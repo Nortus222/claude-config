@@ -1,0 +1,26 @@
+# Universal agent skills expected on every machine, under ~/.agents/skills/<name>.
+# These are NOT vendored — re-install them on a new machine with your installer,
+# then run skills-check.sh to confirm. One skill name per line; blank lines and
+# lines starting with '#' are ignored.
+#
+# Fill this in once with the command that installs these (the tool that created
+# ~/.agents/skills + the per-agent symlinks). skills-check.sh prints it when
+# skills are missing:
+# install-command: <your skills installer command here>
+
+ask-matt
+codebase-design
+design-an-interface
+domain-modeling
+find-skills
+grill-me
+grill-with-docs
+handoff
+improve-codebase-architecture
+prototype
+resolving-merge-conflicts
+setup-matt-pocock-skills
+teach
+to-issues
+triage
+writing-great-skills

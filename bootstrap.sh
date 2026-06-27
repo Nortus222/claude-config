@@ -61,3 +61,15 @@ echo "Done. Restart Claude Code (or open /permissions) to load the synced rules.
 if [[ -d "$BACKUP_DIR" ]]; then
   echo "Backups saved in: $BACKUP_DIR"
 fi
+
+# Report any enabled plugins/marketplaces not yet installed on this machine.
+if [[ -x "$CLONE_DIR/plugin-check.sh" ]]; then
+  echo
+  "$CLONE_DIR/plugin-check.sh" || true
+fi
+
+# Report any universal agent skills (from skills-manifest.txt) missing here.
+if [[ -x "$CLONE_DIR/skills-check.sh" ]]; then
+  echo
+  "$CLONE_DIR/skills-check.sh" || true
+fi
