@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Version-agnostic launcher for superpowers skill scripts.
+#
+# Usage: sp <skill> <script> [args...]
+#   e.g. sp subagent-driven-development task-brief PLAN.md 2
+#
+# Resolves the highest installed superpowers version under the plugin cache and
+# execs the requested skill script, so invocations survive plugin updates
+# (no hard-coded version in callers or allow-rules).
+set -euo pipefail
+
+base="$HOME/.claude/plugins/cache/claude-plugins-official/superpowers"
+
+if [[ $# -lt 2 ]]; then
+  echo "usage: sp <skill> <script> [args...]" >&2
+  exit 2
+fi
+
+if [[ ! -d "$base" ]]; then
+  echo "sp: superpowers cache not found at $base" >&2
+  exit 1
+fi
+
+skill="$1"; script="$2"; shift 2
+
+# Highest version directory (semver-aware).
+ver="$(ls -1 "$base" | sort -V | tail -1)"
+target="$base/$ver/skills/$skill/scripts/$script"
+
+if [[ ! -x "$target" ]]; then
+  if [[ -f "$target" ]]; then
+    exec bash "$target" "$@"   # not +x: run via bash
+  fi
+  echo "sp: script not found: $target" >&2
+  exit 1
+fi
+
+exec "$target" "$@"

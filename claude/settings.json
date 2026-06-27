@@ -1,0 +1,85 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/context-mode-cache-heal.mjs\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "voltagent-core-dev@voltagent-subagents": true,
+    "voltagent-infra@voltagent-subagents": true,
+    "voltagent-qa-sec@voltagent-subagents": true,
+    "voltagent-lang@voltagent-subagents": true,
+    "voltagent-dev-exp@voltagent-subagents": true,
+    "voltagent-meta@voltagent-subagents": true,
+    "context-mode@context-mode": true,
+    "claude-mem@thedotmack": true
+  },
+  "extraKnownMarketplaces": {
+    "voltagent-subagents": {
+      "source": {
+        "source": "github",
+        "repo": "VoltAgent/awesome-claude-code-subagents"
+      }
+    },
+    "context-mode": {
+      "source": {
+        "source": "github",
+        "repo": "mksglu/context-mode"
+      }
+    },
+    "thedotmack": {
+      "source": {
+        "source": "github",
+        "repo": "thedotmack/claude-mem"
+      }
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cd:*)",
+      "Bash(mkdir:*)",
+      "Bash(echo:*)",
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sed:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(git -C:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git log:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git config:*)",
+      "Bash(git submodule:*)",
+      "Bash(dart analyze:*)",
+      "Bash(bash ~/.claude/bin/sdd-pkg.sh:*)",
+      "Bash(~/.claude/bin/sdd-pkg.sh:*)",
+      "Bash(bash ~/.claude/bin/sp:*)",
+      "Bash(~/.claude/bin/sp:*)",
+      "Read(~/.claude/plugins/cache/claude-plugins-official/superpowers/**)",
+      "Write(**/*.md)",
+      "Edit(**/*.md)",
+      "Write(**/.git/**)",
+      "Edit(**/.git/**)",
+      "Write(.git/**)",
+      "Edit(.git/**)"
+    ]
+  },
+  "theme": "auto",
+  "agentPushNotifEnabled": true,
+  "effortLevel": "xhigh"
+}
