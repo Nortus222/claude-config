@@ -21,12 +21,42 @@ them into `~/.claude/` so edits sync via Git.
 4. Link this machine: `./bootstrap.sh`
 5. Restart Claude Code (or open `/permissions`) to load the rules.
 
-## New machine
+## New machine (macOS)
 
 ```bash
 git clone git@github.com:OWNER/claude-config.git ~/.config/claude-config
 ~/.config/claude-config/bootstrap.sh
 ```
+
+## Windows (Git Bash)
+
+Windows uses **copies, not symlinks** (symlinks need Developer Mode/admin, and
+Claude Code may rewrite settings.json in place). Only `settings.json` is synced
+to Windows — `bin/` (bash) and `hooks/` (.mjs) are skipped. The shared hook is
+self-guarding (`[ -f … ] && node … || true`), so it silently no-ops on Windows
+where `hooks/` is absent.
+
+Run from inside the cloned repo, in **Git Bash**:
+
+```bash
+git clone https://github.com/OWNER/claude-config.git ~/claude-config
+cd ~/claude-config
+./bootstrap-windows.sh            # apply:   repo -> %USERPROFILE%\.claude\settings.json
+./bootstrap-windows.sh --capture  # capture: local settings -> repo (then commit & push)
+```
+
+- The script resolves the target via `cygpath "$USERPROFILE"` and prints it —
+  if that's not where your Windows Claude Code reads, re-run with
+  `CLAUDE_DIR=/c/Users/<you>/.claude ./bootstrap-windows.sh`.
+- Existing `settings.json` is backed up under `~/.claude/backups/win-config-*/`.
+- **Plugins:** launch Claude Code (auto-installs from `enabledPlugins`), or run
+  the printed `claude plugin install …` commands. `bootstrap-windows.sh` runs
+  `plugin-check.sh` at the end (needs `python3`; skips gracefully if absent).
+- `--capture` copies the **entire** settings.json back (not just the allowlist);
+  prefer editing rules on your primary (mac) machine. `git diff` before pushing.
+
+> Not tested on Windows from the authoring machine — verify the resolved target
+> path on first run.
 
 ## Daily use
 

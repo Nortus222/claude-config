@@ -4,7 +4,7 @@
 # `claude plugin ...` commands to close it. Installs nothing.
 set -euo pipefail
 
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 SETTINGS="$CLAUDE_DIR/settings.json"
 PLUGINS_DIR="$CLAUDE_DIR/plugins"
 

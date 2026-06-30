@@ -1,49 +1,8 @@
 {
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME/.claude/hooks/context-mode-cache-heal.mjs\""
-          }
-        ]
-      }
-    ]
-  },
-  "enabledPlugins": {
-    "superpowers@claude-plugins-official": true,
-    "voltagent-core-dev@voltagent-subagents": true,
-    "voltagent-infra@voltagent-subagents": true,
-    "voltagent-qa-sec@voltagent-subagents": true,
-    "voltagent-lang@voltagent-subagents": true,
-    "voltagent-dev-exp@voltagent-subagents": true,
-    "voltagent-meta@voltagent-subagents": true,
-    "context-mode@context-mode": true,
-    "claude-mem@thedotmack": true
-  },
-  "extraKnownMarketplaces": {
-    "voltagent-subagents": {
-      "source": {
-        "source": "github",
-        "repo": "VoltAgent/awesome-claude-code-subagents"
-      }
-    },
-    "context-mode": {
-      "source": {
-        "source": "github",
-        "repo": "mksglu/context-mode"
-      }
-    },
-    "thedotmack": {
-      "source": {
-        "source": "github",
-        "repo": "thedotmack/claude-mem"
-      }
-    }
-  },
   "permissions": {
     "allow": [
+      "Bash(dotnet test:*)",
+      "Bash(dotnet build:*)",
       "Bash(ls:*)",
       "Bash(cd:*)",
       "Bash(mkdir:*)",
@@ -77,9 +36,44 @@
       "Edit(**/.git/**)",
       "Write(.git/**)",
       "Edit(.git/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/nortus/Developer/emanageOne"
     ]
   },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$HOME/.claude/hooks/context-mode-cache-heal.mjs\" ] && node \"$HOME/.claude/hooks/context-mode-cache-heal.mjs\" || true"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "context-mode@context-mode": true,
+    "claude-mem@thedotmack": true
+  },
+  "extraKnownMarketplaces": {
+    "context-mode": {
+      "source": {
+        "source": "github",
+        "repo": "mksglu/context-mode"
+      }
+    },
+    "thedotmack": {
+      "source": {
+        "source": "github",
+        "repo": "thedotmack/claude-mem"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
   "theme": "auto",
   "agentPushNotifEnabled": true,
-  "effortLevel": "xhigh"
+  "tui": "fullscreen"
 }
