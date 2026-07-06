@@ -35,9 +35,14 @@ else
 fi
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME_DIR/.claude}"
 
-SRC="$CLONE_DIR/claude/settings.json"
-DEST="$CLAUDE_DIR/settings.json"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="$CLAUDE_DIR/backups/win-config-$STAMP"
+
+# Files synced to Windows (copy-based): <repo-relative source>:<basename under ~/.claude>
+FILES=(
+  "claude/settings.json:settings.json"
+  "claude/CLAUDE.md:CLAUDE.md"
+)
 
 # Refresh the repo (apply mode only; capture is about local -> repo).
 if [[ "$SKIP_FETCH" == "0" && "$MODE" == "apply" && -d "$CLONE_DIR/.git" ]]; then
@@ -46,33 +51,38 @@ if [[ "$SKIP_FETCH" == "0" && "$MODE" == "apply" && -d "$CLONE_DIR/.git" ]]; the
 fi
 
 if [[ "$MODE" == "capture" ]]; then
-  if [[ ! -f "$DEST" ]]; then
-    echo "capture: no settings.json at $DEST" >&2; exit 1
-  fi
-  cp "$DEST" "$SRC"
-  echo "captured $DEST -> $SRC"
-  echo "Note: this copies the ENTIRE settings.json (not just the allowlist) back"
-  echo "to the repo. Review with 'git -C \"$CLONE_DIR\" diff', then commit & push."
+  for entry in "${FILES[@]}"; do
+    src="$CLONE_DIR/${entry%%:*}"
+    dest="$CLAUDE_DIR/${entry#*:}"
+    if [[ ! -f "$dest" ]]; then
+      echo "capture: skip (no file at $dest)" >&2; continue
+    fi
+    cp "$dest" "$src"
+    echo "captured $dest -> $src"
+  done
+  echo "Note: this copies the ENTIRE files (not just the allowlist) back to the"
+  echo "repo. Review with 'git -C \"$CLONE_DIR\" diff', then commit & push."
   exit 0
 fi
 
 # apply
-if [[ ! -f "$SRC" ]]; then
-  echo "apply: repo settings.json missing at $SRC" >&2; exit 1
-fi
 mkdir -p "$CLAUDE_DIR"
-
-if [[ -e "$DEST" ]]; then
-  BACKUP_DIR="$CLAUDE_DIR/backups/win-config-$STAMP"
-  mkdir -p "$BACKUP_DIR"
-  cp "$DEST" "$BACKUP_DIR/"
-  echo "bak  $DEST -> $BACKUP_DIR/"
-fi
-
-cp "$SRC" "$DEST"
-echo "copy $SRC -> $DEST"
+for entry in "${FILES[@]}"; do
+  src="$CLONE_DIR/${entry%%:*}"
+  dest="$CLAUDE_DIR/${entry#*:}"
+  if [[ ! -f "$src" ]]; then
+    echo "apply: repo file missing at $src (skipping)" >&2; continue
+  fi
+  if [[ -e "$dest" ]]; then
+    mkdir -p "$BACKUP_DIR"
+    cp "$dest" "$BACKUP_DIR/"
+    echo "bak  $dest -> $BACKUP_DIR/"
+  fi
+  cp "$src" "$dest"
+  echo "copy $src -> $dest"
+done
 echo
-echo "Done. Target resolved to: $DEST"
+echo "Done. Target resolved to: $CLAUDE_DIR"
 echo "If that is NOT where your Windows Claude Code reads settings, re-run with"
 echo "CLAUDE_DIR=/c/Users/<you>/.claude ./bootstrap-windows.sh"
 echo

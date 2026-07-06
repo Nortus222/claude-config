@@ -26,6 +26,7 @@ mkdir -p "$CLAUDE_DIR"
 # 2. Link map: <repo-relative source>:<absolute target under ~/.claude>
 links=(
   "claude/settings.json:$CLAUDE_DIR/settings.json"
+  "claude/CLAUDE.md:$CLAUDE_DIR/CLAUDE.md"
   "claude/bin:$CLAUDE_DIR/bin"
   "claude/hooks:$CLAUDE_DIR/hooks"
 )
