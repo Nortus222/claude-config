@@ -30,6 +30,10 @@
       "Bash(bash ~/.claude/bin/sp:*)",
       "Bash(~/.claude/bin/sp:*)",
       "Read(~/.claude/plugins/cache/claude-plugins-official/superpowers/**)",
+      "Read(/tmp/**)",
+      "Read(//tmp/**)",
+      "Read(/private/tmp/**)",
+      "Read(//private/tmp/**)",
       "Write(**/*.md)",
       "Edit(**/*.md)",
       "Write(**/.git/**)",
@@ -72,8 +76,8 @@
       }
     }
   },
-  "effortLevel": "xhigh",
+  "effortLevel": "high",
+  "tui": "fullscreen",
   "theme": "auto",
-  "agentPushNotifEnabled": true,
-  "tui": "fullscreen"
+  "agentPushNotifEnabled": true
 }
