@@ -151,9 +151,11 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// src/ lives directly under the repo root.
+// src/ lives directly under the repo root. The override lets tests that WRITE
+// to the repo side (capture) point at a throwaway fixture instead of mutating
+// tracked files.
 export function repoRoot() {
-  return resolve(here, '..');
+  return process.env.NORTUSCC_REPO_DIR || resolve(here, '..');
 }
 
 export function claudeDir() {
@@ -182,7 +184,7 @@ export function resolveEntry(entry) {
 }
 ```
 
-The `NORTUSCC_CLAUDE_DIR` and `NORTUSCC_AGENTS_DIR` overrides exist so later tasks can point the whole CLI at a temp directory during tests.
+The three environment overrides exist so tests can point the whole CLI at temp directories. `NORTUSCC_REPO_DIR` matters most: `capture` writes to the repo side, and without it the test suite would mutate tracked files and depend on test ordering to restore them.
 
 - [ ] **Step 6: Write `bin/nortuscc.mjs`**
 
@@ -1322,48 +1324,65 @@ Create `test/capture.test.mjs`:
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// A throwaway repo mirroring the manifest, so capture never writes to tracked
+// files. Every override must be set before the modules are imported, since
+// resolve.mjs reads them at call time but the commands capture paths eagerly.
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-capture-'));
+const repo = join(home, 'repo');
 const claude = join(home, '.claude');
+
+mkdirSync(join(repo, 'claude', 'bin'), { recursive: true });
+mkdirSync(join(repo, 'claude', 'hooks'), { recursive: true });
+writeFileSync(join(repo, 'claude', 'bin', 'sp'), 'echo sp\n');
+writeFileSync(join(repo, 'claude', 'hooks', 'h.mjs'), '// hook\n');
+writeFileSync(join(repo, 'claude', 'settings.json'), '{"a":1}\n');
+writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# from repo\n');
 mkdirSync(claude, { recursive: true });
+
+process.env.NORTUSCC_REPO_DIR = repo;
 process.env.NORTUSCC_CLAUDE_DIR = claude;
+process.env.NORTUSCC_AGENTS_DIR = join(home, 'agents-skills');
 
 const { run: applyRun } = await import('../src/commands/apply.mjs');
 const { run: captureRun, capturedPaths } = await import('../src/commands/capture.mjs');
-const { repoRoot } = await import('../src/resolve.mjs');
 
-const repoClaudeMd = join(repoRoot(), 'claude', 'CLAUDE.md');
-const backup = join(home, 'CLAUDE.md.orig');
+const repoClaudeMd = join(repo, 'claude', 'CLAUDE.md');
 
-test('setup: seed the machine, and stash the repo file we are about to mutate', async () => {
-  copyFileSync(repoClaudeMd, backup);
+test('seed the machine from the fixture repo', async () => {
   assert.equal(await applyRun([]), 0);
+  assert.equal(readFileSync(join(claude, 'CLAUDE.md'), 'utf8'), '# from repo\n');
 });
 
-test('capture with no local changes reports nothing captured', async () => {
-  const code = await captureRun([]);
-  assert.equal(code, 0);
-  assert.equal(capturedPaths().length, 0);
+test('capture with no local changes captures nothing', async () => {
+  assert.equal(await captureRun([]), 0);
+  assert.deepEqual(capturedPaths(), []);
 });
 
 test('capture copies a local edit back into the repo', async () => {
   writeFileSync(join(claude, 'CLAUDE.md'), '# captured edit\n');
-  const code = await captureRun([]);
-  assert.equal(code, 0);
+  assert.equal(await captureRun([]), 0);
   assert.equal(readFileSync(repoClaudeMd, 'utf8'), '# captured edit\n');
-  assert.deepEqual(capturedPaths(), ['claude/CLAUDE.md']);
+  assert.ok(capturedPaths().includes('claude/CLAUDE.md'));
 });
 
-test('teardown: restore the repo file', () => {
-  copyFileSync(backup, repoClaudeMd);
-  assert.equal(readFileSync(repoClaudeMd, 'utf8'), readFileSync(backup, 'utf8'));
+test('capture ignores linked directories entirely', async () => {
+  assert.ok(
+    !capturedPaths().some((p) => p.includes('bin') || p.includes('hooks')),
+    'linked dirs need no capture — the repo IS the live copy',
+  );
+});
+
+test('a second capture with nothing new captures nothing', async () => {
+  assert.equal(await captureRun([]), 0);
+  assert.deepEqual(capturedPaths(), []);
 });
 ```
 
-This test mutates a real repo file, so the first and last tests bracket it with a stash and restore. Run it alone if a failure leaves the repo dirty; `git checkout claude/CLAUDE.md` recovers.
+Because `NORTUSCC_REPO_DIR` points at a fixture, this suite never touches tracked files and has no ordering dependency for cleanup.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1428,12 +1447,12 @@ export async function run(args = []) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test test/capture.test.mjs`
-Expected: PASS — 4 tests.
+Expected: PASS — 5 tests.
 
-- [ ] **Step 5: Confirm the repo is clean**
+- [ ] **Step 5: Confirm the repo is untouched**
 
 Run: `git status --short`
-Expected: no modification to `claude/CLAUDE.md`. If there is one, run `git checkout claude/CLAUDE.md`.
+Expected: only the new and modified source files — no change to `claude/CLAUDE.md` or `claude/settings.json`. If either shows as modified, the fixture override is not being honoured; check that `NORTUSCC_REPO_DIR` is set before the dynamic imports in the test.
 
 - [ ] **Step 6: Commit**
 
@@ -2074,7 +2093,16 @@ The shrink guard exists because capture emits only what is installed: a failed i
 Run: `npm test`
 Expected: PASS — all suites, including the 5 new skills-cli tests.
 
-Note: `test/capture.test.mjs` now also writes `skills-manifest.txt`. Add a stash/restore for it mirroring the existing `CLAUDE.md` handling, or run `git checkout skills-manifest.txt` afterwards.
+`test/capture.test.mjs` now also writes `skills-manifest.txt`, but into the fixture repo rather than the real one, so nothing tracked is touched. Add this assertion to that suite to lock the behaviour in:
+
+```js
+test('the manifest path resolves inside the fixture repo, never the real one', async () => {
+  const { manifestPath } = await import('../src/skills.mjs');
+  assert.equal(manifestPath(), join(repo, 'skills-manifest.txt'));
+});
+```
+
+That asserts the property that matters: every manifest write is addressed into the fixture. Then confirm with `git status --short` that the real `skills-manifest.txt` is unmodified.
 
 - [ ] **Step 7: Commit**
 
