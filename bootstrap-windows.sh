@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Windows (Git Bash) bootstrap — COPY-BASED sync of settings.json only.
+# Windows (Git Bash) bootstrap — copy-based sync of settings.json and CLAUDE.md.
 #
 # Unlike bootstrap.sh (macOS symlinks), Windows uses copies: symlinks there need
 # Developer Mode/admin and Claude Code may rewrite settings.json in place. This
-# script copies the repo's settings.json into the Windows-side ~/.claude and can
-# copy local edits back (--capture).
+# script copies the repo files into the Windows-side ~/.claude and can copy local
+# edits back (--capture).
 #
 #   ./bootstrap-windows.sh            # apply: repo  -> ~/.claude/settings.json
 #   ./bootstrap-windows.sh --capture  # capture: ~/.claude/settings.json -> repo

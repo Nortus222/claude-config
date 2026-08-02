@@ -31,8 +31,8 @@ git clone git@github.com:OWNER/claude-config.git ~/.config/claude-config
 ## Windows (Git Bash)
 
 Windows uses **copies, not symlinks** (symlinks need Developer Mode/admin, and
-Claude Code may rewrite settings.json in place). Only `settings.json` is synced
-to Windows — `bin/` (bash) and `hooks/` (.mjs) are skipped. The shared hook is
+Claude Code may rewrite files in place). `settings.json` and `CLAUDE.md` are synced
+to Windows; `bin/` (bash) and `hooks/` (.mjs) are skipped. The shared hook is
 self-guarding (`[ -f … ] && node … || true`), so it silently no-ops on Windows
 where `hooks/` is absent.
 
@@ -41,8 +41,8 @@ Run from inside the cloned repo, in **Git Bash**:
 ```bash
 git clone https://github.com/OWNER/claude-config.git ~/claude-config
 cd ~/claude-config
-./bootstrap-windows.sh            # apply:   repo -> %USERPROFILE%\.claude\settings.json
-./bootstrap-windows.sh --capture  # capture: local settings -> repo (then commit & push)
+./bootstrap-windows.sh            # apply:   repo -> %USERPROFILE%\.claude
+./bootstrap-windows.sh --capture  # capture: local files -> repo (then review, commit, and push)
 ```
 
 - The script resolves the target via `cygpath "$USERPROFILE"` and prints it —
