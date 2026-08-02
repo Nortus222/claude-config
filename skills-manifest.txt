@@ -3,15 +3,17 @@
 # then run skills-check.sh to confirm. One skill name per line; blank lines and
 # lines starting with '#' are ignored.
 #
-# Fill this in once with the command that installs these (the tool that created
-# ~/.agents/skills + the per-agent symlinks). skills-check.sh prints it when
-# skills are missing:
-# install-command: <your skills installer command here>
+# The installer is the `skills` CLI (vercel-labs), which creates ~/.agents/skills
+# and the per-agent symlinks. skills-check.sh prints this when skills are missing.
+# Locally authored skills live in Nortus222/agent-skills; the rest come from the
+# upstreams recorded per-skill in ~/.agents/.skill-lock.json.
+# install-command: npx skills add Nortus222/agent-skills mattpocock/skills vercel-labs/skills
 
 ask-matt
 codebase-design
 design-an-interface
 domain-modeling
+explain
 find-skills
 grill-me
 grill-with-docs
