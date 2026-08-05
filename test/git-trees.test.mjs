@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -51,6 +51,34 @@ test('resolveTrees returns null when the clone itself fails', async () => {
   assert.equal(trees, null);
 });
 
+test('resolveTrees removes its temporary clone even when the clone fails', async () => {
+  let dir;
+  const run = async (args) => {
+    if (args[0] === 'clone') {
+      dir = args[args.length - 1];
+      return { code: 128, out: '', err: 'fatal: could not clone' };
+    }
+    return { code: 0, out: 'deadbeef', err: '' };
+  };
+  const trees = await resolveTrees(ORIGIN_URL, ['skills/tdd'], { run });
+  assert.equal(trees, null);
+  assert.equal(existsSync(dir), false, 'the temp clone must not survive a failed clone');
+});
+
+test('buildCloneArgs produces a shallow clone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-shallow-'));
+  try {
+    execFileSync('git', buildCloneArgs(ORIGIN_URL, dir), { encoding: 'utf8' });
+    // A shallow clone writes .git/shallow; a full clone does not. This is what
+    // makes --depth 1 load-bearing rather than merely requested — the review
+    // confirmed this distinction holds for file:// on this machine, whereas a
+    // bare local path makes git ignore --depth entirely.
+    assert.equal(existsSync(join(dir, '.git', 'shallow')), true, '--depth 1 should produce a shallow clone');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resolveTrees with no paths clones nothing', async () => {
   let called = false;
   const trees = await resolveTrees(ORIGIN_URL, [], { run: async () => { called = true; } });
@@ -66,6 +94,5 @@ test('resolveTrees removes its temporary clone', async () => {
   };
   await resolveTrees(ORIGIN_URL, ['skills/tdd'], { run });
   assert.equal(dirs.length, 1);
-  const { existsSync } = await import('node:fs');
   assert.equal(existsSync(dirs[0]), false, 'the temp clone must not survive the call');
 });
