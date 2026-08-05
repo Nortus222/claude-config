@@ -57,3 +57,19 @@ test('writeLock then readLock round-trips', () => {
   assert.equal(again.files['settings.json'].hash, hashText('v1'));
   assert.match(again.files['settings.json'].appliedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
+
+test('readLock rejects valid JSON with string files field', () => {
+  writeFileSync(join(dir, '.nortuscc-lock.json'), JSON.stringify({version: 1, repo: null, files: 'not-an-object'}));
+  const lock = readLock();
+  assert.deepEqual(lock.files, {});
+  assert.doesNotThrow(() => setBaseline(lock, 'x', hashText('test')));
+  rmSync(join(dir, '.nortuscc-lock.json'));
+});
+
+test('readLock rejects valid JSON with array files field', () => {
+  writeFileSync(join(dir, '.nortuscc-lock.json'), JSON.stringify({version: 1, repo: null, files: [1, 2, 3]}));
+  const lock = readLock();
+  assert.deepEqual(lock.files, {});
+  assert.doesNotThrow(() => setBaseline(lock, 'y', hashText('test')));
+  rmSync(join(dir, '.nortuscc-lock.json'));
+});

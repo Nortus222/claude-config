@@ -28,7 +28,7 @@ export function readLock() {
   if (!existsSync(path)) return emptyLock();
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || !parsed.files) return emptyLock();
+    if (!parsed || typeof parsed !== 'object' || !parsed.files || typeof parsed.files !== 'object' || Array.isArray(parsed.files)) return emptyLock();
     return { version: parsed.version ?? LOCK_VERSION, repo: parsed.repo ?? null, files: parsed.files };
   } catch {
     return emptyLock();
