@@ -100,10 +100,10 @@ and **pure logic that turns a plan plus a selection into an action set**.
 | Module | Responsibility | New? |
 | --- | --- | --- |
 | `src/select.mjs` | Generic grouped multi-select. Pure `reduce(state, key)` and `render(state)`, plus a thin raw-mode driver. No skill vocabulary at all | new |
-| `src/skill-actions.mjs` | Pure. `choices(plan)` → picker rows; `actionsFrom(plan, selectedKeys)` → `{update, remove, add}`; `manifestEdits(actions)` | new |
+| `src/skill-actions.mjs` | Pure. `choices(plan)` → picker rows; `actionsFrom(plan, selectedKeys)` → `{update, remove, add}` | new |
 | `src/git-trees.mjs` | `inspectSource(sourceUrl, paths)` → `{trees, skillPaths}` — both facts from the one clone. Replaces `resolveTrees` | changed |
 | `src/skill-updates.mjs` | Adds pure `upstreamSkills(skillPaths)` and `availableSkills({upstreamBySource, installedNames})` | changed |
-| `src/skills.mjs` | Adds pure `editManifest(groups, {add, remove})` | changed |
+| `src/skills.mjs` | Adds pure `installedGroups(lock, installedNames)` — `groupsFromLock` gated on what is actually on disk | changed |
 | `src/skills-cli.mjs` | Adds `buildRemoveCommand(names)` / `runRemove`. Adds reuse the existing `installGroups` | changed |
 | `src/commands/update.mjs` | Orchestration only: gather, present, execute, report | changed |
 
@@ -146,22 +146,48 @@ This makes `update` the second command that writes to the repo. That is a
 deliberate widening: a prune whose manifest entry survives is undone by the very
 next `apply --skills`.
 
-**It is a targeted edit, not a regeneration.** `capture` rebuilds the manifest
-from `groupsFromLock(readSkillLock())`. That is wrong here for two reasons:
+**The manifest becomes what is installed right now.** After the executors have
+run, `update` regenerates `skills-manifest.txt` from the skills that are
+actually present in `~/.agents/skills` and carry a recorded source. Adopted
+skills appear because their folders now exist; pruned skills disappear because
+theirs no longer do. No diffing, no bookkeeping — the manifest is a statement
+about the machine, and it is rebuilt from the machine.
 
-1. The lock outlives the folder. The owner's lock still carries `review` and
-   `ubiquitous-language`, whose folders no longer exist on disk. A regeneration
-   would silently *add* both to the manifest — the opposite of what a prune was
-   asked to do.
-2. `capture` refuses to write a manifest smaller than the one it read unless
-   given `--allow-shrink`. A prune always shrinks it, so a regeneration would
-   be refused outright.
+This is deliberately **not** how `capture` does it. `capture` regenerates from
+`groupsFromLock(readSkillLock())` — the lock alone, with no check that the
+folder still exists. The lock outlives the folder: the owner's lock carries
+`review` and `ubiquitous-language`, neither of which is on disk. Regenerating
+from the lock would put both into the manifest.
 
-So `editManifest(groups, {add, remove})` adds each adopted name under its source
-group, drops each pruned name, and leaves every other line untouched. A source
-group that empties is dropped; an adopted skill from a source not yet in the
-manifest gets a new group. It is pure, so every case is testable without
-touching the repo.
+So the new source of truth is `installedGroups(lock, installedNames)` — pure,
+in `src/skills.mjs`, gating `groupsFromLock`'s output on what `readdirSync`
+actually found. `capture` keeps its existing behaviour; changing it is a
+separate decision, noted under Follow-ups.
+
+### The shrink guard
+
+`capture` refuses to write a manifest smaller than the one it read unless given
+`--allow-shrink`, because on a shared manifest a shrink usually means "this
+machine happens not to have those" rather than "drop them everywhere".
+
+`update` cannot simply inherit that — a prune always shrinks. But it also does
+not need to be blind, because it knows exactly how many skills it removed. So:
+
+> **A shrink of exactly the number pruned is expected and written. Any larger
+> shrink is unexplained, and the manifest is left alone with a message naming
+> the difference and pointing at `nortuscc capture --allow-shrink`.**
+
+That keeps a prune working while still catching the real hazard: a machine that
+is simply missing skills the manifest lists would otherwise quietly delete them
+for every other machine.
+
+### Consequence worth stating
+
+Because the manifest now mirrors this machine, adopting a skill on one machine
+and running `update` there will, after a push, propose that skill to every other
+machine on the next `apply --skills`. That is the intended behaviour of a shared
+manifest, and it is what makes adoption worth doing — but it means `update` on a
+deliberately-minimal machine is not a safe thing to push from.
 
 ## Execution order
 
@@ -216,8 +242,11 @@ with. Only ones still present after the run do. This is what makes
   when a source offers nothing new.
 - `skill-actions`: every plan state maps to the right row and default tick;
   a selection maps to the right action set; an empty selection is a no-op.
-- `editManifest`: add to an existing group, add creating a group, remove,
-  remove emptying a group, and leave unrelated groups byte-identical.
+- `installedGroups`: excludes a lock entry whose folder is absent, includes one
+  whose folder is present, drops a source group that empties, and creates a
+  group for an adopted skill whose source is new to the manifest.
+- The shrink guard: a shrink equal to the pruned count is written; a larger one
+  leaves the manifest byte-identical and reports the difference.
 - `buildRemoveCommand` produces the exact argv.
 - `update.mjs` orchestration against injected fakes: interactive selection,
   `--yes` scripted, `--check` refusing the action flags, cancelled picker,
@@ -225,3 +254,17 @@ with. Only ones still present after the run do. This is what makes
 
 No test spawns `npx skills`, clones, hits the network, writes to the real
 `~/.agents`, or enters raw mode.
+
+## Follow-ups, not in scope here
+
+**`capture` has the same latent bug this spec avoids.** It regenerates the
+manifest from `groupsFromLock(readSkillLock())` with no check that the folder
+still exists, so running `nortuscc capture` — or `nortuscc push`, which calls it
+— on the owner's machine today would add `review` and `ubiquitous-language` to
+`skills-manifest.txt`, both of which have lock entries but no folder on disk.
+That is live, reachable, and predates this branch.
+
+The fix is one argument: `capture` calling `installedGroups(lock, installedNames)`
+instead. It is left out of this spec because it changes an existing command's
+output, which deserves its own decision rather than riding along inside a
+feature branch. It should be the next thing done after this merges.
