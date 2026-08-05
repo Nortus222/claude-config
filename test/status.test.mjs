@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, copyFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  statSync,
+  copyFileSync,
+  readdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -156,4 +164,91 @@ test('unknown mode is surfaced with correct state and note', async () => {
     formatted.includes('unrecognized mode'),
     'descriptive note appears in formatted output',
   );
+});
+
+// Finding 4: Strengthen read-only safety net with full directory snapshot
+function snapshotDirectory(dir) {
+  // Recursively snapshot a directory's contents
+  const snapshot = {};
+  try {
+    const walk = (path, prefix) => {
+      const entries = readdirSync(path, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(path, entry.name);
+        const key = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walk(fullPath, key);
+        } else {
+          snapshot[key] = readFileSync(fullPath);
+        }
+      }
+    };
+    walk(dir, '');
+  } catch (e) {
+    // Directory doesn't exist yet
+  }
+  return snapshot;
+}
+
+test('run() does not write any files to claude dir and does not create new directories', async () => {
+  // Set up a genuinely clean machine
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+  const { ensureLink } = await import('../src/link.mjs');
+  const { resolveEntry, claudeDir } = await import('../src/resolve.mjs');
+
+  const claude = claudeDir();
+
+  // Snapshot before run()
+  const snapshotBefore = snapshotDirectory(claude);
+
+  // For all link entries: create the symlinks
+  for (const entry of SYNC) {
+    if (entry.mode === 'link') {
+      const { src, dest } = resolveEntry(entry);
+      await ensureLink(dest, src);
+    }
+  }
+
+  // For all copy entries: copy the file to dest and seed lockfile with its hash
+  const lock = readLock();
+  for (const entry of SYNC) {
+    if (entry.mode === 'copy') {
+      const { src, dest } = resolveEntry(entry);
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, entry.dest, hash);
+      }
+    }
+  }
+  writeLock(lock);
+
+  // Snapshot after setup but before run()
+  const snapshotAfterSetup = snapshotDirectory(claude);
+
+  // Run the command
+  await run();
+
+  // Snapshot after run()
+  const snapshotAfter = snapshotDirectory(claude);
+
+  // Verify no new files or directories were created
+  const keysBefore = Object.keys(snapshotAfterSetup).sort();
+  const keysAfter = Object.keys(snapshotAfter).sort();
+
+  assert.deepEqual(
+    keysAfter,
+    keysBefore,
+    'run() created no new files or directories in claude dir',
+  );
+
+  // Verify no files were modified
+  for (const key of keysBefore) {
+    assert.deepEqual(
+      snapshotAfter[key],
+      snapshotAfterSetup[key],
+      `run() did not modify ${key}`,
+    );
+  }
 });
