@@ -1,8 +1,10 @@
+import { writeFileSync } from 'node:fs';
 import { SYNC } from '../manifest.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
+import { groupsFromLock, emitManifest, readSkillLock, manifestPath, readSkillsManifest } from '../skills.mjs';
 
 let lastCaptured = [];
 
@@ -45,6 +47,22 @@ export async function run(args = [], entries = SYNC) {
     if (res.action === 'refused') refused += 1;
     if (res.action === 'copied') captured.push(entry.src);
     lines.push(formatRow(entry.dest, res.action, res.action === 'refused' ? 'conflict — nothing changed' : ''));
+  }
+
+  // Regenerate the skills manifest from what is actually installed. Capture is
+  // the only command that writes it, so an install done the normal way is shared
+  // by running capture afterwards.
+  const groups = groupsFromLock(readSkillLock());
+  const manifestBefore = readSkillsManifest();
+  const beforeCount = manifestBefore.reduce((n, g) => n + g.skills.length, 0);
+  const afterCount = groups.reduce((n, g) => n + g.skills.length, 0);
+
+  if (afterCount < beforeCount && !args.includes('--allow-shrink')) {
+    lines.push(formatRow('skills-manifest', 'refused', `would drop ${beforeCount - afterCount} entr(ies); pass --allow-shrink`));
+  } else if (groups.length > 0) {
+    writeFileSync(manifestPath(), emitManifest(groups), 'utf8');
+    captured.push('skills-manifest.txt');
+    lines.push(formatRow('skills-manifest', 'written', `${afterCount} skill(s)`));
   }
 
   // Only rewrite the lockfile when something in it actually changed. captureCopy

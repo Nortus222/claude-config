@@ -4,6 +4,8 @@ import { readLock, writeLock } from '../lock.mjs';
 import { ensureLink } from '../link.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
+import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
+import { installGroups } from '../skills-cli.mjs';
 
 // entries defaults to SYNC; the parameter exists so tests can inject a bogus
 // manifest entry to exercise the unknown-mode path, the same pattern
@@ -45,6 +47,20 @@ export async function run(args = [], entries = SYNC) {
     const res = applyCopy(src, dest, entry.dest, lock, { force: takeRepo });
     if (res.action === 'refused') refused += 1;
     lines.push(formatRow(entry.dest, res.action, noteFor(res)));
+  }
+
+  if (args.includes('--skills')) {
+    const skills = reconcile({
+      groups: readSkillsManifest(),
+      lock: readSkillLock(),
+      installedNames: installedSkillNames(),
+    });
+    if (skills.missing.length === 0) {
+      lines.push(formatRow('skills', 'satisfied', ''));
+    } else {
+      await installGroups(installArgs(skills.missing));
+      lines.push(formatRow('skills', 'installed', skills.missing.map((m) => m.name).join(', ')));
+    }
   }
 
   // Only rewrite the lockfile when something in it actually changed. applyCopy

@@ -86,3 +86,8 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   assert.deepEqual(capturedPaths(), []);
   assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
 });
+
+test('the manifest path resolves inside the fixture repo, never the real one', async () => {
+  const { manifestPath } = await import('../src/skills.mjs');
+  assert.equal(manifestPath(), join(repo, 'skills-manifest.txt'));
+});
