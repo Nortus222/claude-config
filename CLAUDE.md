@@ -34,5 +34,8 @@ Feature branches target **`main`**.
 ## Tests
 
 ```bash
-npm test          # node --test test/
+npm test          # node --test
 ```
+
+`node --test test/` reports `pass 0 / fail 1` on Node 25 — pass no path and let
+the runner find `test/` itself, exactly as `package.json` does.

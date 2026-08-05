@@ -185,3 +185,35 @@ test('--allow-shrink permits writing a smaller manifest', async () => {
   ]);
   assert.ok(capturedPaths().includes('skills-manifest.txt'));
 });
+
+// M7: captureCopy has always backed the repo file up before overwriting it,
+// but capture printed nothing about it — a push run wrote two backups into
+// ~/.claude/backups/ completely silently. apply names the path; so must this.
+test('capture names the backup it made of the repo file it overwrote', async () => {
+  const repoBefore = readFileSync(repoClaudeMd, 'utf8');
+  writeFileSync(join(claude, 'CLAUDE.md'), '# a later local edit\n');
+
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    output += chunk.toString();
+    return true;
+  };
+  let code;
+  try {
+    code = await captureRun([]);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  assert.equal(code, 0);
+  assert.equal(readFileSync(repoClaudeMd, 'utf8'), '# a later local edit\n');
+
+  const match = output.match(/CLAUDE\.md\s+copied\s+backed up -> (\S+)/);
+  assert.ok(match, `capture must print where the overwritten repo file went; got:\n${output}`);
+  assert.equal(
+    readFileSync(match[1], 'utf8'),
+    repoBefore,
+    'the printed path must hold the repo content capture displaced',
+  );
+});

@@ -60,7 +60,10 @@ export async function run(args = [], entries = SYNC) {
 
     if (res.action === 'refused') refused += 1;
     if (res.action === 'copied') captured.push(entry.src);
-    lines.push(formatRow(entry.dest, res.action, res.action === 'refused' ? 'conflict — nothing changed' : ''));
+    // Surface backedUp exactly as apply does: capture overwrites the repo's
+    // working tree, which git cannot recover if the edit was never committed,
+    // so the path the old content went to must not be printed only by apply.
+    lines.push(formatRow(entry.dest, res.action, noteFor(res)));
   }
 
   // Regenerate the skills manifest from what is actually installed. Capture is
@@ -93,4 +96,10 @@ export async function run(args = [], entries = SYNC) {
     return 1;
   }
   return 0;
+}
+
+function noteFor(res) {
+  if (res.action === 'refused') return 'conflict — nothing changed';
+  if (res.backedUp) return `backed up -> ${res.backedUp}`;
+  return '';
 }

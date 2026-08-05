@@ -13,6 +13,11 @@ Clones the repo, links `bin/` and `hooks/` into `~/.claude`, copies
 `settings.json` and `CLAUDE.md`, installs every skill in the manifest, and
 prints a status report. Restart Claude Code afterwards to load the rules.
 
+If `--dir` already exists it must be a git checkout — an interrupted clone
+leaves the directory behind, and syncing from a half-made one would record a
+repo path that every later command silently resolves away from. `setup` refuses
+it instead: remove the directory and re-run.
+
 ## Daily use
 
 ```bash
@@ -53,8 +58,11 @@ pointing at the command that actually supports them.
 Copied files carry a content hash in `~/.claude/.nortuscc-lock.json`, recorded at
 the last sync. Comparing it against both sides gives four states: `clean`,
 `repo-ahead`, `local-ahead`, and `conflict`. A conflict is refused and backed up,
-never guessed. Directory links add a fifth: `clobbered`, meaning a real path sits
-where a link belongs and syncing had silently stopped.
+never guessed. Directory links add two more: `clobbered`, meaning a real path sits
+where a link belongs and syncing had silently stopped, and `broken-link`, meaning
+the link is perfectly formed but the repo path it points into is gone — a deleted
+worktree or a moved clone. Both are reported, exit non-zero, and are repaired by
+`apply`.
 
 Everything destructive backs up to `~/.claude/backups/nortuscc-<stamp>/` first.
 
@@ -75,6 +83,19 @@ removed — that is how a machine carries the shared set plus its own extras. Ru
 
 Skills with no recorded source are hand-authored and are never written to the
 manifest, since nothing could install them.
+
+### `NORTUSCC_AGENTS_DIR` does not sandbox the installer
+
+`NORTUSCC_AGENTS_DIR` redirects only what **nortuscc reads**: the installed
+skill list and the sibling `.skill-lock.json`. It does not reach the installer.
+`npx skills add ... --global` writes into the real `~/.agents` regardless of
+what that variable is set to, so `nortuscc apply --skills` — and therefore
+`nortuscc setup` — is **not** isolated by it.
+
+Anything that spawns the installer touches the machine's live skills. The test
+suite never does: its fixtures keep `skills.missing` empty, so the `--skills`
+branch takes the "satisfied" path and nothing is spawned. Keep it that way, and
+do not treat `NORTUSCC_AGENTS_DIR` as a sandbox for a real install.
 
 ## Adding a synced path
 

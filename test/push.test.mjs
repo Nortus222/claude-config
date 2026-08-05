@@ -83,21 +83,6 @@ function captureStdout(fn) {
     .then((result) => ({ result, output: () => output }));
 }
 
-function captureStderr(fn) {
-  let output = '';
-  const original = process.stderr.write;
-  process.stderr.write = function (chunk) {
-    output += chunk.toString();
-    return true;
-  };
-  return Promise.resolve()
-    .then(fn)
-    .finally(() => {
-      process.stderr.write = original;
-    })
-    .then((result) => ({ result, output: () => output }));
-}
-
 // Captures both stdout and stderr from a single invocation, so one call can
 // be checked both for its human-readable text and for the absence of a raw
 // Node stack trace, without running the command under test twice.
