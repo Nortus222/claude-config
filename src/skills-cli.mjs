@@ -42,3 +42,25 @@ export async function installGroups(groups, { dryRun = false } = {}) {
   }
   return results;
 }
+
+// `update` takes a bare name list, where `add --skill` takes one comma-joined
+// value. Naming every skill keeps the batch to exactly what was confirmed,
+// rather than everything installed globally. --yes skips the scope prompt,
+// which is the only prompt this command has.
+export function buildUpdateCommand(names) {
+  return {
+    cmd: 'npx',
+    args: ['-y', 'skills', 'update', ...names, '--global', '--yes'],
+  };
+}
+
+export async function runUpdate(names, { dryRun = false } = {}) {
+  if (names.length === 0) return true;
+  const command = buildUpdateCommand(names);
+  if (dryRun) {
+    console.log(`  ${command.cmd} ${command.args.join(' ')}`);
+    return true;
+  }
+  console.log(`\nupdating ${names.length} skill(s)`);
+  return runOne(command);
+}
