@@ -15,8 +15,16 @@ export function buildCommand({ source, skills }) {
 function runOne({ cmd, args }) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+    // A non-zero exit is the install itself failing, already visible through
+    // the child's inherited stderr — nothing more to say here.
     child.on('close', (code) => resolve(code === 0));
-    child.on('error', () => resolve(false));
+    // An 'error' here means the child never launched at all (e.g. ENOENT —
+    // `npx` not on PATH), so stdio: 'inherit' had nothing to show. That is
+    // silent otherwise, so it gets its own diagnostic.
+    child.on('error', (err) => {
+      console.error(`nortuscc: could not launch \`${cmd}\`: ${err.message}`);
+      resolve(false);
+    });
   });
 }
 

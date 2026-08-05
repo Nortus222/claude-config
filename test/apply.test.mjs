@@ -9,7 +9,7 @@ const claude = join(home, '.claude');
 mkdirSync(claude, { recursive: true });
 process.env.NORTUSCC_CLAUDE_DIR = claude;
 
-const { run } = await import('../src/commands/apply.mjs');
+const { run, summarizeSkillsInstall } = await import('../src/commands/apply.mjs');
 const { SYNC } = await import('../src/manifest.mjs');
 const { resolveEntry } = await import('../src/resolve.mjs');
 const { readLock } = await import('../src/lock.mjs');
@@ -87,4 +87,70 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   assert.equal(code, 0);
   assert.equal(existsSync(join(claude, 'some-file')), false, 'apply must not write an entry with an unknown mode');
   assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
+});
+
+// Fix round 2, finding 1: installGroups' per-source results were discarded,
+// so a failed install still reported "installed" and exited 0. These tests
+// drive the reporting logic directly with crafted results — never through a
+// real install — matching the reviewer's guidance that dryRun already covers
+// installGroups' own wiring and no injectable-spawn seam is needed here.
+test('summarizeSkillsInstall reports every skill installed when every source succeeds', () => {
+  const missing = [
+    { name: 'one', source: 'a/b' },
+    { name: 'two', source: 'a/b' },
+    { name: 'three', source: 'c/d' },
+  ];
+  const results = [
+    { source: 'a/b', ok: true },
+    { source: 'c/d', ok: true },
+  ];
+  const summary = summarizeSkillsInstall(missing, results);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.lines.length, 1);
+  assert.match(summary.lines[0], /installed/);
+  assert.match(summary.lines[0], /one/);
+  assert.match(summary.lines[0], /two/);
+  assert.match(summary.lines[0], /three/);
+});
+
+test('summarizeSkillsInstall reports every skill failed when every source fails, and counts them', () => {
+  const missing = [
+    { name: 'one', source: 'a/b' },
+    { name: 'two', source: 'c/d' },
+  ];
+  const results = [
+    { source: 'a/b', ok: false },
+    { source: 'c/d', ok: false },
+  ];
+  const summary = summarizeSkillsInstall(missing, results);
+  assert.equal(summary.failed, 2);
+  assert.equal(summary.lines.length, 1);
+  assert.match(summary.lines[0], /failed/);
+});
+
+test('summarizeSkillsInstall keeps a partial failure visible as partial — not collapsed either way', () => {
+  const missing = [
+    { name: 'good', source: 'a/b' },
+    { name: 'bad', source: 'c/d' },
+  ];
+  const results = [
+    { source: 'a/b', ok: true },
+    { source: 'c/d', ok: false },
+  ];
+  const summary = summarizeSkillsInstall(missing, results);
+  assert.equal(summary.failed, 1);
+  // Both an "installed" row (for the source that succeeded) and a "failed"
+  // row (for the source that didn't) must be present — a partial failure is
+  // neither total success nor total failure.
+  assert.equal(summary.lines.length, 2);
+  const joined = summary.lines.join('\n');
+  assert.match(joined, /installed/);
+  assert.match(joined, /good/);
+  assert.match(joined, /failed/);
+  assert.match(joined, /bad/);
+});
+
+test('summarizeSkillsInstall with nothing missing reports nothing and fails nothing', () => {
+  const summary = summarizeSkillsInstall([], []);
+  assert.deepEqual(summary, { lines: [], failed: 0 });
 });

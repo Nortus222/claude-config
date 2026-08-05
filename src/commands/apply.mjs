@@ -7,6 +7,24 @@ import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
 import { installGroups } from '../skills-cli.mjs';
 
+// Turns installGroups' per-source {source, ok} results into report lines and
+// a failure count, kept separate from installGroups itself so the mapping
+// from source back to skill name — and the "some sources failed, some
+// didn't" case — is testable without spawning anything.
+export function summarizeSkillsInstall(missing, results) {
+  const okSources = new Set(results.filter((r) => r.ok).map((r) => r.source));
+  const installedNames = missing.filter((m) => okSources.has(m.source)).map((m) => m.name);
+  const failedNames = missing.filter((m) => !okSources.has(m.source)).map((m) => m.name);
+
+  const lines = [];
+  // A partial failure gets both rows, never collapsed into total success or
+  // total failure.
+  if (installedNames.length > 0) lines.push(formatRow('skills', 'installed', installedNames.join(', ')));
+  if (failedNames.length > 0) lines.push(formatRow('skills', 'failed', failedNames.join(', ')));
+
+  return { lines, failed: failedNames.length };
+}
+
 // entries defaults to SYNC; the parameter exists so tests can inject a bogus
 // manifest entry to exercise the unknown-mode path, the same pattern
 // configReport uses in status.mjs.
@@ -23,6 +41,7 @@ export async function run(args = [], entries = SYNC) {
   const before = JSON.stringify(lock);
   const lines = [];
   let refused = 0;
+  let skillsFailed = 0;
 
   for (const entry of entries) {
     const { src, dest, mode } = resolveEntry(entry);
@@ -58,8 +77,10 @@ export async function run(args = [], entries = SYNC) {
     if (skills.missing.length === 0) {
       lines.push(formatRow('skills', 'satisfied', ''));
     } else {
-      await installGroups(installArgs(skills.missing));
-      lines.push(formatRow('skills', 'installed', skills.missing.map((m) => m.name).join(', ')));
+      const results = await installGroups(installArgs(skills.missing));
+      const summary = summarizeSkillsInstall(skills.missing, results);
+      lines.push(...summary.lines);
+      skillsFailed = summary.failed;
     }
   }
 
@@ -80,6 +101,12 @@ export async function run(args = [], entries = SYNC) {
     );
     return 1;
   }
+
+  if (skillsFailed > 0) {
+    process.stdout.write(`\n${skillsFailed} skill(s) failed to install. See output above for details.\n`);
+    return 1;
+  }
+
   return 0;
 }
 

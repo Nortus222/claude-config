@@ -91,3 +91,74 @@ test('the manifest path resolves inside the fixture repo, never the real one', a
   const { manifestPath } = await import('../src/skills.mjs');
   assert.equal(manifestPath(), join(repo, 'skills-manifest.txt'));
 });
+
+// Fix round 2, finding 2: the fixture above never populates a skill lock, so
+// the manifest-write and shrink-guard branches capture.mjs added were never
+// actually exercised by the suite (the whole block could be deleted with all
+// tests still green). These tests populate .skill-lock.json — a sibling of
+// NORTUSCC_AGENTS_DIR's directory, per skills.mjs's SKILL_LOCK() — to drive
+// both branches for real, still entirely inside the fixture home.
+const skillLockPath = join(home, '.skill-lock.json');
+const { manifestPath, parseManifest } = await import('../src/skills.mjs');
+
+test('capture regenerates the manifest from the skill lock, grouped by source, excluding a local skill', async () => {
+  writeFileSync(
+    skillLockPath,
+    JSON.stringify({
+      skills: {
+        alpha: { source: 'foo/bar' },
+        beta: { source: 'foo/bar' },
+        gamma: { source: 'baz/qux' },
+        // No recorded source: authored directly in ~/.agents/skills. Nothing
+        // could install it, so it must never land in the manifest.
+        homegrown: {},
+      },
+    }),
+    'utf8',
+  );
+
+  const code = await captureRun([]);
+  assert.equal(code, 0);
+
+  const written = readFileSync(manifestPath(), 'utf8');
+  assert.deepEqual(parseManifest(written), [
+    { source: 'baz/qux', skills: ['gamma'] },
+    { source: 'foo/bar', skills: ['alpha', 'beta'] },
+  ]);
+  assert.ok(!written.includes('homegrown'), 'a skill with no recorded source must never be written to the manifest');
+  assert.ok(capturedPaths().includes('skills-manifest.txt'), 'a manifest write must be staged for commit');
+});
+
+test('capture refuses to shrink the manifest when the lock has fewer skills than the manifest already has', async () => {
+  const before = readFileSync(manifestPath(), 'utf8');
+
+  // Drop 'beta': the regenerated manifest would now have fewer skills than
+  // the 3 already written above.
+  writeFileSync(
+    skillLockPath,
+    JSON.stringify({
+      skills: {
+        alpha: { source: 'foo/bar' },
+        gamma: { source: 'baz/qux' },
+      },
+    }),
+    'utf8',
+  );
+
+  const code = await captureRun([]);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(manifestPath(), 'utf8'), before, 'a shrinking manifest must be refused, not written');
+  assert.ok(!capturedPaths().includes('skills-manifest.txt'), 'a refused write must not be staged for commit');
+});
+
+test('--allow-shrink permits writing a smaller manifest', async () => {
+  const code = await captureRun(['--allow-shrink']);
+  assert.equal(code, 0);
+
+  const written = parseManifest(readFileSync(manifestPath(), 'utf8'));
+  assert.deepEqual(written, [
+    { source: 'baz/qux', skills: ['gamma'] },
+    { source: 'foo/bar', skills: ['alpha'] },
+  ]);
+  assert.ok(capturedPaths().includes('skills-manifest.txt'));
+});
