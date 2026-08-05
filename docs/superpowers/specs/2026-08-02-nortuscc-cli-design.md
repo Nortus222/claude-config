@@ -333,6 +333,40 @@ The mac path cannot be verified from the authoring machine. `setup` and `apply` 
 run once on the mac and the result recorded before the old scripts are considered dead;
 step 3 may land in the same change, but the verification is outstanding until then.
 
+### macOS verification, 2026-08-05 — passed
+
+Run on the mac against the live `~/.claude`, with `NORTUSCC_REPO_DIR` pinned to the
+durable clone at `~/Developer/misc/claude-config` rather than to the feature worktree,
+which is deleted after merge.
+
+`status` beforehand reported `bin` and `hooks` as **`clobbered`**, not `linked` — this
+machine's copies were real directories, never symlinked. Step 2's expectation that a
+backup means "something unexpected" was written against the Windows machine's state; on
+the mac a backup is the correct outcome, and four were taken:
+
+```
+bin              linked       backed up -> backups/nortuscc-2026-08-05T15-28-18-953Z/bin
+hooks            linked       backed up -> .../hooks
+settings.json    copied       backed up -> .../settings.json
+CLAUDE.md        copied       backed up -> .../CLAUDE.md
+```
+
+`apply` exited 0. Verified afterwards: both directories are symlinks into the clone;
+`bin/sp` and `hooks/context-mode-cache-heal.mjs` read through them; `settings.json` and
+`CLAUDE.md` are byte-identical to their pre-run contents (`3e567f78…`, `cd7fcd67…`), so
+the symlink-to-copy conversion changed nothing but the storage shape. The backup
+directory holds the full originals. A following `status` reported `everything is in
+agreement`, exit 0.
+
+One expected artefact: with the repo pinned to the clone, whose `main` still carries the
+old flat manifest, the skills section reports all 26 installed skills as `extra` — a flat
+list parses to zero source groups. Run against the branch's source-grouped manifest the
+same machine reports `manifest satisfied`. This resolves on merge. Extras correctly do not
+make the run dirty.
+
+Not verified on macOS: `setup`'s clone path (the clone already existed), and `push`
+against a real remote. Windows junctions remain unexercised by any test.
+
 ## 10. Testing
 
 `node:test`, no framework.
