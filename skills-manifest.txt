@@ -1,28 +1,35 @@
-# Universal agent skills expected on every machine, under ~/.agents/skills/<name>.
-# These are NOT vendored — re-install them on a new machine with your installer,
-# then run skills-check.sh to confirm. One skill name per line; blank lines and
-# lines starting with '#' are ignored.
-#
-# The installer is the `skills` CLI (vercel-labs), which creates ~/.agents/skills
-# and the per-agent symlinks. skills-check.sh prints this when skills are missing.
-# Locally authored skills live in Nortus222/agent-skills; the rest come from the
-# upstreams recorded per-skill in ~/.agents/.skill-lock.json.
-# install-command: npx skills add Nortus222/agent-skills mattpocock/skills vercel-labs/skills
+# Skills expected on every machine, grouped by the repo they install from.
+# Regenerate with: nortuscc capture
+# Install with:    nortuscc apply --skills
 
+[Nortus222/agent-skills]
+explain
+
+[mattpocock/skills]
 ask-matt
+code-review
 codebase-design
 design-an-interface
+diagnosing-bugs
 domain-modeling
-explain
-find-skills
 grill-me
 grill-with-docs
+grilling
 handoff
+implement
 improve-codebase-architecture
 prototype
+research
 resolving-merge-conflicts
 setup-matt-pocock-skills
+tdd
 teach
 to-issues
+to-spec
+to-tickets
 triage
+wayfinder
 writing-great-skills
+
+[vercel-labs/skills]
+find-skills
