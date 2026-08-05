@@ -184,7 +184,7 @@ constraint is unchanged here.
 - **Scope is all sourced skills, not manifest-only.** A skill installed outside
   the manifest still goes stale.
 
-## Unverified
+## Verified
 
 **Verified 2026-08-05.** `skills update <names…> --global --yes` was assumed to
 update **only** the named skills and to run without prompting. Its `--help`
