@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { planUpdates, updatableSkills, sourcesOf } from '../skill-updates.mjs';
 import { resolveTrees as realResolveTrees } from '../git-trees.mjs';
 import { confirm as realConfirm } from '../prompt.mjs';
-import { preserveCopy } from '../backup.mjs';
+import { preserveCopy, backupDir } from '../backup.mjs';
 import { runUpdate as realRunUpdate } from '../skills-cli.mjs';
 import { readSkillLock, installedSkillNames } from '../skills.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
@@ -120,26 +120,38 @@ export async function run(args = [], deps = {}) {
   // folder in place the previous version is gone, and this copy is the only
   // way back.
   const names = plan.outdated.map((o) => o.name);
-  let backupLocation = null;
+  // Print the shared directory, not the last per-skill path preserve() returns
+  // — a multi-skill batch lands together under one backupDir(), and naming
+  // only the last skill's path would read as if the others were never saved.
+  let anyBackedUp = false;
   for (const name of names) {
-    backupLocation = preserve(join(agentsSkillsDir(), name), join('skills', name)) || backupLocation;
+    if (preserve(join(agentsSkillsDir(), name), join('skills', name))) anyBackedUp = true;
   }
-  if (backupLocation) process.stdout.write(`\nbacked up -> ${backupLocation}\n`);
+  if (anyBackedUp) process.stdout.write(`\nbacked up -> ${backupDir()}\n`);
 
   const ok = await runUpdate(names);
 
   // Re-read the lock rather than assuming the update did what was asked, so
-  // the closing report describes what was observed.
+  // the closing report describes what was observed. A skill only counts as
+  // moved when both the recorded and re-read hashes are known — an entry
+  // with `from: null` (no hash was ever recorded) or one the updater's lock
+  // no longer mentions must not read as "unknown -> unknown".
   const after = readLock();
-  const moved = plan.outdated.filter((o) => after.skills?.[o.name]?.skillFolderHash !== o.from);
+  const movedInfo = plan.outdated
+    .map((o) => ({ o, to: after.skills?.[o.name]?.skillFolderHash ?? null }))
+    .filter(({ o, to }) => o.from != null && to != null && to !== o.from);
   process.stdout.write(
-    '\n' + section('updated', moved.length
-      ? moved.map((o) => formatRow(o.name, 'updated', `${short(o.from)} -> ${short(after.skills[o.name]?.skillFolderHash)}`))
+    '\n' + section('updated', movedInfo.length
+      ? movedInfo.map(({ o, to }) => formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`))
       : [formatRow('skills', 'unchanged', 'the updater reported no change')]),
   );
 
   if (!ok) {
-    process.stdout.write('\nThe updater failed. See the output above; the backup is listed at the top.\n');
+    process.stdout.write(
+      anyBackedUp
+        ? '\nThe updater failed. See the output above; the backup is listed at the top.\n'
+        : '\nThe updater failed. No backup was made — nothing existed to preserve.\n',
+    );
   }
 
   return exitCode({ plan, updateFailed: !ok });
