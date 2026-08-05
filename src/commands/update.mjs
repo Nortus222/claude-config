@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { planUpdates, updatableSkills, sourcesOf } from '../skill-updates.mjs';
-import { resolveTrees as realResolveTrees } from '../git-trees.mjs';
+import { inspectSource as realInspectSource } from '../git-trees.mjs';
 import { confirm as realConfirm } from '../prompt.mjs';
 import { preserveCopy, backupDir } from '../backup.mjs';
 import { runUpdate as realRunUpdate } from '../skills-cli.mjs';
@@ -78,7 +78,7 @@ export function reportLines(plan) {
 
 export async function run(args = [], deps = {}) {
   const {
-    resolveTrees = realResolveTrees,
+    inspectSource = realInspectSource,
     confirm = realConfirm,
     runUpdate = realRunUpdate,
     preserve = preserveCopy,
@@ -117,8 +117,8 @@ export async function run(args = [], deps = {}) {
   // that source's skills unknown while the others still get a real answer.
   const remoteTrees = new Map();
   for (const { sourceUrl, paths } of sourcesOf(entries)) {
-    const trees = await resolveTrees(sourceUrl, paths);
-    if (trees) remoteTrees.set(sourceUrl, trees);
+    const found = await inspectSource(sourceUrl, paths);
+    if (found) remoteTrees.set(sourceUrl, found.trees);
   }
 
   const plan = planUpdates({ lock, installedNames, remoteTrees });

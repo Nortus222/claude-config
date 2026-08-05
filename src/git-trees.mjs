@@ -37,26 +37,39 @@ function runGit(args, { cwd } = {}) {
   });
 }
 
-// Returns null if the source could not be cloned — the caller reports every
-// skill from that source as unknown rather than assuming it is current.
-// A path present in the map with a null value exists in the lock but no longer
-// exists upstream.
-export async function resolveTrees(sourceUrl, paths, { run = runGit } = {}) {
-  const trees = new Map();
-  if (paths.length === 0) return trees;
+export function buildLsTreeArgs() {
+  return ['ls-tree', '-r', 'HEAD', '--name-only'];
+}
 
+// Both facts the caller needs come out of one clone: the tree SHA per known
+// skill folder, and every SKILL.md in the repo so a skill that is not installed
+// yet can still be seen. Splitting these into two exported functions would
+// double the clones per source to save renaming one function.
+//
+// Returns null if the source could not be cloned — the caller reports every
+// skill from that source as unknown rather than assuming it is current. A path
+// present in `trees` with a null value exists in the lock but no longer exists
+// upstream.
+export async function inspectSource(sourceUrl, paths, { run = runGit } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-trees-'));
   try {
     const cloned = await run(buildCloneArgs(sourceUrl, dir));
     if (cloned.code !== 0) return null;
 
+    const trees = new Map();
     for (const path of paths) {
       const res = await run(buildRevParseArgs(path), { cwd: dir });
       // A non-zero exit here is git saying the path is not in HEAD, which is a
       // real answer about the skill, not a failure of the check.
       trees.set(path, res.code === 0 && res.out ? res.out : null);
     }
-    return trees;
+
+    const listed = await run(buildLsTreeArgs(), { cwd: dir });
+    const skillPaths = listed.code === 0
+      ? listed.out.split('\n').map((l) => l.trim()).filter((p) => /(^|\/)SKILL\.md$/.test(p))
+      : [];
+
+    return { trees, skillPaths };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

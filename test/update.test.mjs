@@ -26,7 +26,7 @@ function baseDeps(overrides = {}) {
   return {
     readLock: () => ({ skills: { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') } }),
     installed: () => ['fresh', 'stale'],
-    resolveTrees: async () => new Map([['s/stale', 'new'], ['s/fresh', 'same']]),
+    inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]), skillPaths: [] }),
     confirm: async () => true,
     preserve: () => '/backup/path',
     runUpdate: async () => true,
@@ -100,7 +100,7 @@ test('--check never prompts', async () => {
 test('an all-current machine exits 0 and updates nothing', async () => {
   let updated = false;
   const deps = baseDeps({
-    resolveTrees: async () => new Map([['s/stale', 'old'], ['s/fresh', 'same']]),
+    inspectSource: async () => ({ trees: new Map([['s/stale', 'old'], ['s/fresh', 'same']]), skillPaths: [] }),
     runUpdate: async () => { updated = true; return true; },
   });
   assert.equal(await run([], deps), 0);
@@ -160,7 +160,7 @@ test('no TTY without --yes refuses with exit 2 rather than hanging', async () =>
 test('an unreachable source exits 1 and updates nothing', async () => {
   let sent = null;
   const deps = baseDeps({
-    resolveTrees: async () => null,
+    inspectSource: async () => null,
     runUpdate: async (names) => { sent = names; return true; },
   });
   assert.equal(await run(['--yes'], deps), 1);
@@ -175,7 +175,7 @@ test('a failing updater exits 1', async () => {
 test('a skill whose folder vanished upstream is never sent to the updater', async () => {
   const sent = [];
   const deps = baseDeps({
-    resolveTrees: async () => new Map([['s/stale', null], ['s/fresh', 'same']]),
+    inspectSource: async () => ({ trees: new Map([['s/stale', null], ['s/fresh', 'same']]), skillPaths: [] }),
     runUpdate: async (names) => { sent.push(...names); return true; },
   });
   const code = await run(['--yes'], deps);
@@ -186,7 +186,7 @@ test('a skill whose folder vanished upstream is never sent to the updater', asyn
 test('declining still exits 1 when a skill has gone missing upstream', async () => {
   const deps = baseDeps({
     confirm: async () => false,
-    resolveTrees: async () => new Map([['s/stale', null], ['s/fresh', 'same']]),
+    inspectSource: async () => ({ trees: new Map([['s/stale', null], ['s/fresh', 'same']]), skillPaths: [] }),
   });
   assert.equal(await run([], deps), 1);
 });
@@ -239,7 +239,7 @@ test('a still-hashless skill is not reported as updated', async () => {
     await run(['--yes'], {
       readLock: () => ({ skills: { nohash: noHashEntry } }),
       installed: () => ['nohash'],
-      resolveTrees: async () => new Map([['s/nohash', 'somehash']]),
+      inspectSource: async () => ({ trees: new Map([['s/nohash', 'somehash']]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -262,7 +262,7 @@ test("the backup line names the shared backup directory, not the last skill's pa
     await run(['--yes'], {
       readLock: () => ({ skills: { one: entry('s/one', 'old1'), two: entry('s/two', 'old2') } }),
       installed: () => ['one', 'two'],
-      resolveTrees: async () => new Map([['s/one', 'new1'], ['s/two', 'new2']]),
+      inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
       confirm: async () => true,
       preserve: (abs, rel) => `/fake/per-skill/${rel}`,
       runUpdate: async () => true,
@@ -289,7 +289,7 @@ test('a failed update with nothing to preserve does not falsely point at a backu
 });
 
 // --- Finding 5: two distinct sources, one unreachable, only its own skills
-// classified unknown. Exercises the per-source resolveTrees loop, not just
+// classified unknown. Exercises the per-source inspectSource loop, not just
 // planUpdates directly. ---
 
 test('two sources: an unreachable one only marks its own skills unknown', async () => {
@@ -299,7 +299,7 @@ test('two sources: an unreachable one only marks its own skills unknown', async 
       stale: entry('s/stale', 'old'),
       fresh: { source: 'o/other', sourceUrl: URL2, skillPath: 's/fresh/SKILL.md', skillFolderHash: 'same' },
     } }),
-    resolveTrees: async (sourceUrl) => (sourceUrl === URL2 ? null : new Map([['s/stale', 'new']])),
+    inspectSource: async (sourceUrl) => (sourceUrl === URL2 ? null : { trees: new Map([['s/stale', 'new']]), skillPaths: [] }),
   });
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
@@ -328,7 +328,7 @@ test('gone with nothing outdated prints the capture pointer and --check exits 1'
     code = await run(['--check'], {
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
       installed: () => ['vanished', 'fresh'],
-      resolveTrees: async () => new Map([['s/vanished', null], ['s/fresh', 'same']]),
+      inspectSource: async () => ({ trees: new Map([['s/vanished', null], ['s/fresh', 'same']]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -350,7 +350,7 @@ test('gone with nothing outdated still prints the capture pointer outside --chec
     code = await run([], {
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
       installed: () => ['vanished', 'fresh'],
-      resolveTrees: async () => new Map([['s/vanished', null], ['s/fresh', 'same']]),
+      inspectSource: async () => ({ trees: new Map([['s/vanished', null], ['s/fresh', 'same']]), skillPaths: [] }),
       confirm: async () => { asked = true; return true; },
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -371,7 +371,7 @@ test('gone and outdated together print both the capture pointer and the update s
     code = await run(['--check'], {
       readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
       installed: () => ['stale', 'vanished'],
-      resolveTrees: async () => new Map([['s/stale', 'new'], ['s/vanished', null]]),
+      inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/vanished', null]]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -396,7 +396,7 @@ test('a skill whose backup returns null is named as unprotected, not silently se
     await run(['--yes'], {
       readLock: () => ({ skills: { one: entry('s/one', 'old1'), two: entry('s/two', 'old2') } }),
       installed: () => ['one', 'two'],
-      resolveTrees: async () => new Map([['s/one', 'new1'], ['s/two', 'new2']]),
+      inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
       confirm: async () => true,
       preserve: (abs, rel) => (rel.includes('one') ? '/backup/one' : null),
       runUpdate: async () => true,
@@ -457,7 +457,7 @@ test('the gone footer names the gone skills, not just a bare pronoun', async () 
     await run(['--check'], {
       readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
       installed: () => ['stale', 'vanished'],
-      resolveTrees: async () => new Map([['s/stale', 'new'], ['s/vanished', null]]),
+      inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/vanished', null]]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -479,7 +479,7 @@ test('the gone footer offers a removal command, not only capture', async () => {
     await run(['--check'], {
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old') } }),
       installed: () => ['vanished'],
-      resolveTrees: async () => new Map([['s/vanished', null]]),
+      inspectSource: async () => ({ trees: new Map([['s/vanished', null]]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
@@ -506,7 +506,7 @@ test('a long skill name keeps the outdated detail rows aligned', async () => {
         },
       }),
       installed: () => ['setup-matt-pocock-skills', 'tdd'],
-      resolveTrees: async () => new Map([['s/long', 'new'], ['s/tdd', 'new2']]),
+      inspectSource: async () => ({ trees: new Map([['s/long', 'new'], ['s/tdd', 'new2']]), skillPaths: [] }),
       confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
