@@ -147,6 +147,85 @@ test('lock.repo is used as fallback', async () => {
   }
 });
 
+// Test 3b: stale lock.repo (nonexistent path) falls back safely.
+//
+// repoRoot() is consumed by every command (apply, status, capture, setup
+// itself), so a lock.repo left pointing at a moved or deleted clone must
+// fall back to the module's own location rather than propagating a path
+// that no longer exists -- without this guard every command would appear
+// to be broken, when the real problem is just a stale record.
+test('stale lock.repo pointing at a nonexistent path falls back to module location', async () => {
+  const { claude, agents } = createTestHome();
+
+  const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
+  const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
+  const savedRepo = process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    process.env.NORTUSCC_CLAUDE_DIR = claude;
+    process.env.NORTUSCC_AGENTS_DIR = agents;
+    delete process.env.NORTUSCC_REPO_DIR;
+
+    const { repoRoot } = await import('../src/resolve.mjs');
+    const { writeLock } = await import('../src/lock.mjs');
+
+    writeLock({ version: 1, repo: '/nonexistent/nortuscc-stale/path', files: {} });
+
+    const root = repoRoot();
+    assert.notEqual(
+      root,
+      '/nonexistent/nortuscc-stale/path',
+      'should not use a lock.repo path that does not exist',
+    );
+    assert.ok(existsSync(root), 'fallback path should exist');
+    assert.ok(
+      existsSync(join(root, 'src', 'resolve.mjs')),
+      'fallback should be this module\'s own repo checkout, not an arbitrary existing path',
+    );
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
+    process.env.NORTUSCC_AGENTS_DIR = savedAgents;
+    process.env.NORTUSCC_REPO_DIR = savedRepo;
+  }
+});
+
+// Test 3c: stale lock.repo (directory with no .git) falls back safely.
+//
+// A path that exists but isn't a git checkout (e.g. the clone was deleted
+// and the directory got reused, or recreated by something else) is exactly
+// as unsafe as a nonexistent one and must fail the same way.
+test('stale lock.repo pointing at a directory with no .git falls back to module location', async () => {
+  const { claude, agents } = createTestHome();
+  const notAGitRepo = mkdtempSync(join(tmpdir(), 'nortuscc-not-a-repo-'));
+
+  const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
+  const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
+  const savedRepo = process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    process.env.NORTUSCC_CLAUDE_DIR = claude;
+    process.env.NORTUSCC_AGENTS_DIR = agents;
+    delete process.env.NORTUSCC_REPO_DIR;
+
+    const { repoRoot } = await import('../src/resolve.mjs');
+    const { writeLock } = await import('../src/lock.mjs');
+
+    writeLock({ version: 1, repo: notAGitRepo, files: {} });
+
+    const root = repoRoot();
+    assert.notEqual(
+      root,
+      notAGitRepo,
+      'should not use a lock.repo directory that exists but has no .git',
+    );
+    assert.ok(existsSync(root), 'fallback path should exist');
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
+    process.env.NORTUSCC_AGENTS_DIR = savedAgents;
+    process.env.NORTUSCC_REPO_DIR = savedRepo;
+  }
+});
+
 // Test 4: Probe A — --skills must be composed into the applyRun(...) call.
 //
 // Fixture has a real, correctly source-grouped skills-manifest.txt naming one
