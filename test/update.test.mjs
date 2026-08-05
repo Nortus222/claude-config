@@ -81,9 +81,14 @@ test('--check and --yes together are refused', async () => {
 
 test('--check reports outdated skills, exits 1, and updates nothing', async () => {
   let updated = false;
-  const code = await run(['--check'], baseDeps({ runUpdate: async () => { updated = true; return true; } }));
+  let preserved = false;
+  const code = await run(['--check'], baseDeps({
+    runUpdate: async () => { updated = true; return true; },
+    preserve: () => { preserved = true; return '/backup/path'; },
+  }));
   assert.equal(code, 1);
   assert.equal(updated, false, '--check must never write');
+  assert.equal(preserved, false, '--check must never take a backup either');
 });
 
 test('--check never prompts', async () => {
