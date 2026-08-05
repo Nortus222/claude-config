@@ -17,6 +17,8 @@ export function inspectLink(dest, expectedTarget) {
 
   const isSymlink = stat.isSymbolicLink();
   let target = null;
+  // Only a symlink can dangle; anything else lstat found is its own content.
+  let targetResolves = true;
   if (isSymlink) {
     try {
       // readlinkSync returns the link's raw text, which is relative to the
@@ -27,10 +29,20 @@ export function inspectLink(dest, expectedTarget) {
     } catch {
       target = null;
     }
+    // existsSync follows the link and swallows ENOENT, so false here means the
+    // link's target is gone — the same lstat-then-existsSync pair
+    // brokenSkillLinks() uses in skills.mjs, kept deliberately identical.
+    targetResolves = existsSync(dest);
   }
 
   return {
-    state: linkState({ exists: true, isSymlink, target, expectedTarget: resolve(expectedTarget) }),
+    state: linkState({
+      exists: true,
+      isSymlink,
+      target,
+      expectedTarget: resolve(expectedTarget),
+      targetResolves,
+    }),
     target,
   };
 }
@@ -40,9 +52,11 @@ export function ensureLink(dest, target, relative) {
   if (state === 'linked') return { state: 'linked', backedUp: null };
 
   let backedUp = null;
-  if (state === 'wrong-target') {
-    // A wrong link holds no content of its own, so remove it rather than
-    // filling the backup directory with dangling links.
+  if (state === 'wrong-target' || state === 'broken-link') {
+    // Neither a mispointed link nor a dangling one holds content of its own —
+    // the link text is the whole of it — so remove it rather than filling the
+    // backup directory with links that point nowhere. backupOnce would decline
+    // a dangling link anyway: its existsSync guard follows the link.
     rmSync(dest, { recursive: true, force: true });
   } else if (state === 'clobbered') {
     backedUp = backupOnce(dest, relative);
@@ -50,5 +64,10 @@ export function ensureLink(dest, target, relative) {
 
   mkdirSync(dirname(dest), { recursive: true });
   symlinkSync(resolve(target), dest, DIR_LINK_TYPE);
-  return { state: 'linked', backedUp };
+
+  // Report what is actually there now, not what was attempted. Rebuilding a
+  // link cannot conjure up a target that the repo no longer has, and claiming
+  // 'linked' in that case would restate the very lie this state machine was
+  // extended to catch.
+  return { state: inspectLink(dest, target).state, backedUp };
 }

@@ -98,6 +98,7 @@ function noteFor(row) {
   switch (row.state) {
     case 'clobbered': return 'a real path sits where a link belongs';
     case 'wrong-target': return 'link points somewhere else';
+    case 'broken-link': return 'link points at a path that no longer exists';
     case 'conflict': return 'changed in the repo AND here';
     case 'local-ahead': return 'local edits not in the repo';
     case 'repo-ahead': return 'repo has newer content';

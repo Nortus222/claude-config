@@ -8,6 +8,8 @@ import {
   statSync,
   copyFileSync,
   readdirSync,
+  rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +29,11 @@ process.env.NORTUSCC_REPO_DIR = fixtureRepo;
 mkdirSync(join(fixtureRepo, 'claude'), { recursive: true });
 writeFileSync(join(fixtureRepo, 'claude', 'settings.json'), JSON.stringify({}));
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
+// The link entries need real directories to point at. Without them the links
+// these tests create dangle, which is now (correctly) reported as broken-link
+// rather than as a clean machine.
+mkdirSync(join(fixtureRepo, 'claude', 'bin'), { recursive: true });
+mkdirSync(join(fixtureRepo, 'claude', 'hooks'), { recursive: true });
 
 const { configReport, run } = await import('../src/commands/status.mjs');
 
@@ -203,7 +210,8 @@ test('run() does not write any files to claude dir and does not create new direc
 
   // Set up an isolated repo fixture
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-readonly-'));
-  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
 
@@ -331,7 +339,8 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   mkdirSync(isolatedClaudeDir, { recursive: true });
 
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-skills-missing-'));
-  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   // A real source-grouped manifest naming two skills.
@@ -395,3 +404,112 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
   }
 });
+
+// --- shared fixture for the end-to-end reporting tests below -----------------
+
+// Builds an isolated machine that is genuinely clean — links pointing at real
+// repo directories, baselines recorded for both copied files — and hands it to
+// fn with the env overrides in place. Each test then breaks exactly one thing,
+// so what it asserts is the only thing that could have caused the report.
+async function onCleanMachine(prefix, fn) {
+  const isolatedHome = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-home-`));
+  const isolatedClaudeDir = join(isolatedHome, '.claude');
+  const isolatedAgentsSkillsDir = join(isolatedHome, '.agents', 'skills');
+  mkdirSync(isolatedClaudeDir, { recursive: true });
+  mkdirSync(isolatedAgentsSkillsDir, { recursive: true });
+
+  const isolatedRepo = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-repo-`));
+  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
+  writeFileSync(join(isolatedRepo, 'claude', 'bin', 'sp'), '#!/bin/sh\n');
+  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
+
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    repo: process.env.NORTUSCC_REPO_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+  };
+  process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_REPO_DIR = isolatedRepo;
+  process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+
+  try {
+    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { SYNC } = await import('../src/manifest.mjs');
+    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+    const { ensureLink } = await import('../src/link.mjs');
+    const { resolveEntry } = await import('../src/resolve.mjs');
+
+    for (const entry of SYNC) {
+      if (entry.mode === 'link') {
+        const { src, dest } = resolveEntry(entry);
+        ensureLink(dest, src, entry.dest);
+      }
+    }
+    const lock = readLock();
+    for (const entry of SYNC) {
+      if (entry.mode === 'copy') {
+        const { src, dest } = resolveEntry(entry);
+        const hash = hashFile(src);
+        if (hash) {
+          copyFileSync(src, dest);
+          setBaseline(lock, entry.dest, hash);
+        }
+      }
+    }
+    writeLock(lock);
+
+    return await fn({
+      home: isolatedHome,
+      claude: isolatedClaudeDir,
+      agents: isolatedAgentsSkillsDir,
+      repo: isolatedRepo,
+      run: isolatedRun,
+    });
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = saved.claude;
+    process.env.NORTUSCC_REPO_DIR = saved.repo;
+    process.env.NORTUSCC_AGENTS_DIR = saved.agents;
+  }
+}
+
+async function runCaptured(run) {
+  const chunks = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    chunks.push(chunk.toString());
+    return true;
+  };
+  try {
+    const code = await run();
+    return { code, output: chunks.join('') };
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+}
+
+// C1: with the repo's claude/bin moved away, status used to print "bin linked"
+// and "everything is in agreement" with exit 0, while `cat ~/.claude/bin/sp`
+// failed. That is the design's §1 problem statement restated verbatim, and
+// ~/.claude/bin/sp is what the global CLAUDE.md tells every agent to run.
+test('status reports a link whose repo target has vanished, and exits non-zero', async () => {
+  await onCleanMachine('broken-link', async (fx) => {
+    const clean = await runCaptured(fx.run);
+    assert.equal(clean.code, 0, 'the fixture machine must start genuinely clean');
+    assert.match(clean.output, /everything is in agreement/);
+
+    // The repo path goes away: a deleted worktree, or a moved clone.
+    rmSync(join(fx.repo, 'claude', 'bin'), { recursive: true, force: true });
+
+    const dirty = await runCaptured(fx.run);
+    assert.equal(dirty.code, 1, 'a dangling bin link must make status exit non-zero');
+    assert.match(dirty.output, /bin\s+broken-link/, 'the dangling link is named and its state reported');
+    assert.doesNotMatch(
+      dirty.output,
+      /everything is in agreement/,
+      'a machine whose bin link leads nowhere is not in agreement',
+    );
+  });
+});
+

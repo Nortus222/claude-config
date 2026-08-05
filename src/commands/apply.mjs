@@ -56,6 +56,7 @@ export async function run(args = [], entries = SYNC) {
   const lines = [];
   let refused = 0;
   let skillsFailed = 0;
+  let linksUnresolved = 0;
   // Tracks whether this run actually wrote anything to ~/.claude, so the
   // restart reminder below only fires when it is true and stays silent on a
   // clean, idempotent no-op run.
@@ -71,7 +72,11 @@ export async function run(args = [], entries = SYNC) {
       const { state: preState } = inspectLink(dest, src);
       const res = ensureLink(dest, src, entry.dest);
       if (preState !== 'linked') changed = true;
-      lines.push(formatRow(entry.dest, res.state, res.backedUp ? `backed up -> ${res.backedUp}` : ''));
+      // ensureLink reports the post-state honestly, so a link it rebuilt over a
+      // repo path that is simply not there stays visible instead of being
+      // reported as a success apply did not achieve.
+      if (res.state !== 'linked') linksUnresolved += 1;
+      lines.push(formatRow(entry.dest, res.state, noteForLink(res, src)));
       continue;
     }
 
@@ -135,12 +140,26 @@ export async function run(args = [], entries = SYNC) {
     return 1;
   }
 
+  if (linksUnresolved > 0) {
+    process.stdout.write(
+      `\n${linksUnresolved} link(s) still lead nowhere: the repo path they need is missing.\n` +
+        '  Check that the repo recorded in ~/.claude/.nortuscc-lock.json still exists,\n' +
+        '  then re-run: nortuscc apply\n',
+    );
+    return 1;
+  }
+
   if (skillsFailed > 0) {
     process.stdout.write(`\n${skillsFailed} skill(s) failed to install. See output above for details.\n`);
     return 1;
   }
 
   return 0;
+}
+
+function noteForLink(res, src) {
+  if (res.state !== 'linked') return `target missing in the repo: ${src}`;
+  return res.backedUp ? `backed up -> ${res.backedUp}` : '';
 }
 
 function noteFor(res) {

@@ -41,8 +41,27 @@ test('local deleted while the repo also moved is still repo-ahead', () => {
   assert.equal(fileState({ baseline: A, repo: B, local: null }), 'repo-ahead');
 });
 
-test('a correct symlink is linked', () => {
-  assert.equal(linkState({ exists: true, isSymlink: true, target: '/r/bin', expectedTarget: '/r/bin' }), 'linked');
+test('a correct symlink whose target resolves is linked', () => {
+  assert.equal(
+    linkState({ exists: true, isSymlink: true, target: '/r/bin', expectedTarget: '/r/bin', targetResolves: true }),
+    'linked',
+  );
+});
+
+test('a correct symlink whose target no longer resolves is broken-link, not linked', () => {
+  assert.equal(
+    linkState({ exists: true, isSymlink: true, target: '/r/bin', expectedTarget: '/r/bin', targetResolves: false }),
+    'broken-link',
+  );
+});
+
+test('an unstated targetResolves reads as broken rather than as linked', () => {
+  // Fail loud, not silent: a caller that forgets to gather the fact must not
+  // be handed the reassuring answer.
+  assert.equal(
+    linkState({ exists: true, isSymlink: true, target: '/r/bin', expectedTarget: '/r/bin' }),
+    'broken-link',
+  );
 });
 
 test('a real directory where a link belongs is clobbered', () => {
@@ -58,13 +77,14 @@ test('nothing there is missing', () => {
 });
 
 test('state groupings partition the actionable states', () => {
-  // NEEDS_APPLY: 5 states for apply to handle
+  // NEEDS_APPLY: 6 states for apply to handle
   assert.ok(NEEDS_APPLY.has('repo-ahead'));
   assert.ok(NEEDS_APPLY.has('unmanaged'));
   assert.ok(NEEDS_APPLY.has('missing'));
   assert.ok(NEEDS_APPLY.has('clobbered'));
   assert.ok(NEEDS_APPLY.has('wrong-target'));
-  assert.equal(NEEDS_APPLY.size, 5, 'NEEDS_APPLY must contain exactly 5 states');
+  assert.ok(NEEDS_APPLY.has('broken-link'), 'broken-link is repairable by apply, so it must be actionable');
+  assert.equal(NEEDS_APPLY.size, 6, 'NEEDS_APPLY must contain exactly 6 states');
 
   // NEEDS_CAPTURE: 1 state for capture to handle
   assert.ok(NEEDS_CAPTURE.has('local-ahead'));
@@ -86,6 +106,8 @@ test('state groupings partition the actionable states', () => {
   assert.ok(!NEEDS_CAPTURE.has('unknown-mode'), 'unknown-mode not in NEEDS_CAPTURE');
   assert.ok(!BLOCKED.has('local-ahead'), 'local-ahead not in BLOCKED');
   assert.ok(!BLOCKED.has('repo-ahead'), 'repo-ahead not in BLOCKED');
+  assert.ok(!BLOCKED.has('broken-link'), 'broken-link not in BLOCKED (apply can rebuild it)');
+  assert.ok(!NEEDS_CAPTURE.has('broken-link'), 'broken-link not in NEEDS_CAPTURE');
 
   // Clean and linked are not actionable (in no sets)
   assert.ok(!NEEDS_APPLY.has('clean'), 'clean not in NEEDS_APPLY');
