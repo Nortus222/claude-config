@@ -213,3 +213,109 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
 });
+
+// Test 5: setup forwards --take-* flags to apply.
+//
+// A conflict that apply refuses without --take-repo (see Test 2) must
+// resolve once setup forwards --take-repo through to the composed
+// applyRun([...]) call. If the `...args.filter((a) => a.startsWith('--take-'))`
+// spread were dropped, apply would never see the flag and would keep
+// refusing -- exit 1, file untouched -- so this only passes when the flag
+// genuinely arrives.
+test('setup forwards --take-repo to apply, resolving a conflict', async () => {
+  const testRepo = createTestRepo('nortuscc-take-repo-');
+  const { claude, agents } = createTestHome();
+
+  const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
+  const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
+  const savedRepo = process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    process.env.NORTUSCC_CLAUDE_DIR = claude;
+    process.env.NORTUSCC_AGENTS_DIR = agents;
+    process.env.NORTUSCC_REPO_DIR = testRepo;
+
+    const { run } = await import('../src/commands/setup.mjs');
+
+    // Baseline run establishes the lockfile's recorded hash for CLAUDE.md.
+    let code = await run([]);
+    assert.equal(code, 0);
+
+    // Genuine conflict: both sides change CLAUDE.md after the baseline.
+    writeFileSync(join(claude, 'CLAUDE.md'), '# local change\n');
+    writeFileSync(join(testRepo, 'claude', 'CLAUDE.md'), '# repo change\n');
+    execSync('git add .', { cwd: testRepo, stdio: 'ignore' });
+    execSync('git commit -m "repo change"', { cwd: testRepo, stdio: 'ignore' });
+
+    // Forward --take-repo through setup. Only true when the flag reaches
+    // apply: the conflict resolves in the repo's favor instead of being
+    // refused.
+    code = await run(['--take-repo']);
+    assert.equal(code, 0, '--take-repo should resolve the conflict once forwarded to apply');
+
+    const resolved = readFileSync(join(claude, 'CLAUDE.md'), 'utf8');
+    assert.equal(
+      resolved,
+      '# repo change\n',
+      'CLAUDE.md should have been overwritten with the repo version, proving --take-repo reached apply',
+    );
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
+    process.env.NORTUSCC_AGENTS_DIR = savedAgents;
+    process.env.NORTUSCC_REPO_DIR = savedRepo;
+  }
+});
+
+// Test 6: setup --dir pointing at an existing directory skips the clone.
+//
+// The guard `if (dir && !existsSync(dir))` should never attempt a clone when
+// --dir already names a real directory. Asserted purely on observable
+// behavior: no "cloning" log line, and setup still succeeds using that
+// directory directly. `--repo` is deliberately pointed at a bogus,
+// unreachable URL so that if the guard regresses and a clone is attempted
+// anyway, it fails immediately on git's local "destination already exists"
+// check -- before any network I/O -- rather than hanging or reaching out.
+test('setup --dir pointing at an existing directory does not attempt to clone', async () => {
+  const existingRepo = createTestRepo('nortuscc-existing-dir-');
+  const { claude, agents } = createTestHome();
+
+  const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
+  const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
+  const savedRepo = process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    process.env.NORTUSCC_CLAUDE_DIR = claude;
+    process.env.NORTUSCC_AGENTS_DIR = agents;
+    delete process.env.NORTUSCC_REPO_DIR;
+
+    const { run } = await import('../src/commands/setup.mjs');
+    const { readLock } = await import('../src/lock.mjs');
+
+    let output = '';
+    const originalWrite = process.stdout.write;
+    process.stdout.write = function (chunk) {
+      output += chunk.toString();
+      return originalWrite.call(this, chunk);
+    };
+
+    let code;
+    try {
+      code = await run(['--dir', existingRepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    assert.equal(code, 0, 'setup should succeed against the pre-existing directory rather than attempt a clone');
+    assert.equal(
+      output.includes('cloning'),
+      false,
+      'setup should not log a clone attempt when --dir already names an existing directory',
+    );
+    const lock = readLock();
+    assert.equal(lock.repo, existingRepo, 'lock.repo should record the pre-existing --dir path directly');
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
+    process.env.NORTUSCC_AGENTS_DIR = savedAgents;
+    process.env.NORTUSCC_REPO_DIR = savedRepo;
+  }
+});

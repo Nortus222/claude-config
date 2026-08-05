@@ -16,10 +16,10 @@ export function repoRoot() {
 
   // Priority 2: recorded lock.repo if it's a valid, existing git checkout
   // Read lockfile directly to avoid import cycle with lock.mjs
-  const lockPath = join(claudeDir(), '.nortuscc-lock.json');
-  if (existsSync(lockPath)) {
+  const lockFilePath = lockPath();
+  if (existsSync(lockFilePath)) {
     try {
-      const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+      const lock = JSON.parse(readFileSync(lockFilePath, 'utf8'));
       if (lock.repo && typeof lock.repo === 'string') {
         // Validate: path must exist and look like a git repo
         if (existsSync(lock.repo) && existsSync(join(lock.repo, '.git'))) {
