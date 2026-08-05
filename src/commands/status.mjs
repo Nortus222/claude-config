@@ -5,6 +5,7 @@ import { inspectLink } from '../link.mjs';
 import { inspectCopy } from '../copy.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
+import { loadPluginState, pluginReport } from '../plugins.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -28,11 +29,24 @@ export async function run() {
   const lines = rows.map((r) => formatRow(r.dest, r.state, noteFor(r)));
   process.stdout.write('\n' + section('config', lines));
 
+  const { settings, installed, marketplaces } = loadPluginState();
+  const plugins = pluginReport(settings, installed, marketplaces);
+  const pluginLines =
+    plugins.commands.length === 0
+      ? [formatRow('all enabled', 'installed', '')]
+      : [
+          ...plugins.missingMarketplaces.map((m) => formatRow(m, 'no marketplace', '')),
+          ...plugins.missingPlugins.map((p) => formatRow(p, 'not installed', '')),
+          '',
+          ...plugins.commands.map((c) => `  ${c}`),
+        ];
+  process.stdout.write(section('plugins', pluginLines));
+
   const actionable = rows.filter(
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
 
-  if (actionable.length === 0) {
+  if (actionable.length === 0 && plugins.commands.length === 0) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }

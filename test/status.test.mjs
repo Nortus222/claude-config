@@ -8,6 +8,13 @@ const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
 mkdirSync(process.env.NORTUSCC_CLAUDE_DIR, { recursive: true });
 
+// Set up a fixture repo with empty settings.json so tests don't read plugins from the real repo
+const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-'));
+process.env.NORTUSCC_REPO_DIR = fixtureRepo;
+mkdirSync(join(fixtureRepo, 'claude'), { recursive: true });
+writeFileSync(join(fixtureRepo, 'claude', 'settings.json'), JSON.stringify({}));
+writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
+
 const { configReport, run } = await import('../src/commands/status.mjs');
 
 test('configReport returns one row per manifest entry', async () => {
