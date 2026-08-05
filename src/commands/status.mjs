@@ -7,9 +7,9 @@ import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
-export function configReport() {
+export function configReport(entries = SYNC) {
   const lock = readLock();
-  return SYNC.map((entry) => {
+  return entries.map((entry) => {
     const { src, dest, mode } = resolveEntry(entry);
     if (mode === 'link') {
       return { dest: entry.dest, mode, state: inspectLink(dest, src).state };
