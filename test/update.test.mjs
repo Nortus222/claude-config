@@ -308,3 +308,100 @@ test('two sources: an unreachable one only marks its own skills unknown', async 
   assert.match(out, /outdated\s+1\s+stale/);
   assert.match(out, /unreachable\s+1\s+fresh/);
 });
+
+// --- Fix 1: `gone` skills must get a next step, not just a count row, and
+// that pointer must not be swallowed by (or swallow) the `Run: nortuscc
+// update` suggestion. `Run: nortuscc update` itself excludes `gone` skills
+// from its batch by construction, so it alone sends the user in a circle. ---
+
+test('gone with nothing outdated prints the capture pointer and --check exits 1', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--check'], {
+      readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
+      installed: () => ['vanished', 'fresh'],
+      resolveTrees: async () => new Map([['s/vanished', null], ['s/fresh', 'same']]),
+      confirm: async () => true,
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.equal(code, 1);
+  assert.match(out, /nortuscc capture/);
+  assert.doesNotMatch(out, /Run: nortuscc update/, 'nothing is outdated, so that suggestion must not appear');
+});
+
+test('gone with nothing outdated still prints the capture pointer outside --check, without prompting', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let asked = false;
+  let code;
+  try {
+    code = await run([], {
+      readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
+      installed: () => ['vanished', 'fresh'],
+      resolveTrees: async () => new Map([['s/vanished', null], ['s/fresh', 'same']]),
+      confirm: async () => { asked = true; return true; },
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.equal(code, 1);
+  assert.equal(asked, false, 'nothing is outdated, so run must not prompt at all');
+  assert.match(out, /nortuscc capture/);
+});
+
+test('gone and outdated together print both the capture pointer and the update suggestion', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--check'], {
+      readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
+      installed: () => ['stale', 'vanished'],
+      resolveTrees: async () => new Map([['s/stale', 'new'], ['s/vanished', null]]),
+      confirm: async () => true,
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.equal(code, 1);
+  assert.match(out, /Run: nortuscc update/);
+  assert.match(out, /nortuscc capture/);
+});
+
+// --- Fix 2: preserveCopy returns null when existsSync sees nothing at the
+// path, which includes a broken symlink (existsSync follows links;
+// installedSkillNames deliberately counts them). That skill must be named as
+// unprotected rather than silently handed to the updater with no backup. ---
+
+test('a skill whose backup returns null is named as unprotected, not silently sent on', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--yes'], {
+      readLock: () => ({ skills: { one: entry('s/one', 'old1'), two: entry('s/two', 'old2') } }),
+      installed: () => ['one', 'two'],
+      resolveTrees: async () => new Map([['s/one', 'new1'], ['s/two', 'new2']]),
+      confirm: async () => true,
+      preserve: (abs, rel) => (rel.includes('one') ? '/backup/one' : null),
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /backed up ->/, 'one skill did back up, so the shared directory is still reported');
+  assert.match(out, /no backup exists for:.*\btwo\b/);
+  assert.ok(
+    !/no backup exists for:[^\n]*\bone\b/.test(out),
+    'the skill that WAS backed up must not also be named as unprotected',
+  );
+});

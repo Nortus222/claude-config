@@ -49,6 +49,13 @@ export function reportLines(plan) {
       lines.push(formatRow(o.name, 'outdated', `${short(o.from)} -> ${short(o.to)}  ${o.source}`));
     }
   }
+  // Mirrors status.mjs's broken-links footer: a count row alone leaves a
+  // `gone` skill with no next step, and the one suggestion `update` prints
+  // elsewhere (`Run: nortuscc update`) excludes `gone` skills by construction
+  // — following it in a loop just reprints the same three rows forever.
+  if (plan.gone.length) {
+    lines.push('', '  re-add them upstream, or run: nortuscc capture');
+  }
   return lines;
 }
 
@@ -124,10 +131,22 @@ export async function run(args = [], deps = {}) {
   // — a multi-skill batch lands together under one backupDir(), and naming
   // only the last skill's path would read as if the others were never saved.
   let anyBackedUp = false;
+  // preserveCopy returns null when existsSync sees nothing at the path —
+  // which includes a broken symlink, since existsSync follows links while
+  // installedSkillNames (deliberately) counts them. That skill still goes to
+  // the updater unmodified — a broken link is exactly what an update should
+  // repair — but it must be named here rather than passing through silently,
+  // since it is the one case where CLAUDE.md's "backup before anything
+  // destructive" rule would otherwise be quietly untrue.
+  const unprotected = [];
   for (const name of names) {
     if (preserve(join(agentsSkillsDir(), name), join('skills', name))) anyBackedUp = true;
+    else unprotected.push(name);
   }
   if (anyBackedUp) process.stdout.write(`\nbacked up -> ${backupDir()}\n`);
+  if (unprotected.length) {
+    process.stdout.write(`\nno backup exists for: ${unprotected.join(', ')} (nothing was there to copy) — updating without a backup\n`);
+  }
 
   const ok = await runUpdate(names);
 
