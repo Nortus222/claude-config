@@ -513,3 +513,32 @@ test('status reports a link whose repo target has vanished, and exits non-zero',
   });
 });
 
+// I2: status used to point at `nortuscc apply --take-repo | --take-local`.
+// Following the second half of that gives exit 2, since apply refuses a flag
+// that runs against its own direction.
+test('the conflict suggestion names, for each direction, the command that accepts the flag', async () => {
+  await onCleanMachine('conflict-advice', async (fx) => {
+    assert.equal((await runCaptured(fx.run)).code, 0, 'the fixture machine must start genuinely clean');
+
+    // Both sides move apart after the recorded baseline: a genuine conflict.
+    writeFileSync(join(fx.claude, 'CLAUDE.md'), '# local change');
+    writeFileSync(join(fx.repo, 'claude', 'CLAUDE.md'), '# repo change');
+
+    const { code, output } = await runCaptured(fx.run);
+    assert.equal(code, 1);
+    assert.match(output, /CLAUDE\.md\s+conflict/);
+    assert.match(output, /nortuscc apply --take-repo/, 'apply is the command that resolves in the repo\'s favour');
+    assert.match(output, /nortuscc capture --take-local/, 'capture is the command that keeps the local version');
+    assert.doesNotMatch(
+      output,
+      /apply --take-local/,
+      'apply --take-local exits 2 with a refusal, so status must never suggest it',
+    );
+    assert.doesNotMatch(
+      output,
+      /capture --take-repo/,
+      'capture --take-repo exits 2 with a refusal, so status must never suggest it',
+    );
+  });
+});
+

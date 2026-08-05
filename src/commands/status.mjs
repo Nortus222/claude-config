@@ -114,7 +114,12 @@ function suggestions(rows) {
   if (rows.some((r) => NEEDS_APPLY.has(r.state))) out.push('  nortuscc apply     bring this machine up to date');
   if (rows.some((r) => NEEDS_CAPTURE.has(r.state))) out.push('  nortuscc push -m   share local edits');
   if (rows.some((r) => r.state === 'conflict')) {
-    out.push('  conflicts need a decision: nortuscc apply --take-repo | --take-local');
+    // Each command only understands the flag that matches its own direction —
+    // `apply --take-local` is refused outright — so the suggestion has to name
+    // the command that can actually perform each resolution.
+    out.push('  conflicts need a decision:');
+    out.push('    nortuscc apply --take-repo    discard the local version');
+    out.push('    nortuscc capture --take-local keep the local version');
   }
   return out.join('\n');
 }

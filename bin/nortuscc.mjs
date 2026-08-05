@@ -8,10 +8,10 @@ Usage: nortuscc <command> [options]
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, install skills, report
   status                            read-only: config / plugins / skills
-  apply [--skills] [--take-repo|--take-local]
-                                    repo -> machine
-  capture [--take-repo|--take-local]
-                                    machine -> repo
+  apply [--skills] [--take-repo]    repo -> machine
+                                    --take-repo resolves a conflict by discarding the local version
+  capture [--take-local]            machine -> repo
+                                    --take-local resolves a conflict by keeping the local version
   pull                              git pull --ff-only, then apply
   push -m MSG                       capture, then commit and push
 
