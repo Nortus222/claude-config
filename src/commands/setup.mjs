@@ -20,7 +20,12 @@ export async function run(args = []) {
   // running from a clone, which is the npx-from-GitHub case.
   if (dir && !existsSync(dir)) {
     console.log(`cloning ${url} -> ${dir}`);
-    execFileSync('git', ['clone', url, dir], { stdio: 'inherit' });
+    try {
+      execFileSync('git', ['clone', url, dir], { stdio: 'inherit' });
+    } catch (e) {
+      console.error(`failed to clone ${url}: ${e.message}`);
+      return 1;
+    }
   }
 
   const root = dir ?? repoRoot();

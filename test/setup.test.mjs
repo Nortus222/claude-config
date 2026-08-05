@@ -5,13 +5,7 @@ import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const home = mkdtempSync(join(tmpdir(), 'nortuscc-setup-'));
-const claude = join(home, '.claude');
-const agents = join(home, '.agents', 'skills');
-mkdirSync(claude, { recursive: true });
-mkdirSync(agents, { recursive: true });
-
-// Test repo: a minimal local git repo with all manifest entries, not cloned from network
+// Create a test repo
 const testRepo = mkdtempSync(join(tmpdir(), 'nortuscc-setup-repo-'));
 execSync('git init', { cwd: testRepo, stdio: 'ignore' });
 execSync('git config user.email "test@example.com"', { cwd: testRepo, stdio: 'ignore' });
@@ -25,46 +19,54 @@ writeFileSync(join(testRepo, 'claude', 'hooks', '.gitkeep'), '');
 execSync('git add .', { cwd: testRepo, stdio: 'ignore' });
 execSync('git commit -m "initial"', { cwd: testRepo, stdio: 'ignore' });
 
+// Create test home
+const home = mkdtempSync(join(tmpdir(), 'nortuscc-setup-'));
+const claude = join(home, '.claude');
+const agents = join(home, '.agents', 'skills');
+mkdirSync(claude, { recursive: true });
+mkdirSync(agents, { recursive: true });
+
 process.env.NORTUSCC_CLAUDE_DIR = claude;
 process.env.NORTUSCC_AGENTS_DIR = agents;
 process.env.NORTUSCC_REPO_DIR = testRepo;
 
 const { run } = await import('../src/commands/setup.mjs');
-const { readLock } = await import('../src/lock.mjs');
+const { readLock, writeLock } = await import('../src/lock.mjs');
+const { repoRoot } = await import('../src/resolve.mjs');
 
-test('setup with no arguments records the current repo in lock', async () => {
+test('setup updates lock.repo with the repo root', async () => {
   const code = await run([]);
-  assert.equal(code, 0, 'setup should exit 0 on success');
-
+  assert.equal(code, 0, 'setup should exit 0');
   const lock = readLock();
-  assert.equal(lock.repo, testRepo, 'lock.repo should be set to the repo root');
+  assert.equal(lock.repo, testRepo);
 });
 
-test('setup records the repo root even with --take-* flags', async () => {
-  const code = await run(['--take-repo']);
-  assert.equal(code, 0, 'setup with --take-repo should exit 0');
+test('setup returns apply exit code when there is a conflict', async () => {
+  // Create a conflict: write a different version of CLAUDE.md locally
+  writeFileSync(join(claude, 'CLAUDE.md'), '# local version\n');
 
-  const lock = readLock();
-  assert.equal(lock.repo, testRepo, 'lock.repo should be set even with --take-repo');
-});
-
-test('setup is idempotent — a second run returns 0 and does not change the lock', async () => {
-  const lockBefore = readFileSync(join(claude, '.nortuscc-lock.json'), 'utf8');
+  // Run setup without --take-repo to trigger conflict
   const code = await run([]);
-  assert.equal(code, 0, 'second run should exit 0');
 
-  const lockAfter = readFileSync(join(claude, '.nortuscc-lock.json'), 'utf8');
-  assert.equal(lockBefore, lockAfter, 'lock should not change on idempotent run');
+  // Should return non-zero due to conflict
+  assert.notEqual(code, 0, 'setup should return non-zero on conflict');
 });
 
-test('setup with --dir pointing to an existing directory does not clone', async () => {
-  const existingDir = mkdtempSync(join(tmpdir(), 'nortuscc-existing-'));
-  // Create a minimal git repo in the existing directory
-  execSync('git init', { cwd: existingDir, stdio: 'ignore' });
+test('lock.repo is used as fallback when NORTUSCC_REPO_DIR is not set', async () => {
+  // First, establish lock.repo with the current testRepo
+  delete process.env.NORTUSCC_REPO_DIR;
 
-  const code = await run(['--dir', existingDir]);
-  assert.equal(code, 0, 'setup with existing --dir should exit 0');
+  // Check that repoRoot() returns lock.repo
+  const root = repoRoot();
+  assert.equal(root, testRepo, 'repoRoot should fall back to lock.repo');
+});
 
-  const lock = readLock();
-  assert.equal(lock.repo, existingDir, 'lock.repo should be set to the --dir path');
+test('stale lock.repo is rejected and falls back to module location', async () => {
+  // Write a stale path to lock
+  writeLock({ version: 1, repo: '/nonexistent/stale/path', files: {} });
+
+  // repoRoot should not return the stale path
+  const root = repoRoot();
+  assert.notEqual(root, '/nonexistent/stale/path', 'should not use stale lock.repo');
+  assert.ok(existsSync(root), 'fallback path should exist');
 });

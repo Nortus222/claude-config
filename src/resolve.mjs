@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -8,7 +9,31 @@ const here = dirname(fileURLToPath(import.meta.url));
 // to the repo side (capture) point at a throwaway fixture instead of mutating
 // tracked files.
 export function repoRoot() {
-  return process.env.NORTUSCC_REPO_DIR || resolve(here, '..');
+  // Priority 1: explicit env var override (used by tests and npx scenarios)
+  if (process.env.NORTUSCC_REPO_DIR) {
+    return process.env.NORTUSCC_REPO_DIR;
+  }
+
+  // Priority 2: recorded lock.repo if it's a valid, existing git checkout
+  // Read lockfile directly to avoid import cycle with lock.mjs
+  const lockPath = join(claudeDir(), '.nortuscc-lock.json');
+  if (existsSync(lockPath)) {
+    try {
+      const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+      if (lock.repo && typeof lock.repo === 'string') {
+        // Validate: path must exist and look like a git repo
+        if (existsSync(lock.repo) && existsSync(join(lock.repo, '.git'))) {
+          return lock.repo;
+        }
+        // Stale path: log and fall through to module location
+      }
+    } catch {
+      // Corrupt lockfile: ignore and fall through
+    }
+  }
+
+  // Priority 3: module's own location (original behavior)
+  return resolve(here, '..');
 }
 
 export function claudeDir() {
