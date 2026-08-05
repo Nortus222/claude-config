@@ -1,0 +1,10 @@
+{
+  "name": "nortuscc",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Keep a machine's Claude config and skill set in agreement with claude-config",
+  "bin": { "nortuscc": "./bin/nortuscc.mjs" },
+  "scripts": { "test": "node --test test/" },
+  "engines": { "node": ">=18" }
+}
