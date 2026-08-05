@@ -70,17 +70,20 @@ test('state groupings partition the actionable states', () => {
   assert.ok(NEEDS_CAPTURE.has('local-ahead'));
   assert.equal(NEEDS_CAPTURE.size, 1, 'NEEDS_CAPTURE must contain exactly 1 state');
 
-  // BLOCKED: 2 states that block all operations
+  // BLOCKED: 3 states that block all operations
   assert.ok(BLOCKED.has('conflict'), 'conflict must be BLOCKED (divergent changes)');
   assert.ok(BLOCKED.has('missing-repo'), 'missing-repo must be BLOCKED (data-loss case)');
-  assert.equal(BLOCKED.size, 2, 'BLOCKED must contain exactly 2 states');
+  assert.ok(BLOCKED.has('unknown-mode'), 'unknown-mode must be BLOCKED (configuration error)');
+  assert.equal(BLOCKED.size, 3, 'BLOCKED must contain exactly 3 states');
 
   // No state is in multiple sets
   assert.ok(!NEEDS_APPLY.has('local-ahead'), 'local-ahead not in NEEDS_APPLY');
   assert.ok(!NEEDS_APPLY.has('conflict'), 'conflict not in NEEDS_APPLY');
   assert.ok(!NEEDS_APPLY.has('missing-repo'), 'missing-repo not in NEEDS_APPLY (data-loss case)');
+  assert.ok(!NEEDS_APPLY.has('unknown-mode'), 'unknown-mode not in NEEDS_APPLY (configuration error)');
   assert.ok(!NEEDS_CAPTURE.has('repo-ahead'), 'repo-ahead not in NEEDS_CAPTURE');
   assert.ok(!NEEDS_CAPTURE.has('conflict'), 'conflict not in NEEDS_CAPTURE');
+  assert.ok(!NEEDS_CAPTURE.has('unknown-mode'), 'unknown-mode not in NEEDS_CAPTURE');
   assert.ok(!BLOCKED.has('local-ahead'), 'local-ahead not in BLOCKED');
   assert.ok(!BLOCKED.has('repo-ahead'), 'repo-ahead not in BLOCKED');
 

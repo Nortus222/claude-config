@@ -36,4 +36,4 @@ export function linkState({ exists, isSymlink, target, expectedTarget }) {
 
 export const NEEDS_APPLY = new Set(['repo-ahead', 'unmanaged', 'missing', 'clobbered', 'wrong-target']);
 export const NEEDS_CAPTURE = new Set(['local-ahead']);
-export const BLOCKED = new Set(['conflict', 'missing-repo']);
+export const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode']);

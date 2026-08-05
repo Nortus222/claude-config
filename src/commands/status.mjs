@@ -13,9 +13,13 @@ export function configReport() {
     const { src, dest, mode } = resolveEntry(entry);
     if (mode === 'link') {
       return { dest: entry.dest, mode, state: inspectLink(dest, src).state };
+    } else if (mode === 'copy') {
+      const baseline = lock.files[entry.dest]?.hash;
+      return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
+    } else {
+      // Unknown mode: surface as a visible error rather than silently misdispatching
+      return { dest: entry.dest, mode, state: 'unknown-mode' };
     }
-    const baseline = lock.files[entry.dest]?.hash;
-    return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
   });
 }
 
@@ -46,6 +50,7 @@ function noteFor(row) {
     case 'repo-ahead': return 'repo has newer content';
     case 'unmanaged': return 'never synced on this machine';
     case 'missing-repo': return 'listed in the manifest but absent from the repo';
+    case 'unknown-mode': return 'manifest entry has an unrecognized mode';
     default: return '';
   }
 }
