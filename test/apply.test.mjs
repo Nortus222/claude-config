@@ -74,6 +74,68 @@ test('apply --take-repo overwrites the local edit', async () => {
   assert.notEqual(readFileSync(f, 'utf8'), '# still edited\n');
 });
 
+// Fix round 1, finding 1: --take-local was parsed but never wired to
+// anything in apply.mjs (only --take-repo fed applyCopy's `force`), so it was
+// silently accepted and did nothing — a conflict stayed refused regardless.
+// apply only ever moves repo -> machine, so "keep the local version" is not
+// a resolution apply can perform at all; it must refuse the flag outright
+// and point at capture, not attempt and fail silently.
+test('apply --take-local is refused outright — the flag does not fit apply\'s direction', async () => {
+  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  let stderr = '';
+  const originalError = console.error;
+  console.error = (msg) => { stderr += String(msg) + '\n'; };
+  let code;
+  try {
+    code = await run(['--take-local']);
+  } finally {
+    console.error = originalError;
+  }
+  assert.notEqual(code, 0, '--take-local must not be silently accepted by apply');
+  assert.match(stderr, /capture --take-local/, 'must point the user at the command that actually supports it');
+  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+});
+
+// Fix round 1, finding 2: bootstrap.sh printed a restart reminder on every
+// run; the CLI dropped it entirely. settings.json/CLAUDE.md are only read at
+// Claude Code startup, so a successful apply that changed one has no visible
+// effect until the user restarts. Gated on actually having changed something,
+// so a clean re-run stays silent (idempotency).
+test('apply prints a restart reminder when it actually changed a copied file', async () => {
+  writeFileSync(join(claude, 'CLAUDE.md'), '# yet another local edit\n');
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = function (chunk) {
+    output += chunk.toString();
+    return true;
+  };
+  let code;
+  try {
+    code = await run(['--take-repo']);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.equal(code, 0);
+  assert.match(output, /Restart Claude Code/, 'a run that changed a file must remind the user to restart');
+});
+
+test('a clean apply run prints no restart reminder', async () => {
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = function (chunk) {
+    output += chunk.toString();
+    return true;
+  };
+  let code;
+  try {
+    code = await run([]);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.equal(code, 0);
+  assert.doesNotMatch(output, /Restart Claude Code/, 'a no-op run must stay silent — no false reminder');
+});
+
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
   const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
   const lockBytesBefore = readFileSync(lockPath(), 'utf8');

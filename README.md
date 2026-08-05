@@ -35,7 +35,11 @@ prompt or a scheduled check.
 | `pull` | `git pull --ff-only`, then apply |
 | `push -m MSG` | Capture, then commit and push only what changed |
 
-Conflict resolution on `apply` and `capture`: `--take-repo` or `--take-local`.
+Conflict resolution: `apply --take-repo` discards the local version;
+`capture --take-local` keeps it. Each command only understands the flag that
+matches its own direction — `apply --take-local` and `capture --take-repo`
+would silently do nothing useful, so both are refused outright with a message
+pointing at the command that actually supports them.
 
 ## How syncing works
 
@@ -53,6 +57,11 @@ never guessed. Directory links add a fifth: `clobbered`, meaning a real path sit
 where a link belongs and syncing had silently stopped.
 
 Everything destructive backs up to `~/.claude/backups/nortuscc-<stamp>/` first.
+
+Directory links (`bin/`, `hooks/`) are created as NTFS junctions on Windows,
+which need no Developer Mode or admin. That path is not exercised by the test
+suite and has not been run on a real Windows machine — treat Windows support
+as unverified until someone runs `setup` there and reports back.
 
 ## Skills
 

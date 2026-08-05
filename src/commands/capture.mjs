@@ -23,6 +23,20 @@ export async function run(args = [], entries = SYNC) {
     return 2;
   }
 
+  // capture only ever moves machine -> repo, so "keep the repo version" is
+  // not a resolution capture can perform — marking the baseline repo without
+  // copying would record repo and local as reconciled while they still
+  // differ, and the next capture would then overwrite the very local edit the
+  // user asked to keep. Refuse rather than guess; apply is the command that
+  // actually moves in that direction.
+  if (takeRepo) {
+    console.error(
+      "nortuscc: --take-repo has no effect on capture (capture is machine -> repo).\n" +
+        "Use 'nortuscc apply --take-repo' to discard the local version instead.",
+    );
+    return 2;
+  }
+
   const lock = readLock();
   const before = JSON.stringify(lock);
   const lines = [];

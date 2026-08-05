@@ -72,6 +72,29 @@ test('a clean second capture does not rewrite the lockfile at all', async () => 
   assert.equal(statSync(lockPath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
 });
 
+// Fix round 1, finding 1: apply's --take-local hole (see apply.test.mjs) has
+// a mirror image here — capture's --take-repo was parsed but never wired to
+// captureCopy's `force` (only --take-local was), so it was silently accepted
+// and did nothing. capture only ever moves machine -> repo, so "keep the
+// repo version" is not a resolution capture can perform at all; it must
+// refuse the flag outright and point at apply, not attempt and fail silently.
+test('capture --take-repo is refused outright — the flag does not fit capture\'s direction', async () => {
+  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  let stderr = '';
+  const originalError = console.error;
+  console.error = (msg) => { stderr += String(msg) + '\n'; };
+  let code;
+  try {
+    code = await captureRun(['--take-repo']);
+  } finally {
+    console.error = originalError;
+  }
+  assert.notEqual(code, 0, '--take-repo must not be silently accepted by capture');
+  assert.match(stderr, /apply --take-repo/, 'must point the user at the command that actually supports it');
+  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+  assert.deepEqual(capturedPaths(), [], 'a refused flag must not stage anything for commit');
+});
+
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
   const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
   const lockBytesBefore = readFileSync(lockPath(), 'utf8');

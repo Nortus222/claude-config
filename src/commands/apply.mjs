@@ -1,7 +1,7 @@
 import { SYNC } from '../manifest.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
-import { ensureLink } from '../link.mjs';
+import { ensureLink, inspectLink } from '../link.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
@@ -37,17 +37,40 @@ export async function run(args = [], entries = SYNC) {
     return 2;
   }
 
+  // apply only ever moves repo -> machine, so "keep the local version" is not
+  // a resolution apply can perform — marking the baseline local without
+  // copying would record repo and local as reconciled while they still
+  // differ, and the next apply would then overwrite the very file the user
+  // asked to keep. Refuse rather than guess; capture is the command that
+  // actually moves in that direction.
+  if (takeLocal) {
+    console.error(
+      "nortuscc: --take-local has no effect on apply (apply is repo -> machine).\n" +
+        "Use 'nortuscc capture --take-local' to keep the local version instead.",
+    );
+    return 2;
+  }
+
   const lock = readLock();
   const before = JSON.stringify(lock);
   const lines = [];
   let refused = 0;
   let skillsFailed = 0;
+  // Tracks whether this run actually wrote anything to ~/.claude, so the
+  // restart reminder below only fires when it is true and stays silent on a
+  // clean, idempotent no-op run.
+  let changed = false;
 
   for (const entry of entries) {
     const { src, dest, mode } = resolveEntry(entry);
 
     if (mode === 'link') {
+      // Read the state before ensureLink fixes it — ensureLink always reports
+      // 'linked' on success, whether or not it had to do anything, so the
+      // pre-state is the only way to tell a repair from a no-op.
+      const { state: preState } = inspectLink(dest, src);
       const res = ensureLink(dest, src, entry.dest);
+      if (preState !== 'linked') changed = true;
       lines.push(formatRow(entry.dest, res.state, res.backedUp ? `backed up -> ${res.backedUp}` : ''));
       continue;
     }
@@ -60,11 +83,12 @@ export async function run(args = [], entries = SYNC) {
       continue;
     }
 
-    // --take-local is a capture-side resolution; here it means "leave the local
-    // file alone", which apply already does for anything but a conflict. Passing
-    // force only for --take-repo keeps a conflict refused under --take-local.
+    // --take-local is refused above before this loop ever runs, so the only
+    // force this command ever applies is --take-repo, discarding the local
+    // side of a conflict.
     const res = applyCopy(src, dest, entry.dest, lock, { force: takeRepo });
     if (res.action === 'refused') refused += 1;
+    if (res.action === 'copied') changed = true;
     lines.push(formatRow(entry.dest, res.action, noteFor(res)));
   }
 
@@ -92,6 +116,15 @@ export async function run(args = [], entries = SYNC) {
   if (JSON.stringify(lock) !== before) writeLock(lock);
 
   process.stdout.write('\n' + section('apply', lines));
+
+  // settings.json and CLAUDE.md are only read by Claude Code at startup, so a
+  // successful apply that changed anything has no visible effect until the
+  // user restarts — bootstrap.sh printed this reminder unconditionally on
+  // every run; here it is conditioned on actually having changed something,
+  // so a clean re-run stays silent.
+  if (changed) {
+    process.stdout.write('\nRestart Claude Code to load the synced settings.\n');
+  }
 
   if (refused > 0) {
     process.stdout.write(
