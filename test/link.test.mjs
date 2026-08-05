@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, lstatSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, lstatSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-link-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
@@ -60,6 +60,15 @@ test('a link to the wrong target is repointed', () => {
 
   const res = ensureLink(dest, repoBin, 'bin-e');
   assert.equal(res.state, 'linked');
+  assert.equal(inspectLink(dest, repoBin).state, 'linked');
+});
+
+test('a relative symlink target that genuinely points at the expected location is linked', () => {
+  // readlinkSync returns the link's raw text, which for a relative symlink
+  // must be resolved against the *link's own directory*, not process.cwd().
+  const dest = join(process.env.NORTUSCC_CLAUDE_DIR, 'bin-f');
+  const relTarget = relative(dirname(dest), repoBin);
+  symlinkSync(relTarget, dest, 'dir');
   assert.equal(inspectLink(dest, repoBin).state, 'linked');
 });
 

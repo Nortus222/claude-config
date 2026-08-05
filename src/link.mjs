@@ -19,7 +19,11 @@ export function inspectLink(dest, expectedTarget) {
   let target = null;
   if (isSymlink) {
     try {
-      target = resolve(readlinkSync(dest));
+      // readlinkSync returns the link's raw text, which is relative to the
+      // link's own directory when the link itself is relative — not to
+      // process.cwd(). An absolute link text is unaffected, since resolve's
+      // later argument wins once it is itself absolute.
+      target = resolve(dirname(dest), readlinkSync(dest));
     } catch {
       target = null;
     }
