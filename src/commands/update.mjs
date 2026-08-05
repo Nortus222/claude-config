@@ -6,7 +6,9 @@ import { preserveCopy, backupDir } from '../backup.mjs';
 import { runUpdate as realRunUpdate } from '../skills-cli.mjs';
 import { readSkillLock, installedSkillNames } from '../skills.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
-import { formatRow, section } from '../report.mjs';
+import { formatRow, section, labelWidth } from '../report.mjs';
+
+const FLAGS = new Set(['--check', '--yes']);
 
 const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
 
@@ -45,16 +47,31 @@ export function reportLines(plan) {
 
   if (plan.outdated.length) {
     lines.push('');
+    // Skill names are arbitrary, so the column has to be sized to the batch —
+    // `setup-matt-pocock-skills` is 24 characters and would otherwise push its
+    // own state column eight past everyone else's.
+    const width = labelWidth(plan.outdated.map((o) => o.name));
     for (const o of plan.outdated) {
-      lines.push(formatRow(o.name, 'outdated', `${short(o.from)} -> ${short(o.to)}  ${o.source}`));
+      lines.push(formatRow(o.name, 'outdated', `${short(o.from)} -> ${short(o.to)}  ${o.source}`, width));
     }
   }
   // Mirrors status.mjs's broken-links footer: a count row alone leaves a
   // `gone` skill with no next step, and the one suggestion `update` prints
   // elsewhere (`Run: nortuscc update`) excludes `gone` skills by construction
   // — following it in a loop just reprints the same three rows forever.
+  //
+  // The footer names its skills rather than saying "them". It prints directly
+  // below the outdated detail rows, so a pronoun reads as referring to those,
+  // which is the opposite of what it means. And "re-add upstream" was never
+  // advice the reader could act on — the folder is gone from someone else's
+  // repo. What they can actually do is drop it locally.
   if (plan.gone.length) {
-    lines.push('', '  re-add them upstream, or run: nortuscc capture');
+    lines.push(
+      '',
+      `  gone upstream: ${plan.gone.map((g) => g.name).join(', ')}`,
+      '  nothing can update these. Remove with: npx skills remove <name> --global',
+      '  then run: nortuscc capture   to drop them from the manifest',
+    );
   }
   return lines;
 }
@@ -68,6 +85,17 @@ export async function run(args = [], deps = {}) {
     readLock = readSkillLock,
     installed = installedSkillNames,
   } = deps;
+
+  // Unlike apply, which merely ignores what it does not recognise, update's
+  // default action writes. `--chek` is a plausible slip when reaching for the
+  // refused `--check --yes`, and ignoring it would turn a typo into an
+  // unprompted full update. Refuse before reading anything.
+  const unknown = args.filter((a) => !FLAGS.has(a));
+  if (unknown.length) {
+    console.error(`nortuscc: unknown option(s) for update: ${unknown.join(', ')}`);
+    console.error('Usage: nortuscc update [--check] [--yes]');
+    return 2;
+  }
 
   const check = args.includes('--check');
   const yes = args.includes('--yes');
@@ -161,7 +189,8 @@ export async function run(args = [], deps = {}) {
     .filter(({ o, to }) => o.from != null && to != null && to !== o.from);
   process.stdout.write(
     '\n' + section('updated', movedInfo.length
-      ? movedInfo.map(({ o, to }) => formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`))
+      ? movedInfo.map(({ o, to }) =>
+          formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`, labelWidth(movedInfo.map(({ o: m }) => m.name))))
       : [formatRow('skills', 'unchanged', 'the updater reported no change')]),
   );
 

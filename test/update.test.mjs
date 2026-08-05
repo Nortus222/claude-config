@@ -410,3 +410,115 @@ test('a skill whose backup returns null is named as unprotected, not silently se
     'the skill that WAS backed up must not also be named as unprotected',
   );
 });
+
+// --- Follow-up fixes after the final branch review ---
+
+// An unrecognised flag used to be ignored, so `nortuscc update --chek` — a
+// plausible slip when reaching for the refused `--check --yes` — silently
+// performed a full interactive update. `update` is the first command whose
+// default action writes, so the permissiveness `apply` gets away with is not
+// safe here.
+
+test('an unknown flag is refused rather than silently ignored', async () => {
+  let updated = false;
+  const code = await run(['--chek'], baseDeps({ runUpdate: async () => { updated = true; return true; } }));
+  assert.equal(code, 2);
+  assert.equal(updated, false, 'a typo must never reach the updater');
+});
+
+test('the unknown-flag refusal names the offending flag', async () => {
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(String(m));
+  try {
+    await run(['--dry-run'], baseDeps());
+  } finally { console.error = orig; }
+  assert.match(errs.join('\n'), /--dry-run/);
+});
+
+test('a bare positional argument is refused too', async () => {
+  assert.equal(await run(['tdd'], baseDeps()), 2);
+});
+
+test('the known flags are still accepted together with nothing else', async () => {
+  assert.equal(await run(['--yes'], baseDeps()), 0);
+  assert.equal(await run([], baseDeps()), 0);
+});
+
+// The gone footer used to read "re-add them upstream" and sat directly below
+// the outdated detail rows, so "them" read as referring to those. It must name
+// the skills it is about.
+
+test('the gone footer names the gone skills, not just a bare pronoun', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], {
+      readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
+      installed: () => ['stale', 'vanished'],
+      resolveTrees: async () => new Map([['s/stale', 'new'], ['s/vanished', null]]),
+      confirm: async () => true,
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  // The footer must say which skill it means, and must not be phrased so it
+  // could be read as advice about the outdated one listed just above it.
+  const footer = out.split('\n').filter((l) => /gone upstream|skills remove|nortuscc capture/.test(l)).join('\n');
+  assert.match(footer, /vanished/, 'the footer must name the gone skill');
+  assert.doesNotMatch(footer, /\bstale\b/, 'the footer must not name an outdated skill');
+});
+
+test('the gone footer offers a removal command, not only capture', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], {
+      readLock: () => ({ skills: { vanished: entry('s/vanished', 'old') } }),
+      installed: () => ['vanished'],
+      resolveTrees: async () => new Map([['s/vanished', null]]),
+      confirm: async () => true,
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /skills remove/, 'a skill deleted upstream can only be removed locally');
+  assert.match(out, /nortuscc capture/);
+});
+
+// A long skill name used to shunt the state column out of alignment, because
+// formatRow padded every label to a fixed 16.
+
+test('a long skill name keeps the outdated detail rows aligned', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], {
+      readLock: () => ({
+        skills: {
+          'setup-matt-pocock-skills': entry('s/long', 'old'),
+          tdd: entry('s/tdd', 'old2'),
+        },
+      }),
+      installed: () => ['setup-matt-pocock-skills', 'tdd'],
+      resolveTrees: async () => new Map([['s/long', 'new'], ['s/tdd', 'new2']]),
+      confirm: async () => true,
+      preserve: () => '/b',
+      runUpdate: async () => true,
+    });
+  } finally { process.stdout.write = orig; }
+  // Detail rows carry the SHA transition; the aggregate count row above them
+  // also contains the word "outdated", so match on the arrow instead.
+  const detail = chunks.join('').split('\n').filter((l) => /outdated/.test(l) && / -> /.test(l));
+  assert.equal(detail.length, 2, 'both skills should have a detail row');
+  assert.equal(
+    detail[0].indexOf('outdated'),
+    detail[1].indexOf('outdated'),
+    'the state column must line up regardless of skill-name length',
+  );
+});
