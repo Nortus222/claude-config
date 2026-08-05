@@ -513,6 +513,26 @@ test('status reports a link whose repo target has vanished, and exits non-zero',
   });
 });
 
+// I3: brokenSkillLinks() was entirely unpinned — replacing the call with []
+// left the whole suite green — even though preserving it from the deleted
+// skills-check.sh is called out in the design.
+test('status reports a broken skill link and exits non-zero', async () => {
+  await onCleanMachine('broken-skill', async (fx) => {
+    assert.equal((await runCaptured(fx.run)).code, 0, 'the fixture machine must start genuinely clean');
+
+    // A skill removed from ~/.agents/skills without removing its Claude-side link.
+    const claudeSkills = join(fx.claude, 'skills');
+    mkdirSync(claudeSkills, { recursive: true });
+    symlinkSync(join(fx.agents, 'ghost-skill'), join(claudeSkills, 'ghost-skill'), 'dir');
+
+    const { code, output } = await runCaptured(fx.run);
+    assert.equal(code, 1, 'a broken skill link must make status exit non-zero');
+    assert.match(output, /broken links/, 'the broken-link row is printed');
+    assert.match(output, /ghost-skill/, 'the stale link is named');
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
 // I2: status used to point at `nortuscc apply --take-repo | --take-local`.
 // Following the second half of that gives exit 2, since apply refuses a flag
 // that runs against its own direction.
