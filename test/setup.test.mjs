@@ -398,3 +398,65 @@ test('setup --dir pointing at an existing directory does not attempt to clone', 
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
 });
+
+// Test 7: --dir naming an existing directory that is NOT a checkout.
+//
+// An interrupted `git clone` leaves the directory behind, so re-running the
+// documented onboarding command lands exactly here. setup used to skip the
+// clone, announce that path as the repo, and write it into lock.repo — while
+// repoRoot() rejected it for having no .git and resolved somewhere else
+// entirely (under `npx github:`, the throwaway npx cache). Every later apply,
+// capture and push then silently worked against a different repo than the one
+// setup had just named.
+test('setup --dir naming an existing non-git directory is refused and lock.repo is left alone', async () => {
+  const notARepo = mkdtempSync(join(tmpdir(), 'nortuscc-interrupted-clone-'));
+  writeFileSync(join(notARepo, 'partial'), 'left behind by an interrupted clone\n');
+  const goodRepo = createTestRepo('nortuscc-i1-good-');
+  const { claude, agents } = createTestHome();
+
+  const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
+  const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
+  const savedRepo = process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    process.env.NORTUSCC_CLAUDE_DIR = claude;
+    process.env.NORTUSCC_AGENTS_DIR = agents;
+    delete process.env.NORTUSCC_REPO_DIR;
+
+    const { run } = await import('../src/commands/setup.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
+
+    // A previously good record, so overwriting it with the bogus path is visible.
+    writeLock({ version: 1, repo: goodRepo, files: {} });
+
+    let output = '';
+    const originalWrite = process.stdout.write;
+    process.stdout.write = function (chunk) {
+      output += chunk.toString();
+      return true;
+    };
+
+    let code;
+    try {
+      code = await run(['--dir', notARepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    assert.equal(code, 2, 'setup must refuse a --dir that is not a git checkout');
+    assert.equal(
+      output.includes(`repo: ${notARepo}`),
+      false,
+      'setup must not announce a path it cannot actually sync from',
+    );
+    assert.equal(
+      readLock().repo,
+      goodRepo,
+      'a refused setup must leave lock.repo alone rather than poisoning it',
+    );
+  } finally {
+    process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
+    process.env.NORTUSCC_AGENTS_DIR = savedAgents;
+    process.env.NORTUSCC_REPO_DIR = savedRepo;
+  }
+});

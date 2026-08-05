@@ -5,6 +5,19 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// The single test for "is this path a usable clone?", shared by repoRoot's
+// stale-lock guard and by setup's --dir validation so the two can never
+// disagree about which paths are acceptable. `.git` is a directory in a normal
+// clone and a file in a linked worktree; existsSync accepts both.
+export function isGitCheckout(path) {
+  return Boolean(path) && existsSync(path) && existsSync(join(path, '.git'));
+}
+
+// A stale lock.repo is worth exactly one line of warning per process: repoRoot()
+// is called once per manifest entry per command, so warning every time would
+// bury the report it is meant to draw attention to.
+let warnedStaleRepo = false;
+
 // src/ lives directly under the repo root. The override lets tests that WRITE
 // to the repo side (capture) point at a throwaway fixture instead of mutating
 // tracked files.
@@ -21,11 +34,20 @@ export function repoRoot() {
     try {
       const lock = JSON.parse(readFileSync(lockFilePath, 'utf8'));
       if (lock.repo && typeof lock.repo === 'string') {
-        // Validate: path must exist and look like a git repo
-        if (existsSync(lock.repo) && existsSync(join(lock.repo, '.git'))) {
+        if (isGitCheckout(lock.repo)) {
           return lock.repo;
         }
-        // Stale path: log and fall through to module location
+        // Stale path: warn once, then fall through to the module location.
+        // Falling through silently is what made a poisoned lock.repo invisible
+        // — every command would quietly sync against a different repo than the
+        // one the user believes is recorded.
+        if (!warnedStaleRepo) {
+          warnedStaleRepo = true;
+          console.error(
+            `nortuscc: recorded repo '${lock.repo}' is not a git checkout; ` +
+              `using ${resolve(here, '..')} instead. Re-run 'nortuscc setup --dir <path>' to fix the record.`,
+          );
+        }
       }
     } catch {
       // Corrupt lockfile: ignore and fall through
