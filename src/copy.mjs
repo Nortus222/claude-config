@@ -32,11 +32,17 @@ export function applyCopy(src, dest, relative, lock, { force = false } = {}) {
   const { state, repo } = inspectCopy(src, dest, baseline);
 
   if (state === 'missing-repo') return { action: 'skipped', backedUp: null };
-  if (state === 'clean' || state === 'local-ahead') {
+  if (state === 'clean') {
     // Only restamp when the baseline is actually stale (both sides converged
     // on new, identical content). A no-op refresh here would make every apply
     // on an already-clean machine rewrite the lockfile.
-    if (state === 'clean' && repo && baseline !== repo) setBaseline(lock, relative, repo);
+    if (repo && baseline !== repo) setBaseline(lock, relative, repo);
+    return { action: 'skipped', backedUp: null };
+  }
+
+  // local-ahead is apply's signal to leave a file alone — that's capture's
+  // job — unless force explicitly asks to discard the local side anyway.
+  if (state === 'local-ahead' && !force) {
     return { action: 'skipped', backedUp: null };
   }
 
@@ -46,8 +52,8 @@ export function applyCopy(src, dest, relative, lock, { force = false } = {}) {
     return { action: 'refused', backedUp: preserve(dest, relative) };
   }
 
-  // unmanaged, repo-ahead, or a forced conflict: the local file is about to be
-  // replaced, so keep whatever was there.
+  // unmanaged, repo-ahead, a forced local-ahead, or a forced conflict: the
+  // local file is about to be replaced, so keep whatever was there.
   const backedUp = existsSync(dest) ? backupOnce(dest, relative) : null;
   write(src, dest);
   setBaseline(lock, relative, hashFile(dest));
