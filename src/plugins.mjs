@@ -19,8 +19,12 @@ export function loadPluginState() {
   };
 }
 
-// Check if a value is a plain object (not null, not array, not other type)
-function isPlainObject(value) {
+// Check if a value is a plain object (not null, not array, not other type).
+// Shared with skills.mjs, which has the same `.skill-lock.json` hole: JSON
+// from a source this tool doesn't own can hand back null/arrays/scalars
+// anywhere an object is expected, and `typeof x === 'object'` alone doesn't
+// rule those out.
+export function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 

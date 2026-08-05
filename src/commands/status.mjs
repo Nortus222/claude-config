@@ -6,6 +6,7 @@ import { inspectCopy } from '../copy.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
 import { loadPluginState, pluginReport } from '../plugins.mjs';
+import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile } from '../skills.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -42,11 +43,30 @@ export async function run() {
         ];
   process.stdout.write(section('plugins', pluginLines));
 
+  const skills = reconcile({
+    groups: readSkillsManifest(),
+    lock: readSkillLock(),
+    installedNames: installedSkillNames(),
+  });
+  const skillLines = [];
+  if (skills.missing.length) {
+    skillLines.push(formatRow('missing', String(skills.missing.length), skills.missing.map((m) => m.name).join(', ')));
+  }
+  if (skills.extra.length) {
+    skillLines.push(formatRow('extra', String(skills.extra.length), skills.extra.join(', ')));
+  }
+  if (skills.local.length) {
+    skillLines.push(formatRow('local', String(skills.local.length), skills.local.join(', ')));
+  }
+  if (!skillLines.length) skillLines.push(formatRow('manifest', 'satisfied', ''));
+  if (skills.missing.length) skillLines.push('', '  nortuscc apply --skills');
+  process.stdout.write(section('skills', skillLines));
+
   const actionable = rows.filter(
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
 
-  if (actionable.length === 0 && plugins.commands.length === 0) {
+  if (actionable.length === 0 && plugins.commands.length === 0 && skills.missing.length === 0) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }

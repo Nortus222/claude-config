@@ -16,6 +16,11 @@ const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
 mkdirSync(process.env.NORTUSCC_CLAUDE_DIR, { recursive: true });
 
+// Redirect the skills dir (and, via skills.mjs, the sibling .skill-lock.json)
+// so these tests never read the real ~/.agents/skills or the real, unrecoverable
+// ~/.agents/.skill-lock.json.
+process.env.NORTUSCC_AGENTS_DIR = join(home, '.agents', 'skills');
+
 // Set up a fixture repo with empty settings.json so tests don't read plugins from the real repo
 const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-'));
 process.env.NORTUSCC_REPO_DIR = fixtureRepo;
