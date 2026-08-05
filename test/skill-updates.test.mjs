@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skillFolder, updatableSkills, sourcesOf, planUpdates } from '../src/skill-updates.mjs';
+import {
+  skillFolder,
+  updatableSkills,
+  sourcesOf,
+  planUpdates,
+  upstreamSkills,
+  availableSkills,
+} from '../src/skill-updates.mjs';
 
 const lockOf = (skills) => ({ skills });
 
@@ -117,4 +124,69 @@ test('planUpdates ignores lock entries for skills that are not installed', () =>
   const lock = lockOf({ tdd: { ...ENTRY, sourceUrl: 'u', skillPath: 'p/tdd/SKILL.md' } });
   const plan = planUpdates({ lock, installedNames: [], remoteTrees: remote });
   assert.deepEqual(plan, { current: [], outdated: [], gone: [], unknown: [], local: [] });
+});
+
+test('upstreamSkills names a skill after its folder', () => {
+  assert.deepEqual(upstreamSkills(['skills/engineering/tdd/SKILL.md']), [
+    { path: 'skills/engineering/tdd', name: 'tdd' },
+  ]);
+});
+
+test('upstreamSkills sorts by name', () => {
+  const names = upstreamSkills(['s/zebra/SKILL.md', 's/apple/SKILL.md']).map((s) => s.name);
+  assert.deepEqual(names, ['apple', 'zebra']);
+});
+
+test('upstreamSkills drops a SKILL.md nested inside another skill', () => {
+  // A SKILL.md under an existing skill's folder is a sub-resource, not a
+  // second skill — counting it would invent one that could never install.
+  const found = upstreamSkills(['s/tdd/SKILL.md', 's/tdd/references/deep/SKILL.md']);
+  assert.deepEqual(found.map((s) => s.name), ['tdd']);
+});
+
+test('upstreamSkills keeps siblings that merely share a prefix', () => {
+  const found = upstreamSkills(['s/tdd/SKILL.md', 's/tdd-extra/SKILL.md']);
+  assert.deepEqual(found.map((s) => s.name), ['tdd', 'tdd-extra']);
+});
+
+test('upstreamSkills skips a repo-root SKILL.md', () => {
+  // Its installed name comes from the repo, which this listing cannot derive.
+  assert.deepEqual(upstreamSkills(['SKILL.md', 's/tdd/SKILL.md']).map((s) => s.name), ['tdd']);
+});
+
+test('upstreamSkills on nothing is empty', () => {
+  assert.deepEqual(upstreamSkills([]), []);
+});
+
+test('availableSkills excludes what is already installed', () => {
+  const bySource = new Map([['o/r', [{ path: 's/tdd', name: 'tdd' }, { path: 's/new', name: 'new' }]]]);
+  assert.deepEqual(availableSkills({ upstreamBySource: bySource, installedNames: ['tdd'] }), [
+    { name: 'new', source: 'o/r' },
+  ]);
+});
+
+test('availableSkills is empty when a source offers nothing new', () => {
+  const bySource = new Map([['o/r', [{ path: 's/tdd', name: 'tdd' }]]]);
+  assert.deepEqual(availableSkills({ upstreamBySource: bySource, installedNames: ['tdd'] }), []);
+});
+
+test('availableSkills reports each source separately', () => {
+  const bySource = new Map([
+    ['o/one', [{ path: 's/a', name: 'a' }]],
+    ['o/two', [{ path: 's/b', name: 'b' }]],
+  ]);
+  assert.deepEqual(availableSkills({ upstreamBySource: bySource, installedNames: [] }), [
+    { name: 'a', source: 'o/one' },
+    { name: 'b', source: 'o/two' },
+  ]);
+});
+
+test('availableSkills lists a name offered by two sources only once', () => {
+  const bySource = new Map([
+    ['o/one', [{ path: 's/dup', name: 'dup' }]],
+    ['o/two', [{ path: 's/dup', name: 'dup' }]],
+  ]);
+  const found = availableSkills({ upstreamBySource: bySource, installedNames: [] });
+  assert.equal(found.length, 1, 'installing the same name twice is not a thing that can happen');
+  assert.equal(found[0].source, 'o/one', 'the first source in iteration order wins');
 });

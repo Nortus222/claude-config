@@ -1,4 +1,4 @@
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { isPlainObject } from './plugins.mjs';
 
 // The lock records the path of a skill's SKILL.md, but the tree SHA that
@@ -89,4 +89,52 @@ export function planUpdates({ lock, installedNames, remoteTrees }) {
     plan.outdated.push({ name: entry.name, source: entry.source, from: entry.hash, to: remote });
   }
   return plan;
+}
+
+// Every SKILL.md in a source repo, reduced to the skills it would install as.
+// A skill's installed name is its folder name, so the mapping is structural —
+// but two shapes have to be rejected first.
+export function upstreamSkills(skillPaths) {
+  const folders = skillPaths
+    .map((p) => skillFolder(p))
+    // A repo-root SKILL.md makes the repo itself one skill, taking its name
+    // from the repo rather than the path. Nothing here can derive that, so it
+    // is skipped rather than guessed at.
+    .filter((dir) => dir !== '.')
+    // Shallowest first, so the nesting check below always sees a parent before
+    // any of its children.
+    .sort((a, b) => a.split('/').length - b.split('/').length || (a < b ? -1 : 1));
+
+  const kept = [];
+  for (const dir of folders) {
+    // A SKILL.md beneath a folder that already holds one is a sub-resource.
+    // The trailing slash matters: `s/tdd-extra` must not read as nested under
+    // `s/tdd`.
+    if (kept.some((k) => dir.startsWith(`${k}/`))) continue;
+    kept.push(dir);
+  }
+
+  return kept
+    .map((path) => ({ path, name: basename(path) }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+// Upstream skills that are not installed here. Not a state of an installed
+// skill — which is why it is computed separately from planUpdates rather than
+// being a sixth bucket in it.
+export function availableSkills({ upstreamBySource, installedNames }) {
+  const installed = new Set(installedNames);
+  const seen = new Set();
+  const out = [];
+  for (const [source, skills] of upstreamBySource) {
+    for (const { name } of skills) {
+      // Two sources can offer the same name, but only one folder can ever
+      // exist under ~/.agents/skills, so the first source wins and the
+      // duplicate is not offered twice.
+      if (installed.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      out.push({ name, source });
+    }
+  }
+  return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
