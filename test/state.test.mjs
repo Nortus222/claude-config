@@ -58,13 +58,37 @@ test('nothing there is missing', () => {
 });
 
 test('state groupings partition the actionable states', () => {
+  // NEEDS_APPLY: 5 states for apply to handle
   assert.ok(NEEDS_APPLY.has('repo-ahead'));
   assert.ok(NEEDS_APPLY.has('unmanaged'));
   assert.ok(NEEDS_APPLY.has('missing'));
   assert.ok(NEEDS_APPLY.has('clobbered'));
   assert.ok(NEEDS_APPLY.has('wrong-target'));
+  assert.equal(NEEDS_APPLY.size, 5, 'NEEDS_APPLY must contain exactly 5 states');
+
+  // NEEDS_CAPTURE: 1 state for capture to handle
   assert.ok(NEEDS_CAPTURE.has('local-ahead'));
-  assert.ok(BLOCKED.has('conflict'));
-  assert.ok(!NEEDS_APPLY.has('clean'));
-  assert.ok(!NEEDS_APPLY.has('conflict'));
+  assert.equal(NEEDS_CAPTURE.size, 1, 'NEEDS_CAPTURE must contain exactly 1 state');
+
+  // BLOCKED: 2 states that block all operations
+  assert.ok(BLOCKED.has('conflict'), 'conflict must be BLOCKED (divergent changes)');
+  assert.ok(BLOCKED.has('missing-repo'), 'missing-repo must be BLOCKED (data-loss case)');
+  assert.equal(BLOCKED.size, 2, 'BLOCKED must contain exactly 2 states');
+
+  // No state is in multiple sets
+  assert.ok(!NEEDS_APPLY.has('local-ahead'), 'local-ahead not in NEEDS_APPLY');
+  assert.ok(!NEEDS_APPLY.has('conflict'), 'conflict not in NEEDS_APPLY');
+  assert.ok(!NEEDS_APPLY.has('missing-repo'), 'missing-repo not in NEEDS_APPLY (data-loss case)');
+  assert.ok(!NEEDS_CAPTURE.has('repo-ahead'), 'repo-ahead not in NEEDS_CAPTURE');
+  assert.ok(!NEEDS_CAPTURE.has('conflict'), 'conflict not in NEEDS_CAPTURE');
+  assert.ok(!BLOCKED.has('local-ahead'), 'local-ahead not in BLOCKED');
+  assert.ok(!BLOCKED.has('repo-ahead'), 'repo-ahead not in BLOCKED');
+
+  // Clean and linked are not actionable (in no sets)
+  assert.ok(!NEEDS_APPLY.has('clean'), 'clean not in NEEDS_APPLY');
+  assert.ok(!NEEDS_CAPTURE.has('clean'), 'clean not in NEEDS_CAPTURE');
+  assert.ok(!BLOCKED.has('clean'), 'clean not in BLOCKED');
+  assert.ok(!NEEDS_APPLY.has('linked'), 'linked not in NEEDS_APPLY');
+  assert.ok(!NEEDS_CAPTURE.has('linked'), 'linked not in NEEDS_CAPTURE');
+  assert.ok(!BLOCKED.has('linked'), 'linked not in BLOCKED');
 });
