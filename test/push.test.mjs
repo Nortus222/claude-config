@@ -83,6 +83,65 @@ function captureStdout(fn) {
     .then((result) => ({ result, output: () => output }));
 }
 
+function captureStderr(fn) {
+  let output = '';
+  const original = process.stderr.write;
+  process.stderr.write = function (chunk) {
+    output += chunk.toString();
+    return true;
+  };
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      process.stderr.write = original;
+    })
+    .then((result) => ({ result, output: () => output }));
+}
+
+// Captures both stdout and stderr from a single invocation, so one call can
+// be checked both for its human-readable text and for the absence of a raw
+// Node stack trace, without running the command under test twice.
+function captureBoth(fn) {
+  let out = '';
+  let err = '';
+  const originalOut = process.stdout.write;
+  const originalErr = process.stderr.write;
+  process.stdout.write = function (chunk) {
+    out += chunk.toString();
+    return true;
+  };
+  process.stderr.write = function (chunk) {
+    err += chunk.toString();
+    return true;
+  };
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      process.stdout.write = originalOut;
+      process.stderr.write = originalErr;
+    })
+    .then((result) => ({ result, stdout: () => out, stderr: () => err }));
+}
+
+// A standalone repo with the manifest layout but no remote at all -- used to
+// exercise the "no upstream configured" branch, which is a legitimate state
+// (a fresh branch that was never pushed) distinct from "nothing to push".
+function createStandaloneRepo(prefix) {
+  const work = mkdtempSync(join(tmpdir(), `${prefix}-work-`));
+  execSync('git init -b main', { cwd: work, stdio: 'ignore' });
+  execSync('git config user.email "test@example.com"', { cwd: work, stdio: 'ignore' });
+  execSync('git config user.name "Test"', { cwd: work, stdio: 'ignore' });
+  mkdirSync(join(work, 'claude', 'bin'), { recursive: true });
+  mkdirSync(join(work, 'claude', 'hooks'), { recursive: true });
+  writeFileSync(join(work, 'claude', 'bin', '.gitkeep'), '');
+  writeFileSync(join(work, 'claude', 'hooks', '.gitkeep'), '');
+  writeFileSync(join(work, 'claude', 'settings.json'), '{"version":1}\n');
+  writeFileSync(join(work, 'claude', 'CLAUDE.md'), '# from repo\n');
+  execSync('git add .', { cwd: work, stdio: 'ignore' });
+  execSync('git commit -m "initial"', { cwd: work, stdio: 'ignore' });
+  return work;
+}
+
 test('push refuses without an explicit message and stages nothing', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-nomsg');
   const { claude, agents } = createTestHome('nortuscc-push-nomsg-home-');
@@ -233,6 +292,75 @@ test('push accepts --message as an alias for -m', async () => {
       const code = await pushRun(['--message', 'test: long flag']);
       assert.equal(code, 0);
       assert.equal(headMessage(work), 'test: long flag');
+    },
+  );
+});
+
+test('a retried push after a failed non-fast-forward attempt must not report success', async () => {
+  const { bare, work } = createRemoteAndClone('nortuscc-push-retry');
+  const { claude, agents } = createTestHome('nortuscc-push-retry-home-');
+
+  await withFixtureEnv(
+    { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_AGENTS_DIR: agents, NORTUSCC_REPO_DIR: work },
+    async () => {
+      assert.equal(await applyRun([]), 0);
+
+      // Simulate another machine pushing to the shared remote first, so this
+      // machine's eventual push is a genuine non-fast-forward rejection, not
+      // just "nothing to do".
+      const other = mkdtempSync(join(tmpdir(), 'nortuscc-push-retry-other-'));
+      execFileSync('git', ['clone', bare, other], { stdio: 'ignore' });
+      execSync('git config user.email "test@example.com"', { cwd: other, stdio: 'ignore' });
+      execSync('git config user.name "Test"', { cwd: other, stdio: 'ignore' });
+      writeFileSync(join(other, 'claude', 'CLAUDE.md'), '# from another machine\n');
+      execSync('git commit -am "another machine\'s change"', { cwd: other, stdio: 'ignore' });
+      execFileSync('git', ['-C', other, 'push'], { stdio: 'ignore' });
+
+      // Now this machine captures and commits locally, unaware the remote
+      // has moved on.
+      writeFileSync(join(claude, 'CLAUDE.md'), '# local change\n');
+
+      const first = await captureBoth(() => pushRun(['-m', 'test: first attempt']));
+      assert.equal(first.result, 1, 'the first attempt must fail: the remote has diverged');
+      assert.doesNotMatch(first.stderr(), /at .*:\d+:\d+/, 'no raw stack trace on the first failure');
+
+      const shaAfterFirst = headSha(work);
+      assert.equal(headMessage(work), 'test: first attempt', 'the commit lands locally even though the push failed');
+
+      // Retry, exactly as a user re-running the same command would. capture
+      // finds nothing new -- the machine already matches what was captured
+      // on the first attempt -- but the local branch is still ahead of its
+      // upstream and must not be reported as a no-op.
+      const second = await captureBoth(() => pushRun(['-m', 'test: retry']));
+      assert.notEqual(second.result, 0, 'a retried push with an unpushed local commit must not report success');
+      assert.doesNotMatch(
+        second.stdout(),
+        /nothing captured; nothing to push/,
+        'push has an unreconciled local commit ahead of upstream; it must not claim there is nothing to push',
+      );
+      assert.doesNotMatch(second.stderr(), /at .*:\d+:\d+/, 'no raw stack trace on the retry failure either');
+      assert.equal(headSha(work), shaAfterFirst, 'the retry must not create a duplicate local commit');
+
+      const bareHead = execSync('git log -1 --format=%s', { cwd: bare }).toString().trim();
+      assert.equal(bareHead, "another machine's change", 'the diverged local commit never reached the remote');
+    },
+  );
+});
+
+test('push on a fresh branch with no upstream and nothing captured is a genuine no-op, not a crash', async () => {
+  const work = createStandaloneRepo('nortuscc-push-noupstream');
+  const { claude, agents } = createTestHome('nortuscc-push-noupstream-home-');
+
+  await withFixtureEnv(
+    { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_AGENTS_DIR: agents, NORTUSCC_REPO_DIR: work },
+    async () => {
+      assert.equal(await applyRun([]), 0);
+      const shaBefore = headSha(work);
+
+      const { result: code, output } = await captureStdout(() => pushRun(['-m', 'test: no upstream no-op']));
+      assert.equal(code, 0, 'no upstream configured, and nothing captured, must be a genuine no-op, not an error');
+      assert.match(output(), /nothing captured; nothing to push/);
+      assert.equal(headSha(work), shaBefore, 'no commit should be created');
     },
   );
 });
