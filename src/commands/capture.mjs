@@ -1,4 +1,64 @@
-export async function run() {
-  console.error('nortuscc: not implemented yet');
-  return 1;
+import { SYNC } from '../manifest.mjs';
+import { resolveEntry } from '../resolve.mjs';
+import { readLock, writeLock } from '../lock.mjs';
+import { captureCopy } from '../copy.mjs';
+import { formatRow, section } from '../report.mjs';
+
+let lastCaptured = [];
+
+// The repo-relative paths the most recent capture actually wrote. push stages
+// exactly these, so nothing outside the manifest is ever committed.
+export function capturedPaths() {
+  return [...lastCaptured];
+}
+
+export async function run(args = [], entries = SYNC) {
+  const takeLocal = args.includes('--take-local');
+  const takeRepo = args.includes('--take-repo');
+
+  if (takeRepo && takeLocal) {
+    console.error('nortuscc: --take-repo and --take-local are mutually exclusive');
+    return 2;
+  }
+
+  const lock = readLock();
+  const before = JSON.stringify(lock);
+  const lines = [];
+  const captured = [];
+  let refused = 0;
+
+  for (const entry of entries) {
+    // Linked directories need no capture: the repo IS the live copy.
+    if (entry.mode === 'link') continue;
+
+    if (entry.mode !== 'copy') {
+      // Unknown mode: capture has no idea how to remediate this entry, so it is
+      // reported and left alone rather than guessed at — the same treatment
+      // as missing-repo and conflict, which are also BLOCKED states.
+      lines.push(formatRow(entry.dest, 'unknown-mode', 'manifest entry has an unrecognized mode'));
+      continue;
+    }
+
+    const { src, dest } = resolveEntry(entry);
+    const res = captureCopy(src, dest, entry.dest, lock, { force: takeLocal });
+
+    if (res.action === 'refused') refused += 1;
+    if (res.action === 'copied') captured.push(entry.src);
+    lines.push(formatRow(entry.dest, res.action, res.action === 'refused' ? 'conflict — nothing changed' : ''));
+  }
+
+  // Only rewrite the lockfile when something in it actually changed. captureCopy
+  // already refuses to restamp a baseline that is merely stale-but-converged;
+  // this guard extends that idempotency to the file write itself, so a clean
+  // machine's lockfile mtime — and an otherwise-empty backup directory — never
+  // move on a no-op run.
+  if (JSON.stringify(lock) !== before) writeLock(lock);
+  lastCaptured = captured;
+  process.stdout.write('\n' + section('capture', lines));
+
+  if (refused > 0) {
+    process.stdout.write(`\n${refused} conflict(s) refused. Use --take-local to keep the local version.\n`);
+    return 1;
+  }
+  return 0;
 }
