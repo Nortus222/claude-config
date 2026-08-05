@@ -26,13 +26,22 @@ export function pluginReport(settings, installed, marketplaces) {
     .map(([name]) => name);
   const wantedMarkets = settings.extraKnownMarketplaces ?? {};
 
-  const missingPlugins = enabled.filter((name) => !(name in (installed ?? {})));
+  // Handle both flat object format (from tests) and nested format (from Claude Code's installed_plugins.json)
+  const installedPluginsDict = typeof installed?.plugins === 'object' ? installed.plugins : (installed ?? {});
+  const missingPlugins = enabled.filter((name) => !(name in installedPluginsDict));
   const missingMarketplaces = Object.keys(wantedMarkets).filter((m) => !(m in (marketplaces ?? {})));
 
   const commands = [
     ...missingMarketplaces.map((m) => {
-      const source = wantedMarkets[m]?.source ?? m;
-      return `claude plugin marketplace add ${source}`;
+      const sourceValue = wantedMarkets[m]?.source;
+      // Handle both string format (from tests) and object format (from Claude Code)
+      let sourceStr = m;
+      if (typeof sourceValue === 'string') {
+        sourceStr = sourceValue;
+      } else if (sourceValue && typeof sourceValue === 'object' && sourceValue.repo) {
+        sourceStr = sourceValue.repo;
+      }
+      return `claude plugin marketplace add ${sourceStr}`;
     }),
     ...missingPlugins.map((p) => `claude plugin install ${p}`),
   ];
