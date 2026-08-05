@@ -104,3 +104,54 @@ test('a missing local file is restored by apply', () => {
   assert.equal(applyCopy(src, dest, rel, lock, {}).action, 'copied');
   assert.equal(readFileSync(dest, 'utf8'), 'v1');
 });
+
+test('capture backs up the repo file before first write', () => {
+  const { src, dest, rel } = pair('repo-original', 'local-content');
+  const lock = readLock();
+
+  assert.equal(inspectCopy(src, dest, undefined).state, 'unmanaged');
+
+  const res = captureCopy(src, dest, rel, lock, {});
+  assert.equal(res.action, 'copied');
+  assert.ok(res.backedUp, 'overwriting the repo file must back it up');
+  assert.equal(readFileSync(res.backedUp, 'utf8'), 'repo-original');
+  assert.equal(readFileSync(src, 'utf8'), 'local-content');
+});
+
+test('a genuinely clean apply run leaves the lock entry untouched', () => {
+  const { src, dest, rel } = pair('same', 'same');
+  const lock = readLock();
+  setBaseline(lock, rel, hashText('same'));
+  const before = lock.files[rel];
+
+  assert.equal(applyCopy(src, dest, rel, lock, {}).action, 'skipped');
+  assert.equal(lock.files[rel], before, 'a clean run must not restamp the baseline');
+});
+
+test('a convergent apply run refreshes a stale baseline', () => {
+  const { src, dest, rel } = pair('converged', 'converged');
+  const lock = readLock();
+  setBaseline(lock, rel, hashText('old-baseline'));
+
+  assert.equal(applyCopy(src, dest, rel, lock, {}).action, 'skipped');
+  assert.equal(lock.files[rel].hash, hashText('converged'), 'baseline must refresh on convergence');
+});
+
+test('a genuinely clean capture run leaves the lock entry untouched', () => {
+  const { src, dest, rel } = pair('same', 'same');
+  const lock = readLock();
+  setBaseline(lock, rel, hashText('same'));
+  const before = lock.files[rel];
+
+  assert.equal(captureCopy(src, dest, rel, lock, {}).action, 'skipped');
+  assert.equal(lock.files[rel], before, 'a clean run must not restamp the baseline');
+});
+
+test('a convergent capture run refreshes a stale baseline', () => {
+  const { src, dest, rel } = pair('converged', 'converged');
+  const lock = readLock();
+  setBaseline(lock, rel, hashText('old-baseline'));
+
+  assert.equal(captureCopy(src, dest, rel, lock, {}).action, 'skipped');
+  assert.equal(lock.files[rel].hash, hashText('converged'), 'baseline must refresh on convergence');
+});

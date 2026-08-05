@@ -33,7 +33,10 @@ export function applyCopy(src, dest, relative, lock, { force = false } = {}) {
 
   if (state === 'missing-repo') return { action: 'skipped', backedUp: null };
   if (state === 'clean' || state === 'local-ahead') {
-    if (state === 'clean' && repo) setBaseline(lock, relative, repo);
+    // Only restamp when the baseline is actually stale (both sides converged
+    // on new, identical content). A no-op refresh here would make every apply
+    // on an already-clean machine rewrite the lockfile.
+    if (state === 'clean' && repo && baseline !== repo) setBaseline(lock, relative, repo);
     return { action: 'skipped', backedUp: null };
   }
 
@@ -58,7 +61,8 @@ export function captureCopy(src, dest, relative, lock, { force = false } = {}) {
 
   if (state === 'missing-repo' || local === null) return { action: 'skipped', backedUp: null };
   if (state === 'clean' || state === 'repo-ahead') {
-    if (state === 'clean' && local) setBaseline(lock, relative, local);
+    // Same convergence guard as applyCopy: only restamp when stale.
+    if (state === 'clean' && local && baseline !== local) setBaseline(lock, relative, local);
     return { action: 'skipped', backedUp: null };
   }
 
@@ -66,7 +70,13 @@ export function captureCopy(src, dest, relative, lock, { force = false } = {}) {
     return { action: 'refused', backedUp: preserve(dest, relative) };
   }
 
+  // unmanaged, local-ahead, or a forced conflict: the repo file is about to be
+  // replaced, so keep whatever was there first, exactly as applyCopy does for
+  // the local side. copyFileSync overwrites the working tree with no relation
+  // to git's index or HEAD, so an uncommitted repo-side edit is not otherwise
+  // recoverable.
+  const backedUp = existsSync(src) ? backupOnce(src, relative) : null;
   write(dest, src);
   setBaseline(lock, relative, hashFile(src));
-  return { action: 'copied', backedUp: null };
+  return { action: 'copied', backedUp };
 }
