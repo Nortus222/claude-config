@@ -191,64 +191,85 @@ function snapshotDirectory(dir) {
 }
 
 test('run() does not write any files to claude dir and does not create new directories', async () => {
-  // Set up a genuinely clean machine
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { ensureLink } = await import('../src/link.mjs');
-  const { resolveEntry, claudeDir } = await import('../src/resolve.mjs');
+  // Use a fresh, isolated temp directory for this test to avoid state leakage from other tests
+  const isolatedHome = mkdtempSync(join(tmpdir(), 'nortuscc-readonly-'));
+  const isolatedClaudeDir = join(isolatedHome, '.claude');
+  mkdirSync(isolatedClaudeDir, { recursive: true });
 
-  const claude = claudeDir();
+  // Set up an isolated repo fixture
+  const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-readonly-'));
+  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
 
-  // Snapshot before run()
-  const snapshotBefore = snapshotDirectory(claude);
+  // Save original env vars and override with isolated paths
+  const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
+  const origRepoDir = process.env.NORTUSCC_REPO_DIR;
+  process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_REPO_DIR = isolatedRepo;
 
-  // For all link entries: create the symlinks
-  for (const entry of SYNC) {
-    if (entry.mode === 'link') {
-      const { src, dest } = resolveEntry(entry);
-      await ensureLink(dest, src);
-    }
-  }
+  try {
+    // Reimport to get fresh functions bound to isolated paths
+    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { SYNC } = await import('../src/manifest.mjs');
+    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+    const { ensureLink } = await import('../src/link.mjs');
+    const { resolveEntry } = await import('../src/resolve.mjs');
 
-  // For all copy entries: copy the file to dest and seed lockfile with its hash
-  const lock = readLock();
-  for (const entry of SYNC) {
-    if (entry.mode === 'copy') {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, entry.dest, hash);
+    // Take pristine snapshot before any setup
+    const snapshotBefore = snapshotDirectory(isolatedClaudeDir);
+
+    // Set up a clean machine: all entries in non-actionable states
+    for (const entry of SYNC) {
+      if (entry.mode === 'link') {
+        const { src, dest } = resolveEntry(entry);
+        await ensureLink(dest, src);
       }
     }
-  }
-  writeLock(lock);
 
-  // Snapshot after setup but before run()
-  const snapshotAfterSetup = snapshotDirectory(claude);
+    const lock = readLock();
+    for (const entry of SYNC) {
+      if (entry.mode === 'copy') {
+        const { src, dest } = resolveEntry(entry);
+        const hash = hashFile(src);
+        if (hash) {
+          copyFileSync(src, dest);
+          setBaseline(lock, entry.dest, hash);
+        }
+      }
+    }
+    writeLock(lock);
 
-  // Run the command
-  await run();
+    // Snapshot after setup but before run()
+    const snapshotAfterSetup = snapshotDirectory(isolatedClaudeDir);
 
-  // Snapshot after run()
-  const snapshotAfter = snapshotDirectory(claude);
+    // Run the command on clean machine
+    await isolatedRun();
 
-  // Verify no new files or directories were created
-  const keysBefore = Object.keys(snapshotAfterSetup).sort();
-  const keysAfter = Object.keys(snapshotAfter).sort();
+    // Snapshot after run()
+    const snapshotAfter = snapshotDirectory(isolatedClaudeDir);
 
-  assert.deepEqual(
-    keysAfter,
-    keysBefore,
-    'run() created no new files or directories in claude dir',
-  );
+    // Verify no new files or directories were created
+    const keysBefore = Object.keys(snapshotAfterSetup).sort();
+    const keysAfter = Object.keys(snapshotAfter).sort();
 
-  // Verify no files were modified
-  for (const key of keysBefore) {
     assert.deepEqual(
-      snapshotAfter[key],
-      snapshotAfterSetup[key],
-      `run() did not modify ${key}`,
+      keysAfter,
+      keysBefore,
+      'run() created no new files or directories in claude dir',
     );
+
+    // Verify no files were modified
+    for (const key of keysBefore) {
+      assert.deepEqual(
+        snapshotAfter[key],
+        snapshotAfterSetup[key],
+        `run() did not modify ${key}`,
+      );
+    }
+  } finally {
+    // Restore original env vars
+    process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
+    process.env.NORTUSCC_REPO_DIR = origRepoDir;
   }
 });
