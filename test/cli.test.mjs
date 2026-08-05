@@ -41,3 +41,23 @@ test('usage advertises only the direction each command actually accepts', () => 
     'capture --take-repo exits 2 with a refusal, so usage must not advertise it',
   );
 });
+
+// --check --yes is refused by update itself with exit 2 and its own message,
+// which proves dispatch reached the command rather than the unknown-verb
+// guard. It is also the only flag pair that cannot touch the network.
+test('update is a known verb', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, [BIN, 'update', '--check', '--yes'], { encoding: 'utf8' }),
+    (e) => {
+      assert.ok(!e.stderr.includes("unknown command 'update'"), 'update must reach its command module');
+      assert.match(e.stderr, /mutually exclusive/);
+      assert.equal(e.status, 2);
+      return true;
+    },
+  );
+});
+
+test('usage lists update', () => {
+  const out = usage();
+  assert.match(out, /update \[--check\]/);
+});

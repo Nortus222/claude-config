@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push'];
+const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'update'];
 
 const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
@@ -10,6 +10,8 @@ Commands:
   status                            read-only: config / plugins / skills
   apply [--skills] [--take-repo]    repo -> machine
                                     --take-repo resolves a conflict by discarding the local version
+  update [--check] [--yes]          refresh installed skills from their sources
+                                    --check reports what is stale and writes nothing
   capture [--take-local]            machine -> repo
                                     --take-local resolves a conflict by keeping the local version
   pull                              git pull --ff-only, then apply

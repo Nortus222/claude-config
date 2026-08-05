@@ -36,6 +36,7 @@ prompt or a scheduled check.
 | `setup [--repo URL] [--dir PATH]` | Clone if absent, apply, install skills, report |
 | `status` | Read-only report: config, plugins, skills |
 | `apply [--skills]` | Repo → machine. `--skills` also installs missing skills |
+| `update [--check] [--yes]` | Refresh installed skills from their sources, after confirmation |
 | `capture` | Machine → repo, including regenerating the skills manifest |
 | `pull` | `git pull --ff-only`, then apply |
 | `push -m MSG` | Capture, then commit and push only what changed |
@@ -96,6 +97,34 @@ Anything that spawns the installer touches the machine's live skills. The test
 suite never does: its fixtures keep `skills.missing` empty, so the `--skills`
 branch takes the "satisfied" path and nothing is spawned. Keep it that way, and
 do not treat `NORTUSCC_AGENTS_DIR` as a sandbox for a real install.
+
+### Staying current
+
+`apply --skills` installs skills the machine is *missing*. `nortuscc update`
+refreshes the ones it already has.
+
+The skill lock records a `skillFolderHash` per skill, which is the git tree SHA
+of that skill's folder in its source repo. Comparing it against the repo's
+current tree SHA answers "is there an update?" without downloading a single
+file: one blobless, no-checkout shallow clone per source repo, then
+`git rev-parse HEAD:<folder>`.
+
+```bash
+nortuscc update --check   # report only; exits non-zero if anything is stale
+nortuscc update           # report, confirm, back up, then update
+```
+
+Every skill lands in one of five states: `current`, `outdated`, `gone` (the
+folder no longer exists upstream), `unreachable` (the source repo could not be
+cloned — only that source's skills are affected), and `local` (hand-authored,
+with no source anything could update from).
+
+Outdated skills are copied to `~/.claude/backups/nortuscc-<stamp>/skills/`
+before the updater runs, and the closing report is built by re-reading the lock
+afterwards, so it describes what happened rather than what was intended.
+
+Without a TTY and without `--yes`, `update` refuses and exits 2 rather than
+blocking a scheduled run on a prompt nothing will answer.
 
 ## Adding a synced path
 

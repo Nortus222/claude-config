@@ -186,13 +186,10 @@ constraint is unchanged here.
 
 ## Unverified
 
-`skills update <names…> --global --yes` is assumed to update **only** the named
-skills and to run without prompting. Its `--help` implies both, but confirming
-it requires actually running it. This gets verified against a throwaway skill
-before step 6 is wired up.
-
-If it turns out to update everything global, or to prompt anyway, the fallback
-is `skills add <source> --skill <names> --global --yes` — the command
-`apply --skills` already uses, whose per-skill precision is known good. Only
-`buildUpdateCommand` changes; the classification, prompt, backup, and report
-are unaffected either way.
+**Verified 2026-08-05.** `skills update <names…> --global --yes` was assumed to
+update **only** the named skills and to run without prompting. Its `--help`
+implied both, but confirming it required actually running it, so Task 5 Step 1
+did: a live `npx -y skills update code-review --global --yes` moved only
+`code-review`. A reviewer independently diffed the pre-run lock against the
+post-run lock and found 27 of 28 entries byte-identical — the one difference
+was `code-review`'s own entry. The assumption holds.
