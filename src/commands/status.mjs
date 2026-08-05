@@ -6,7 +6,14 @@ import { inspectCopy } from '../copy.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
 import { loadPluginState, pluginReport } from '../plugins.mjs';
-import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile } from '../skills.mjs';
+import {
+  readSkillsManifest,
+  readSkillLock,
+  installedSkillNames,
+  reconcile,
+  brokenSkillLinks,
+  claudeSkillsDir,
+} from '../skills.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -58,15 +65,27 @@ export async function run() {
   if (skills.local.length) {
     skillLines.push(formatRow('local', String(skills.local.length), skills.local.join(', ')));
   }
+  const broken = brokenSkillLinks();
+  if (broken.length) {
+    skillLines.push(formatRow('broken links', String(broken.length), broken.join(', ')));
+  }
   if (!skillLines.length) skillLines.push(formatRow('manifest', 'satisfied', ''));
   if (skills.missing.length) skillLines.push('', '  nortuscc apply --skills');
+  if (broken.length) {
+    skillLines.push('', `  remove stale links under ${claudeSkillsDir()} after confirming`);
+  }
   process.stdout.write(section('skills', skillLines));
 
   const actionable = rows.filter(
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
 
-  if (actionable.length === 0 && plugins.commands.length === 0 && skills.missing.length === 0) {
+  if (
+    actionable.length === 0 &&
+    plugins.commands.length === 0 &&
+    skills.missing.length === 0 &&
+    broken.length === 0
+  ) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }

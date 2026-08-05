@@ -207,11 +207,24 @@ test('run() does not write any files to claude dir and does not create new direc
   writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
 
+  // Set up an isolated agents/skills fixture too (fix round 1, finding 3: the
+  // original snapshot only covered the claude dir, so a write in the new
+  // skills-reading code path — installedSkillNames(), readSkillLock() — would
+  // have gone undetected).
+  const isolatedAgentsSkillsDir = join(isolatedHome, '.agents', 'skills');
+  mkdirSync(join(isolatedAgentsSkillsDir, 'sample-skill'), { recursive: true });
+  writeFileSync(
+    join(isolatedHome, '.agents', '.skill-lock.json'),
+    JSON.stringify({ skills: { 'sample-skill': { source: 'a/b' } } }),
+  );
+
   // Save original env vars and override with isolated paths
   const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
   const origRepoDir = process.env.NORTUSCC_REPO_DIR;
+  const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
+  process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
 
   try {
     // Reimport to get fresh functions bound to isolated paths
@@ -221,7 +234,9 @@ test('run() does not write any files to claude dir and does not create new direc
     const { ensureLink } = await import('../src/link.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
 
-    // Take pristine snapshot before any setup
+    // Take a pristine snapshot before any setup (kept for parity with the
+    // pre-existing claude-dir check below; the agents/skills fixture doesn't
+    // change during setup, so only "after setup" and "after run()" are compared).
     const snapshotBefore = snapshotDirectory(isolatedClaudeDir);
 
     // Set up a clean machine: all entries in non-actionable states
@@ -247,12 +262,18 @@ test('run() does not write any files to claude dir and does not create new direc
 
     // Snapshot after setup but before run()
     const snapshotAfterSetup = snapshotDirectory(isolatedClaudeDir);
+    // The agents/skills fixture (and the sibling .skill-lock.json) are not
+    // touched by the setup above, so its "after setup" and "pristine" snapshots
+    // of isolatedHome/.agents are the same tree; re-snapshot here anyway to
+    // pin down exactly what run() is allowed to see.
+    const skillsSnapshotAfterSetup = snapshotDirectory(isolatedHome);
 
     // Run the command on clean machine
     await isolatedRun();
 
     // Snapshot after run()
     const snapshotAfter = snapshotDirectory(isolatedClaudeDir);
+    const skillsSnapshotAfter = snapshotDirectory(isolatedHome);
 
     // Verify no new files or directories were created
     const keysBefore = Object.keys(snapshotAfterSetup).sort();
@@ -272,9 +293,105 @@ test('run() does not write any files to claude dir and does not create new direc
         `run() did not modify ${key}`,
       );
     }
+
+    // Same checks for ~/.agents (skills dir + .skill-lock.json): status reads
+    // both via skills.mjs, and must not write either.
+    const skillsKeysBefore = Object.keys(skillsSnapshotAfterSetup).sort();
+    const skillsKeysAfter = Object.keys(skillsSnapshotAfter).sort();
+
+    assert.deepEqual(
+      skillsKeysAfter,
+      skillsKeysBefore,
+      'run() created no new files or directories under ~/.agents',
+    );
+
+    for (const key of skillsKeysBefore) {
+      assert.deepEqual(
+        skillsSnapshotAfter[key],
+        skillsSnapshotAfterSetup[key],
+        `run() did not modify ${key} under ~/.agents`,
+      );
+    }
   } finally {
     // Restore original env vars
     process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
     process.env.NORTUSCC_REPO_DIR = origRepoDir;
+    process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
+  }
+});
+
+// Fix round 1, finding 2: the wiring from reconcile()'s output to run()'s exit
+// code and printed section had no test that constructs a real source-grouped
+// manifest with a skill genuinely missing from the agents skills dir. Without
+// this, deleting the `&& skills.missing.length === 0` clause in status.mjs
+// left the whole suite green.
+test('run() returns 1 when a manifest skill is missing, and names it in the output', async () => {
+  const isolatedHome = mkdtempSync(join(tmpdir(), 'nortuscc-skills-missing-'));
+  const isolatedClaudeDir = join(isolatedHome, '.claude');
+  mkdirSync(isolatedClaudeDir, { recursive: true });
+
+  const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-skills-missing-'));
+  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
+  // A real source-grouped manifest naming two skills.
+  writeFileSync(join(isolatedRepo, 'skills-manifest.txt'), '[a/b]\nhave\nwant\n');
+
+  // Only 'have' is actually installed; 'want' is genuinely missing.
+  const isolatedAgentsSkillsDir = join(isolatedHome, '.agents', 'skills');
+  mkdirSync(join(isolatedAgentsSkillsDir, 'have'), { recursive: true });
+
+  const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
+  const origRepoDir = process.env.NORTUSCC_REPO_DIR;
+  const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
+  process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_REPO_DIR = isolatedRepo;
+  process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => {
+    chunks.push(chunk.toString());
+    return true;
+  };
+
+  try {
+    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { SYNC } = await import('../src/manifest.mjs');
+    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+    const { ensureLink } = await import('../src/link.mjs');
+    const { resolveEntry } = await import('../src/resolve.mjs');
+
+    // Bring config to a clean state so the missing skill is the only thing
+    // that can make this run dirty — isolates the wiring under test.
+    for (const entry of SYNC) {
+      if (entry.mode === 'link') {
+        const { src, dest } = resolveEntry(entry);
+        await ensureLink(dest, src);
+      }
+    }
+    const lock = readLock();
+    for (const entry of SYNC) {
+      if (entry.mode === 'copy') {
+        const { src, dest } = resolveEntry(entry);
+        const hash = hashFile(src);
+        if (hash) {
+          copyFileSync(src, dest);
+          setBaseline(lock, entry.dest, hash);
+        }
+      }
+    }
+    writeLock(lock);
+
+    const exitCode = await isolatedRun();
+
+    assert.equal(exitCode, 1, 'a manifest skill missing from the agents skills dir makes the run dirty');
+    const output = chunks.join('');
+    assert.ok(output.includes('want'), 'the missing skill name is named in the printed output');
+  } finally {
+    process.stdout.write = originalWrite;
+    process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
+    process.env.NORTUSCC_REPO_DIR = origRepoDir;
+    process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
   }
 });

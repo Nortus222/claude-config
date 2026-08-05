@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { agentsSkillsDir, repoRoot } from './resolve.mjs';
+import { agentsSkillsDir, repoRoot, claudeDir } from './resolve.mjs';
 import { isPlainObject } from './plugins.mjs';
 
 const MANIFEST = () => join(repoRoot(), 'skills-manifest.txt');
@@ -9,6 +9,13 @@ const MANIFEST = () => join(repoRoot(), 'skills-manifest.txt');
 // NORTUSCC_AGENTS_DIR override that redirects the skills dir also redirects
 // the lock, so tests never have to touch the real ~/.agents/.skill-lock.json.
 const SKILL_LOCK = () => join(dirname(agentsSkillsDir()), '.skill-lock.json');
+
+// A recorded source has to be a string to mean anything — a lock entry like
+// {"source": 5} is malformed, not a source. groupsFromLock and reconcile both
+// call this so they can never disagree on what counts as "has a source".
+function sourceOf(meta) {
+  return isPlainObject(meta) && typeof meta.source === 'string' && meta.source ? meta.source : null;
+}
 
 const HEADER = /^\[(.+)\]$/;
 
@@ -54,7 +61,7 @@ export function groupsFromLock(lock) {
   // degrades to "nothing known" rather than throwing.
   const skills = isPlainObject(lock) && isPlainObject(lock.skills) ? lock.skills : {};
   for (const [name, meta] of Object.entries(skills)) {
-    const source = isPlainObject(meta) && typeof meta.source === 'string' ? meta.source : null;
+    const source = sourceOf(meta);
     if (!source) continue; // hand-authored locally; nothing to install it from
     if (!bySource.has(source)) bySource.set(source, []);
     bySource.get(source).push(name);
@@ -84,10 +91,9 @@ export function reconcile({ groups, lock, installedNames }) {
   const local = [];
   for (const name of installedNames) {
     if (wanted.has(name)) continue;
-    const meta = lockSkills[name];
     // No recorded source means it was authored directly in ~/.agents/skills and
     // can never be installed from anywhere, so it is never written to the manifest.
-    if (isPlainObject(meta) && meta.source) extra.push(name);
+    if (sourceOf(lockSkills[name])) extra.push(name);
     else local.push(name);
   }
 
@@ -135,4 +141,35 @@ export function installedSkillNames() {
 
 export function manifestPath() {
   return MANIFEST();
+}
+
+export function claudeSkillsDir() {
+  return join(claudeDir(), 'skills');
+}
+
+// skills-check.sh's one behaviour that is not about the manifest: entries
+// under ~/.claude/skills are symlinks into ~/.agents/skills, and a skill
+// removed from ~/.agents/skills without also removing its Claude-side link
+// leaves a broken link behind. Use lstat, not stat, to see the link itself
+// rather than follow it into ENOENT — the same distinction link.mjs's
+// inspectLink relies on.
+export function brokenSkillLinks() {
+  const dir = claudeSkillsDir();
+  if (!existsSync(dir)) return [];
+
+  const broken = [];
+  for (const name of readdirSync(dir)) {
+    const linkPath = join(dir, name);
+    let stat;
+    try {
+      stat = lstatSync(linkPath);
+    } catch {
+      continue; // vanished between readdir and lstat; nothing to report
+    }
+    if (!stat.isSymbolicLink()) continue;
+    // existsSync follows the link and swallows ENOENT, so false here means
+    // the link's target is gone.
+    if (!existsSync(linkPath)) broken.push(name);
+  }
+  return broken.sort();
 }
