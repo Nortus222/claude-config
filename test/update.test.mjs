@@ -964,3 +964,45 @@ test('a failing installer reports the skill as failed, not added', async () => {
   assert.match(out, /wizard\s+failed/, 'the failed install must be named as failed');
   assert.doesNotMatch(out, /wizard\s+added/, 'a failed install must never be reported as added');
 });
+
+// The bug a single shared derivation closes: `installResults.some(r =>
+// !r.ok)` and membership in `okAddSources` used to be computed separately,
+// and only ever agreed because installGroups always returned one result per
+// group. A fixture (or a real bug) that returns fewer results than groups
+// used to pass `some(r => !r.ok)` vacuously — nothing in the (empty) array is
+// `!r.ok` — while still reporting every add as failed, an exit-0-with-a-
+// failed-row contradiction. Both now read the same map, so a missing result
+// reads as failed everywhere at once.
+test('an installer that returns no result for a requested source is coherent, not a silent success', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+      installGroups: async () => [],
+    }));
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.equal(code, 1, 'a source installGroups never answered for must not exit clean');
+  assert.match(out, /wizard\s+failed/, 'the unanswered add must be named as failed, not silently dropped');
+});
+
+// Finding: an unmatched --add name used to always read as a typo, even when
+// the real cause was staring right at it in plan.unknown — the source it
+// would have come from was never reached at all.
+test('an unmatched --add name blames an unreachable source when one exists, not just a typo', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+      inspectSource: async () => null,
+    }));
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.equal(code, 1);
+  assert.match(out, /wizard/);
+  assert.match(out, /could not be reached \(o\/r\)/, 'the unreachable source must be named, not just guessed at as a typo');
+});

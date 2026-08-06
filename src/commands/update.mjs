@@ -6,11 +6,9 @@ import { select as realSelect } from '../select.mjs';
 import { choices, actionsFrom, seedKeys } from '../skill-actions.mjs';
 import { preserveCopy, backupDir } from '../backup.mjs';
 import { runUpdate as realRunUpdate, runRemove as realRunRemove, installGroups as realInstallGroups } from '../skills-cli.mjs';
-import { readSkillLock, installedSkillNames, installedGroups, emitManifest, manifestPath, readSkillsManifest } from '../skills.mjs';
+import { readSkillLock, installedSkillNames, installedGroups, emitManifest, manifestPath, readSkillsManifest, installArgs } from '../skills.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
-import { formatRow, section, labelWidth } from '../report.mjs';
-
-const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
+import { formatRow, section, labelWidth, short } from '../report.mjs';
 
 const NEEDS_NAMES = '--add needs a comma-separated list of skill names';
 
@@ -204,10 +202,15 @@ export async function run(args = [], deps = {}) {
   // reports it the same way.
   const unmatchedAdd = flags.add.filter((name) => !plan.available.some((a) => a.name === name));
   if (unmatchedAdd.length) {
-    process.stdout.write(
-      `\n--add named skill(s) not found upstream (already installed, misspelled, or not offered by a` +
-        ` known source): ${unmatchedAdd.join(', ')}\n`,
-    );
+    // A name can also go unmatched because the source that would have
+    // offered it could never be reached at all — plan.unknown already names
+    // exactly those sources, so say so instead of only ever guessing at a typo.
+    const unreachableSources = [...new Set(plan.unknown.map((u) => u.source))];
+    const reason = unreachableSources.length
+      ? `already installed, misspelled, not offered by a known source, or from a source that could not` +
+        ` be reached (${unreachableSources.join(', ')})`
+      : 'already installed, misspelled, or not offered by a known source';
+    process.stdout.write(`\n--add named skill(s) not found upstream (${reason}): ${unmatchedAdd.join(', ')}\n`);
   }
   // A scripted run that named a skill and adopted none of what it asked for
   // is not a success just because nothing else went wrong — the same
@@ -229,7 +232,7 @@ export async function run(args = [], deps = {}) {
     // outdated skill plus whatever the flags seeded.
     keys = rows.filter((r) => r.checked).map((r) => r.key);
   } else {
-    keys = await select(rows, { title: 'space to toggle, enter to confirm', isTTY });
+    keys = await select(rows, { title: 'choose what to adopt, refresh and prune', isTTY });
     if (keys === null) {
       if (!isTTY) {
         console.error('\nnortuscc: no terminal to choose on. Re-run with --yes to take the defaults,\n  or with --check to report only.');
@@ -268,16 +271,17 @@ export async function run(args = [], deps = {}) {
   const removeOk = actions.remove.length ? await runRemove(actions.remove) : true;
   if (!removeOk) failed = true;
   if (actions.update.length && !(await runUpdate(actions.update))) failed = true;
-  let installResults = [];
+  // The single source of truth for "did an add fail": every other place that
+  // needs to know (the `failed` flag below and the added/failed report split
+  // further down) reads this same set, so a source installGroups never
+  // returned a result for cannot read as ok in one place and failed in the
+  // other.
+  let okAddSources = new Set();
   if (actions.add.length) {
-    const bySource = new Map();
-    for (const { name, source } of actions.add) {
-      if (!bySource.has(source)) bySource.set(source, []);
-      bySource.get(source).push(name);
-    }
-    const groups = [...bySource.entries()].map(([source, skills]) => ({ source, skills }));
-    installResults = await installGroups(groups);
-    if (installResults.some((r) => !r.ok)) failed = true;
+    const groups = installArgs(actions.add);
+    const installResults = await installGroups(groups);
+    okAddSources = new Set(installResults.filter((r) => r.ok).map((r) => r.source));
+    if (groups.some((g) => !okAddSources.has(g.source))) failed = true;
   }
 
   // The manifest is a statement about the machine, so it is rebuilt from the
@@ -314,7 +318,6 @@ export async function run(args = [], deps = {}) {
   // an add is only marked failed for the source that actually failed — the
   // same split apply.mjs's summarizeSkillsInstall makes ("A partial failure
   // gets both rows, never collapsed into total success or total failure").
-  const okAddSources = new Set(installResults.filter((r) => r.ok).map((r) => r.source));
   const addedOk = actions.add.filter((a) => okAddSources.has(a.source));
   const addedFailed = actions.add.filter((a) => !okAddSources.has(a.source));
 
