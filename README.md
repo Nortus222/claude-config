@@ -126,6 +126,37 @@ afterwards, so it describes what happened rather than what was intended.
 Without a TTY and without `--yes`, `update` refuses and exits 2 rather than
 blocking a scheduled run on a prompt nothing will answer.
 
+Run without `--check` and it becomes one interactive pass over every pending
+decision:
+
+```
+  update (8)
+  ❯ ◉ ask-matt                  c7d5778 -> c9c83b1   mattpocock/skills
+
+  remove (3)
+    ◯ to-issues                 gone upstream        mattpocock/skills
+
+  add (14)
+    ◯ wizard                    available            mattpocock/skills
+
+  ↑↓ move · space toggle · a all in group · A all · n none in group · N none
+  enter confirm · esc cancel
+```
+
+Outdated skills start ticked; removing and adopting are opt-in. `a` and `n`
+act on the group under the cursor — the groups are the actions, so `a` means
+"update all of these" or "adopt all of these" depending on where you are.
+
+`--add wizard,wait-what` pre-ticks those rows; with `--yes` it acts on them
+without asking. There is deliberately no flag that adopts a whole repo.
+`--prune` pre-ticks every skill deleted upstream.
+
+Adopting or pruning rewrites `skills-manifest.txt` from what is installed
+afterwards, so the manifest and the machine cannot disagree about a change
+`update` made. A shrink larger than the number pruned is refused — that means
+this machine is missing skills the shared manifest lists, and writing it would
+drop them for every other machine.
+
 ## Adding a synced path
 
 Add one line to `SYNC` in `src/manifest.mjs`. Every command reads that table;
