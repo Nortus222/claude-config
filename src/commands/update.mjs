@@ -54,19 +54,37 @@ export function parseFlags(args) {
   return out;
 }
 
-// A shrink of exactly what was pruned is the prune working. Anything larger is
-// this machine missing skills the shared manifest lists, and writing it would
-// delete them for every other machine.
-export function manifestOutcome({ groups, before, prunedCount }) {
-  const after = groups.reduce((n, g) => n + g.skills.length, 0);
-  const shrink = before - after;
-  if (shrink > prunedCount) {
+// A count-based shrink guard (before - after) is fooled the moment an adopt
+// and a miss cancel out: `--add wizard` on a machine that is also missing a
+// manifest entry leaves the totals equal, so a subtraction sees no shrink at
+// all and writes — silently dropping the missing entry from the shared
+// manifest on the next push. The guard has to compare *sets*: every name the
+// current manifest lists that neither survives into the new groups nor was
+// actually pruned is a name this machine is simply missing, not one that was
+// dealt with.
+export function manifestOutcome({ before, groups, prunedNames = [] }) {
+  const afterCount = groups.reduce((n, g) => n + g.skills.length, 0);
+  // Mirrors capture.mjs's refusal to write a manifest with nothing in it:
+  // pruning every entry a machine has is not the same as the shared manifest
+  // itself having nothing left to list.
+  if (afterCount === 0) {
+    return { write: false, reason: 'would leave the manifest empty; nothing was written' };
+  }
+
+  const beforeNames = before.flatMap((g) => g.skills);
+  const afterNames = new Set(groups.flatMap((g) => g.skills));
+  const pruned = new Set(prunedNames);
+  const missing = beforeNames.filter((n) => !afterNames.has(n) && !pruned.has(n));
+
+  if (missing.length) {
     return {
       write: false,
-      reason: `would drop ${shrink} entr(ies) but only ${prunedCount} were pruned; run 'nortuscc capture --allow-shrink' if that is intended`,
+      reason:
+        `would drop ${missing.length} entr(ies) (${missing.join(', ')}) not accounted for by the` +
+        ` prune; run 'nortuscc capture --allow-shrink' if that is intended`,
     };
   }
-  return { write: true, reason: `${after} skill(s)` };
+  return { write: true, reason: `${afterCount} skill(s)` };
 }
 
 export function exitCode({ plan, failed, prunedNames = [] }) {
@@ -262,9 +280,9 @@ export async function run(args = [], deps = {}) {
   // machine — re-reading both the lock and the directory after the executors
   // ran, rather than diffing what we intended to do.
   if (actions.add.length || actions.remove.length) {
-    const before = readSkillsManifest().reduce((n, g) => n + g.skills.length, 0);
+    const before = readSkillsManifest();
     const groups = installedGroups(readLock(), installed());
-    const outcome = manifestOutcome({ groups, before, prunedCount: actions.remove.length });
+    const outcome = manifestOutcome({ before, groups, prunedNames: removeOk ? actions.remove : [] });
     if (outcome.write) {
       writeManifest(emitManifest(groups));
       process.stdout.write(`\nskills-manifest.txt written — ${outcome.reason}\n`);
@@ -314,5 +332,5 @@ export async function run(args = [], deps = {}) {
     );
   }
 
-  return exitCode({ plan, failed: failed || addFailed, prunedNames: actions.remove });
+  return exitCode({ plan, failed: failed || addFailed, prunedNames: removeOk ? actions.remove : [] });
 }

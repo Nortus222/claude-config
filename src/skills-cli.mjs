@@ -28,7 +28,7 @@ function runOne({ cmd, args }) {
   });
 }
 
-export async function installGroups(groups, { dryRun = false } = {}) {
+export async function installGroups(groups, { dryRun = false, run = runOne } = {}) {
   const results = [];
   for (const group of groups) {
     const command = buildCommand(group);
@@ -38,7 +38,7 @@ export async function installGroups(groups, { dryRun = false } = {}) {
       continue;
     }
     console.log(`\ninstalling ${group.skills.length} skill(s) from ${group.source}`);
-    results.push({ source: group.source, ok: await runOne(command) });
+    results.push({ source: group.source, ok: await run(command) });
   }
   return results;
 }

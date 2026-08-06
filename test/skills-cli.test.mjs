@@ -26,13 +26,14 @@ test('buildCommand always installs globally, never project-scoped', () => {
   assert.ok(args.includes('--global'), 'skills belong in ~/.agents/skills, not a project');
 });
 
-test('installGroups in dry-run spawns nothing and echoes every group', async () => {
+test('installGroups in dry-run never reaches the runner, not merely leaves it unobserved', async () => {
+  const run = () => { throw new Error('run must not be called during dry-run'); };
   const res = await installGroups(
     [
       { source: 'a/b', skills: ['one'] },
       { source: 'c/d', skills: ['two'] },
     ],
-    { dryRun: true },
+    { dryRun: true, run },
   );
   assert.equal(res.length, 2);
   assert.ok(res.every((r) => r.ok));
@@ -40,6 +41,22 @@ test('installGroups in dry-run spawns nothing and echoes every group', async () 
 
 test('installGroups with nothing to do returns an empty result', async () => {
   assert.deepEqual(await installGroups([], { dryRun: true }), []);
+});
+
+test('installGroups outside dry-run calls the runner once per group with the built command', async () => {
+  const calls = [];
+  const run = async (command) => { calls.push(command); return true; };
+  const res = await installGroups(
+    [
+      { source: 'a/b', skills: ['one', 'two'] },
+      { source: 'c/d', skills: ['three'] },
+    ],
+    { run },
+  );
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], buildCommand({ source: 'a/b', skills: ['one', 'two'] }));
+  assert.deepEqual(calls[1], buildCommand({ source: 'c/d', skills: ['three'] }));
+  assert.deepEqual(res, [{ source: 'a/b', ok: true }, { source: 'c/d', ok: true }]);
 });
 
 test('buildUpdateCommand names every skill and stays global and non-interactive', () => {

@@ -570,26 +570,66 @@ test('parseFlags refuses an unknown flag', () => {
 });
 
 test('manifestOutcome writes when nothing shrank', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b'] }];
   const groups = [{ source: 'o/r', skills: ['a', 'b'] }];
-  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 0 }).write, true);
+  assert.equal(manifestOutcome({ before, groups, prunedNames: [] }).write, true);
 });
 
-test('manifestOutcome writes a shrink that the prune explains', () => {
+test('manifestOutcome writes a shrink that the prune fully explains', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b'] }];
   const groups = [{ source: 'o/r', skills: ['a'] }];
-  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 1 }).write, true);
+  assert.equal(manifestOutcome({ before, groups, prunedNames: ['b'] }).write, true);
 });
 
-test('manifestOutcome refuses a shrink larger than the prune', () => {
+test('manifestOutcome refuses a shrink larger than the prune, naming the survivors', () => {
   // The real hazard: a machine simply missing skills the shared manifest lists
   // would otherwise delete them for every other machine.
-  const out = manifestOutcome({ groups: [{ source: 'o/r', skills: ['a'] }], before: 5, prunedCount: 1 });
+  const before = [{ source: 'o/r', skills: ['a', 'b', 'c'] }];
+  const groups = [{ source: 'o/r', skills: ['a'] }];
+  const out = manifestOutcome({ before, groups, prunedNames: ['b'] });
   assert.equal(out.write, false);
   assert.match(out.reason, /--allow-shrink/);
+  assert.match(out.reason, /\bc\b/, 'the surviving entry the prune does not explain must be named');
 });
 
 test('manifestOutcome writes growth', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b'] }];
   const groups = [{ source: 'o/r', skills: ['a', 'b', 'c'] }];
-  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 0 }).write, true);
+  assert.equal(manifestOutcome({ before, groups, prunedNames: [] }).write, true);
+});
+
+// The bug the count-based guard could not catch: an adopt (+1) exactly cancels
+// out a miss (-1) in the aggregate count, so `before === after` and the old
+// guard wrote — silently dropping the missing skill from the shared manifest
+// on the next push. A set difference catches this even though the totals
+// match; a plain subtraction cannot.
+test('an adopt that exactly masks a miss is refused, not written', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b', 'ghost'] }]; // this machine never had 'ghost'
+  const groups = [{ source: 'o/r', skills: ['a', 'b', 'wizard'] }]; // adopted 'wizard' instead
+  const out = manifestOutcome({ before, groups, prunedNames: [] });
+  assert.equal(out.write, false, 'counts match (3 == 3) but the set differs — must still refuse');
+  assert.match(out.reason, /ghost/, 'the missing skill must be named, not just counted');
+});
+
+test('a pure prune of exactly the pruned names writes', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b', 'c'] }];
+  const groups = [{ source: 'o/r', skills: ['a'] }];
+  const out = manifestOutcome({ before, groups, prunedNames: ['b', 'c'] });
+  assert.equal(out.write, true);
+});
+
+test('an adopt with no misses writes', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b'] }];
+  const groups = [{ source: 'o/r', skills: ['a', 'b', 'wizard'] }];
+  const out = manifestOutcome({ before, groups, prunedNames: [] });
+  assert.equal(out.write, true);
+});
+
+test('manifestOutcome refuses to write an empty manifest even when the shrink is fully explained', () => {
+  const before = [{ source: 'o/r', skills: ['a', 'b'] }];
+  const groups = [];
+  const out = manifestOutcome({ before, groups, prunedNames: ['a', 'b'] });
+  assert.equal(out.write, false);
 });
 
 // --- orchestration ---
@@ -863,7 +903,11 @@ test('a shrink larger than what was pruned leaves a populated manifest alone', a
   assert.equal(written, null, 'a shrink bigger than the prune must never be written');
   const out = chunks.join('');
   assert.match(out, /left alone/);
-  assert.match(out, /would drop 5 entr\(ies\) but only 1 were pruned/);
+  // 'stale' was pruned, but none of a-f were ever installed on this machine —
+  // pruning 'stale' explains none of their absence, so all six are named as
+  // unaccounted-for survivors, not folded into a single opaque count.
+  assert.match(out, /would drop 6 entr\(ies\)/);
+  assert.match(out, /\ba\b.*\bb\b.*\bc\b.*\bd\b.*\be\b.*\bf\b/);
 });
 
 test('a failing remover exits 1', async () => {
