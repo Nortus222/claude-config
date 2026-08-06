@@ -110,7 +110,7 @@ file: one blobless, no-checkout shallow clone per source repo, then
 `git rev-parse HEAD:<folder>`.
 
 ```bash
-nortuscc update --check   # report only; exits non-zero if anything is stale
+nortuscc update --check   # report only; exits non-zero only if a skill is gone or unreachable
 nortuscc update           # report, confirm, back up, then update
 ```
 
@@ -149,7 +149,10 @@ act on the group under the cursor — the groups are the actions, so `a` means
 
 `--add wizard,wait-what` pre-ticks those rows; with `--yes` it acts on them
 without asking. There is deliberately no flag that adopts a whole repo.
-`--prune` pre-ticks every skill deleted upstream.
+`--prune` pre-ticks every skill deleted upstream. A name in `--add` that
+matches nothing available — already installed, misspelled, or from a source
+not offered — is reported and forces a non-zero exit, so a scripted adoption
+that silently adopted nothing never looks like success.
 
 Adopting or pruning rewrites `skills-manifest.txt` from what is installed
 afterwards, so the manifest and the machine cannot disagree about a change

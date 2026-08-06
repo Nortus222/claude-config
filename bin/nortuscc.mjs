@@ -11,7 +11,7 @@ Commands:
   apply [--skills] [--take-repo]    repo -> machine
                                     --take-repo resolves a conflict by discarding the local version
   update [--check] [--yes]          adopt, refresh and prune skills, interactively
-        [--add N,N] [--prune]       --check reports only; --add and --prune pre-tick rows
+         [--add N,N] [--prune]      --check reports only; --add and --prune pre-tick rows
   capture [--take-local]            machine -> repo
                                     --take-local resolves a conflict by keeping the local version
   pull                              git pull --ff-only, then apply
