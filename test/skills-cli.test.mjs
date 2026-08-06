@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCommand, installGroups, buildUpdateCommand, runUpdate } from '../src/skills-cli.mjs';
+import {
+  buildCommand,
+  installGroups,
+  buildUpdateCommand,
+  runUpdate,
+  buildRemoveCommand,
+  runRemove,
+} from '../src/skills-cli.mjs';
 
 test('buildCommand targets the right repo with an explicit skill list', () => {
   const { cmd, args } = buildCommand({ source: 'a/b', skills: ['one', 'two'] });
@@ -57,4 +64,23 @@ test('runUpdate in dry-run spawns nothing and reports success', async () => {
 
 test('runUpdate with nothing to update spawns nothing', async () => {
   assert.equal(await runUpdate([], { dryRun: true }), true);
+});
+
+test('buildRemoveCommand names every skill and stays global and non-interactive', () => {
+  const { cmd, args } = buildRemoveCommand(['one', 'two']);
+  assert.equal(cmd, 'npx');
+  assert.deepEqual(args, ['-y', 'skills', 'remove', 'one', 'two', '--global', '--yes']);
+});
+
+test('buildRemoveCommand passes names positionally, like update and unlike add', () => {
+  const { args } = buildRemoveCommand(['one', 'two']);
+  assert.ok(!args.some((a) => a.includes(',')));
+});
+
+test('runRemove in dry-run spawns nothing and reports success', async () => {
+  assert.equal(await runRemove(['one'], { dryRun: true }), true);
+});
+
+test('runRemove with nothing to remove spawns nothing', async () => {
+  assert.equal(await runRemove([], { dryRun: false }), true, 'an empty list must not reach spawn');
 });

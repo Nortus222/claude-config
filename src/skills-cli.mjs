@@ -64,3 +64,24 @@ export async function runUpdate(names, { dryRun = false } = {}) {
   console.log(`\nupdating ${names.length} skill(s)`);
   return runOne(command);
 }
+
+// `remove` takes bare positional names, the same shape as `update` and unlike
+// `add --skill one,two`. --yes suppresses its confirmation prompt; nortuscc has
+// already asked, and has already copied the folders into ~/.claude/backups/.
+export function buildRemoveCommand(names) {
+  return {
+    cmd: 'npx',
+    args: ['-y', 'skills', 'remove', ...names, '--global', '--yes'],
+  };
+}
+
+export async function runRemove(names, { dryRun = false } = {}) {
+  if (names.length === 0) return true;
+  const command = buildRemoveCommand(names);
+  if (dryRun) {
+    console.log(`  ${command.cmd} ${command.args.join(' ')}`);
+    return true;
+  }
+  console.log(`\nremoving ${names.length} skill(s)`);
+  return runOne(command);
+}
