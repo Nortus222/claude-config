@@ -54,7 +54,7 @@ export function buildUpdateCommand(names) {
   };
 }
 
-export async function runUpdate(names, { dryRun = false } = {}) {
+export async function runUpdate(names, { dryRun = false, run = runOne } = {}) {
   if (names.length === 0) return true;
   const command = buildUpdateCommand(names);
   if (dryRun) {
@@ -62,7 +62,7 @@ export async function runUpdate(names, { dryRun = false } = {}) {
     return true;
   }
   console.log(`\nupdating ${names.length} skill(s)`);
-  return runOne(command);
+  return run(command);
 }
 
 // `remove` takes bare positional names, the same shape as `update` and unlike
@@ -75,7 +75,7 @@ export function buildRemoveCommand(names) {
   };
 }
 
-export async function runRemove(names, { dryRun = false } = {}) {
+export async function runRemove(names, { dryRun = false, run = runOne } = {}) {
   if (names.length === 0) return true;
   const command = buildRemoveCommand(names);
   if (dryRun) {
@@ -83,5 +83,5 @@ export async function runRemove(names, { dryRun = false } = {}) {
     return true;
   }
   console.log(`\nremoving ${names.length} skill(s)`);
-  return runOne(command);
+  return run(command);
 }

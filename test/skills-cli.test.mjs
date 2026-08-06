@@ -58,12 +58,22 @@ test('buildUpdateCommand handles a single skill', () => {
   assert.deepEqual(args, ['-y', 'skills', 'update', 'solo', '--global', '--yes']);
 });
 
-test('runUpdate in dry-run spawns nothing and reports success', async () => {
-  assert.equal(await runUpdate(['one'], { dryRun: true }), true);
+test('runUpdate in dry-run never reaches the runner, not merely leaves it unobserved', async () => {
+  const run = () => { throw new Error('run must not be called during dry-run'); };
+  assert.equal(await runUpdate(['one'], { dryRun: true, run }), true);
 });
 
-test('runUpdate with nothing to update spawns nothing', async () => {
-  assert.equal(await runUpdate([], { dryRun: true }), true);
+test('runUpdate with nothing to update never reaches the runner', async () => {
+  const run = () => { throw new Error('run must not be called for an empty list'); };
+  assert.equal(await runUpdate([], { dryRun: false, run }), true, 'an empty list must not reach the runner');
+});
+
+test('runUpdate outside dry-run calls the runner exactly once with the built command', async () => {
+  const calls = [];
+  const run = async (command) => { calls.push(command); return true; };
+  assert.equal(await runUpdate(['one'], { run }), true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], buildUpdateCommand(['one']));
 });
 
 test('buildRemoveCommand names every skill and stays global and non-interactive', () => {
@@ -77,10 +87,20 @@ test('buildRemoveCommand passes names positionally, like update and unlike add',
   assert.ok(!args.some((a) => a.includes(',')));
 });
 
-test('runRemove in dry-run spawns nothing and reports success', async () => {
-  assert.equal(await runRemove(['one'], { dryRun: true }), true);
+test('runRemove in dry-run never reaches the runner, not merely leaves it unobserved', async () => {
+  const run = () => { throw new Error('run must not be called during dry-run'); };
+  assert.equal(await runRemove(['one'], { dryRun: true, run }), true);
 });
 
-test('runRemove with nothing to remove spawns nothing', async () => {
-  assert.equal(await runRemove([], { dryRun: false }), true, 'an empty list must not reach spawn');
+test('runRemove with nothing to remove never reaches the runner', async () => {
+  const run = () => { throw new Error('run must not be called for an empty list'); };
+  assert.equal(await runRemove([], { dryRun: false, run }), true, 'an empty list must not reach the runner');
+});
+
+test('runRemove outside dry-run calls the runner exactly once with the built command', async () => {
+  const calls = [];
+  const run = async (command) => { calls.push(command); return true; };
+  assert.equal(await runRemove(['one'], { run }), true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], buildRemoveCommand(['one']));
 });
