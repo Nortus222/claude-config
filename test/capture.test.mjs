@@ -124,7 +124,14 @@ test('the manifest path resolves inside the fixture repo, never the real one', a
 const skillLockPath = join(home, '.skill-lock.json');
 const { manifestPath, parseManifest } = await import('../src/skills.mjs');
 
-test('capture regenerates the manifest from the skill lock, grouped by source, excluding a local skill', async () => {
+// The manifest is regenerated from skills that are BOTH recorded in the lock
+// and present on disk, so these fixtures have to create the folders too — a
+// lock entry alone is no longer enough to reach the manifest.
+const installSkill = (name) => mkdirSync(join(home, 'agents-skills', name), { recursive: true });
+
+test('capture regenerates the manifest from the installed skills, grouped by source, excluding a local skill', async () => {
+  for (const name of ['alpha', 'beta', 'gamma', 'homegrown']) installSkill(name);
+
   writeFileSync(
     skillLockPath,
     JSON.stringify({
@@ -152,11 +159,12 @@ test('capture regenerates the manifest from the skill lock, grouped by source, e
   assert.ok(capturedPaths().includes('skills-manifest.txt'), 'a manifest write must be staged for commit');
 });
 
-test('capture refuses to shrink the manifest when the lock has fewer skills than the manifest already has', async () => {
+test('capture refuses to shrink the manifest when fewer skills are installed than the manifest already lists', async () => {
   const before = readFileSync(manifestPath(), 'utf8');
 
-  // Drop 'beta': the regenerated manifest would now have fewer skills than
-  // the 3 already written above.
+  // Drop 'beta' from the lock. Its folder still exists, but a folder with no
+  // recorded source could never be installed from anywhere, so it drops out of
+  // the manifest too — leaving fewer skills than the 3 written above.
   writeFileSync(
     skillLockPath,
     JSON.stringify({
@@ -184,6 +192,66 @@ test('--allow-shrink permits writing a smaller manifest', async () => {
     { source: 'foo/bar', skills: ['alpha'] },
   ]);
   assert.ok(capturedPaths().includes('skills-manifest.txt'));
+});
+
+// The lock outlives the folder. `npx skills remove` — or a hand-deleted
+// directory — leaves the lock entry behind, so a manifest regenerated from the
+// lock alone re-adds a skill that is not installed anywhere. On the owner's
+// real machine that was two entries (`review`, `ubiquitous-language`), and it
+// meant `capture` — and therefore `push` — would quietly hand every other
+// machine two skills to install that this one had deliberately removed.
+test('capture excludes a lock entry whose skill folder no longer exists', async () => {
+  installSkill('alpha');
+  installSkill('gamma');
+
+  writeFileSync(
+    skillLockPath,
+    JSON.stringify({
+      skills: {
+        alpha: { source: 'foo/bar' },
+        gamma: { source: 'baz/qux' },
+        // Recorded in the lock, but its folder is gone from ~/.agents/skills.
+        ghost: { source: 'foo/bar' },
+      },
+    }),
+    'utf8',
+  );
+
+  const code = await captureRun([]);
+  assert.equal(code, 0);
+
+  const written = readFileSync(manifestPath(), 'utf8');
+  assert.ok(!written.includes('ghost'), 'a lock entry with no folder on disk must never reach the manifest');
+  assert.deepEqual(parseManifest(written), [
+    { source: 'baz/qux', skills: ['gamma'] },
+    { source: 'foo/bar', skills: ['alpha'] },
+  ]);
+});
+
+test('a ghost lock entry cannot mask a genuine shrink', async () => {
+  // The shrink guard counts entries, so a ghost inflating the count is not
+  // merely cosmetic: it can hide the fact that this machine is missing a skill
+  // the shared manifest lists, which is exactly what the guard exists to catch.
+  const before = readFileSync(manifestPath(), 'utf8');
+
+  writeFileSync(
+    skillLockPath,
+    JSON.stringify({
+      skills: {
+        alpha: { source: 'foo/bar' },
+        // gamma's folder still exists but its lock entry is gone, so it drops
+        // out — a real shrink from 2 to 1. Two ghosts would restore the count
+        // to 3 under the old behaviour and let the write through.
+        ghost1: { source: 'foo/bar' },
+        ghost2: { source: 'foo/bar' },
+      },
+    }),
+    'utf8',
+  );
+
+  const code = await captureRun([]);
+  assert.equal(code, 0);
+  assert.equal(readFileSync(manifestPath(), 'utf8'), before, 'ghosts must not pad the count past the shrink guard');
 });
 
 // M7: captureCopy has always backed the repo file up before overwriting it,
