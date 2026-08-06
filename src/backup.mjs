@@ -35,3 +35,14 @@ export function backupOnce(absPath, relative) {
   }
   return target;
 }
+
+// Copy rather than move. backupOnce moves its target aside, which is right
+// when something else is about to take that path — but a skill folder has to
+// stay exactly where it is for the updater to overwrite it in place, so
+// preserving it here must not disturb the original.
+export function preserveCopy(absPath, relative) {
+  if (!existsSync(absPath)) return null;
+  const target = backupPath(relative);
+  cpSync(absPath, target, { recursive: true });
+  return target;
+}

@@ -4,7 +4,7 @@ import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
-import { groupsFromLock, emitManifest, readSkillLock, manifestPath, readSkillsManifest } from '../skills.mjs';
+import { installedGroups, emitManifest, readSkillLock, manifestPath, readSkillsManifest, installedSkillNames } from '../skills.mjs';
 
 let lastCaptured = [];
 
@@ -69,7 +69,14 @@ export async function run(args = [], entries = SYNC) {
   // Regenerate the skills manifest from what is actually installed. Capture is
   // the only command that writes it, so an install done the normal way is shared
   // by running capture afterwards.
-  const groups = groupsFromLock(readSkillLock());
+  //
+  // Gated on what is on disk, not on the lock alone: the lock outlives the
+  // folder, so a skill removed by `npx skills remove` — or by `update --prune`
+  // — leaves its entry behind. Regenerating from the lock would re-add it,
+  // handing every other machine a skill this one deliberately removed. It also
+  // keeps the shrink guard below honest: a lingering entry would pad the count
+  // and let a genuine shrink through unnoticed.
+  const groups = installedGroups(readSkillLock(), installedSkillNames());
   const manifestBefore = readSkillsManifest();
   const beforeCount = manifestBefore.reduce((n, g) => n + g.skills.length, 0);
   const afterCount = groups.reduce((n, g) => n + g.skills.length, 0);

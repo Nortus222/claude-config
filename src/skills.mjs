@@ -139,6 +139,17 @@ export function installedSkillNames() {
     .sort();
 }
 
+// groupsFromLock answers "what does the lock say was installed"; this answers
+// "what is installed". They differ whenever a skill folder is removed without
+// its lock entry, which is exactly the state a prune leaves behind — so a
+// manifest regenerated from the lock alone would restore what a prune removed.
+export function installedGroups(lock, installedNames) {
+  const present = new Set(installedNames);
+  return groupsFromLock(lock)
+    .map((group) => ({ source: group.source, skills: group.skills.filter((n) => present.has(n)) }))
+    .filter((group) => group.skills.length > 0);
+}
+
 export function manifestPath() {
   return MANIFEST();
 }

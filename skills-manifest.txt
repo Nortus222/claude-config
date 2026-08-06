@@ -9,7 +9,6 @@ explain
 ask-matt
 code-review
 codebase-design
-design-an-interface
 diagnosing-bugs
 domain-modeling
 grill-me
@@ -24,12 +23,13 @@ resolving-merge-conflicts
 setup-matt-pocock-skills
 tdd
 teach
-to-issues
 to-spec
 to-tickets
 triage
+wait-what
 wayfinder
-writing-great-skills
+wizard
+writing-for-agents
 
 [vercel-labs/skills]
 find-skills
