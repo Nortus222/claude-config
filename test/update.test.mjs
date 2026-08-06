@@ -13,7 +13,15 @@ process.env.NORTUSCC_CLAUDE_DIR = claude;
 // fixture instead of silently reading the real ~/.agents/skills.
 process.env.NORTUSCC_AGENTS_DIR = join(claude, '.agents', 'skills');
 
-const { run, exitCode, reportLines } = await import('../src/commands/update.mjs');
+// Task 8 adds manifest handling to update.mjs (readSkillsManifest/manifestPath
+// are not dependency-injected — only writeManifest is). Without this, `before`
+// in manifestOutcome would be computed from this repo's own real
+// skills-manifest.txt, the same real-file leak test/status.test.mjs's
+// fixtureRepo pattern exists to prevent.
+const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-update-repo-'));
+process.env.NORTUSCC_REPO_DIR = fixtureRepo;
+
+const { run, exitCode, reportLines, parseFlags, manifestOutcome } = await import('../src/commands/update.mjs');
 const { backupDir } = await import('../src/backup.mjs');
 
 const URL = 'https://github.com/o/r.git';
@@ -36,32 +44,37 @@ function baseDeps(overrides = {}) {
 
 test('exitCode is 0 when everything is current', () => {
   const plan = { current: ['a'], outdated: [], gone: [], unknown: [], local: [] };
-  assert.equal(exitCode({ plan, updateFailed: false }), 0);
+  assert.equal(exitCode({ plan, failed: false }), 0);
 });
 
 test('exitCode is 1 for a gone skill even with nothing outdated', () => {
   const plan = { current: [], outdated: [], gone: [{ name: 'a' }], unknown: [], local: [] };
-  assert.equal(exitCode({ plan, updateFailed: false }), 1);
+  assert.equal(exitCode({ plan, failed: false }), 1);
 });
 
 test('exitCode is 1 for an unreachable source', () => {
   const plan = { current: [], outdated: [], gone: [], unknown: [{ name: 'a' }], local: [] };
-  assert.equal(exitCode({ plan, updateFailed: false }), 1);
+  assert.equal(exitCode({ plan, failed: false }), 1);
 });
 
 test('exitCode is 1 when the updater failed', () => {
   const plan = { current: [], outdated: [{ name: 'a' }], gone: [], unknown: [], local: [] };
-  assert.equal(exitCode({ plan, updateFailed: true }), 1);
+  assert.equal(exitCode({ plan, failed: true }), 1);
 });
 
 test('exitCode ignores local skills, which are informational', () => {
   const plan = { current: [], outdated: [], gone: [], unknown: [], local: ['mine'] };
-  assert.equal(exitCode({ plan, updateFailed: false }), 0);
+  assert.equal(exitCode({ plan, failed: false }), 0);
 });
 
 test('exitCode is 0 for an outdated skill left alone — declining is not a failure', () => {
   const plan = { current: [], outdated: [{ name: 'a' }], gone: [], unknown: [], local: [] };
-  assert.equal(exitCode({ plan, updateFailed: false }), 0);
+  assert.equal(exitCode({ plan, failed: false }), 0);
+});
+
+test('exitCode does not count a gone skill named in prunedNames toward exit 1', () => {
+  const plan = { current: [], outdated: [], gone: [{ name: 'a' }], unknown: [], local: [] };
+  assert.equal(exitCode({ plan, failed: false, prunedNames: ['a'] }), 0);
 });
 
 test('reportLines shows both SHAs for an outdated skill', () => {
@@ -79,14 +92,18 @@ test('--check and --yes together are refused', async () => {
   assert.equal(await run(['--check', '--yes'], baseDeps()), 2);
 });
 
-test('--check reports outdated skills, exits 1, and updates nothing', async () => {
+// Outdated alone is a suggestion, not a --check failure — only `gone` and
+// `unknown` are unresolved problems `exitCode` treats as exit 1. That is what
+// lets `--check` stay quiet on a machine that is merely behind, the same way
+// declining an update was never a failure either.
+test('--check reports outdated skills and updates nothing', async () => {
   let updated = false;
   let preserved = false;
   const code = await run(['--check'], baseDeps({
     runUpdate: async () => { updated = true; return true; },
     preserve: () => { preserved = true; return '/backup/path'; },
   }));
-  assert.equal(code, 1);
+  assert.equal(code, 0, 'outdated alone does not fail --check');
   assert.equal(updated, false, '--check must never write');
   assert.equal(preserved, false, '--check must never take a backup either');
 });
@@ -111,6 +128,7 @@ test('a confirmed run backs up and updates only the outdated skills', async () =
   const preserved = [];
   const sent = [];
   const deps = baseDeps({
+    select: async () => ['update:stale'],
     preserve: (abs, rel) => { preserved.push(rel); return '/b'; },
     runUpdate: async (names) => { sent.push(...names); return true; },
   });
@@ -123,21 +141,12 @@ test('a confirmed run backs up and updates only the outdated skills', async () =
 test('backups are taken before the updater runs', async () => {
   const order = [];
   const deps = baseDeps({
+    select: async () => ['update:stale'],
     preserve: () => { order.push('backup'); return '/b'; },
     runUpdate: async () => { order.push('update'); return true; },
   });
   await run([], deps);
   assert.deepEqual(order, ['backup', 'update']);
-});
-
-test('declining changes nothing and exits 0', async () => {
-  let updated = false;
-  const deps = baseDeps({
-    confirm: async () => false,
-    runUpdate: async () => { updated = true; return true; },
-  });
-  assert.equal(await run([], deps), 0);
-  assert.equal(updated, false);
 });
 
 test('--yes skips the prompt entirely', async () => {
@@ -147,14 +156,9 @@ test('--yes skips the prompt entirely', async () => {
   assert.equal(asked, false);
 });
 
-test('no TTY without --yes refuses with exit 2 rather than hanging', async () => {
-  let updated = false;
-  const deps = baseDeps({
-    confirm: async () => null,
-    runUpdate: async () => { updated = true; return true; },
-  });
-  assert.equal(await run([], deps), 2);
-  assert.equal(updated, false);
+test('no TTY and no --yes refuses with exit 2 rather than hanging', async () => {
+  const code = await run([], AVAILABLE_DEPS({ select: async () => null, isTTY: false }));
+  assert.equal(code, 2);
 });
 
 test('an unreachable source exits 1 and updates nothing', async () => {
@@ -183,9 +187,9 @@ test('a skill whose folder vanished upstream is never sent to the updater', asyn
   assert.deepEqual(sent, [], 'a gone skill has nowhere to update from');
 });
 
-test('declining still exits 1 when a skill has gone missing upstream', async () => {
+test('an empty picker selection still exits 1 when a skill has gone missing upstream', async () => {
   const deps = baseDeps({
-    confirm: async () => false,
+    select: async () => [],
     inspectSource: async () => ({ trees: new Map([['s/stale', null], ['s/fresh', 'same']]), skillPaths: [] }),
   });
   assert.equal(await run([], deps), 1);
@@ -204,6 +208,7 @@ test('the closing report names the hash the lock actually moved to', async () =>
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
   try {
     await run([], baseDeps({
+      select: async () => ['update:stale'],
       readLock: () => ({ skills: {
         stale: entry('s/stale', ++calls === 1 ? 'old' : 'newhash1234'),
         fresh: entry('s/fresh', 'same'),
@@ -220,7 +225,7 @@ test('an unmoved lock (no writer touched it) still reports unchanged', async () 
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
   try {
-    await run([], baseDeps());
+    await run([], baseDeps({ select: async () => ['update:stale'] }));
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
   assert.match(out, /unchanged/);
@@ -340,25 +345,27 @@ test('gone with nothing outdated prints the capture pointer and --check exits 1'
   assert.doesNotMatch(out, /Run: nortuscc update/, 'nothing is outdated, so that suggestion must not appear');
 });
 
-test('gone with nothing outdated still prints the capture pointer outside --check, without prompting', async () => {
+// A `gone` skill still gets a row in the picker (so it can be removed), even
+// when nothing is outdated. Declining that row (an empty selection) leaves it
+// unresolved, so the capture pointer must still print and the exit code must
+// still be 1.
+test('gone with nothing outdated still prints the capture pointer when nothing is picked', async () => {
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
-  let asked = false;
   let code;
   try {
     code = await run([], {
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
       installed: () => ['vanished', 'fresh'],
       inspectSource: async () => ({ trees: new Map([['s/vanished', null], ['s/fresh', 'same']]), skillPaths: [] }),
-      confirm: async () => { asked = true; return true; },
+      select: async () => [],
       preserve: () => '/b',
       runUpdate: async () => true,
     });
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
   assert.equal(code, 1);
-  assert.equal(asked, false, 'nothing is outdated, so run must not prompt at all');
   assert.match(out, /nortuscc capture/);
 });
 
@@ -442,7 +449,7 @@ test('a bare positional argument is refused too', async () => {
 
 test('the known flags are still accepted together with nothing else', async () => {
   assert.equal(await run(['--yes'], baseDeps()), 0);
-  assert.equal(await run([], baseDeps()), 0);
+  assert.equal(await run([], baseDeps({ select: async () => [] })), 0);
 });
 
 // The gone footer used to read "re-add them upstream" and sat directly below
@@ -521,4 +528,220 @@ test('a long skill name keeps the outdated detail rows aligned', async () => {
     detail[1].indexOf('outdated'),
     'the state column must line up regardless of skill-name length',
   );
+});
+
+// --- Task 8: parseFlags and manifestOutcome ---
+
+test('parseFlags reads --add as a comma list', () => {
+  assert.deepEqual(parseFlags(['--add', 'a,b']).add, ['a', 'b']);
+});
+
+test('parseFlags accepts --add=a,b', () => {
+  assert.deepEqual(parseFlags(['--add=a,b']).add, ['a', 'b']);
+});
+
+test('parseFlags rejects --add with no names', () => {
+  // There is deliberately no way to adopt a whole repo from a flag.
+  assert.match(parseFlags(['--add']).error, /--add/);
+});
+
+test('parseFlags reads --prune as a boolean', () => {
+  assert.equal(parseFlags(['--prune']).prune, true);
+  assert.equal(parseFlags([]).prune, false);
+});
+
+test('parseFlags refuses --check with an action flag', () => {
+  assert.match(parseFlags(['--check', '--prune']).error, /--check/);
+  assert.match(parseFlags(['--check', '--add', 'x']).error, /--check/);
+  assert.match(parseFlags(['--check', '--yes']).error, /--check/);
+});
+
+test('parseFlags refuses an unknown flag', () => {
+  assert.match(parseFlags(['--chek']).error, /--chek/);
+});
+
+test('manifestOutcome writes when nothing shrank', () => {
+  const groups = [{ source: 'o/r', skills: ['a', 'b'] }];
+  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 0 }).write, true);
+});
+
+test('manifestOutcome writes a shrink that the prune explains', () => {
+  const groups = [{ source: 'o/r', skills: ['a'] }];
+  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 1 }).write, true);
+});
+
+test('manifestOutcome refuses a shrink larger than the prune', () => {
+  // The real hazard: a machine simply missing skills the shared manifest lists
+  // would otherwise delete them for every other machine.
+  const out = manifestOutcome({ groups: [{ source: 'o/r', skills: ['a'] }], before: 5, prunedCount: 1 });
+  assert.equal(out.write, false);
+  assert.match(out.reason, /--allow-shrink/);
+});
+
+test('manifestOutcome writes growth', () => {
+  const groups = [{ source: 'o/r', skills: ['a', 'b', 'c'] }];
+  assert.equal(manifestOutcome({ groups, before: 2, prunedCount: 0 }).write, true);
+});
+
+// --- orchestration ---
+
+const AVAILABLE_DEPS = (overrides = {}) => ({
+  readLock: () => ({ skills: { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') } }),
+  installed: () => ['fresh', 'stale'],
+  inspectSource: async () => ({
+    trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]),
+    skillPaths: ['s/stale/SKILL.md', 's/fresh/SKILL.md', 's/wizard/SKILL.md'],
+  }),
+  select: async () => [],
+  confirm: async () => true,
+  preserve: () => '/b',
+  runUpdate: async () => true,
+  runRemove: async () => true,
+  installGroups: async () => [],
+  writeManifest: () => {},
+  ...overrides,
+});
+
+test('the report lists an upstream skill that is not installed as available', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], AVAILABLE_DEPS());
+  } finally { process.stdout.write = orig; }
+  assert.match(chunks.join(''), /available.*wizard/s);
+});
+
+test('available skills never affect the exit code', async () => {
+  // An active source repo almost always has something new; counting it would
+  // leave --check permanently red and useless as a gate.
+  const code = await run(['--check'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', 'old'], ['s/fresh', 'same']]),
+      skillPaths: ['s/stale/SKILL.md', 's/fresh/SKILL.md', 's/wizard/SKILL.md'],
+    }),
+  }));
+  assert.equal(code, 0, 'nothing outdated, gone or unknown — available alone must not fail');
+});
+
+test('the picker drives what gets executed', async () => {
+  const sent = [];
+  await run([], AVAILABLE_DEPS({
+    select: async () => ['update:stale'],
+    runUpdate: async (names) => { sent.push(...names); return true; },
+  }));
+  assert.deepEqual(sent, ['stale']);
+});
+
+test('a cancelled picker changes nothing and exits 0', async () => {
+  let touched = false;
+  const mark = async () => { touched = true; return true; };
+  // isTTY: true distinguishes this from "no terminal at all" (tested below) —
+  // a real select() only ever returns null with no isTTY reason attached, so
+  // run() has to take the caller's word for which case it is.
+  const code = await run([], AVAILABLE_DEPS({
+    select: async () => null,
+    isTTY: true,
+    runUpdate: mark, runRemove: mark, installGroups: mark,
+  }));
+  assert.equal(code, 0);
+  assert.equal(touched, false);
+});
+
+test('an empty selection is a no-op that exits 0', async () => {
+  let touched = false;
+  const code = await run([], AVAILABLE_DEPS({
+    select: async () => [],
+    runUpdate: async () => { touched = true; return true; },
+  }));
+  assert.equal(code, 0);
+  assert.equal(touched, false);
+});
+
+test('--yes skips the picker and updates everything outdated', async () => {
+  let asked = false;
+  const sent = [];
+  await run(['--yes'], AVAILABLE_DEPS({
+    select: async () => { asked = true; return []; },
+    runUpdate: async (names) => { sent.push(...names); return true; },
+  }));
+  assert.equal(asked, false, '--yes must not open a picker');
+  assert.deepEqual(sent, ['stale']);
+});
+
+test('--yes --add adopts exactly the named skills', async () => {
+  const added = [];
+  await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+    installGroups: async (groups) => { added.push(...groups.flatMap((g) => g.skills)); return []; },
+  }));
+  assert.deepEqual(added, ['wizard']);
+});
+
+test('--check refuses an action flag', async () => {
+  assert.equal(await run(['--check', '--prune'], AVAILABLE_DEPS()), 2);
+});
+
+test('removals are backed up before anything is removed', async () => {
+  const order = [];
+  await run(['--yes', '--prune'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+      skillPaths: ['s/fresh/SKILL.md'],
+    }),
+    preserve: () => { order.push('backup'); return '/b'; },
+    runRemove: async () => { order.push('remove'); return true; },
+  }));
+  assert.deepEqual(order, ['backup', 'remove'], 'prune is the first thing that deletes a skill outright');
+});
+
+test('a pruned gone skill no longer forces exit 1', async () => {
+  const code = await run(['--yes', '--prune'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+      skillPaths: ['s/fresh/SKILL.md'],
+    }),
+  }));
+  assert.equal(code, 0, 'a gone skill that was dealt with is not still a problem');
+});
+
+test('an unpruned gone skill still forces exit 1', async () => {
+  const code = await run(['--yes'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+      skillPaths: ['s/fresh/SKILL.md'],
+    }),
+  }));
+  assert.equal(code, 1);
+});
+
+test('the manifest is written after adopting', async () => {
+  let written = null;
+  await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+    writeManifest: (text) => { written = text; },
+  }));
+  assert.ok(written, 'adopting a skill must record it in the manifest');
+});
+
+test('the manifest is left alone when nothing was adopted or pruned', async () => {
+  let written = null;
+  await run(['--yes'], AVAILABLE_DEPS({ writeManifest: (t) => { written = t; } }));
+  assert.equal(written, null, 'a plain refresh changes no manifest entry');
+});
+
+test('a failing remover exits 1', async () => {
+  const code = await run(['--yes', '--prune'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+      skillPaths: ['s/fresh/SKILL.md'],
+    }),
+    runRemove: async () => false,
+  }));
+  assert.equal(code, 1);
+});
+
+test('a failing installer exits 1', async () => {
+  const code = await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+    installGroups: async () => [{ source: 'o/r', ok: false }],
+  }));
+  assert.equal(code, 1);
 });

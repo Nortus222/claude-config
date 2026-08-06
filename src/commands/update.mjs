@@ -1,27 +1,79 @@
 import { join } from 'node:path';
-import { planUpdates, updatableSkills, sourcesOf } from '../skill-updates.mjs';
+import { writeFileSync } from 'node:fs';
+import { planUpdates, updatableSkills, sourcesOf, upstreamSkills, availableSkills } from '../skill-updates.mjs';
 import { inspectSource as realInspectSource } from '../git-trees.mjs';
-import { confirm as realConfirm } from '../prompt.mjs';
+import { select as realSelect } from '../select.mjs';
+import { choices, actionsFrom, seedKeys } from '../skill-actions.mjs';
 import { preserveCopy, backupDir } from '../backup.mjs';
-import { runUpdate as realRunUpdate } from '../skills-cli.mjs';
-import { readSkillLock, installedSkillNames } from '../skills.mjs';
+import { runUpdate as realRunUpdate, runRemove as realRunRemove, installGroups as realInstallGroups } from '../skills-cli.mjs';
+import { readSkillLock, installedSkillNames, installedGroups, emitManifest, manifestPath, readSkillsManifest } from '../skills.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
 import { formatRow, section, labelWidth } from '../report.mjs';
 
-const FLAGS = new Set(['--check', '--yes']);
-
 const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
 
-// `local` is informational — a hand-authored skill is not a problem to fix.
-// `gone` and `unknown` both need a decision, so they exit non-zero the way
-// `status` does when anything needs attention.
-//
-// Declining is deliberately not an input here: a declined update is not a
-// failure, so it returns whatever the plan alone says. That still leaves a
-// `gone` skill exiting 1 even when the user said no to updating.
-export function exitCode({ plan, updateFailed }) {
-  if (updateFailed) return 1;
-  if (plan.gone.length > 0 || plan.unknown.length > 0) return 1;
+const FLAGS = new Set(['--check', '--yes', '--prune']);
+
+const NEEDS_NAMES = '--add needs a comma-separated list of skill names';
+
+export function parseFlags(args) {
+  const out = { check: false, yes: false, prune: false, add: [], error: null };
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+
+    if (arg === '--check') { out.check = true; continue; }
+    if (arg === '--yes') { out.yes = true; continue; }
+    if (arg === '--prune') { out.prune = true; continue; }
+
+    // No bare --add: adopting a whole repo is exactly what a curated skill set
+    // is not, so the names have to be said out loud. Both spellings funnel
+    // through one place so neither can grow its own rule.
+    let names = null;
+    if (arg.startsWith('--add=')) {
+      names = arg.slice('--add='.length);
+    } else if (arg === '--add') {
+      const next = args[i + 1];
+      // A following flag is not a name list — `--add --prune` is a missing
+      // argument, not an adoption of a skill called "--prune".
+      if (next && !next.startsWith('-')) { names = next; i += 1; }
+    } else if (!FLAGS.has(arg)) {
+      out.error = `unknown option(s) for update: ${arg}`;
+      return out;
+    } else {
+      continue;
+    }
+
+    out.add = (names ?? '').split(',').filter(Boolean);
+    if (out.add.length === 0) { out.error = NEEDS_NAMES; return out; }
+  }
+
+  if (out.check && (out.yes || out.prune || out.add.length)) {
+    out.error = '--check is mutually exclusive with --yes, --add and --prune (it reports only)';
+  }
+  return out;
+}
+
+// A shrink of exactly what was pruned is the prune working. Anything larger is
+// this machine missing skills the shared manifest lists, and writing it would
+// delete them for every other machine.
+export function manifestOutcome({ groups, before, prunedCount }) {
+  const after = groups.reduce((n, g) => n + g.skills.length, 0);
+  const shrink = before - after;
+  if (shrink > prunedCount) {
+    return {
+      write: false,
+      reason: `would drop ${shrink} entr(ies) but only ${prunedCount} were pruned; run 'nortuscc capture --allow-shrink' if that is intended`,
+    };
+  }
+  return { write: true, reason: `${after} skill(s)` };
+}
+
+export function exitCode({ plan, failed, prunedNames = [] }) {
+  if (failed) return 1;
+  const pruned = new Set(prunedNames);
+  const goneLeft = plan.gone.filter((g) => !pruned.has(g.name));
+  if (goneLeft.length > 0 || plan.unknown.length > 0) return 1;
   return 0;
 }
 
@@ -42,6 +94,9 @@ export function reportLines(plan) {
   }
   if (plan.local.length) {
     lines.push(formatRow('local', String(plan.local.length), plan.local.join(', ')));
+  }
+  if (plan.available?.length) {
+    lines.push(formatRow('available', String(plan.available.length), plan.available.map((a) => a.name).join(', ')));
   }
   if (!lines.length) lines.push(formatRow('skills', 'none', 'nothing installed to check'));
 
@@ -79,32 +134,21 @@ export function reportLines(plan) {
 export async function run(args = [], deps = {}) {
   const {
     inspectSource = realInspectSource,
-    confirm = realConfirm,
+    select = realSelect,
     runUpdate = realRunUpdate,
+    runRemove = realRunRemove,
+    installGroups = realInstallGroups,
     preserve = preserveCopy,
     readLock = readSkillLock,
     installed = installedSkillNames,
+    writeManifest = (text) => writeFileSync(manifestPath(), text, 'utf8'),
+    isTTY = process.stdin.isTTY,
   } = deps;
 
-  // Unlike apply, which merely ignores what it does not recognise, update's
-  // default action writes. `--chek` is a plausible slip when reaching for the
-  // refused `--check --yes`, and ignoring it would turn a typo into an
-  // unprompted full update. Refuse before reading anything.
-  const unknown = args.filter((a) => !FLAGS.has(a));
-  if (unknown.length) {
-    console.error(`nortuscc: unknown option(s) for update: ${unknown.join(', ')}`);
-    console.error('Usage: nortuscc update [--check] [--yes]');
-    return 2;
-  }
-
-  const check = args.includes('--check');
-  const yes = args.includes('--yes');
-
-  // --check never prompts, so --yes has nothing to skip. Refusing beats
-  // silently ignoring one of them, the same call apply makes on
-  // --take-repo --take-local.
-  if (check && yes) {
-    console.error('nortuscc: --check and --yes are mutually exclusive (--check never prompts)');
+  const flags = parseFlags(args);
+  if (flags.error) {
+    console.error(`nortuscc: ${flags.error}`);
+    console.error('Usage: nortuscc update [--check] [--yes] [--add <names>] [--prune]');
     return 2;
   }
 
@@ -112,95 +156,127 @@ export async function run(args = [], deps = {}) {
   const installedNames = installed();
   const entries = updatableSkills(lock, installedNames);
 
-  // One clone per source, not per skill. A source that fails to clone is left
-  // out of remoteTrees entirely, which is how planUpdates learns to mark just
-  // that source's skills unknown while the others still get a real answer.
+  // One clone per source yields both the tree SHAs and the repo's full skill
+  // list, so discovering what is available costs no extra network.
   const remoteTrees = new Map();
-  for (const { sourceUrl, paths } of sourcesOf(entries)) {
+  const upstreamBySource = new Map();
+  for (const { source, sourceUrl, paths } of sourcesOf(entries)) {
     const found = await inspectSource(sourceUrl, paths);
-    if (found) remoteTrees.set(sourceUrl, found.trees);
+    if (!found) continue;
+    remoteTrees.set(sourceUrl, found.trees);
+    upstreamBySource.set(source, upstreamSkills(found.skillPaths));
   }
 
-  const plan = planUpdates({ lock, installedNames, remoteTrees });
+  const plan = {
+    ...planUpdates({ lock, installedNames, remoteTrees }),
+    available: availableSkills({ upstreamBySource, installedNames }),
+  };
   process.stdout.write('\n' + section('update', reportLines(plan)));
 
-  if (check) {
-    if (plan.outdated.length) {
-      process.stdout.write('\nRun: nortuscc update\n');
-      return 1;
-    }
-    return exitCode({ plan, updateFailed: false });
+  if (flags.check) {
+    if (plan.outdated.length) process.stdout.write('\nRun: nortuscc update\n');
+    return exitCode({ plan, failed: false });
   }
 
-  if (plan.outdated.length === 0) {
-    return exitCode({ plan, updateFailed: false });
+  const seeded = seedKeys(plan, { add: flags.add, prune: flags.prune });
+  const rows = choices(plan, { seeded });
+  if (rows.length === 0) return exitCode({ plan, failed: false });
+
+  let keys;
+  if (flags.yes) {
+    // Scripted: take the defaults the picker would have shown, which is every
+    // outdated skill plus whatever the flags seeded.
+    keys = rows.filter((r) => r.checked).map((r) => r.key);
+  } else {
+    keys = await select(rows, { title: 'space to toggle, enter to confirm', isTTY });
+    if (keys === null) {
+      if (!isTTY) {
+        console.error('\nnortuscc: no terminal to choose on. Re-run with --yes to take the defaults,\n  or with --check to report only.');
+        return 2;
+      }
+      process.stdout.write('nothing selected\n');
+      return exitCode({ plan, failed: false });
+    }
   }
 
-  if (!yes) {
-    const answer = await confirm(`\nUpdate ${plan.outdated.length} skill(s)?`);
-    if (answer === null) {
-      console.error(
-        '\nnortuscc: no terminal to confirm on. Re-run with --yes to update without asking,\n' +
-          '  or with --check to report only.',
-      );
-      return 2;
-    }
-    if (!answer) {
-      process.stdout.write('nothing updated\n');
-      return exitCode({ plan, updateFailed: false });
-    }
+  const actions = actionsFrom(plan, keys);
+  if (!actions.update.length && !actions.remove.length && !actions.add.length) {
+    process.stdout.write('nothing selected\n');
+    return exitCode({ plan, failed: false });
   }
 
-  // Backups before the updater, never after: once it has overwritten a skill
-  // folder in place the previous version is gone, and this copy is the only
-  // way back.
-  const names = plan.outdated.map((o) => o.name);
-  // Print the shared directory, not the last per-skill path preserve() returns
-  // — a multi-skill batch lands together under one backupDir(), and naming
-  // only the last skill's path would read as if the others were never saved.
+  // Back up everything about to be removed or overwritten, before either
+  // happens. --prune deletes outright, so this is the only copy.
+  const touched = [...actions.remove, ...actions.update];
   let anyBackedUp = false;
-  // preserveCopy returns null when existsSync sees nothing at the path —
-  // which includes a broken symlink, since existsSync follows links while
-  // installedSkillNames (deliberately) counts them. That skill still goes to
-  // the updater unmodified — a broken link is exactly what an update should
-  // repair — but it must be named here rather than passing through silently,
-  // since it is the one case where CLAUDE.md's "backup before anything
-  // destructive" rule would otherwise be quietly untrue.
   const unprotected = [];
-  for (const name of names) {
+  for (const name of touched) {
     if (preserve(join(agentsSkillsDir(), name), join('skills', name))) anyBackedUp = true;
     else unprotected.push(name);
   }
   if (anyBackedUp) process.stdout.write(`\nbacked up -> ${backupDir()}\n`);
   if (unprotected.length) {
-    process.stdout.write(`\nno backup exists for: ${unprotected.join(', ')} (nothing was there to copy) — updating without a backup\n`);
+    process.stdout.write(`\nno backup exists for: ${unprotected.join(', ')} (nothing was there to copy)\n`);
   }
 
-  const ok = await runUpdate(names);
+  // Most destructive first, so a failure partway leaves the least to undo.
+  let failed = false;
+  if (actions.remove.length && !(await runRemove(actions.remove))) failed = true;
+  if (actions.update.length && !(await runUpdate(actions.update))) failed = true;
+  if (actions.add.length) {
+    const bySource = new Map();
+    for (const { name, source } of actions.add) {
+      if (!bySource.has(source)) bySource.set(source, []);
+      bySource.get(source).push(name);
+    }
+    const groups = [...bySource.entries()].map(([source, skills]) => ({ source, skills }));
+    const results = await installGroups(groups);
+    if (results.some((r) => !r.ok)) failed = true;
+  }
 
-  // Re-read the lock rather than assuming the update did what was asked, so
-  // the closing report describes what was observed. A skill only counts as
-  // moved when both the recorded and re-read hashes are known — an entry
-  // with `from: null` (no hash was ever recorded) or one the updater's lock
-  // no longer mentions must not read as "unknown -> unknown".
+  // The manifest is a statement about the machine, so it is rebuilt from the
+  // machine — re-reading both the lock and the directory after the executors
+  // ran, rather than diffing what we intended to do.
+  if (actions.add.length || actions.remove.length) {
+    const before = readSkillsManifest().reduce((n, g) => n + g.skills.length, 0);
+    const groups = installedGroups(readLock(), installed());
+    const outcome = manifestOutcome({ groups, before, prunedCount: actions.remove.length });
+    if (outcome.write) {
+      writeManifest(emitManifest(groups));
+      process.stdout.write(`\nskills-manifest.txt written — ${outcome.reason}\n`);
+      process.stdout.write('Run: nortuscc push -m "..."   to share it\n');
+    } else {
+      process.stdout.write(`\nskills-manifest.txt left alone — ${outcome.reason}\n`);
+    }
+  }
+
   const after = readLock();
   const movedInfo = plan.outdated
+    .filter((o) => actions.update.includes(o.name))
     .map((o) => ({ o, to: after.skills?.[o.name]?.skillFolderHash ?? null }))
     .filter(({ o, to }) => o.from != null && to != null && to !== o.from);
+  const width = labelWidth(movedInfo.map(({ o }) => o.name));
+  // An update was requested but the re-read lock shows no verifiable move —
+  // either because nothing actually changed, or because a hash was never
+  // recorded to compare against. Either way, silence here would read as if
+  // the requested update never happened at all.
+  const unmovedUpdate = actions.update.length > 0 && movedInfo.length === 0;
   process.stdout.write(
-    '\n' + section('updated', movedInfo.length
-      ? movedInfo.map(({ o, to }) =>
-          formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`, labelWidth(movedInfo.map(({ o: m }) => m.name))))
-      : [formatRow('skills', 'unchanged', 'the updater reported no change')]),
+    '\n' + section('done', [
+      ...movedInfo.map(({ o, to }) => formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`, width)),
+      ...(unmovedUpdate ? [formatRow('skills', 'unchanged', 'the updater reported no change')] : []),
+      ...actions.remove.map((n) => formatRow(n, 'removed', '')),
+      ...actions.add.map((a) => formatRow(a.name, 'added', a.source)),
+    ]),
   );
 
-  if (!ok) {
+  if (failed) {
     process.stdout.write(
       anyBackedUp
-        ? '\nThe updater failed. See the output above; the backup is listed at the top.\n'
-        : '\nThe updater failed. No backup was made — nothing existed to preserve.\n',
+        ? '\nSomething failed above. The backup is listed at the top.\n'
+        : '\nSomething failed above. No backup was made — nothing existed to preserve.\n',
     );
   }
 
-  return exitCode({ plan, updateFailed: !ok });
+  return exitCode({ plan, failed, prunedNames: actions.remove });
 }
