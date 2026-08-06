@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -108,10 +108,16 @@ test('--check reports outdated skills and updates nothing', async () => {
   assert.equal(preserved, false, '--check must never take a backup either');
 });
 
+// `run` no longer destructures `confirm` at all, so a mock installed under
+// that name is dead weight that can never observe anything `run` does — this
+// used to assert on it and could not have failed no matter what `run` called.
+// `select` is the thing that would actually be reached if --check stopped
+// short-circuiting before the picker, so a mock that throws pins the real
+// guarantee: it fails loudly instead of passing by construction.
 test('--check never prompts', async () => {
-  let asked = false;
-  await run(['--check'], baseDeps({ confirm: async () => { asked = true; return true; } }));
-  assert.equal(asked, false);
+  await run(['--check'], baseDeps({
+    select: async () => { throw new Error('select must not be called under --check'); },
+  }));
 });
 
 test('an all-current machine exits 0 and updates nothing', async () => {
@@ -149,11 +155,14 @@ test('backups are taken before the updater runs', async () => {
   assert.deepEqual(order, ['backup', 'update']);
 });
 
+// Same rot as '--check never prompts' above: `confirm` is not a dependency of
+// `run` anymore, so a mock under that name could never be reached. `select`
+// is the picker --yes is supposed to bypass, so that is what has to throw.
 test('--yes skips the prompt entirely', async () => {
-  let asked = false;
-  const deps = baseDeps({ confirm: async () => { asked = true; return true; } });
+  const deps = baseDeps({
+    select: async () => { throw new Error('select must not be called under --yes'); },
+  });
   assert.equal(await run(['--yes'], deps), 0);
-  assert.equal(asked, false);
 });
 
 test('no TTY and no --yes refuses with exit 2 rather than hanging', async () => {
@@ -633,6 +642,26 @@ test('the picker drives what gets executed', async () => {
   assert.deepEqual(sent, ['stale']);
 });
 
+// The spec requirement ("--add and --prune pre-tick rows") was previously
+// exercised only through --yes, which reads `r.checked` directly and would
+// pass even if `seeded` were dropped from the call to `select` entirely — the
+// interactive path would still show every row unchecked and nothing here
+// would catch it. Capturing what `select` actually receives closes that gap.
+test('--add and --prune pre-tick their rows in the picker, not just under --yes', async () => {
+  let capturedRows = null;
+  await run(['--add', 'wizard', '--prune'], AVAILABLE_DEPS({
+    inspectSource: async () => ({
+      trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+      skillPaths: ['s/fresh/SKILL.md', 's/wizard/SKILL.md', 's/gizmo/SKILL.md'],
+    }),
+    select: async (rows) => { capturedRows = rows; return []; },
+  }));
+  const byKey = Object.fromEntries(capturedRows.map((r) => [r.key, r.checked]));
+  assert.equal(byKey['add:wizard'], true, '--add wizard must pre-tick its row');
+  assert.equal(byKey['add:gizmo'], false, 'a skill not named by --add must not be pre-ticked');
+  assert.equal(byKey['remove:stale'], true, '--prune must pre-tick the gone row');
+});
+
 test('a cancelled picker changes nothing and exits 0', async () => {
   let touched = false;
   const mark = async () => { touched = true; return true; };
@@ -677,6 +706,42 @@ test('--yes --add adopts exactly the named skills', async () => {
   assert.deepEqual(added, ['wizard']);
 });
 
+// seedKeys quietly drops an --add name that matches nothing in
+// plan.available — right for the picker, where it just means one fewer row
+// pre-ticked, but a scripted run has no picker to show that anything was
+// skipped. Without a diagnostic, `--yes --add does-not-exist` looks
+// identical to a run that adopted the name successfully: it calls nothing,
+// never mentions the name, and exits 0.
+test('a scripted --add naming an unmatched skill reports it and exits non-zero', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--yes', '--add', 'does-not-exist'], AVAILABLE_DEPS());
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /does-not-exist/, 'the unmatched name must be named in the output');
+  assert.equal(code, 1, 'a named --add skill that matched nothing must not exit clean');
+});
+
+// Same guarantee with nothing else pending at all, so the run has no other
+// route to a non-zero exit — it has to come from the unmatched name itself.
+test('a scripted --add with an unmatched name and nothing else pending still exits non-zero', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  let code;
+  try {
+    code = await run(['--yes', '--add', 'does-not-exist'], AVAILABLE_DEPS({
+      inspectSource: async () => ({ trees: new Map([['s/stale', 'old'], ['s/fresh', 'same']]), skillPaths: [] }),
+    }));
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /does-not-exist/);
+  assert.equal(code, 1);
+});
+
 test('--check refuses an action flag', async () => {
   assert.equal(await run(['--check', '--prune'], AVAILABLE_DEPS()), 2);
 });
@@ -714,18 +779,91 @@ test('an unpruned gone skill still forces exit 1', async () => {
   assert.equal(code, 1);
 });
 
+// `assert.ok(written)` alone passes for any string, including an empty
+// `emitManifest([])` — and with static readLock/installed stubs `wizard` can
+// never actually appear in the emitted text, since the manifest block
+// rebuilds `groups` from `readLock()`/`installed()` called *after* the
+// executors ran, not from `actions.add`. Driving those two dependencies
+// statefully (the same pattern as 'the closing report names the hash the
+// lock actually moved to' above) proves `run` really does feed the adopted
+// skill's post-install presence into what gets written, not just some fixed
+// string.
 test('the manifest is written after adopting', async () => {
   let written = null;
+  let adopted = false;
   await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+    readLock: () => ({
+      skills: {
+        stale: entry('s/stale', 'old'),
+        fresh: entry('s/fresh', 'same'),
+        ...(adopted ? { wizard: entry('s/wizard', 'wizardhash') } : {}),
+      },
+    }),
+    installed: () => (adopted ? ['fresh', 'stale', 'wizard'] : ['fresh', 'stale']),
+    installGroups: async (groups) => {
+      adopted = true;
+      return groups.map((g) => ({ source: g.source, ok: true }));
+    },
     writeManifest: (text) => { written = text; },
   }));
   assert.ok(written, 'adopting a skill must record it in the manifest');
+  assert.match(written, /\bwizard\b/, 'the manifest must actually name the skill that was adopted');
 });
 
 test('the manifest is left alone when nothing was adopted or pruned', async () => {
   let written = null;
   await run(['--yes'], AVAILABLE_DEPS({ writeManifest: (t) => { written = t; } }));
   assert.equal(written, null, 'a plain refresh changes no manifest entry');
+});
+
+// The refusal branch of manifestOutcome is the thing protecting every other
+// machine's manifest from one machine's incomplete skill set — and nothing
+// exercised it through `run` before this: `fixtureRepo` is an empty temp dir
+// for every other test here, so readSkillsManifest() always returns [] and
+// `before` is always 0, landing on `write: true` no matter what. This test
+// writes a real, populated manifest into an isolated repo dir (swapped in and
+// restored the same way test/status.test.mjs does), then drives a prune that
+// only accounts for 1 of the 6 entries the shared manifest lists — proving
+// `run` feeds the real manifest count into manifestOutcome rather than a
+// constant, and that the refusal message names the actual numbers.
+test('a shrink larger than what was pruned leaves a populated manifest alone', async () => {
+  const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-update-shrink-'));
+  writeFileSync(join(isolatedRepo, 'skills-manifest.txt'), '[o/r]\na\nb\nc\nd\ne\nf\n');
+  const origRepoDir = process.env.NORTUSCC_REPO_DIR;
+  process.env.NORTUSCC_REPO_DIR = isolatedRepo;
+
+  let pruned = false;
+  let written = null;
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--yes', '--prune'], AVAILABLE_DEPS({
+      inspectSource: async () => ({
+        trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+        skillPaths: ['s/fresh/SKILL.md'],
+      }),
+      // Statefully reflects only 'stale' having actually been removed — 'a'
+      // through 'f' were never installed here at all, so the shared manifest
+      // is simply ahead of what this machine has, which is exactly the
+      // hazard the guard exists for.
+      readLock: () => ({
+        skills: pruned
+          ? { fresh: entry('s/fresh', 'same') }
+          : { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') },
+      }),
+      installed: () => (pruned ? ['fresh'] : ['fresh', 'stale']),
+      runRemove: async () => { pruned = true; return true; },
+      writeManifest: (text) => { written = text; },
+    }));
+  } finally {
+    process.stdout.write = orig;
+    process.env.NORTUSCC_REPO_DIR = origRepoDir;
+  }
+  assert.equal(written, null, 'a shrink bigger than the prune must never be written');
+  const out = chunks.join('');
+  assert.match(out, /left alone/);
+  assert.match(out, /would drop 5 entr\(ies\) but only 1 were pruned/);
 });
 
 test('a failing remover exits 1', async () => {
@@ -739,9 +877,45 @@ test('a failing remover exits 1', async () => {
   assert.equal(code, 1);
 });
 
+// A failed removal must never be reported as 'removed' — that row sits right
+// below the 'backed up ->' line and would read as an invitation to discard
+// the backup that is now the skill's only remaining copy.
+test('a failing remover reports the skill as failed, not removed', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--yes', '--prune'], AVAILABLE_DEPS({
+      inspectSource: async () => ({
+        trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+        skillPaths: ['s/fresh/SKILL.md'],
+      }),
+      runRemove: async () => false,
+    }));
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /stale\s+failed/, 'the failed removal must be named as failed');
+  assert.doesNotMatch(out, /stale\s+removed/, 'a failed removal must never be reported as removed');
+});
+
 test('a failing installer exits 1', async () => {
   const code = await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
     installGroups: async () => [{ source: 'o/r', ok: false }],
   }));
   assert.equal(code, 1);
+});
+
+// Mirrors the removal case: a failed install must not read as adopted.
+test('a failing installer reports the skill as failed, not added', async () => {
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--yes', '--add', 'wizard'], AVAILABLE_DEPS({
+      installGroups: async () => [{ source: 'o/r', ok: false }],
+    }));
+  } finally { process.stdout.write = orig; }
+  const out = chunks.join('');
+  assert.match(out, /wizard\s+failed/, 'the failed install must be named as failed');
+  assert.doesNotMatch(out, /wizard\s+added/, 'a failed install must never be reported as added');
 });

@@ -173,6 +173,25 @@ export async function run(args = [], deps = {}) {
   };
   process.stdout.write('\n' + section('update', reportLines(plan)));
 
+  // seedKeys silently drops an --add name it cannot match against
+  // plan.available (a typo, a name already installed, a name from a
+  // different repo) — the right call for the picker, where an unmatched name
+  // simply pre-ticks nothing, but left unreported it makes a scripted
+  // adoption that did nothing look identical to one that worked. Named once,
+  // here, so every path below (including "nothing to pick" and "cancelled")
+  // reports it the same way.
+  const unmatchedAdd = flags.add.filter((name) => !plan.available.some((a) => a.name === name));
+  if (unmatchedAdd.length) {
+    process.stdout.write(
+      `\n--add named skill(s) not found upstream (already installed, misspelled, or not offered by a` +
+        ` known source): ${unmatchedAdd.join(', ')}\n`,
+    );
+  }
+  // A scripted run that named a skill and adopted none of what it asked for
+  // is not a success just because nothing else went wrong — the same
+  // standard `gone`/`unknown` already hold the rest of the plan to.
+  const addFailed = unmatchedAdd.length > 0;
+
   if (flags.check) {
     if (plan.outdated.length) process.stdout.write('\nRun: nortuscc update\n');
     return exitCode({ plan, failed: false });
@@ -180,7 +199,7 @@ export async function run(args = [], deps = {}) {
 
   const seeded = seedKeys(plan, { add: flags.add, prune: flags.prune });
   const rows = choices(plan, { seeded });
-  if (rows.length === 0) return exitCode({ plan, failed: false });
+  if (rows.length === 0) return exitCode({ plan, failed: addFailed });
 
   let keys;
   if (flags.yes) {
@@ -195,14 +214,14 @@ export async function run(args = [], deps = {}) {
         return 2;
       }
       process.stdout.write('nothing selected\n');
-      return exitCode({ plan, failed: false });
+      return exitCode({ plan, failed: addFailed });
     }
   }
 
   const actions = actionsFrom(plan, keys);
   if (!actions.update.length && !actions.remove.length && !actions.add.length) {
     process.stdout.write('nothing selected\n');
-    return exitCode({ plan, failed: false });
+    return exitCode({ plan, failed: addFailed });
   }
 
   // Back up everything about to be removed or overwritten, before either
@@ -220,9 +239,14 @@ export async function run(args = [], deps = {}) {
   }
 
   // Most destructive first, so a failure partway leaves the least to undo.
+  // The two booleans below are kept, not discarded, because the closing
+  // report has to describe what was observed — the same reason movedInfo
+  // re-reads the lock rather than trusting actions.update wholesale.
   let failed = false;
-  if (actions.remove.length && !(await runRemove(actions.remove))) failed = true;
+  const removeOk = actions.remove.length ? await runRemove(actions.remove) : true;
+  if (!removeOk) failed = true;
   if (actions.update.length && !(await runUpdate(actions.update))) failed = true;
+  let installResults = [];
   if (actions.add.length) {
     const bySource = new Map();
     for (const { name, source } of actions.add) {
@@ -230,8 +254,8 @@ export async function run(args = [], deps = {}) {
       bySource.get(source).push(name);
     }
     const groups = [...bySource.entries()].map(([source, skills]) => ({ source, skills }));
-    const results = await installGroups(groups);
-    if (results.some((r) => !r.ok)) failed = true;
+    installResults = await installGroups(groups);
+    if (installResults.some((r) => !r.ok)) failed = true;
   }
 
   // The manifest is a statement about the machine, so it is rebuilt from the
@@ -261,12 +285,24 @@ export async function run(args = [], deps = {}) {
   // recorded to compare against. Either way, silence here would read as if
   // the requested update never happened at all.
   const unmovedUpdate = actions.update.length > 0 && movedInfo.length === 0;
+
+  // runRemove answers for the whole batch in one shot (it is a single `skills
+  // remove a b c` invocation), so there is no finer-grained result to report
+  // than "all of these failed together". installGroups answers per source, so
+  // an add is only marked failed for the source that actually failed — the
+  // same split apply.mjs's summarizeSkillsInstall makes ("A partial failure
+  // gets both rows, never collapsed into total success or total failure").
+  const okAddSources = new Set(installResults.filter((r) => r.ok).map((r) => r.source));
+  const addedOk = actions.add.filter((a) => okAddSources.has(a.source));
+  const addedFailed = actions.add.filter((a) => !okAddSources.has(a.source));
+
   process.stdout.write(
     '\n' + section('done', [
       ...movedInfo.map(({ o, to }) => formatRow(o.name, 'updated', `${short(o.from)} -> ${short(to)}`, width)),
       ...(unmovedUpdate ? [formatRow('skills', 'unchanged', 'the updater reported no change')] : []),
-      ...actions.remove.map((n) => formatRow(n, 'removed', '')),
-      ...actions.add.map((a) => formatRow(a.name, 'added', a.source)),
+      ...actions.remove.map((n) => formatRow(n, removeOk ? 'removed' : 'failed', removeOk ? '' : 'remove failed — see output above')),
+      ...addedOk.map((a) => formatRow(a.name, 'added', a.source)),
+      ...addedFailed.map((a) => formatRow(a.name, 'failed', `${a.source} — install failed, see output above`)),
     ]),
   );
 
@@ -278,5 +314,5 @@ export async function run(args = [], deps = {}) {
     );
   }
 
-  return exitCode({ plan, failed, prunedNames: actions.remove });
+  return exitCode({ plan, failed: failed || addFailed, prunedNames: actions.remove });
 }
