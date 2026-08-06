@@ -71,7 +71,10 @@ Defaults: **outdated ticked, gone and available unticked.** Refreshing what you
 already have is what the command is for; removing and adopting are choices you
 opt into. Group headers are labels, not rows — the cursor skips them.
 
-Enter with nothing ticked is a no-op that exits 0, the same as declining today.
+Enter with nothing ticked is a no-op — it changes nothing on disk, the same
+as declining today. Its exit code still follows the table below: 0 unless a
+`gone` or `unknown` skill remains unresolved, in which case declining does
+not clear it.
 
 ### Keys
 
@@ -82,7 +85,7 @@ Enter with nothing ticked is a no-op that exits 0, the same as declining today.
 | `a` / `n` | Select / deselect every row in the **current group** |
 | `A` / `N` | Select / deselect **every row** |
 | `enter` | Confirm the current selection |
-| `esc`, `ctrl-c`, `q` | Cancel — changes nothing, exits 0 |
+| `esc`, `ctrl-c`, `q` | Cancel — changes nothing on disk; exit code still follows the table below |
 
 Group-scoped select-all is the one that earns its place: the groups *are* the
 actions, so `a` means "update all of them" or "adopt all of them" depending on
@@ -211,12 +214,18 @@ Step 3 covers removals as well as updates. `--prune` is the first thing
 | Code | Condition |
 | --- | --- |
 | 2 | `--check` with `--yes`/`--add`/`--prune`; unknown flag; no TTY and no `--yes` |
-| 1 | any executor failed; or, after the run, `gone` or `unknown` skills remain |
+| 1 | any executor failed; or, after the run, `gone` or `unknown` skills remain; or a `--add` name matched nothing available |
 | 0 | everything satisfied, or the user selected nothing |
 
 `available` never affects the exit code — a new upstream skill is an
 opportunity, not drift, and counting it would leave `update --check`
 permanently red against any active repo.
+
+A `--add` name that matches nothing available — already installed,
+misspelled, or from a source not offered (or unreachable) — forces a
+non-zero exit on its own, even if nothing else about the run failed. Without
+this, a scripted `--add` that silently adopted nothing would look identical
+to one that succeeded.
 
 `gone` skills that were *pruned* no longer count toward exit 1: they are dealt
 with. Only ones still present after the run do. This is what makes
