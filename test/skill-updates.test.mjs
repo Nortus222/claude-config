@@ -144,6 +144,14 @@ test('upstreamSkills drops a SKILL.md nested inside another skill', () => {
   assert.deepEqual(found.map((s) => s.name), ['tdd']);
 });
 
+test('upstreamSkills drops a nested SKILL.md regardless of which order the paths arrive in', () => {
+  // Without the shallowest-first sort, the parent's SKILL.md is not yet in
+  // `kept` by the time the nested one is checked, so it fails the
+  // `startsWith` test and survives as a phantom skill named "deep".
+  const found = upstreamSkills(['s/tdd/references/deep/SKILL.md', 's/tdd/SKILL.md']);
+  assert.deepEqual(found.map((s) => s.name), ['tdd']);
+});
+
 test('upstreamSkills keeps siblings that merely share a prefix', () => {
   const found = upstreamSkills(['s/tdd/SKILL.md', 's/tdd-extra/SKILL.md']);
   assert.deepEqual(found.map((s) => s.name), ['tdd', 'tdd-extra']);

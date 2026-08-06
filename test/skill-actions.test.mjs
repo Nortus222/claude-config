@@ -76,6 +76,13 @@ test('actionsFrom keeps the source with each added skill', () => {
   assert.equal(actionsFrom(PLAN, ['add:wizard']).add[0].source, 'o/r');
 });
 
+test('actionsFrom tolerates a plan with no available key', () => {
+  // Same guard as choices() above, for actionsFrom's own `plan.available ??
+  // []` — a plan that lost `available` must not throw.
+  const actions = actionsFrom({ ...PLAN, available: undefined }, ['update:tdd']);
+  assert.deepEqual(actions, { update: ['tdd'], remove: [], add: [] });
+});
+
 test('seedKeys with --prune checks every gone skill', () => {
   assert.deepEqual([...seedKeys(PLAN, { add: [], prune: true })], ['remove:to-issues']);
 });
@@ -90,4 +97,11 @@ test('seedKeys ignores a named add that is not available', () => {
 
 test('seedKeys with neither flag seeds nothing', () => {
   assert.deepEqual([...seedKeys(PLAN, { add: [], prune: false })], []);
+});
+
+test('seedKeys tolerates a plan with no available key', () => {
+  // Same guard as choices()/actionsFrom above, for seedKeys' own
+  // `plan.available ?? []` — a --prune-only call must still work fine even
+  // when `available` is missing from the plan entirely.
+  assert.deepEqual([...seedKeys({ ...PLAN, available: undefined }, { add: [], prune: true })], ['remove:to-issues']);
 });

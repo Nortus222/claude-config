@@ -12,8 +12,6 @@ import { formatRow, section, labelWidth } from '../report.mjs';
 
 const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
 
-const FLAGS = new Set(['--check', '--yes', '--prune']);
-
 const NEEDS_NAMES = '--add needs a comma-separated list of skill names';
 
 export function parseFlags(args) {
@@ -37,11 +35,11 @@ export function parseFlags(args) {
       // A following flag is not a name list — `--add --prune` is a missing
       // argument, not an adoption of a skill called "--prune".
       if (next && !next.startsWith('-')) { names = next; i += 1; }
-    } else if (!FLAGS.has(arg)) {
+    } else {
+      // --check/--yes/--prune already `continue`d above, so anything reaching
+      // here is neither one of those nor an --add spelling: an unknown flag.
       out.error = `unknown option(s) for update: ${arg}`;
       return out;
-    } else {
-      continue;
     }
 
     out.add = (names ?? '').split(',').filter(Boolean);

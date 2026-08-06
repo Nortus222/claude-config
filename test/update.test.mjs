@@ -35,12 +35,29 @@ function baseDeps(overrides = {}) {
     readLock: () => ({ skills: { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') } }),
     installed: () => ['fresh', 'stale'],
     inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]), skillPaths: [] }),
-    confirm: async () => true,
     preserve: () => '/backup/path',
     runUpdate: async () => true,
     ...overrides,
   };
 }
+
+// Adds an `available` skill (`wizard`) on top of baseDeps' fixture, plus the
+// remove/install/manifest deps the orchestration tests below exercise.
+const AVAILABLE_DEPS = (overrides = {}) => ({
+  readLock: () => ({ skills: { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') } }),
+  installed: () => ['fresh', 'stale'],
+  inspectSource: async () => ({
+    trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]),
+    skillPaths: ['s/stale/SKILL.md', 's/fresh/SKILL.md', 's/wizard/SKILL.md'],
+  }),
+  select: async () => [],
+  preserve: () => '/b',
+  runUpdate: async () => true,
+  runRemove: async () => true,
+  installGroups: async () => [],
+  writeManifest: () => {},
+  ...overrides,
+});
 
 test('exitCode is 0 when everything is current', () => {
   const plan = { current: ['a'], outdated: [], gone: [], unknown: [], local: [] };
@@ -254,7 +271,6 @@ test('a still-hashless skill is not reported as updated', async () => {
       readLock: () => ({ skills: { nohash: noHashEntry } }),
       installed: () => ['nohash'],
       inspectSource: async () => ({ trees: new Map([['s/nohash', 'somehash']]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -277,7 +293,6 @@ test("the backup line names the shared backup directory, not the last skill's pa
       readLock: () => ({ skills: { one: entry('s/one', 'old1'), two: entry('s/two', 'old2') } }),
       installed: () => ['one', 'two'],
       inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: (abs, rel) => `/fake/per-skill/${rel}`,
       runUpdate: async () => true,
     });
@@ -343,7 +358,6 @@ test('gone with nothing outdated prints the prune pointer and --check exits 1', 
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old'), fresh: entry('s/fresh', 'same') } }),
       installed: () => ['vanished', 'fresh'],
       inspectSource: async () => ({ trees: new Map([['s/vanished', null], ['s/fresh', 'same']]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -391,7 +405,6 @@ test('gone and outdated together print both the prune pointer and the update sug
       readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
       installed: () => ['stale', 'vanished'],
       inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/vanished', null]]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -416,7 +429,6 @@ test('a skill whose backup returns null is named as unprotected, not silently se
       readLock: () => ({ skills: { one: entry('s/one', 'old1'), two: entry('s/two', 'old2') } }),
       installed: () => ['one', 'two'],
       inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: (abs, rel) => (rel.includes('one') ? '/backup/one' : null),
       runUpdate: async () => true,
     });
@@ -477,7 +489,6 @@ test('the gone footer names the gone skills, not just a bare pronoun', async () 
       readLock: () => ({ skills: { stale: entry('s/stale', 'old'), vanished: entry('s/vanished', 'old2') } }),
       installed: () => ['stale', 'vanished'],
       inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/vanished', null]]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -504,7 +515,6 @@ test('the gone footer points at update --prune, not a manual remove-then-capture
       readLock: () => ({ skills: { vanished: entry('s/vanished', 'old') } }),
       installed: () => ['vanished'],
       inspectSource: async () => ({ trees: new Map([['s/vanished', null]]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -532,7 +542,6 @@ test('a long skill name keeps the outdated detail rows aligned', async () => {
       }),
       installed: () => ['setup-matt-pocock-skills', 'tdd'],
       inspectSource: async () => ({ trees: new Map([['s/long', 'new'], ['s/tdd', 'new2']]), skillPaths: [] }),
-      confirm: async () => true,
       preserve: () => '/b',
       runUpdate: async () => true,
     });
@@ -642,23 +651,6 @@ test('manifestOutcome refuses to write an empty manifest even when the shrink is
 });
 
 // --- orchestration ---
-
-const AVAILABLE_DEPS = (overrides = {}) => ({
-  readLock: () => ({ skills: { stale: entry('s/stale', 'old'), fresh: entry('s/fresh', 'same') } }),
-  installed: () => ['fresh', 'stale'],
-  inspectSource: async () => ({
-    trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]),
-    skillPaths: ['s/stale/SKILL.md', 's/fresh/SKILL.md', 's/wizard/SKILL.md'],
-  }),
-  select: async () => [],
-  confirm: async () => true,
-  preserve: () => '/b',
-  runUpdate: async () => true,
-  runRemove: async () => true,
-  installGroups: async () => [],
-  writeManifest: () => {},
-  ...overrides,
-});
 
 test('the report lists an upstream skill that is not installed as available', async () => {
   const chunks = [];
