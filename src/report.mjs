@@ -1,5 +1,10 @@
 const WIDTH = 16;
 
+// Shared by every report that prints a git SHA: `update.mjs`'s outdated/moved
+// rows and `skill-actions.mjs`'s picker rows both want the same seven-char
+// prefix, with the same fallback when a skill was never hashed at all.
+export const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
+
 // `width` exists for callers whose labels are arbitrary rather than chosen —
 // a skill name, say. padEnd does nothing to a label already past the pad, so
 // one long name silently shunts the state and note columns right for its row

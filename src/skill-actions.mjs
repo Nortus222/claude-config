@@ -2,7 +2,7 @@
 // never branches on a skill's state: it hands a plan in and gets back the three
 // lists its executors take.
 
-const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
+import { short } from './report.mjs';
 
 const key = (action, name) => `${action}:${name}`;
 
