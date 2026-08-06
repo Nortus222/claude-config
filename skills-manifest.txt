@@ -26,7 +26,10 @@ teach
 to-spec
 to-tickets
 triage
+wait-what
 wayfinder
+wizard
+writing-for-agents
 
 [vercel-labs/skills]
 find-skills
