@@ -10,6 +10,7 @@ import {
   reconcile,
   installArgs,
   brokenSkillLinks,
+  installedGroups,
 } from '../src/skills.mjs';
 
 const SAMPLE = `# a comment
@@ -164,4 +165,51 @@ test('brokenSkillLinks sorts deterministically', () => {
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
   }
+});
+
+const locked = (skills) => ({ skills });
+const meta = (source) => ({ source, sourceUrl: `https://github.com/${source}.git`, skillPath: 'x/SKILL.md' });
+
+test('installedGroups keeps a skill whose folder is present', () => {
+  const lock = locked({ tdd: meta('o/r') });
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'] }]);
+});
+
+test('installedGroups drops a lock entry whose folder is gone', () => {
+  // The lock outlives the folder — this is the whole reason the function
+  // exists, and why regenerating the manifest from the lock alone is wrong.
+  const lock = locked({ tdd: meta('o/r'), ghost: meta('o/r') });
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'] }]);
+});
+
+test('installedGroups drops a source group that empties', () => {
+  const lock = locked({ tdd: meta('o/one'), ghost: meta('o/two') });
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/one', skills: ['tdd'] }]);
+});
+
+test('installedGroups includes a newly adopted skill', () => {
+  const lock = locked({ tdd: meta('o/r'), wizard: meta('o/r') });
+  assert.deepEqual(installedGroups(lock, ['tdd', 'wizard']), [
+    { source: 'o/r', skills: ['tdd', 'wizard'] },
+  ]);
+});
+
+test('installedGroups creates a group for a source new to the manifest', () => {
+  const lock = locked({ tdd: meta('o/one'), fresh: meta('o/new') });
+  assert.deepEqual(installedGroups(lock, ['tdd', 'fresh']), [
+    { source: 'o/new', skills: ['fresh'] },
+    { source: 'o/one', skills: ['tdd'] },
+  ]);
+});
+
+test('installedGroups ignores a skill on disk with no lock entry', () => {
+  // Hand-authored: nothing could install it, so it never enters the manifest.
+  assert.deepEqual(installedGroups(locked({ tdd: meta('o/r') }), ['tdd', 'mine']), [
+    { source: 'o/r', skills: ['tdd'] },
+  ]);
+});
+
+test('installedGroups on a malformed lock is empty rather than throwing', () => {
+  assert.deepEqual(installedGroups(null, ['tdd']), []);
+  assert.deepEqual(installedGroups({ skills: 'nope' }, ['tdd']), []);
 });
