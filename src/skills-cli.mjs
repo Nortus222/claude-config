@@ -5,10 +5,18 @@ import { spawn } from 'node:child_process';
 
 // --skill restores a precise subset rather than everything a repo publishes;
 // --global keeps skills in ~/.agents/skills rather than a project directory.
+//
+// The names go in space-separated, not comma-joined. `--skill` is variadic —
+// its own help example is `--skill pr-review commit` — so a comma-joined value
+// is taken as one literal skill name. That failed silently-ish: the CLI
+// reported "No matching skills found for: a,b,c" and then listed every one of
+// them as available, which reads as the repo being wrong rather than the
+// argument. Single-skill installs were unaffected, which is why it survived.
+// The variadic stops at the next flag, so --global and --yes still land.
 export function buildCommand({ source, skills }) {
   return {
     cmd: 'npx',
-    args: ['-y', 'skills', 'add', source, '--skill', skills.join(','), '--global', '--yes'],
+    args: ['-y', 'skills', 'add', source, '--skill', ...skills, '--global', '--yes'],
   };
 }
 

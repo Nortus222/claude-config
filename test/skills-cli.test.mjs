@@ -9,10 +9,28 @@ import {
   runRemove,
 } from '../src/skills-cli.mjs';
 
+// `skills add --skill` is variadic and space-separated, exactly like `update`
+// and `remove` — its own help example is `--skill pr-review commit`. A
+// comma-joined value is read as one literal skill name, so a multi-skill
+// install fails with "No matching skills found for: a,b,c" while listing every
+// one of them as available. Verified against the real CLI: `--skill wizard
+// wait-what` reports "Installed 2 skills"; the comma form matches nothing.
 test('buildCommand targets the right repo with an explicit skill list', () => {
   const { cmd, args } = buildCommand({ source: 'a/b', skills: ['one', 'two'] });
   assert.equal(cmd, 'npx');
-  assert.deepEqual(args, ['-y', 'skills', 'add', 'a/b', '--skill', 'one,two', '--global', '--yes']);
+  assert.deepEqual(args, ['-y', 'skills', 'add', 'a/b', '--skill', 'one', 'two', '--global', '--yes']);
+});
+
+test('buildCommand never comma-joins the skill list', () => {
+  const { args } = buildCommand({ source: 'a/b', skills: ['one', 'two', 'three'] });
+  assert.ok(!args.some((a) => a.includes(',')), 'a comma-joined value is read as one literal skill name');
+});
+
+test('buildCommand keeps --global and --yes after the variadic skill list', () => {
+  // The variadic stops at the next flag, so the trailing options survive —
+  // confirmed against the real CLI, which accepted this exact ordering.
+  const { args } = buildCommand({ source: 'a/b', skills: ['one', 'two'] });
+  assert.deepEqual(args.slice(-2), ['--global', '--yes']);
 });
 
 test('buildCommand handles a single skill', () => {
