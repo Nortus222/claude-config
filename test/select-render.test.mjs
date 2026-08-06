@@ -11,6 +11,34 @@ const ITEMS = [
 
 const sink = () => new Writable({ write(_c, _e, cb) { cb(); } });
 
+// A fake input that can observe raw-mode toggling, the one piece of terminal
+// state select() promises to restore in its `finally` even when the caller
+// throws. `Readable.from([])` alone (as the other tests here use) has no
+// `setRawMode` at all — select()'s own `if (input.setRawMode)` guard skips
+// it silently, which is exactly why nothing before this proved the restore
+// really happens.
+function fakeInput() {
+  const input = Readable.from([]);
+  const rawModeCalls = [];
+  input.isRaw = false;
+  input.setRawMode = (val) => { rawModeCalls.push(val); input.isRaw = val; return input; };
+  return { input, rawModeCalls };
+}
+
+// A fake output that records every write, so the cursor-hide escape
+// (`\x1b[?25l`) can be proven matched by a cursor-show escape (`\x1b[?25h`)
+// on every exit path, not just inferred from the code not crashing.
+function fakeOutput() {
+  const writes = [];
+  const output = sink();
+  output.write = (chunk) => { writes.push(String(chunk)); return true; };
+  return { output, writes };
+}
+
+const HIDE = '\x1b[?25l';
+const SHOW = '\x1b[?25h';
+const countOf = (writes, esc) => writes.filter((w) => w.includes(esc)).length;
+
 test('render marks checked and unchecked items differently', () => {
   const out = render(initialState(ITEMS), { title: 't' }).join('\n');
   assert.match(out, /◉ ask-matt/);
@@ -109,6 +137,86 @@ test('a throw while processing a keypress rejects instead of hanging', { timeout
   input.emit('keypress', '', { name: 'down' });
 
   await assert.rejects(promise, /boom/);
+});
+
+// The spec promises the driver "restores raw mode and the cursor even when
+// the caller throws". Nothing above proves that: the input stream there has
+// no `setRawMode` to observe, so select()'s `finally` restoring it was never
+// actually exercised — only the rejection was. A terminal left in raw mode
+// with a hidden cursor outlives the process and takes the user's shell with
+// it, which makes this the highest-consequence untested path on the branch.
+
+test('a throw while processing a keypress still restores raw mode and the cursor', { timeout: 2000 }, async () => {
+  const { input, rawModeCalls } = fakeInput();
+  const { output, writes } = fakeOutput();
+  let calls = 0;
+  const rawWrite = output.write;
+  output.write = (chunk) => {
+    calls += 1;
+    rawWrite(chunk);
+    if (calls === 3) throw new Error('boom');
+    return true;
+  };
+
+  const promise = select(ITEMS, { title: 't', input, output, isTTY: true });
+  input.emit('keypress', '', { name: 'down' });
+
+  await assert.rejects(promise, /boom/);
+
+  assert.deepEqual(rawModeCalls, [true, false], 'raw mode must be enabled, then restored, even on throw');
+  assert.equal(countOf(writes, HIDE), 1, 'the cursor must have been hidden exactly once');
+  assert.equal(countOf(writes, SHOW), 1, 'a hidden cursor left on throw must still be shown again');
+});
+
+test('confirming the picker restores raw mode and the cursor', async () => {
+  const { input, rawModeCalls } = fakeInput();
+  const { output, writes } = fakeOutput();
+
+  const promise = select(ITEMS, { title: 't', input, output, isTTY: true });
+  input.emit('keypress', '', { name: 'return' });
+  await promise;
+
+  assert.deepEqual(rawModeCalls, [true, false]);
+  assert.equal(countOf(writes, HIDE), 1);
+  assert.equal(countOf(writes, SHOW), 1);
+});
+
+test('cancelling the picker restores raw mode and the cursor', async () => {
+  const { input, rawModeCalls } = fakeInput();
+  const { output, writes } = fakeOutput();
+
+  const promise = select(ITEMS, { title: 't', input, output, isTTY: true });
+  input.emit('keypress', '', { name: 'escape' });
+  await promise;
+
+  assert.deepEqual(rawModeCalls, [true, false]);
+  assert.equal(countOf(writes, HIDE), 1);
+  assert.equal(countOf(writes, SHOW), 1);
+});
+
+// The other gap the reviewer named: no test drove select() through a
+// successful confirm at all — only the no-TTY, empty-list and throw paths
+// were covered, and confirm (keypress -> reduce -> resolve(selectedKeys)) is
+// the path every real interactive run takes.
+
+test('a successful confirm resolves with the toggled selection and removes the keypress listener', async () => {
+  const { input } = fakeInput();
+  const { output } = fakeOutput();
+  const before = input.listenerCount('keypress');
+
+  const promise = select(ITEMS, { title: 't', input, output, isTTY: true });
+  // Move onto the 'remove' row (index 2), tick it on, then confirm — proving
+  // the keypress -> reduce -> resolve path carries a real toggle through,
+  // not just whatever was pre-checked.
+  input.emit('keypress', '', { name: 'down' });
+  input.emit('keypress', '', { name: 'down' });
+  input.emit('keypress', ' ', { name: 'space' });
+  input.emit('keypress', '', { name: 'return' });
+
+  const keys = await promise;
+
+  assert.deepEqual([...keys].sort(), ['r:c', 'u:a', 'u:b'].sort());
+  assert.equal(input.listenerCount('keypress'), before, 'the keypress listener must be removed once resolved');
 });
 
 // A single group of many short, uniquely-labelled items — long enough that
