@@ -135,15 +135,21 @@ export function reportLines(plan) {
   //
   // The footer names its skills rather than saying "them". It prints directly
   // below the outdated detail rows, so a pronoun reads as referring to those,
-  // which is the opposite of what it means. And "re-add upstream" was never
-  // advice the reader could act on — the folder is gone from someone else's
-  // repo. What they can actually do is drop it locally.
+  // which is the opposite of what it means.
+  //
+  // It points at `update --prune`, not a manual `npx skills remove` followed
+  // by `nortuscc capture`: the interactive picker below (when one opens)
+  // offers exactly this as its `remove` group, with a backup the manual route
+  // never takes, and `capture` regenerates the whole manifest from the lock —
+  // its own shrink guard would refuse a multi-entry drop with "pass
+  // --allow-shrink", leaving a `--check`-mode reader who followed the old
+  // advice stuck with a refusal and no explanation. `--check` mode still
+  // needs this footer, since no picker opens there to show the same route.
   if (plan.gone.length) {
     lines.push(
       '',
       `  gone upstream: ${plan.gone.map((g) => g.name).join(', ')}`,
-      '  nothing can update these. Remove with: npx skills remove <name> --global',
-      '  then run: nortuscc capture   to drop them from the manifest',
+      '  nothing can update these. Run: nortuscc update --prune   to remove them (with a backup)',
     );
   }
   return lines;

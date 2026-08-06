@@ -333,7 +333,7 @@ test('two sources: an unreachable one only marks its own skills unknown', async 
 // update` suggestion. `Run: nortuscc update` itself excludes `gone` skills
 // from its batch by construction, so it alone sends the user in a circle. ---
 
-test('gone with nothing outdated prints the capture pointer and --check exits 1', async () => {
+test('gone with nothing outdated prints the prune pointer and --check exits 1', async () => {
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
@@ -350,15 +350,18 @@ test('gone with nothing outdated prints the capture pointer and --check exits 1'
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
   assert.equal(code, 1);
-  assert.match(out, /nortuscc capture/);
-  assert.doesNotMatch(out, /Run: nortuscc update/, 'nothing is outdated, so that suggestion must not appear');
+  assert.match(out, /nortuscc update --prune/);
+  // A precise line match: the gone footer's own "Run: nortuscc update
+  // --prune" advice starts with the same words as the outdated suggestion,
+  // so a loose substring match would false-positive against it.
+  assert.doesNotMatch(out, /^Run: nortuscc update$/m, 'nothing is outdated, so that suggestion must not appear');
 });
 
 // A `gone` skill still gets a row in the picker (so it can be removed), even
 // when nothing is outdated. Declining that row (an empty selection) leaves it
-// unresolved, so the capture pointer must still print and the exit code must
+// unresolved, so the prune pointer must still print and the exit code must
 // still be 1.
-test('gone with nothing outdated still prints the capture pointer when nothing is picked', async () => {
+test('gone with nothing outdated still prints the prune pointer when nothing is picked', async () => {
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
@@ -375,10 +378,10 @@ test('gone with nothing outdated still prints the capture pointer when nothing i
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
   assert.equal(code, 1);
-  assert.match(out, /nortuscc capture/);
+  assert.match(out, /nortuscc update --prune/);
 });
 
-test('gone and outdated together print both the capture pointer and the update suggestion', async () => {
+test('gone and outdated together print both the prune pointer and the update suggestion', async () => {
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
@@ -395,8 +398,8 @@ test('gone and outdated together print both the capture pointer and the update s
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
   assert.equal(code, 1);
-  assert.match(out, /Run: nortuscc update/);
-  assert.match(out, /nortuscc capture/);
+  assert.match(out, /^Run: nortuscc update$/m);
+  assert.match(out, /nortuscc update --prune/);
 });
 
 // --- Fix 2: preserveCopy returns null when existsSync sees nothing at the
@@ -482,12 +485,17 @@ test('the gone footer names the gone skills, not just a bare pronoun', async () 
   const out = chunks.join('');
   // The footer must say which skill it means, and must not be phrased so it
   // could be read as advice about the outdated one listed just above it.
-  const footer = out.split('\n').filter((l) => /gone upstream|skills remove|nortuscc capture/.test(l)).join('\n');
+  const footer = out.split('\n').filter((l) => /gone upstream|nortuscc update --prune/.test(l)).join('\n');
   assert.match(footer, /vanished/, 'the footer must name the gone skill');
   assert.doesNotMatch(footer, /\bstale\b/, 'the footer must not name an outdated skill');
 });
 
-test('the gone footer offers a removal command, not only capture', async () => {
+// The footer used to point at a manual `npx skills remove` followed by
+// `nortuscc capture` — advice that skips the backup the interactive picker's
+// own `remove` group takes, and that `capture`'s shrink guard would now
+// refuse outright for anything but a single entry. `update --prune` is the
+// one route that actually works end to end.
+test('the gone footer points at update --prune, not a manual remove-then-capture', async () => {
   const chunks = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = (c) => { chunks.push(String(c)); return true; };
@@ -502,8 +510,9 @@ test('the gone footer offers a removal command, not only capture', async () => {
     });
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
-  assert.match(out, /skills remove/, 'a skill deleted upstream can only be removed locally');
-  assert.match(out, /nortuscc capture/);
+  assert.match(out, /nortuscc update --prune/, 'a skill deleted upstream is removed via the prune flag');
+  assert.doesNotMatch(out, /skills remove/, 'no manual npx skills remove advice');
+  assert.doesNotMatch(out, /nortuscc capture/, 'no capture advice — its own shrink guard would refuse this');
 });
 
 // A long skill name used to shunt the state column out of alignment, because
