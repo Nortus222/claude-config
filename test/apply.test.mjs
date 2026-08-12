@@ -6,16 +6,25 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-apply-'));
 const claude = join(home, '.claude');
+const codex = join(home, '.codex');
 mkdirSync(claude, { recursive: true });
+mkdirSync(codex, { recursive: true });
 process.env.NORTUSCC_CLAUDE_DIR = claude;
+// Both agent dirs must be redirected, not just Claude's. apply writes one file
+// per manifest entry, so leaving the Codex side unset points AGENTS.md at the
+// developer's real ~/.codex and the suite writes to the live machine.
+process.env.NORTUSCC_CODEX_DIR = codex;
+// Machine state no longer lives under ~/.claude, so redirecting the agent dirs
+// is no longer enough to keep a run off the developer's machine.
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 const { run, summarizeSkillsInstall } = await import('../src/commands/apply.mjs');
 const { SYNC } = await import('../src/manifest.mjs');
 const { resolveEntry } = await import('../src/resolve.mjs');
 const { readLock } = await import('../src/lock.mjs');
-const { lockPath, backupRoot } = await import('../src/resolve.mjs');
+const { statePath, backupRoot } = await import('../src/resolve.mjs');
 
-test('apply on a bare machine links dirs and copies files', async () => {
+test('apply on a bare machine copies every managed file', async () => {
   const code = await run([]);
   assert.equal(code, 0);
 
@@ -25,11 +34,80 @@ test('apply on a bare machine links dirs and copies files', async () => {
   }
 });
 
-test('apply records a baseline for every copied file', async () => {
+// --target is the whole point of tagging entries, and "did not write the other
+// agent's file" is the half that a filter bug leaves silently broken: writing
+// too much still leaves the named target correct.
+test('apply --target claude writes CLAUDE.md and never touches the Codex side', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-solo-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  try {
+    assert.equal(await run(['--target', 'claude']), 0);
+    assert.ok(existsSync(join(soloClaude, 'CLAUDE.md')), 'the named target is written');
+    assert.equal(existsSync(join(soloCodex, 'AGENTS.md')), false, 'the other target is untouched');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
+  }
+});
+
+test('apply --target codex writes AGENTS.md and never touches the Claude side', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-solo-codex-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  try {
+    assert.equal(await run(['--target', 'codex']), 0);
+    assert.ok(existsSync(join(soloCodex, 'AGENTS.md')), 'the named target is written');
+    assert.equal(existsSync(join(soloClaude, 'CLAUDE.md')), false, 'the other target is untouched');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
+  }
+});
+
+test('an invalid --target exits 2 before apply writes anything', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-badtarget-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await run(['--target', 'cursor']), 2);
+    assert.equal(existsSync(join(soloClaude, 'CLAUDE.md')), false);
+    assert.equal(existsSync(join(soloCodex, 'AGENTS.md')), false);
+  } finally {
+    console.error = originalError;
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
+  }
+});
+
+// Baselines are keyed by target. Keying by dest alone would let a future
+// entry pair — say two agents that both call their file AGENTS.md — silently
+// share one baseline, so each agent's apply would read the other's hash as
+// its own and report a clean machine that had never been synced.
+test('apply records a baseline per target, never one shared by dest name', async () => {
   const lock = readLock();
-  for (const entry of SYNC.filter((e) => e.mode === 'copy')) {
-    assert.ok(lock.files[entry.dest], `no baseline recorded for ${entry.dest}`);
-    assert.match(lock.files[entry.dest].hash, /^sha256:/);
+  for (const entry of SYNC) {
+    const key = `${entry.target}:${entry.dest}`;
+    assert.ok(lock.files[key], `no baseline recorded for ${key}`);
+    assert.match(lock.files[key].hash, /^sha256:/);
+    assert.equal(lock.files[entry.dest], undefined, `${entry.dest} must not be keyed without its target`);
   }
 });
 
@@ -45,8 +123,8 @@ test('apply is idempotent — a second run changes nothing and still exits 0', a
 });
 
 test('a clean second run does not rewrite the lockfile at all', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
-  const mtimeBefore = statSync(lockPath()).mtimeMs;
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
+  const mtimeBefore = statSync(statePath()).mtimeMs;
 
   // Force the clock forward so a spurious rewrite would show up as a changed
   // mtime even on filesystems with coarse mtime resolution.
@@ -54,8 +132,8 @@ test('a clean second run does not rewrite the lockfile at all', async () => {
 
   const code = await run([]);
   assert.equal(code, 0);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
-  assert.equal(statSync(lockPath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
+  assert.equal(statSync(statePath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
 });
 
 test('apply leaves a local-only edit alone and exits 0', async () => {
@@ -81,7 +159,7 @@ test('apply --take-repo overwrites the local edit', async () => {
 // a resolution apply can perform at all; it must refuse the flag outright
 // and point at capture, not attempt and fail silently.
 test('apply --take-local is refused outright — the flag does not fit apply\'s direction', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
   let stderr = '';
   const originalError = console.error;
   console.error = (msg) => { stderr += String(msg) + '\n'; };
@@ -93,7 +171,7 @@ test('apply --take-local is refused outright — the flag does not fit apply\'s 
   }
   assert.notEqual(code, 0, '--take-local must not be silently accepted by apply');
   assert.match(stderr, /capture --take-local/, 'must point the user at the command that actually supports it');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
 });
 
 // Fix round 1, finding 2: bootstrap.sh printed a restart reminder on every
@@ -116,7 +194,10 @@ test('apply prints a restart reminder when it actually changed a copied file', a
     process.stdout.write = originalWrite;
   }
   assert.equal(code, 0);
-  assert.match(output, /Restart Claude Code/, 'a run that changed a file must remind the user to restart');
+  assert.match(output, /Restart the affected agent/, 'a run that changed a file must remind the user to restart');
+  // settings.json is user-owned now, so the reminder must not imply this
+  // command wrote it.
+  assert.doesNotMatch(output, /settings/, 'the reminder must not name a file apply does not write');
 });
 
 test('a clean apply run prints no restart reminder', async () => {
@@ -133,12 +214,12 @@ test('a clean apply run prints no restart reminder', async () => {
     process.stdout.write = originalWrite;
   }
   assert.equal(code, 0);
-  assert.doesNotMatch(output, /Restart Claude Code/, 'a no-op run must stay silent — no false reminder');
+  assert.doesNotMatch(output, /Restart the affected agent/, 'a no-op run must stay silent — no false reminder');
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
-  const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const bogusEntry = { target: 'claude', src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
 
   const code = await run([], [bogusEntry]);
 
@@ -148,7 +229,7 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   // not touch the lockfile.
   assert.equal(code, 0);
   assert.equal(existsSync(join(claude, 'some-file')), false, 'apply must not write an entry with an unknown mode');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
 });
 
 // Fix round 2, finding 1: installGroups' per-source results were discarded,
@@ -156,6 +237,91 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
 // drive the reporting logic directly with crafted results — never through a
 // real install — matching the reviewer's guidance that dryRun already covers
 // installGroups' own wiring and no injectable-spawn seam is needed here.
+// --- apply --install ----------------------------------------------------------
+
+// Injected sections stand in for the real ones, so this exercises apply's
+// wiring into the shared workflow without a child process.
+function fixtureSections(calls) {
+  const install = async (items) =>
+    items.map((item) => { calls.push(item.id); return { id: item.id, label: item.label, ok: true }; });
+  return {
+    isTTY: false,
+    sections: {
+      config: { items: () => [], install },
+      integrations: {
+        items: () => [{ id: 'plugin:x', type: 'plugin', group: 'g', label: 'x', state: 'missing', default: true }],
+        install,
+      },
+      skills: { items: () => [], install },
+    },
+  };
+}
+
+test('apply without --install reconciles configuration and installs nothing', async () => {
+  const calls = [];
+  const code = await run([], SYNC, fixtureSections(calls));
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [], 'apply is configuration-only unless --install is asked for');
+});
+
+test('apply --install runs the shared workflow', async () => {
+  const calls = [];
+  const code = await run(['--install', '--yes'], SYNC, fixtureSections(calls));
+  assert.equal(code, 0);
+  assert.deepEqual(calls, ['plugin:x']);
+});
+
+// A configuration conflict is the one decision only the user can make.
+// Installing on top of it would bury that decision under installer output.
+test('a configuration conflict stops apply before anything is installed', async () => {
+  const conflictHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-conflict-'));
+  const conflictClaude = join(conflictHome, '.claude');
+  const conflictCodex = join(conflictHome, '.codex');
+  mkdirSync(conflictClaude, { recursive: true });
+  mkdirSync(conflictCodex, { recursive: true });
+
+  const saved = [
+    process.env.NORTUSCC_CLAUDE_DIR,
+    process.env.NORTUSCC_CODEX_DIR,
+    process.env.NORTUSCC_STATE_DIR,
+  ];
+  process.env.NORTUSCC_CLAUDE_DIR = conflictClaude;
+  process.env.NORTUSCC_CODEX_DIR = conflictCodex;
+  process.env.NORTUSCC_STATE_DIR = join(conflictHome, 'state');
+
+  const calls = [];
+  try {
+    // Seed a baseline, then move both sides apart: a genuine conflict.
+    assert.equal(await run([]), 0);
+    writeFileSync(join(conflictClaude, 'CLAUDE.md'), '# local change\n');
+    const { readLock, writeLock, setBaseline, hashText } = await import('../src/lock.mjs');
+    const lock = readLock();
+    setBaseline(lock, 'claude:CLAUDE.md', hashText('# a baseline neither side has'));
+    writeLock(lock);
+
+    const code = await run(['--install', '--yes'], SYNC, fixtureSections(calls));
+    assert.equal(code, 1, 'an unresolved conflict must fail the run');
+    assert.deepEqual(calls, [], 'nothing may be installed while a conflict is unresolved');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR, process.env.NORTUSCC_STATE_DIR] = saved;
+  }
+});
+
+test('--skills still installs skills and warns that it is deprecated', async () => {
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => { output += chunk.toString(); return true; };
+  let code;
+  try {
+    code = await run(['--skills']);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.equal(code, 0);
+  assert.match(output, /--skills is deprecated/);
+  assert.match(output, /--install/, 'the warning must name the replacement');
+});
+
 test('summarizeSkillsInstall reports every skill installed when every source succeeds', () => {
   const missing = [
     { name: 'one', source: 'a/b' },

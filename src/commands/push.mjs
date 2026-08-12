@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { repoRoot } from '../resolve.mjs';
+import { parseTarget } from '../targets.mjs';
 import { run as captureRun, capturedPaths } from './capture.mjs';
 
 function flag(args, name) {
@@ -27,14 +28,27 @@ function commitsAheadOfUpstream(root) {
 // and push exactly what capture wrote. Never invents a commit message, and
 // never stages anything beyond capture's own output -- the repo may hold
 // unrelated work in progress that is none of this tool's business.
-export async function run(args = []) {
+export async function run(allArgs = []) {
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+
   const message = flag(args, '-m') ?? flag(args, '--message');
   if (!message) {
     console.error('nortuscc: push requires an explicit message: nortuscc push -m "rules: ..."');
     return 2;
   }
 
-  const captured = await captureRun(args.filter((a) => a.startsWith('--take-')));
+  // push hands capture only the flags capture understands, so the target has
+  // to be put back explicitly — the filter below would otherwise drop it and
+  // silently capture both agents on a `push --target codex`.
+  const captured = await captureRun([
+    '--target',
+    target,
+    ...args.filter((a) => a.startsWith('--take-')),
+  ]);
   if (captured !== 0) return captured;
 
   const root = repoRoot();

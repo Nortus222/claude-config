@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readLock, writeLock } from '../lock.mjs';
-import { repoRoot, isGitCheckout } from '../resolve.mjs';
-import { run as applyRun } from './apply.mjs';
+import { readLock, writeLock, migrateLegacyState } from '../lock.mjs';
+import { repoRoot, isGitCheckout, statePath } from '../resolve.mjs';
+import { parseTarget } from '../targets.mjs';
+import { run as applyRun, installFor } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
 
 const DEFAULT_REPO = 'https://github.com/Nortus222/claude-config.git';
@@ -12,9 +13,26 @@ function flag(args, name) {
   return i >= 0 ? args[i + 1] : null;
 }
 
-export async function run(args = []) {
+// `deps` is forwarded to the closing status run, so a test can answer "what
+// can each agent see?" without spawning the real installer.
+export async function run(allArgs = [], deps = {}) {
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+
   const dir = flag(args, '--dir');
   const url = flag(args, '--repo') ?? DEFAULT_REPO;
+
+  // Import the pre-Codex lock before anything reads or writes state, so a
+  // machine that has been managed before keeps its recorded baselines instead
+  // of reporting every managed file as never synced. The old lock is left
+  // exactly where it is.
+  const migration = migrateLegacyState();
+  if (migration.migrated) {
+    console.log(`migrated existing nortuscc state -> ${statePath()}`);
+  }
 
   // When --dir is given and empty, clone into it. Otherwise this CLI is already
   // running from a clone, which is the npx-from-GitHub case.
@@ -59,10 +77,23 @@ export async function run(args = []) {
   lock.repo = root;
   writeLock(lock);
 
-  // setup always installs skills: a bare machine is exactly when they are wanted.
-  const applied = await applyRun(['--skills', ...args.filter((a) => a.startsWith('--take-'))]);
+  // Configuration first, so a conflict is decided before any installer runs.
+  // The target is put back explicitly — the filter keeps setup's own flags out
+  // of apply, and would otherwise drop it and reconcile both agents on a
+  // `setup --target codex`.
+  const forwarded = ['--target', target, ...args.filter((a) => a.startsWith('--take-'))];
+  const applied = await applyRun(forwarded);
   if (applied !== 0) return applied;
 
+  // setup always offers the full workflow: a bare machine is exactly when
+  // integrations and skills are wanted. Re-running it is idempotent, because
+  // everything already in place is offered as satisfied and never reinstalled.
+  const installed = await installFor(target, args, {
+    takeRepo: args.includes('--take-repo'),
+    deps,
+  });
+  if (installed !== 0) return installed;
+
   console.log('\n--- status ---');
-  return await statusRun();
+  return await statusRun(['--target', target], deps);
 }

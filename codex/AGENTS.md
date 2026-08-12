@@ -1,6 +1,6 @@
 # User Instructions
 
-These rules apply across Claude Code sessions. A repository's `CLAUDE.md` supplies its project-specific
+These rules apply across Codex sessions. A repository's `AGENTS.md` supplies its project-specific
 commands, PR target, and any stricter rules.
 
 ## Execution
@@ -15,8 +15,10 @@ The main checkout is a read-only integration checkout. Keep it on its current in
 implement, stage, commit, switch branches, or merge feature work there.
 
 - Do feature work in a dedicated worktree on a dedicated feature branch. Default location:
-  `.claude/worktrees/<slug>`; a repository may specify another location.
-- The repository's `CLAUDE.md` must name the branch that feature PRs target. Do not guess a missing target.
+  `.claude/worktrees/<slug>`; a repository may specify another location. The directory name is shared
+  across agents so two agents never split one repository's worktrees between two roots.
+- The repository's instruction file must name the branch that feature PRs target. Do not guess a missing
+  target.
 - Inside the task's worktree, agents may create the feature branch, stage and commit their own changes, push
   that branch, and open its PR without asking.
 - Never use `git stash`, force-push, or merge a PR. The owner controls integration.
@@ -33,12 +35,10 @@ implement, stage, commit, switch branches, or merge feature work there.
   I explicitly request another full build.
 - Report what was tested and what remains unverified. A successful build is not a passing test suite.
 
-## Superpowers helpers
+## Skills
 
-- Prefer `superpowers:subagent-driven-development` for same-session plan execution.
-- Invoke a skill's scripts through the paths its native installation exposes; do not reach into a
-  versioned plugin cache.
-- Repository-specific skills may add orchestration, but they do not replace the Git rules above.
+Shared skills are installed into `~/.agents/skills` and exposed to Codex by the `skills` CLI. Invoke a
+skill's scripts through the paths that installation exposes; do not reach into another agent's plugin cache.
 
 ## Completion
 

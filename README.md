@@ -1,7 +1,8 @@
 # claude-config
 
-Portable Claude Code configuration, kept in agreement across machines by
-`nortuscc` — one CLI that reports drift instead of letting it go silent.
+Portable agent configuration for **Claude Code and Codex**, kept in agreement
+across machines by `nortuscc` — one CLI that reports drift instead of letting it
+go silent.
 
 ## New machine
 
@@ -9,21 +10,36 @@ Portable Claude Code configuration, kept in agreement across machines by
 npx github:Nortus222/claude-config setup --dir ~/dev/claude-config
 ```
 
-Clones the repo, links `bin/` and `hooks/` into `~/.claude`, copies
-`settings.json` and `CLAUDE.md`, installs every skill in the manifest, and
-prints a status report. Restart Claude Code afterwards to load the rules.
+Clones the repo, migrates any older machine state, writes the instruction file
+for each selected agent, then opens a selector for the integrations and skills
+to install. Restart the affected agent afterwards to load the rules.
+
+Without a terminal to choose on, `setup` refuses rather than picking for you:
+pass `--yes` to accept the defaults, or `--no-hooks` / `--no-mcp` /
+`--no-plugins` / `--no-skills` to decline categories.
 
 If `--dir` already exists it must be a git checkout — an interrupted clone
 leaves the directory behind, and syncing from a half-made one would record a
 repo path that every later command silently resolves away from. `setup` refuses
 it instead: remove the directory and re-run.
 
+## Targets
+
+Every command takes `--target claude|codex|all`. The default is `all`.
+
+```bash
+nortuscc status --target codex   # report only what Codex owns
+nortuscc apply  --target claude  # write ~/.claude/CLAUDE.md and nothing else
+```
+
+An invalid or repeated `--target` exits 2 before anything is read or written.
+
 ## Daily use
 
 ```bash
 nortuscc status              # read-only; changes nothing
 nortuscc pull                # git pull, then bring this machine up to date
-nortuscc push -m "rules: allow gh pr view"   # share local edits
+nortuscc push -m "rules: ..." # share local edits
 ```
 
 `status` exits non-zero when anything needs attention, so it can gate a shell
@@ -33,12 +49,12 @@ prompt or a scheduled check.
 
 | Command | Effect |
 | --- | --- |
-| `setup [--repo URL] [--dir PATH]` | Clone if absent, apply, install skills, report |
-| `status` | Read-only report: config, plugins, skills |
-| `apply [--skills]` | Repo → machine. `--skills` also installs missing skills |
-| `update [--check] [--yes]` | Refresh installed skills from their sources, after confirmation |
+| `setup [--repo URL] [--dir PATH]` | Clone if absent, apply, then install interactively |
+| `status` | Read-only report: config, integrations, skills |
+| `apply [--install] [--take-repo]` | Repo → machine. `--install` also offers missing integrations and skills |
+| `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
 | `capture` | Machine → repo, including regenerating the skills manifest |
-| `pull` | `git pull --ff-only`, then apply |
+| `pull` | `git pull --ff-only`, then apply. Reports new integrations; installs them only with `--install` |
 | `push -m MSG` | Capture, then commit and push only what changed |
 
 Conflict resolution: `apply --take-repo` discards the local version;
@@ -47,67 +63,119 @@ matches its own direction — `apply --take-local` and `capture --take-repo`
 would silently do nothing useful, so both are refused outright with a message
 pointing at the command that actually supports them.
 
-## How syncing works
+`apply --skills` still works as a deprecated alias for installing missing
+skills; it prints one warning and points at `--install`.
 
-| Path | Mode | Why |
+## What is synced, and what is not
+
+| Path | Target | Mode |
 | --- | --- | --- |
-| `claude/bin` | link | An agent never writes it, so a link gives live sync |
-| `claude/hooks` | link | Same |
-| `claude/settings.json` | copy | Claude Code rewrites it in place, which would silently replace a link |
-| `claude/CLAUDE.md` | copy | Same |
+| `claude/CLAUDE.md` | Claude | copy |
+| `codex/AGENTS.md` | Codex | copy |
+| `skills-manifest.txt` | both | one shared skill set |
+| `integrations.json` | both | declarations only, never machine state |
 
-Copied files carry a content hash in `~/.claude/.nortuscc-lock.json`, recorded at
-the last sync. Comparing it against both sides gives four states: `clean`,
-`repo-ahead`, `local-ahead`, and `conflict`. A conflict is refused and backed up,
-never guessed. Directory links add two more: `clobbered`, meaning a real path sits
-where a link belongs and syncing had silently stopped, and `broken-link`, meaning
-the link is perfectly formed but the repo path it points into is gone — a deleted
-worktree or a moved clone. Both are reported, exit non-zero, and are repaired by
-`apply`.
+**Not synced, and never written by this tool:** Claude's `settings.json`,
+Codex's `config.toml`, credentials, sessions, history, caches, and any
+machine-specific MCP argument. Those files are yours. The one exception is
+narrow and explicit: a hook you select is registered by adding *only* that
+entry to a backed-up `settings.json`, leaving every other key untouched.
 
-Everything destructive backs up to `~/.claude/backups/nortuscc-<stamp>/` first.
+Earlier versions copied all of `settings.json` and symlinked `claude/bin` and
+`claude/hooks`. Those are retired. Existing copies on a machine are left alone —
+they simply stop being managed.
 
-Directory links (`bin/`, `hooks/`) are created as NTFS junctions on Windows,
-which need no Developer Mode or admin. That path is not exercised by the test
-suite and has not been run on a real Windows machine — treat Windows support
-as unverified until someone runs `setup` there and reports back.
+Copied files carry a content hash in the state file, recorded at the last sync.
+Comparing it against both sides gives four states: `clean`, `repo-ahead`,
+`local-ahead`, and `conflict`. A conflict is refused and backed up, never
+guessed.
+
+Everything destructive backs up first, under
+`<state>/backups/nortuscc-<stamp>/<agent>/`.
+
+## Machine state
+
+State lives outside every agent directory, because nortuscc configures more
+than one agent:
+
+- `~/.config/nortuscc/state.json` on Unix-like systems
+- `%APPDATA%\nortuscc\state.json` on Windows
+
+It is written atomically (temp file plus rename), so an interrupted write can
+never leave a half-parsed file that makes every managed file look unsynced.
+
+On first use, the older `~/.claude/.nortuscc-lock.json` is imported once: the
+recorded repo and the `CLAUDE.md` baseline come across as `claude:CLAUDE.md`,
+and the retired `settings.json` / `bin` / `hooks` entries are dropped. **The old
+lock is never modified or deleted.**
+
+`NORTUSCC_STATE_DIR` overrides the whole state root; `NORTUSCC_CLAUDE_DIR` and
+`NORTUSCC_CODEX_DIR` override the agent directories.
+
+## Integrations
+
+`integrations.json` declares the plugins, marketplaces, hooks and MCP servers a
+machine should have. It is validated before anything runs, and a manifest with
+any error installs nothing at all — unknown types, duplicate ids, unsupported
+targets, missing referenced files, and fields that look like secret values are
+all refused.
+
+**This file is public.** It may name an environment variable; it may never
+carry the value. An MCP server whose `requiresEnv` is unset is reported as
+blocked, with the variable named, before any child process starts.
+
+Installation order is hooks, marketplaces, plugins, then MCP servers, so
+prerequisites land first. Each item's failure is its own — the rest of the run
+continues, and any failed or blocked selected item makes the run exit non-zero.
+
+Native installers own their own layouts and updates: nortuscc runs
+`claude plugin install`, `codex mcp add` and friends as argument arrays, and
+never edits `config.toml` or a plugin cache itself.
+
+`capture` never reads local integrations back into the repo. Adding one is an
+edit to `integrations.json`, deliberately.
 
 ## Skills
 
 Skill content is never vendored here. `skills-manifest.txt` records which skills
 belong on every machine and which repo each installs from; `nortuscc` drives
-`npx skills` to fetch them.
+`npx skills` to fetch them into the shared store at `~/.agents/skills`, which is
+where Codex looks natively and where Claude's installation points.
+
+There is **one** shared store, and installs name their agents explicitly:
+
+```bash
+npx -y skills add owner/repo --skill one two --agent claude-code codex --global --yes
+```
+
+So "installed" and "usable by this agent" are separate questions. `status`
+reports a skill that exists in the store but is invisible to a selected agent
+as **partial**, and names the agent that cannot see it. A listing that cannot be
+read is reported as unknown rather than as an empty one — treating a failed read
+as "no skills" would drive a reinstall of everything.
 
 Skills present on a machine but absent from the manifest are reported and never
 removed — that is how a machine carries the shared set plus its own extras. Run
-`nortuscc capture` to fold a locally installed skill into the shared set.
-
-Skills with no recorded source are hand-authored and are never written to the
-manifest, since nothing could install them.
+`nortuscc capture` to fold a locally installed skill into the shared set. Skills
+with no recorded source are hand-authored and are never written to the manifest,
+since nothing could install them.
 
 ### `NORTUSCC_AGENTS_DIR` does not sandbox the installer
 
 `NORTUSCC_AGENTS_DIR` redirects only what **nortuscc reads**: the installed
 skill list and the sibling `.skill-lock.json`. It does not reach the installer.
 `npx skills add ... --global` writes into the real `~/.agents` regardless of
-what that variable is set to, so `nortuscc apply --skills` — and therefore
-`nortuscc setup` — is **not** isolated by it.
+what that variable is set to.
 
-Anything that spawns the installer touches the machine's live skills. The test
-suite never does: its fixtures keep `skills.missing` empty, so the `--skills`
-branch takes the "satisfied" path and nothing is spawned. Keep it that way, and
-do not treat `NORTUSCC_AGENTS_DIR` as a sandbox for a real install.
+The test suite never spawns a real installer: the acceptance tests put fake
+`claude`, `codex` and `npx` executables on `PATH` inside an empty temporary
+home, and every other test injects its own runner. Keep it that way.
 
 ### Staying current
 
-`apply --skills` installs skills the machine is *missing*. `nortuscc update`
-refreshes the ones it already has.
-
-The skill lock records a `skillFolderHash` per skill, which is the git tree SHA
-of that skill's folder in its source repo. Comparing it against the repo's
-current tree SHA answers "is there an update?" without downloading a single
-file: one blobless, no-checkout shallow clone per source repo, then
-`git rev-parse HEAD:<folder>`.
+`nortuscc update` refreshes the skills a machine already has, then re-checks
+agent exposure and asks the installer to re-expose anything a selected agent
+cannot see. It never creates symlinks by hand.
 
 ```bash
 nortuscc update --check   # report only; exits non-zero only if a skill is gone or unreachable
@@ -116,12 +184,11 @@ nortuscc update           # report, confirm, back up, then update
 
 Every skill lands in one of five states: `current`, `outdated`, `gone` (the
 folder no longer exists upstream), `unreachable` (the source repo could not be
-cloned — only that source's skills are affected), and `local` (hand-authored,
-with no source anything could update from).
+cloned), and `local` (hand-authored, with no source anything could update from).
 
-Outdated skills are copied to `~/.claude/backups/nortuscc-<stamp>/skills/`
-before the updater runs, and the closing report is built by re-reading the lock
-afterwards, so it describes what happened rather than what was intended.
+Outdated skills are copied into the backup directory before the updater runs,
+and the closing report is built by re-reading the lock afterwards, so it
+describes what happened rather than what was intended.
 
 Without a TTY and without `--yes`, `update` refuses and exits 2 rather than
 blocking a scheduled run on a prompt nothing will answer.
@@ -143,30 +210,26 @@ decision:
   enter confirm · esc cancel
 ```
 
-Outdated skills start ticked; removing and adopting are opt-in. `a` and `n`
-act on the group under the cursor — the groups are the actions, so `a` means
-"update all of these" or "adopt all of these" depending on where you are.
-
-`--add wizard,wait-what` pre-ticks those rows; with `--yes` it acts on them
-without asking. There is deliberately no flag that adopts a whole repo.
-`--prune` pre-ticks every skill deleted upstream. A name in `--add` that
-matches nothing available — already installed, misspelled, or from a source
-not offered — is reported and forces a non-zero exit, so a scripted adoption
-that silently adopted nothing never looks like success.
+Outdated skills start ticked; removing and adopting are opt-in. `--add
+wizard,wait-what` pre-ticks those rows; with `--yes` it acts on them without
+asking. There is deliberately no flag that adopts a whole repo. `--prune`
+pre-ticks every skill deleted upstream.
 
 Adopting or pruning rewrites `skills-manifest.txt` from what is installed
-afterwards, so the manifest and the machine cannot disagree about a change
-`update` made. A shrink larger than the number pruned is refused — that means
-this machine is missing skills the shared manifest lists, and writing it would
-drop them for every other machine.
+afterwards. A shrink larger than the number pruned is refused — that means this
+machine is missing skills the shared manifest lists, and writing it would drop
+them for every other machine.
 
 ## Adding a synced path
 
-Add one line to `SYNC` in `src/manifest.mjs`. Every command reads that table;
-nothing else needs to change.
+Add one line to `SYNC` in `src/manifest.mjs`, tagged with the agent it belongs
+to. Every command reads that table; nothing else needs to change.
 
 ## Development
 
 ```bash
 npm test    # node:test, no dependencies
 ```
+
+Windows support is unverified: the code avoids colons in backup filenames and
+resolves `%APPDATA%` for state, but no one has run `setup` there.

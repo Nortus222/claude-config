@@ -1,5 +1,5 @@
 import { basename, dirname } from 'node:path';
-import { isPlainObject } from './plugins.mjs';
+import { isPlainObject } from './json.mjs';
 
 // The lock records the path of a skill's SKILL.md, but the tree SHA that
 // identifies a version belongs to the directory containing it. A SKILL.md at

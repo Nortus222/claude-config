@@ -5,8 +5,24 @@ import { inspectSource as realInspectSource } from '../git-trees.mjs';
 import { select as realSelect } from '../select.mjs';
 import { choices, actionsFrom, seedKeys } from '../skill-actions.mjs';
 import { preserveCopy, backupDir } from '../backup.mjs';
-import { runUpdate as realRunUpdate, runRemove as realRunRemove, installGroups as realInstallGroups } from '../skills-cli.mjs';
-import { readSkillLock, installedSkillNames, installedGroups, emitManifest, manifestPath, readSkillsManifest, installArgs } from '../skills.mjs';
+import {
+  runUpdate as realRunUpdate,
+  runRemove as realRunRemove,
+  installGroups as realInstallGroups,
+  readExposure as realReadExposure,
+  agentIdsFor,
+} from '../skills-cli.mjs';
+import {
+  readSkillLock,
+  installedSkillNames,
+  installedGroups,
+  emitManifest,
+  manifestPath,
+  readSkillsManifest,
+  installArgs,
+  skillExposure,
+} from '../skills.mjs';
+import { parseTarget } from '../targets.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
 import { formatRow, section, labelWidth, short } from '../report.mjs';
 
@@ -151,19 +167,49 @@ export function reportLines(plan) {
   return lines;
 }
 
-export async function run(args = [], deps = {}) {
+// After the updater has run, the shared store and each agent's view of it can
+// disagree: an update can land a skill that a selected agent was never told
+// about. Re-installing exactly those, for exactly the agents that cannot see
+// them, is what keeps one shared store usable by both agents — no symlinks are
+// created by hand, the installer is asked to do its own job again.
+export function exposureRepairs({ names, agents, list, lock }) {
+  const { partial, missing } = skillExposure({ names, agents, list });
+  const needing = [...partial.map((p) => p.name), ...missing];
+  const skills = isPlainObjectLock(lock) ? lock.skills : {};
+
+  return installArgs(
+    needing
+      .map((name) => ({ name, source: skills?.[name]?.source }))
+      // A skill with no recorded source was authored locally; nothing could
+      // reinstall it, so it is reported rather than retried forever.
+      .filter((entry) => typeof entry.source === 'string' && entry.source),
+  );
+}
+
+function isPlainObjectLock(lock) {
+  return lock !== null && typeof lock === 'object' && !Array.isArray(lock);
+}
+
+export async function run(allArgs = [], deps = {}) {
   const {
     inspectSource = realInspectSource,
     select = realSelect,
     runUpdate = realRunUpdate,
     runRemove = realRunRemove,
     installGroups = realInstallGroups,
+    inspectExposure = realReadExposure,
     preserve = preserveCopy,
     readLock = readSkillLock,
     installed = installedSkillNames,
     writeManifest = (text) => writeFileSync(manifestPath(), text, 'utf8'),
     isTTY = process.stdin.isTTY,
   } = deps;
+
+  const { target, rest: args, error: targetError } = parseTarget(allArgs);
+  if (targetError) {
+    console.error(`nortuscc: ${targetError}`);
+    return 2;
+  }
 
   const flags = parseFlags(args);
   if (flags.error) {
@@ -276,12 +322,33 @@ export async function run(args = [], deps = {}) {
   // further down) reads this same set, so a source installGroups never
   // returned a result for cannot read as ok in one place and failed in the
   // other.
+  const agents = agentIdsFor(target);
   let okAddSources = new Set();
   if (actions.add.length) {
     const groups = installArgs(actions.add);
-    const installResults = await installGroups(groups);
+    const installResults = await installGroups(groups, { agents });
     okAddSources = new Set(installResults.filter((r) => r.ok).map((r) => r.source));
     if (groups.some((g) => !okAddSources.has(g.source))) failed = true;
+  }
+
+  // Reconcile exposure last, once the store itself has settled. Scoped to the
+  // skills this run touched plus the ones the shared manifest lists — a skill
+  // this machine keeps privately is nobody else's business to re-expose.
+  const exposureScope = new Set([
+    ...actions.update,
+    ...readSkillsManifest().flatMap((g) => g.skills),
+  ]);
+  const canonical = installed().filter((name) => exposureScope.has(name));
+  if (canonical.length) {
+    const { list, errors: exposureErrors } = await inspectExposure(agents);
+    for (const message of exposureErrors) process.stdout.write(`\n${message}\n`);
+
+    const repairs = exposureRepairs({ names: canonical, agents, list, lock: readLock() });
+    if (repairs.length) {
+      process.stdout.write(`\nre-exposing ${repairs.reduce((n, g) => n + g.skills.length, 0)} skill(s) to ${agents.join(', ')}\n`);
+      const repaired = await installGroups(repairs, { agents });
+      if (repaired.some((r) => !r.ok)) failed = true;
+    }
   }
 
   // The manifest is a statement about the machine, so it is rebuilt from the

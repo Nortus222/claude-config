@@ -1,186 +1,122 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pluginReport } from '../src/plugins.mjs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-test('nothing missing when everything is installed', () => {
-  const r = pluginReport(
-    { enabledPlugins: { 'a@mkt': true }, extraKnownMarketplaces: { mkt: { source: 'x/y' } } },
-    { 'a@mkt': {} },
-    { mkt: {} },
-  );
-  assert.deepEqual(r.missingPlugins, []);
-  assert.deepEqual(r.missingMarketplaces, []);
-  assert.deepEqual(r.commands, []);
+import {
+  marketplaceCommand,
+  pluginCommand,
+  claudePluginAdapters,
+} from '../src/integrations/claude-plugins.mjs';
+
+const MARKETPLACE = {
+  id: 'cm-market', label: 'context-mode marketplace', target: 'claude',
+  type: 'marketplace', default: true, marketplace: 'mksglu/context-mode',
+};
+const PLUGIN = {
+  id: 'cm', label: 'context-mode', target: 'claude',
+  type: 'plugin', default: true, plugin: 'context-mode@context-mode',
+};
+
+// An argument array, never a shell string: a marketplace or plugin name is
+// third-party data, and interpolating it into a shell would make quoting the
+// only thing standing between a manifest and arbitrary execution.
+test('the supported commands are built as argv arrays, not shell strings', () => {
+  assert.deepEqual(marketplaceCommand(MARKETPLACE), {
+    cmd: 'claude',
+    args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'],
+  });
+  assert.deepEqual(pluginCommand(PLUGIN), {
+    cmd: 'claude',
+    args: ['plugin', 'install', 'context-mode@context-mode'],
+  });
 });
 
-test('an uninstalled plugin is reported with an install command', () => {
-  const r = pluginReport({ enabledPlugins: { 'a@mkt': true } }, {}, { mkt: {} });
-  assert.deepEqual(r.missingPlugins, ['a@mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin install a@mkt')));
-});
+function claudeHome() {
+  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-claude-plugins-'));
+  mkdirSync(join(dir, 'plugins'), { recursive: true });
+  return dir;
+}
 
-test('a disabled plugin is not reported as missing', () => {
-  const r = pluginReport({ enabledPlugins: { 'a@mkt': false } }, {}, { mkt: {} });
-  assert.deepEqual(r.missingPlugins, []);
-});
+function writeState(dir, { installed = {}, marketplaces = {} } = {}) {
+  writeFileSync(join(dir, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: installed }));
+  writeFileSync(join(dir, 'plugins', 'known_marketplaces.json'), JSON.stringify(marketplaces));
+}
 
-test('an unknown marketplace is reported with an add command', () => {
-  const r = pluginReport(
-    { enabledPlugins: {}, extraKnownMarketplaces: { mkt: { source: 'owner/repo' } } },
-    {},
-    {},
-  );
-  assert.deepEqual(r.missingMarketplaces, ['mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin marketplace add owner/repo')));
-});
-
-test('missing sections default to empty rather than throwing', () => {
-  const r = pluginReport({}, {}, {});
-  assert.deepEqual(r.missingPlugins, []);
-  assert.deepEqual(r.missingMarketplaces, []);
-});
-
-// Finding 1: typeof null === 'object' crash — robustness tests
-test('typeof null === "object" does not crash when plugins property is null', () => {
-  const r = pluginReport({ enabledPlugins: { 'a@mkt': true } }, { plugins: null }, {});
-  // Should degrade gracefully: null is not a valid dictionary, so treat as empty
-  assert.deepEqual(r.missingPlugins, ['a@mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin install a@mkt')));
-});
-
-test('installed parameter as string does not crash', () => {
-  const r = pluginReport({ enabledPlugins: { 'a@mkt': true } }, 'not-an-object', {});
-  // Should degrade gracefully: string is not a valid dictionary, so treat as empty
-  assert.deepEqual(r.missingPlugins, ['a@mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin install a@mkt')));
-});
-
-test('marketplaces parameter as null does not crash', () => {
-  const r = pluginReport(
-    { enabledPlugins: {}, extraKnownMarketplaces: { mkt: { source: 'owner/repo' } } },
-    {},
-    null,
-  );
-  // Should degrade gracefully
-  assert.deepEqual(r.missingMarketplaces, ['mkt']);
-});
-
-// Finding 2: Real nested structure from Claude Code
-test('real Claude Code installed_plugins.json structure with nested plugins property', () => {
-  const realStructure = {
-    version: 2,
-    plugins: {
-      'superpowers@claude-plugins-official': [
-        {
-          scope: 'user',
-          installPath: '/Users/user/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0',
-          version: '6.2.0',
-        },
-      ],
-      'context-mode@context-mode': [
-        {
-          scope: 'user',
-          installPath: '/Users/user/.claude/plugins/cache/context-mode/context-mode/1.0.136',
-          version: '1.0.136',
-        },
-      ],
+function adaptersFor(dir, calls) {
+  return claudePluginAdapters({
+    claudeDir: () => dir,
+    spawn: async (command) => {
+      calls.push(command);
+      return { ok: true };
     },
-  };
+  });
+}
 
-  const r = pluginReport(
-    {
-      enabledPlugins: {
-        'superpowers@claude-plugins-official': true,
-        'context-mode@context-mode': true,
-        'missing@mkt': true,
-      },
-    },
-    realStructure,
-    {},
-  );
+test('inspection reads Claude\'s own installed-plugin and marketplace state', () => {
+  const dir = claudeHome();
+  writeState(dir, {
+    installed: { 'context-mode@context-mode': {} },
+    marketplaces: { 'context-mode': {} },
+  });
+  const adapters = adaptersFor(dir, []);
 
-  assert.deepEqual(r.missingPlugins, ['missing@mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin install missing@mkt')));
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'installed');
+  assert.equal(adapters.marketplace.inspect(MARKETPLACE).state, 'installed');
 });
 
-// Finding 3: Source type handling
-test('github source type with repo property is resolved', () => {
-  const r = pluginReport(
-    {
-      enabledPlugins: {},
-      extraKnownMarketplaces: {
-        mkt: { source: { source: 'github', repo: 'owner/repo' } },
-      },
-    },
-    {},
-    {},
-  );
-  assert.deepEqual(r.missingMarketplaces, ['mkt']);
-  assert.ok(r.commands.some((c) => c.includes('claude plugin marketplace add owner/repo')));
+test('a plugin absent from Claude\'s state reads as missing', () => {
+  const dir = claudeHome();
+  writeState(dir, { installed: {}, marketplaces: {} });
+  const adapters = adaptersFor(dir, []);
+
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'missing');
+  assert.equal(adapters.marketplace.inspect(MARKETPLACE).state, 'missing');
 });
 
-test('git source type with url property is resolved', () => {
-  const r = pluginReport(
-    {
-      enabledPlugins: {},
-      extraKnownMarketplaces: {
-        mkt: { source: { source: 'git', url: 'https://github.com/owner/repo.git' } },
-      },
-    },
-    {},
-    {},
-  );
-  assert.deepEqual(r.missingMarketplaces, ['mkt']);
-  assert.ok(
-    r.commands.some((c) => c.includes('https://github.com/owner/repo.git')),
-    'git source url is in commands',
-  );
+// A machine that has never run Claude has no plugin files at all. That is a
+// bare machine, not a broken one, so inspection must report missing rather
+// than throw and take the whole status run down.
+test('missing or corrupt Claude state reads as missing rather than throwing', () => {
+  const bare = mkdtempSync(join(tmpdir(), 'nortuscc-claude-bare-'));
+  const adapters = adaptersFor(bare, []);
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'missing');
+
+  const corrupt = claudeHome();
+  writeFileSync(join(corrupt, 'plugins', 'installed_plugins.json'), '{ not json');
+  assert.equal(adaptersFor(corrupt, []).plugin.inspect(PLUGIN).state, 'missing');
 });
 
-test('url source type with url property is resolved', () => {
-  const r = pluginReport(
-    {
-      enabledPlugins: {},
-      extraKnownMarketplaces: {
-        mkt: { source: { source: 'url', url: 'https://example.com/plugins.json' } },
-      },
-    },
-    {},
-    {},
-  );
-  assert.deepEqual(r.missingMarketplaces, ['mkt']);
-  assert.ok(
-    r.commands.some((c) => c.includes('https://example.com/plugins.json')),
-    'url source is in commands',
-  );
+test('installing runs the supported command and reports the spawn result', async () => {
+  const dir = claudeHome();
+  writeState(dir);
+  const calls = [];
+  const adapters = adaptersFor(dir, calls);
+
+  const result = await adapters.plugin.install(PLUGIN);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ cmd: 'claude', args: ['plugin', 'install', 'context-mode@context-mode'] }]);
 });
 
-test('unresolvable marketplace source emits comment instead of command', () => {
-  const r = pluginReport(
-    {
-      enabledPlugins: {},
-      extraKnownMarketplaces: {
-        builtin: { source: { source: 'builtin' } },
-        malformed: { source: { unknown: 'structure' } },
-      },
-    },
-    {},
-    {},
-  );
+// The child never launching at all (claude not on PATH) is silent otherwise:
+// stdio inheritance has nothing to show when there is no child.
+test('a launch failure names the unavailable native command', async () => {
+  const dir = claudeHome();
+  writeState(dir);
+  const adapters = claudePluginAdapters({
+    claudeDir: () => dir,
+    spawn: async () => ({ ok: false, note: 'could not launch `claude`: ENOENT' }),
+  });
 
-  assert.deepEqual(r.missingMarketplaces, ['builtin', 'malformed']);
-  // Commands should contain comments for these, not add commands
-  const comments = r.commands.filter((c) => c.startsWith('#'));
-  const adds = r.commands.filter((c) => c.includes('marketplace add'));
+  const result = await adapters.plugin.install(PLUGIN);
+  assert.equal(result.ok, false);
+  assert.match(result.note, /claude/);
+});
 
-  assert.equal(adds.length, 0, 'no marketplace add commands for unresolvable sources');
-  assert.equal(comments.length, 2, 'one comment for each unresolvable marketplace');
-  assert.ok(
-    comments.some((c) => c.includes('builtin')),
-    'comment identifies builtin marketplace',
-  );
-  assert.ok(
-    comments.some((c) => c.includes('malformed')),
-    'comment identifies malformed marketplace',
-  );
+test('describe reports the exact command a run would make', () => {
+  const dir = claudeHome();
+  writeState(dir);
+  const adapters = adaptersFor(dir, []);
+  assert.equal(adapters.marketplace.describe(MARKETPLACE), 'claude plugin marketplace add mksglu/context-mode');
 });

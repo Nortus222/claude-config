@@ -1,12 +1,17 @@
 // The single source of truth for what syncs and how.
 //
-// mode: 'link' — an agent never writes this path, so a symlink is safe and gives
-//                live sync. Directories only.
-// mode: 'copy' — Claude Code rewrites this file in place, which would silently
-//                replace a symlink with a regular file. Copy it and track a hash.
+// Every entry carries the agent it belongs to, so one manifest serves both
+// targets and `--target` is a filter over this table rather than a second
+// implementation of every command.
+//
+// mode: 'copy' — an agent rewrites its instruction file in place, which would
+//                silently replace a symlink with a regular file. Copy it and
+//                track a hash.
+//
+// Only portable instruction files are managed. Claude's settings.json and
+// Codex's config.toml stay user-owned: they mix portable rules with
+// permissions, UI preferences and machine-specific state.
 export const SYNC = [
-  { src: 'claude/bin', dest: 'bin', mode: 'link' },
-  { src: 'claude/hooks', dest: 'hooks', mode: 'link' },
-  { src: 'claude/settings.json', dest: 'settings.json', mode: 'copy' },
-  { src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
+  { target: 'claude', src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
+  { target: 'codex', src: 'codex/AGENTS.md', dest: 'AGENTS.md', mode: 'copy' },
 ];

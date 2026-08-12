@@ -1,11 +1,14 @@
 import { SYNC } from '../manifest.mjs';
+import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
-import { ensureLink, inspectLink } from '../link.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
-import { installGroups } from '../skills-cli.mjs';
+import { installGroups, agentIdsFor } from '../skills-cli.mjs';
+import { parseInstallFlags } from '../install-plan.mjs';
+import { defaultInstallDeps } from '../install-sections.mjs';
+import { runInstall } from './install.mjs';
 
 // Turns installGroups' per-source {source, ok} results into report lines and
 // a failure count, kept separate from installGroups itself so the mapping
@@ -28,7 +31,17 @@ export function summarizeSkillsInstall(missing, results) {
 // entries defaults to SYNC; the parameter exists so tests can inject a bogus
 // manifest entry to exercise the unknown-mode path, the same pattern
 // configReport uses in status.mjs.
-export async function run(args = [], entries = SYNC) {
+export async function run(allArgs = [], entries = SYNC, deps = {}) {
+  // Target first, before any other flag parsing: --target and its value must
+  // never reach a parser that would read them as something else, and an
+  // invalid target has to exit 2 before a single file is written.
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+  const selected = entriesForTarget(entries, target);
+
   const takeRepo = args.includes('--take-repo');
   const takeLocal = args.includes('--take-local');
 
@@ -56,29 +69,13 @@ export async function run(args = [], entries = SYNC) {
   const lines = [];
   let refused = 0;
   let skillsFailed = 0;
-  let linksUnresolved = 0;
-  // Tracks whether this run actually wrote anything to ~/.claude, so the
-  // restart reminder below only fires when it is true and stays silent on a
-  // clean, idempotent no-op run.
+  // Tracks whether this run actually wrote anything to an agent directory, so
+  // the restart reminder below only fires when it is true and stays silent on
+  // a clean, idempotent no-op run.
   let changed = false;
 
-  for (const entry of entries) {
+  for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
-
-    if (mode === 'link') {
-      // Read the state before ensureLink fixes it — ensureLink always reports
-      // 'linked' on success, whether or not it had to do anything, so the
-      // pre-state is the only way to tell a repair from a no-op.
-      const { state: preState } = inspectLink(dest, src);
-      const res = ensureLink(dest, src, entry.dest);
-      if (preState !== 'linked') changed = true;
-      // ensureLink reports the post-state honestly, so a link it rebuilt over a
-      // repo path that is simply not there stays visible instead of being
-      // reported as a success apply did not achieve.
-      if (res.state !== 'linked') linksUnresolved += 1;
-      lines.push(formatRow(entry.dest, res.state, noteForLink(res, src)));
-      continue;
-    }
 
     if (mode !== 'copy') {
       // Unknown mode: apply has no idea how to remediate this entry, so it is
@@ -91,13 +88,24 @@ export async function run(args = [], entries = SYNC) {
     // --take-local is refused above before this loop ever runs, so the only
     // force this command ever applies is --take-repo, discarding the local
     // side of a conflict.
-    const res = applyCopy(src, dest, entry.dest, lock, { force: takeRepo });
+    const res = applyCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
+      force: takeRepo,
+      relative: entry.dest,
+      agent: entry.target,
+    });
     if (res.action === 'refused') refused += 1;
     if (res.action === 'copied') changed = true;
     lines.push(formatRow(entry.dest, res.action, noteFor(res)));
   }
 
-  if (args.includes('--skills')) {
+  // --skills is the compatibility alias: it installs missing skills and
+  // nothing else, which is what it always did. --install is the full workflow.
+  const skillsAlias = args.includes('--skills');
+  if (skillsAlias && !args.includes('--install')) {
+    process.stdout.write(
+      "\nnortuscc: --skills is deprecated; use 'nortuscc apply --install --no-hooks --no-mcp --no-plugins'\n",
+    );
+
     const skills = reconcile({
       groups: readSkillsManifest(),
       lock: readSkillLock(),
@@ -106,7 +114,9 @@ export async function run(args = [], entries = SYNC) {
     if (skills.missing.length === 0) {
       lines.push(formatRow('skills', 'satisfied', ''));
     } else {
-      const results = await installGroups(installArgs(skills.missing));
+      // The selected agents are named explicitly, so a --target codex run
+      // installs for Codex and nothing else.
+      const results = await installGroups(installArgs(skills.missing), { agents: agentIdsFor(target) });
       const summary = summarizeSkillsInstall(skills.missing, results);
       lines.push(...summary.lines);
       skillsFailed = summary.failed;
@@ -122,15 +132,19 @@ export async function run(args = [], entries = SYNC) {
 
   process.stdout.write('\n' + section('apply', lines));
 
-  // settings.json and CLAUDE.md are only read by Claude Code at startup, so a
-  // successful apply that changed anything has no visible effect until the
-  // user restarts — bootstrap.sh printed this reminder unconditionally on
-  // every run; here it is conditioned on actually having changed something,
-  // so a clean re-run stays silent.
+  // Instruction files are only read by an agent at startup, so a successful
+  // apply that changed anything has no visible effect until the user restarts
+  // — bootstrap.sh printed this reminder unconditionally on every run; here it
+  // is conditioned on actually having changed something, so a clean re-run
+  // stays silent. It no longer names settings.json: that file is user-owned
+  // and this command does not write it.
   if (changed) {
-    process.stdout.write('\nRestart Claude Code to load the synced settings.\n');
+    process.stdout.write('\nRestart the affected agent to load the synced instructions.\n');
   }
 
+  // A configuration conflict stops the run before installation. Installing on
+  // top of an unresolved conflict would bury the one thing the user has to
+  // decide under a wall of installer output.
   if (refused > 0) {
     process.stdout.write(
       `\n${refused} conflict(s) refused. Resolve with:\n` +
@@ -140,26 +154,38 @@ export async function run(args = [], entries = SYNC) {
     return 1;
   }
 
-  if (linksUnresolved > 0) {
-    process.stdout.write(
-      `\n${linksUnresolved} link(s) still lead nowhere: the repo path they need is missing.\n` +
-        '  Check that the repo recorded in ~/.claude/.nortuscc-lock.json still exists,\n' +
-        '  then re-run: nortuscc apply\n',
-    );
-    return 1;
-  }
-
   if (skillsFailed > 0) {
     process.stdout.write(`\n${skillsFailed} skill(s) failed to install. See output above for details.\n`);
     return 1;
   }
 
+  if (args.includes('--install')) {
+    // --skills alongside --install narrows the workflow to skills alone,
+    // which is what --skills has always meant.
+    const aliasOptOuts = skillsAlias ? ['--no-hooks', '--no-mcp', '--no-plugins'] : [];
+    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps });
+  }
+
   return 0;
 }
 
-function noteForLink(res, src) {
-  if (res.state !== 'linked') return `target missing in the repo: ${src}`;
-  return res.backedUp ? `backed up -> ${res.backedUp}` : '';
+// Shared by apply --install and by setup, so both offer exactly the same rows
+// in the same order.
+export async function installFor(target, args, { takeRepo = false, deps = {} } = {}) {
+  const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
+  const wiring = deps.sections ? deps : defaultInstallDeps(target, { force: takeRepo });
+
+  if (wiring.integrationErrors?.length) {
+    for (const message of wiring.integrationErrors) console.error(`nortuscc: ${message}`);
+    console.error('nortuscc: integrations.json is invalid; nothing was installed.');
+    return 2;
+  }
+
+  return await runInstall({
+    target,
+    flags,
+    deps: { ...wiring, isTTY: deps.isTTY, select: deps.select, confirm: deps.confirm },
+  });
 }
 
 function noteFor(res) {

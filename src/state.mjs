@@ -25,35 +25,10 @@ export function fileState({ baseline, repo, local }) {
   return 'conflict';
 }
 
-// Linked directories: the failure the old scripts could not see is 'clobbered',
-// where a real directory sits where a link belongs and syncing silently stopped.
-//
-// targetResolves answers "does following this link land on something that
-// exists?" — the caller's job, since this module does no I/O. It is required,
-// not optional: an omitted fact reads as 'broken-link', so a caller that forgets
-// to gather it gets a loud report rather than a silent 'linked'.
-export function linkState({ exists, isSymlink, target, expectedTarget, targetResolves }) {
-  if (!exists) return 'missing';
-  if (!isSymlink) return 'clobbered';
-  if (target !== expectedTarget) return 'wrong-target';
-  // A link can be perfectly formed, point exactly where it should, and still
-  // lead nowhere — the repo it points into was moved, deleted, or is a worktree
-  // that has been removed. Calling that 'linked' is the §1 silent failure this
-  // CLI exists to end: `cat ~/.claude/bin/sp` fails while status says the
-  // machine is in agreement.
-  if (!targetResolves) return 'broken-link';
-  return 'linked';
-}
-
-// broken-link belongs here, not in BLOCKED: apply can rebuild the link, and
-// once the repo path is back the rebuild is all that is needed.
-export const NEEDS_APPLY = new Set([
-  'repo-ahead',
-  'unmanaged',
-  'missing',
-  'clobbered',
-  'wrong-target',
-  'broken-link',
-]);
+// Directory links are gone: no managed path is a directory any more, so the
+// link state machine — and 'clobbered', 'wrong-target' and 'broken-link' with
+// it — had no remaining producer. Native installers own the layouts those
+// links used to stand in for.
+export const NEEDS_APPLY = new Set(['repo-ahead', 'unmanaged', 'missing']);
 export const NEEDS_CAPTURE = new Set(['local-ahead']);
 export const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode']);

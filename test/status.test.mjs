@@ -16,24 +16,24 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
+process.env.NORTUSCC_CODEX_DIR = join(home, '.codex');
 mkdirSync(process.env.NORTUSCC_CLAUDE_DIR, { recursive: true });
+mkdirSync(process.env.NORTUSCC_CODEX_DIR, { recursive: true });
 
 // Redirect the skills dir (and, via skills.mjs, the sibling .skill-lock.json)
 // so these tests never read the real ~/.agents/skills or the real, unrecoverable
 // ~/.agents/.skill-lock.json.
 process.env.NORTUSCC_AGENTS_DIR = join(home, '.agents', 'skills');
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
-// Set up a fixture repo with empty settings.json so tests don't read plugins from the real repo
+// A fixture repo carrying one instruction file per target, so tests never read
+// the real repo's tracked files.
 const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-'));
 process.env.NORTUSCC_REPO_DIR = fixtureRepo;
 mkdirSync(join(fixtureRepo, 'claude'), { recursive: true });
-writeFileSync(join(fixtureRepo, 'claude', 'settings.json'), JSON.stringify({}));
+mkdirSync(join(fixtureRepo, 'codex'), { recursive: true });
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
-// The link entries need real directories to point at. Without them the links
-// these tests create dangle, which is now (correctly) reported as broken-link
-// rather than as a clean machine.
-mkdirSync(join(fixtureRepo, 'claude', 'bin'), { recursive: true });
-mkdirSync(join(fixtureRepo, 'claude', 'hooks'), { recursive: true });
+writeFileSync(join(fixtureRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
 const { configReport, run } = await import('../src/commands/status.mjs');
 
@@ -43,30 +43,52 @@ test('configReport returns one row per manifest entry', async () => {
   assert.equal(rows.length, SYNC.length);
   for (const row of rows) {
     assert.ok(row.dest, 'each row names its destination');
-    assert.ok(['link', 'copy'].includes(row.mode));
+    assert.equal(row.mode, 'copy');
     assert.ok(typeof row.state === 'string' && row.state.length > 0);
   }
 });
 
-test('an empty claude dir reports nothing as clean', () => {
+test('an empty agent dir reports nothing as clean', () => {
   const rows = configReport();
-  const clean = rows.filter((r) => r.state === 'clean' || r.state === 'linked');
+  const clean = rows.filter((r) => r.state === 'clean');
   assert.equal(clean.length, 0, 'a bare machine has no synced files yet');
-});
-
-test('link entries report missing on a bare machine', () => {
-  const rows = configReport().filter((r) => r.mode === 'link');
-  for (const row of rows) assert.equal(row.state, 'missing');
 });
 
 test('copy entries report unmanaged on a bare machine', () => {
   const rows = configReport().filter((r) => r.mode === 'copy');
+  assert.ok(rows.length > 0, 'the manifest must actually have copy entries to check');
   for (const row of rows) assert.equal(row.state, 'unmanaged');
 });
 
+// status is the read-only verb, so its target filter is the one users reach
+// for first — and a filter that reports too much is exactly as wrong as one
+// that reports too little.
+test('a target narrows the config report to that agent alone', async () => {
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { entriesForTarget } = await import('../src/targets.mjs');
+
+  const claudeRows = configReport(entriesForTarget(SYNC, 'claude'));
+  assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md']);
+
+  const codexRows = configReport(entriesForTarget(SYNC, 'codex'));
+  assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md']);
+});
+
+test('an invalid --target makes status exit 2 without reporting', async () => {
+  const originalError = console.error;
+  let stderr = '';
+  console.error = (msg) => { stderr += String(msg) + '\n'; };
+  try {
+    assert.equal(await run(['--target', 'cursor']), 2);
+  } finally {
+    console.error = originalError;
+  }
+  assert.match(stderr, /claude\|codex\|all/);
+});
+
 test('run() returns 1 on a dirty machine and does not write lockfile', async () => {
-  const { lockPath } = await import('../src/resolve.mjs');
-  const lockFile = lockPath();
+  const { statePath } = await import('../src/resolve.mjs');
+  const lockFile = statePath();
 
   // Capture initial state
   let lockExistedBefore = false;
@@ -118,31 +140,16 @@ test('run() returns 0 on a clean machine', async () => {
   // Set up a genuinely clean machine: all entries in non-actionable states
   const { SYNC } = await import('../src/manifest.mjs');
   const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { ensureLink } = await import('../src/link.mjs');
-  const { resolveEntry, claudeDir } = await import('../src/resolve.mjs');
+  const { resolveEntry } = await import('../src/resolve.mjs');
 
-  const claude = claudeDir();
-
-  // For all link entries: create the symlinks
-  for (const entry of SYNC) {
-    if (entry.mode === 'link') {
-      const { src, dest } = resolveEntry(entry);
-      await ensureLink(dest, src);
-    }
-  }
-
-  // For all copy entries: copy the file to dest and seed lockfile with its hash
+  // Copy each managed file to its destination and seed the lockfile with its hash
   const lock = readLock();
   for (const entry of SYNC) {
-    if (entry.mode === 'copy') {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        // Copy the repo file to the local destination
-        copyFileSync(src, dest);
-        // Seed the baseline hash in the lockfile
-        setBaseline(lock, entry.dest, hash);
-      }
+    const { src, dest } = resolveEntry(entry);
+    const hash = hashFile(src);
+    if (hash) {
+      copyFileSync(src, dest);
+      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
     }
   }
   writeLock(lock);
@@ -156,7 +163,7 @@ test('run() returns 0 on a clean machine', async () => {
 
 test('unknown mode is surfaced with correct state and note', async () => {
   // Inject a bogus mode entry and verify it surfaces as unknown-mode with appropriate note
-  const bogusEntry = { src: 'repo/some-file', dest: 'some-file', mode: 'bogus' };
+  const bogusEntry = { target: 'claude', src: 'repo/some-file', dest: 'some-file', mode: 'bogus' };
   const rows = configReport([bogusEntry]);
 
   assert.equal(rows.length, 1);
@@ -206,14 +213,16 @@ test('run() does not write any files to claude dir and does not create new direc
   // Use a fresh, isolated temp directory for this test to avoid state leakage from other tests
   const isolatedHome = mkdtempSync(join(tmpdir(), 'nortuscc-readonly-'));
   const isolatedClaudeDir = join(isolatedHome, '.claude');
+  const isolatedCodexDir = join(isolatedHome, '.codex');
   mkdirSync(isolatedClaudeDir, { recursive: true });
+  mkdirSync(isolatedCodexDir, { recursive: true });
 
   // Set up an isolated repo fixture
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-readonly-'));
-  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
-  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
+  writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
   // Set up an isolated agents/skills fixture too (fix round 1, finding 3: the
   // original snapshot only covered the claude dir, so a write in the new
@@ -228,18 +237,21 @@ test('run() does not write any files to claude dir and does not create new direc
 
   // Save original env vars and override with isolated paths
   const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
+  const origCodexDir = process.env.NORTUSCC_CODEX_DIR;
   const origRepoDir = process.env.NORTUSCC_REPO_DIR;
   const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
+  const origStateDir = process.env.NORTUSCC_STATE_DIR;
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   try {
     // Reimport to get fresh functions bound to isolated paths
     const { run: isolatedRun } = await import('../src/commands/status.mjs');
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { ensureLink } = await import('../src/link.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
 
     // Take a pristine snapshot before any setup (kept for parity with the
@@ -247,23 +259,14 @@ test('run() does not write any files to claude dir and does not create new direc
     // change during setup, so only "after setup" and "after run()" are compared).
     const snapshotBefore = snapshotDirectory(isolatedClaudeDir);
 
-    // Set up a clean machine: all entries in non-actionable states
-    for (const entry of SYNC) {
-      if (entry.mode === 'link') {
-        const { src, dest } = resolveEntry(entry);
-        await ensureLink(dest, src);
-      }
-    }
-
+    // Set up a clean machine: every managed file present and baselined
     const lock = readLock();
     for (const entry of SYNC) {
-      if (entry.mode === 'copy') {
-        const { src, dest } = resolveEntry(entry);
-        const hash = hashFile(src);
-        if (hash) {
-          copyFileSync(src, dest);
-          setBaseline(lock, entry.dest, hash);
-        }
+      const { src, dest } = resolveEntry(entry);
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
@@ -323,8 +326,10 @@ test('run() does not write any files to claude dir and does not create new direc
   } finally {
     // Restore original env vars
     process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
+    process.env.NORTUSCC_CODEX_DIR = origCodexDir;
     process.env.NORTUSCC_REPO_DIR = origRepoDir;
     process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
+    process.env.NORTUSCC_STATE_DIR = origStateDir;
   }
 });
 
@@ -336,13 +341,15 @@ test('run() does not write any files to claude dir and does not create new direc
 test('run() returns 1 when a manifest skill is missing, and names it in the output', async () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), 'nortuscc-skills-missing-'));
   const isolatedClaudeDir = join(isolatedHome, '.claude');
+  const isolatedCodexDir = join(isolatedHome, '.codex');
   mkdirSync(isolatedClaudeDir, { recursive: true });
+  mkdirSync(isolatedCodexDir, { recursive: true });
 
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-skills-missing-'));
-  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
-  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
+  writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
   // A real source-grouped manifest naming two skills.
   writeFileSync(join(isolatedRepo, 'skills-manifest.txt'), '[a/b]\nhave\nwant\n');
 
@@ -351,11 +358,15 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   mkdirSync(join(isolatedAgentsSkillsDir, 'have'), { recursive: true });
 
   const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
+  const origCodexDir = process.env.NORTUSCC_CODEX_DIR;
   const origRepoDir = process.env.NORTUSCC_REPO_DIR;
   const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
+  const origStateDir = process.env.NORTUSCC_STATE_DIR;
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   const originalWrite = process.stdout.write.bind(process.stdout);
   const chunks = [];
@@ -368,31 +379,27 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     const { run: isolatedRun } = await import('../src/commands/status.mjs');
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { ensureLink } = await import('../src/link.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
 
     // Bring config to a clean state so the missing skill is the only thing
     // that can make this run dirty — isolates the wiring under test.
-    for (const entry of SYNC) {
-      if (entry.mode === 'link') {
-        const { src, dest } = resolveEntry(entry);
-        await ensureLink(dest, src);
-      }
-    }
     const lock = readLock();
     for (const entry of SYNC) {
-      if (entry.mode === 'copy') {
-        const { src, dest } = resolveEntry(entry);
-        const hash = hashFile(src);
-        if (hash) {
-          copyFileSync(src, dest);
-          setBaseline(lock, entry.dest, hash);
-        }
+      const { src, dest } = resolveEntry(entry);
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
 
-    const exitCode = await isolatedRun();
+    // 'have' is installed, so status would otherwise ask the real installer
+    // which agents can see it — a network call, and a spawn the constraints
+    // forbid. The stub answers for both agents.
+    const exitCode = await isolatedRun([], {
+      inspectExposure: () => ({ list: { 'claude-code': ['have'], codex: ['have'] }, errors: [] }),
+    });
 
     assert.equal(exitCode, 1, 'a manifest skill missing from the agents skills dir makes the run dirty');
     const output = chunks.join('');
@@ -400,62 +407,60 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   } finally {
     process.stdout.write = originalWrite;
     process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
+    process.env.NORTUSCC_CODEX_DIR = origCodexDir;
     process.env.NORTUSCC_REPO_DIR = origRepoDir;
     process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
+    process.env.NORTUSCC_STATE_DIR = origStateDir;
   }
 });
 
 // --- shared fixture for the end-to-end reporting tests below -----------------
 
-// Builds an isolated machine that is genuinely clean — links pointing at real
-// repo directories, baselines recorded for both copied files — and hands it to
-// fn with the env overrides in place. Each test then breaks exactly one thing,
-// so what it asserts is the only thing that could have caused the report.
+// Builds an isolated machine that is genuinely clean — every managed file
+// present with its baseline recorded — and hands it to fn with the env
+// overrides in place. Each test then breaks exactly one thing, so what it
+// asserts is the only thing that could have caused the report.
 async function onCleanMachine(prefix, fn) {
   const isolatedHome = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-home-`));
   const isolatedClaudeDir = join(isolatedHome, '.claude');
+  const isolatedCodexDir = join(isolatedHome, '.codex');
   const isolatedAgentsSkillsDir = join(isolatedHome, '.agents', 'skills');
   mkdirSync(isolatedClaudeDir, { recursive: true });
+  mkdirSync(isolatedCodexDir, { recursive: true });
   mkdirSync(isolatedAgentsSkillsDir, { recursive: true });
 
   const isolatedRepo = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-repo-`));
-  mkdirSync(join(isolatedRepo, 'claude', 'bin'), { recursive: true });
-  mkdirSync(join(isolatedRepo, 'claude', 'hooks'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'bin', 'sp'), '#!/bin/sh\n');
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
+  mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
+  writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
   const saved = {
     claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
     repo: process.env.NORTUSCC_REPO_DIR,
     agents: process.env.NORTUSCC_AGENTS_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
   };
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
+  process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   try {
     const { run: isolatedRun } = await import('../src/commands/status.mjs');
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { ensureLink } = await import('../src/link.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
 
-    for (const entry of SYNC) {
-      if (entry.mode === 'link') {
-        const { src, dest } = resolveEntry(entry);
-        ensureLink(dest, src, entry.dest);
-      }
-    }
     const lock = readLock();
     for (const entry of SYNC) {
-      if (entry.mode === 'copy') {
-        const { src, dest } = resolveEntry(entry);
-        const hash = hashFile(src);
-        if (hash) {
-          copyFileSync(src, dest);
-          setBaseline(lock, entry.dest, hash);
-        }
+      const { src, dest } = resolveEntry(entry);
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
@@ -463,14 +468,17 @@ async function onCleanMachine(prefix, fn) {
     return await fn({
       home: isolatedHome,
       claude: isolatedClaudeDir,
+      codex: isolatedCodexDir,
       agents: isolatedAgentsSkillsDir,
       repo: isolatedRepo,
       run: isolatedRun,
     });
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = saved.claude;
+    process.env.NORTUSCC_CODEX_DIR = saved.codex;
     process.env.NORTUSCC_REPO_DIR = saved.repo;
     process.env.NORTUSCC_AGENTS_DIR = saved.agents;
+    process.env.NORTUSCC_STATE_DIR = saved.state;
   }
 }
 
@@ -489,47 +497,166 @@ async function runCaptured(run) {
   }
 }
 
-// C1: with the repo's claude/bin moved away, status used to print "bin linked"
-// and "everything is in agreement" with exit 0, while `cat ~/.claude/bin/sp`
-// failed. That is the design's §1 problem statement restated verbatim, and
-// ~/.claude/bin/sp is what the global CLAUDE.md tells every agent to run.
-test('status reports a link whose repo target has vanished, and exits non-zero', async () => {
-  await onCleanMachine('broken-link', async (fx) => {
+// C1 restated for the copy-only model. The original form of this test moved
+// the repo's claude/bin away and proved status stopped claiming agreement.
+// Directory links are gone, but the failure it guards is not: when the repo
+// path behind a managed file disappears — a deleted worktree, a moved clone —
+// status must say so rather than report a machine in agreement.
+test('status reports a managed file whose repo source has vanished, and exits non-zero', async () => {
+  await onCleanMachine('missing-repo', async (fx) => {
     const clean = await runCaptured(fx.run);
     assert.equal(clean.code, 0, 'the fixture machine must start genuinely clean');
     assert.match(clean.output, /everything is in agreement/);
 
-    // The repo path goes away: a deleted worktree, or a moved clone.
-    rmSync(join(fx.repo, 'claude', 'bin'), { recursive: true, force: true });
+    rmSync(join(fx.repo, 'codex', 'AGENTS.md'), { force: true });
 
     const dirty = await runCaptured(fx.run);
-    assert.equal(dirty.code, 1, 'a dangling bin link must make status exit non-zero');
-    assert.match(dirty.output, /bin\s+broken-link/, 'the dangling link is named and its state reported');
+    assert.equal(dirty.code, 1, 'a vanished repo source must make status exit non-zero');
+    assert.match(dirty.output, /AGENTS\.md\s+missing-repo/, 'the file is named and its state reported');
     assert.doesNotMatch(
       dirty.output,
       /everything is in agreement/,
-      'a machine whose bin link leads nowhere is not in agreement',
+      'a machine whose repo source is gone is not in agreement',
     );
   });
 });
 
-// I3: brokenSkillLinks() was entirely unpinned — replacing the call with []
-// left the whole suite green — even though preserving it from the deleted
-// skills-check.sh is called out in the design.
-test('status reports a broken skill link and exits non-zero', async () => {
-  await onCleanMachine('broken-skill', async (fx) => {
+// The Codex half of the same guarantee the conflict test makes for Claude:
+// a drifted AGENTS.md has to be visible, and has to be attributed to Codex
+// rather than folded into the Claude row.
+test('status reports Codex drift under its own destination name', async () => {
+  await onCleanMachine('codex-drift', async (fx) => {
     assert.equal((await runCaptured(fx.run)).code, 0, 'the fixture machine must start genuinely clean');
 
-    // A skill removed from ~/.agents/skills without removing its Claude-side link.
-    const claudeSkills = join(fx.claude, 'skills');
-    mkdirSync(claudeSkills, { recursive: true });
-    symlinkSync(join(fx.agents, 'ghost-skill'), join(claudeSkills, 'ghost-skill'), 'dir');
+    writeFileSync(join(fx.codex, 'AGENTS.md'), '# codex local change');
 
     const { code, output } = await runCaptured(fx.run);
-    assert.equal(code, 1, 'a broken skill link must make status exit non-zero');
-    assert.match(output, /broken links/, 'the broken-link row is printed');
-    assert.match(output, /ghost-skill/, 'the stale link is named');
+    assert.equal(code, 1);
+    assert.match(output, /AGENTS\.md\s+local-ahead/);
+  });
+});
+
+// The successor to the broken-symlink scan: a skill present in the shared
+// store but invisible to one selected agent is partially installed, and a
+// machine in that state is not in agreement. Asked of the installer rather
+// than inferred from a directory layout it owns.
+test('status reports a skill one selected agent cannot see, and exits non-zero', async () => {
+  await onCleanMachine('partial-skill', async (fx) => {
+    mkdirSync(join(fx.agents, 'review'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nreview\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { review: { source: 'a/b' } } }),
+    );
+
+    const seenByBoth = () => ({ list: { 'claude-code': ['review'], codex: ['review'] }, errors: [] });
+    const clean = await runCaptured(() => fx.run([], { inspectExposure: seenByBoth }));
+    assert.equal(clean.code, 0, 'a skill both agents can see leaves the machine in agreement');
+
+    const claudeOnly = () => ({ list: { 'claude-code': ['review'], codex: [] }, errors: [] });
+    const { code, output } = await runCaptured(() => fx.run([], { inspectExposure: claudeOnly }));
+
+    assert.equal(code, 1, 'a partially exposed skill must make status exit non-zero');
+    assert.match(output, /partial/, 'the partial row is printed');
+    assert.match(output, /review/, 'the skill is named');
+    assert.match(output, /codex/, 'the agent that cannot see it is named');
     assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// A listing that could not be read is not a listing of nothing. Reporting it
+// as "no skills exposed" would drive a reinstall of every shared skill.
+test('an unreadable skill listing is reported as unknown, not as nothing exposed', async () => {
+  await onCleanMachine('exposure-error', async (fx) => {
+    mkdirSync(join(fx.agents, 'review'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nreview\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { review: { source: 'a/b' } } }),
+    );
+
+    const broken = () => ({ list: {}, errors: ['could not list skills for codex'] });
+    const { code, output } = await runCaptured(() => fx.run([], { inspectExposure: broken }));
+
+    assert.equal(code, 1);
+    assert.match(output, /unknown/);
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// The report is filtered by target end to end: a Codex run must not name a
+// Claude plugin or Claude's instruction file, and vice versa.
+test('Codex status omits Claude integrations', async () => {
+  await onCleanMachine('codex-only-report', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          { id: 'cm-claude', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+          { id: 'srv-codex', label: 'files server', target: 'codex', type: 'mcp', default: true, command: 'mcp-files' },
+        ],
+      }),
+    );
+
+    const codex = await runCaptured(() => fx.run(['--target', 'codex']));
+    assert.match(codex.output, /AGENTS\.md/);
+    assert.match(codex.output, /Codex MCP|files server/);
+    assert.doesNotMatch(codex.output, /Claude plugins/);
+    assert.doesNotMatch(codex.output, /CLAUDE\.md/);
+
+    const claude = await runCaptured(() => fx.run(['--target', 'claude']));
+    assert.match(claude.output, /CLAUDE\.md/);
+    assert.doesNotMatch(claude.output, /AGENTS\.md/);
+    assert.doesNotMatch(claude.output, /files server/);
+  });
+});
+
+// status is the read-only verb: it reports what an install would do and never
+// does it.
+test('status reports a missing integration as actionable without installing it', async () => {
+  await onCleanMachine('integration-actionable', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          { id: 'cm-claude', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+        ],
+      }),
+    );
+
+    const { code, output } = await runCaptured(() => fx.run(['--target', 'claude']));
+    assert.equal(code, 1, 'a declared integration this machine lacks is actionable');
+    assert.match(output, /context-mode/);
+    assert.match(output, /apply --install/, 'the report names the command that would install it');
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// An invalid manifest is reported, not acted on, and never silently ignored.
+test('an invalid integrations.json is reported and makes status exit non-zero', async () => {
+  await onCleanMachine('integration-invalid', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({ version: 1, integrations: [{ id: 'x', label: 'x', target: 'cursor', type: 'plugin', default: true, plugin: 'a@b' }] }),
+    );
+
+    const { code, output } = await runCaptured(() => fx.run());
+    assert.equal(code, 1);
+    assert.match(output, /invalid/);
+  });
+});
+
+// A bare machine has nothing canonical to ask about, and asking anyway would
+// spawn the installer during a read-only command.
+test('status never inspects exposure when no canonical skill is installed', async () => {
+  await onCleanMachine('no-exposure-call', async (fx) => {
+    let called = false;
+    const spy = () => { called = true; return { list: {}, errors: [] }; };
+    const { code } = await runCaptured(() => fx.run([], { inspectExposure: spy }));
+    assert.equal(code, 0);
+    assert.equal(called, false, 'a read-only command must not spawn the installer for nothing');
   });
 });
 

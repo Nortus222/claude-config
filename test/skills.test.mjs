@@ -9,9 +9,10 @@ import {
   groupsFromLock,
   reconcile,
   installArgs,
-  brokenSkillLinks,
+  skillExposure,
   installedGroups,
 } from '../src/skills.mjs';
+import * as skillsModule from '../src/skills.mjs';
 
 const SAMPLE = `# a comment
 [Nortus222/agent-skills]
@@ -104,67 +105,90 @@ test('groupsFromLock and reconcile agree that a non-string source is not a sourc
   assert.deepEqual(r.local, ['odd']);
 });
 
-// Fix round 1, finding 1: status must flag broken symlinks under
-// ~/.claude/skills — skills-check.sh's one behaviour that isn't about the
-// manifest. A broken link happens when a skill is removed from
-// ~/.agents/skills but its Claude-side link remains.
-test('brokenSkillLinks reports symlinks whose target no longer exists', () => {
-  const claudeDir = mkdtempSync(join(tmpdir(), 'nortuscc-claude-skills-'));
-  const agentsDir = mkdtempSync(join(tmpdir(), 'nortuscc-agents-skills-'));
-  const skillsDir = join(claudeDir, 'skills');
-  mkdirSync(skillsDir, { recursive: true });
+// --- agent exposure ----------------------------------------------------------
+//
+// There is one shared skill store, so "installed" and "usable by this agent"
+// are different questions. The old scan for broken symlinks under
+// ~/.claude/skills answered the second question for Claude alone and by
+// guessing at a layout the installer owns; asking the installer per agent
+// answers it for both.
 
-  // A live target and a live link to it.
-  const liveTarget = join(agentsDir, 'alive');
-  mkdirSync(liveTarget, { recursive: true });
-  symlinkSync(liveTarget, join(skillsDir, 'alive'), 'dir');
-
-  // A link whose target has been removed.
-  const goneTarget = join(agentsDir, 'gone');
-  mkdirSync(goneTarget, { recursive: true });
-  symlinkSync(goneTarget, join(skillsDir, 'gone'), 'dir');
-  rmSync(goneTarget, { recursive: true, force: true });
-
-  // A real directory, not a symlink at all — must be ignored, not reported.
-  mkdirSync(join(skillsDir, 'real-dir'), { recursive: true });
-
-  const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
-  process.env.NORTUSCC_CLAUDE_DIR = claudeDir;
-  try {
-    assert.deepEqual(brokenSkillLinks(), ['gone']);
-  } finally {
-    process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
-  }
+test('exposure reports a canonical skill missing from one selected agent', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': ['review'], codex: [] },
+  });
+  assert.deepEqual(result.partial, [{ name: 'review', missingAgents: ['codex'] }]);
 });
 
-test('brokenSkillLinks reports nothing when ~/.claude/skills does not exist', () => {
-  const claudeDir = mkdtempSync(join(tmpdir(), 'nortuscc-claude-skills-missing-'));
-  const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
-  process.env.NORTUSCC_CLAUDE_DIR = claudeDir;
-  try {
-    assert.deepEqual(brokenSkillLinks(), []);
-  } finally {
-    process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
-  }
+test('a skill every selected agent can see is exposed, not partial', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': ['review'], codex: ['review'] },
+  });
+  assert.deepEqual(result.exposed, ['review']);
+  assert.deepEqual(result.partial, []);
+  assert.deepEqual(result.missing, []);
 });
 
-test('brokenSkillLinks sorts deterministically', () => {
-  const claudeDir = mkdtempSync(join(tmpdir(), 'nortuscc-claude-skills-sort-'));
-  const agentsDir = mkdtempSync(join(tmpdir(), 'nortuscc-agents-skills-sort-'));
-  const skillsDir = join(claudeDir, 'skills');
-  mkdirSync(skillsDir, { recursive: true });
+test('a skill no selected agent can see is missing, not partial', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': [], codex: [] },
+  });
+  assert.deepEqual(result.missing, ['review']);
+  assert.deepEqual(result.partial, []);
+});
 
-  for (const name of ['zeta', 'alpha', 'mid']) {
-    symlinkSync(join(agentsDir, name), join(skillsDir, name), 'dir'); // none of these targets exist
-  }
+// Only the selected agents count. A skill Codex cannot see is not a problem
+// for `--target claude`, and reporting it as one would make a Claude-only run
+// permanently dirty.
+test('an unselected agent never makes a skill partial', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code'],
+    list: { 'claude-code': ['review'], codex: [] },
+  });
+  assert.deepEqual(result.exposed, ['review']);
+  assert.deepEqual(result.partial, []);
+});
 
-  const origClaudeDir = process.env.NORTUSCC_CLAUDE_DIR;
-  process.env.NORTUSCC_CLAUDE_DIR = claudeDir;
-  try {
-    assert.deepEqual(brokenSkillLinks(), ['alpha', 'mid', 'zeta']);
-  } finally {
-    process.env.NORTUSCC_CLAUDE_DIR = origClaudeDir;
-  }
+test('every missing agent is named, not just the first', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': [], codex: [] },
+  });
+  assert.deepEqual(result.missing, ['review']);
+
+  const oneOfThree = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': ['review'], codex: [] },
+  });
+  assert.deepEqual(oneOfThree.partial[0].missingAgents, ['codex']);
+});
+
+// An agent the installer returned nothing for is not an agent that has
+// nothing: it may be an agent the inspection failed to read. That distinction
+// belongs to the caller of the list command, so exposure itself treats an
+// absent key as an empty list and lets the runner report the read failure.
+test('an agent absent from the list reads as seeing nothing', () => {
+  const result = skillExposure({
+    names: ['review'], agents: ['claude-code', 'codex'],
+    list: { 'claude-code': ['review'] },
+  });
+  assert.deepEqual(result.partial, [{ name: 'review', missingAgents: ['codex'] }]);
+});
+
+test('exposure with no names reports three empty lists', () => {
+  const result = skillExposure({ names: [], agents: ['codex'], list: { codex: ['x'] } });
+  assert.deepEqual(result, { exposed: [], partial: [], missing: [] });
+});
+
+// The Claude-only link scan guessed at a layout the installer owns, and
+// answered only for Claude. Leaving it exported alongside the per-agent
+// inspection would leave two disagreeing sources of truth.
+test('the Claude-only broken-link scan is gone, not merely unused', () => {
+  assert.ok(!('brokenSkillLinks' in skillsModule));
+  assert.ok(!('claudeSkillsDir' in skillsModule));
 });
 
 const locked = (skills) => ({ skills });

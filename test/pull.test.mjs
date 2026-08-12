@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,12 +16,10 @@ function createRemoteAndClone(prefix) {
   execSync('git init -b main', { cwd: seed, stdio: 'ignore' });
   execSync('git config user.email "test@example.com"', { cwd: seed, stdio: 'ignore' });
   execSync('git config user.name "Test"', { cwd: seed, stdio: 'ignore' });
-  mkdirSync(join(seed, 'claude', 'bin'), { recursive: true });
-  mkdirSync(join(seed, 'claude', 'hooks'), { recursive: true });
-  writeFileSync(join(seed, 'claude', 'bin', '.gitkeep'), '');
-  writeFileSync(join(seed, 'claude', 'hooks', '.gitkeep'), '');
-  writeFileSync(join(seed, 'claude', 'settings.json'), '{"version":1}\n');
+  mkdirSync(join(seed, 'claude'), { recursive: true });
+  mkdirSync(join(seed, 'codex'), { recursive: true });
   writeFileSync(join(seed, 'claude', 'CLAUDE.md'), '# from repo\n');
+  writeFileSync(join(seed, 'codex', 'AGENTS.md'), '# codex from repo\n');
   execSync('git add .', { cwd: seed, stdio: 'ignore' });
   execSync('git commit -m "initial"', { cwd: seed, stdio: 'ignore' });
 
@@ -47,10 +45,15 @@ function cloneOf(bare, prefix) {
 function createTestHome(prefix) {
   const home = mkdtempSync(join(tmpdir(), prefix));
   const claude = join(home, '.claude');
+  const codex = join(home, '.codex');
   const agents = join(home, '.agents', 'skills');
+  // nortuscc's own state lives outside every agent dir, so it needs its own
+  // override — without it these runs write the developer's real state file.
+  const state = join(home, 'state');
   mkdirSync(claude, { recursive: true });
+  mkdirSync(codex, { recursive: true });
   mkdirSync(agents, { recursive: true });
-  return { home, claude, agents };
+  return { home, claude, codex, agents, state };
 }
 
 function headSha(dir) {
@@ -58,7 +61,13 @@ function headSha(dir) {
 }
 
 async function withFixtureEnv(env, fn) {
-  const keys = ['NORTUSCC_CLAUDE_DIR', 'NORTUSCC_AGENTS_DIR', 'NORTUSCC_REPO_DIR'];
+  const keys = [
+    'NORTUSCC_CLAUDE_DIR',
+    'NORTUSCC_CODEX_DIR',
+    'NORTUSCC_AGENTS_DIR',
+    'NORTUSCC_REPO_DIR',
+    'NORTUSCC_STATE_DIR',
+  ];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, env);
   try {
@@ -88,7 +97,7 @@ function captureStderr(fn) {
 
 test('pull refuses gracefully when the local and remote branches have diverged, without a stack trace, and never calls apply', async () => {
   const { bare, work } = createRemoteAndClone('nortuscc-pull-diverge');
-  const { claude, agents } = createTestHome('nortuscc-pull-diverge-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-pull-diverge-home-');
 
   // A second clone pushes a commit to the bare remote that `work` never sees...
   const other = cloneOf(bare, 'nortuscc-pull-diverge-other');
@@ -111,7 +120,13 @@ test('pull refuses gracefully when the local and remote branches have diverged, 
   writeFileSync(join(claude, 'CLAUDE.md'), '# sentinel, must survive\n');
 
   await withFixtureEnv(
-    { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_AGENTS_DIR: agents, NORTUSCC_REPO_DIR: work },
+    {
+      NORTUSCC_CLAUDE_DIR: claude,
+      NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents,
+      NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
+    },
     async () => {
       const { result: code, output } = await captureStderr(() => pullRun([]));
 
@@ -135,10 +150,16 @@ test('pull refuses gracefully when the local and remote branches have diverged, 
 
 test('pull with nothing new succeeds and delegates to apply', async () => {
   const { work } = createRemoteAndClone('nortuscc-pull-noop');
-  const { claude, agents } = createTestHome('nortuscc-pull-noop-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-pull-noop-home-');
 
   await withFixtureEnv(
-    { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_AGENTS_DIR: agents, NORTUSCC_REPO_DIR: work },
+    {
+      NORTUSCC_CLAUDE_DIR: claude,
+      NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents,
+      NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
+    },
     async () => {
       const code = await pullRun([]);
       assert.equal(code, 0);
@@ -151,12 +172,64 @@ test('pull with nothing new succeeds and delegates to apply', async () => {
   );
 });
 
-test('pull forwards args through to apply, resolving a conflict with --take-repo', async () => {
-  const { work } = createRemoteAndClone('nortuscc-pull-takerepo');
-  const { claude, agents } = createTestHome('nortuscc-pull-takerepo-home-');
+// A pull can bring down a newly declared integration. Reporting it keeps the
+// user informed; installing it would turn a routine `pull` into an unattended
+// run of third-party installers.
+test('pull reports a newly declared integration but does not install it', async () => {
+  const { work } = createRemoteAndClone('nortuscc-pull-integrations');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-pull-integrations-home-');
+
+  writeFileSync(
+    join(work, 'integrations.json'),
+    JSON.stringify({
+      version: 1,
+      integrations: [
+        { id: 'cm', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+      ],
+    }),
+  );
 
   await withFixtureEnv(
-    { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_AGENTS_DIR: agents, NORTUSCC_REPO_DIR: work },
+    {
+      NORTUSCC_CLAUDE_DIR: claude,
+      NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents,
+      NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
+    },
+    async () => {
+      const chunks = [];
+      const original = process.stdout.write;
+      process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
+      let code;
+      try {
+        code = await pullRun([]);
+      } finally {
+        process.stdout.write = original;
+      }
+      const output = chunks.join('');
+
+      assert.equal(code, 0, 'a reportable integration is not a pull failure');
+      assert.match(output, /context-mode/, 'the newly declared integration is named');
+      assert.match(output, /apply --install/, 'the report names the command that would install it');
+      // Nothing was installed: no Claude plugin state was written.
+      assert.equal(existsSync(join(claude, 'plugins')), false);
+    },
+  );
+});
+
+test('pull forwards args through to apply, resolving a conflict with --take-repo', async () => {
+  const { work } = createRemoteAndClone('nortuscc-pull-takerepo');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-pull-takerepo-home-');
+
+  await withFixtureEnv(
+    {
+      NORTUSCC_CLAUDE_DIR: claude,
+      NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents,
+      NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
+    },
     async () => {
       // Baseline: seed the machine so the lockfile has a recorded hash.
       assert.equal(await applyRun([]), 0);

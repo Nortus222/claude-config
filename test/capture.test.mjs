@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,28 +10,31 @@ import { join } from 'node:path';
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-capture-'));
 const repo = join(home, 'repo');
 const claude = join(home, '.claude');
+const codex = join(home, '.codex');
 
-mkdirSync(join(repo, 'claude', 'bin'), { recursive: true });
-mkdirSync(join(repo, 'claude', 'hooks'), { recursive: true });
-writeFileSync(join(repo, 'claude', 'bin', 'sp'), 'echo sp\n');
-writeFileSync(join(repo, 'claude', 'hooks', 'h.mjs'), '// hook\n');
-writeFileSync(join(repo, 'claude', 'settings.json'), '{"a":1}\n');
+mkdirSync(join(repo, 'claude'), { recursive: true });
+mkdirSync(join(repo, 'codex'), { recursive: true });
 writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# from repo\n');
+writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# codex from repo\n');
 mkdirSync(claude, { recursive: true });
+mkdirSync(codex, { recursive: true });
 
 process.env.NORTUSCC_REPO_DIR = repo;
 process.env.NORTUSCC_CLAUDE_DIR = claude;
+process.env.NORTUSCC_CODEX_DIR = codex;
 process.env.NORTUSCC_AGENTS_DIR = join(home, 'agents-skills');
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 const { run: applyRun } = await import('../src/commands/apply.mjs');
 const { run: captureRun, capturedPaths } = await import('../src/commands/capture.mjs');
-const { lockPath } = await import('../src/resolve.mjs');
+const { statePath } = await import('../src/resolve.mjs');
 
 const repoClaudeMd = join(repo, 'claude', 'CLAUDE.md');
 
 test('seed the machine from the fixture repo', async () => {
   assert.equal(await applyRun([]), 0);
   assert.equal(readFileSync(join(claude, 'CLAUDE.md'), 'utf8'), '# from repo\n');
+  assert.equal(readFileSync(join(codex, 'AGENTS.md'), 'utf8'), '# codex from repo\n');
 });
 
 test('capture with no local changes captures nothing', async () => {
@@ -46,11 +49,60 @@ test('capture copies a local edit back into the repo', async () => {
   assert.ok(capturedPaths().includes('claude/CLAUDE.md'));
 });
 
-test('capture ignores linked directories entirely', async () => {
-  assert.ok(
-    !capturedPaths().some((p) => p.includes('bin') || p.includes('hooks')),
-    'linked dirs need no capture — the repo IS the live copy',
+// A Claude-side edit must not drag the Codex file into the same capture, and
+// vice versa: --target is what keeps one agent's local edit from being
+// committed as if it were the other's.
+test('capture --target claude captures only the Claude instruction file', async () => {
+  writeFileSync(join(claude, 'CLAUDE.md'), '# claude only\n');
+  writeFileSync(join(codex, 'AGENTS.md'), '# codex only\n');
+
+  assert.equal(await captureRun(['--target', 'claude']), 0);
+  assert.deepEqual(capturedPaths(), ['claude/CLAUDE.md']);
+  assert.equal(readFileSync(join(repo, 'claude', 'CLAUDE.md'), 'utf8'), '# claude only\n');
+  assert.equal(
+    readFileSync(join(repo, 'codex', 'AGENTS.md'), 'utf8'),
+    '# codex from repo\n',
+    'the unselected target must be left exactly as the repo had it',
   );
+});
+
+test('capture --target codex then picks up the Codex edit that was left behind', async () => {
+  assert.equal(await captureRun(['--target', 'codex']), 0);
+  assert.deepEqual(capturedPaths(), ['codex/AGENTS.md']);
+  assert.equal(readFileSync(join(repo, 'codex', 'AGENTS.md'), 'utf8'), '# codex only\n');
+});
+
+// Capture writes instruction files and the shared skill manifest, and nothing
+// else. Local MCP servers, hooks and plugins are machine state — often with
+// credentials in their arguments — and turning them into repository
+// declarations is exactly what the design forbids.
+test('capture never imports local MCP configuration', async () => {
+  writeFileSync(join(repo, 'integrations.json'), JSON.stringify({ version: 1, integrations: [] }));
+  const manifestBefore = readFileSync(join(repo, 'integrations.json'), 'utf8');
+
+  writeFileSync(join(codex, 'config.toml'), '[mcp_servers.private]\ncommand="secret"\n');
+  writeFileSync(join(codex, 'AGENTS.md'), '# codex local edit\n');
+
+  assert.equal(await captureRun(['--target', 'codex']), 0);
+
+  assert.equal(
+    readFileSync(join(repo, 'integrations.json'), 'utf8'),
+    manifestBefore,
+    'capture must never write an integration declaration',
+  );
+  assert.deepEqual(capturedPaths(), ['codex/AGENTS.md']);
+  assert.equal(existsSync(join(repo, 'config.toml')), false, 'local Codex configuration is never copied into the repo');
+});
+
+test('capture writes nothing outside the instruction files and the skill manifest', async () => {
+  writeFileSync(join(claude, 'CLAUDE.md'), '# another local edit\n');
+  await captureRun([]);
+  for (const path of capturedPaths()) {
+    assert.ok(
+      path === 'skills-manifest.txt' || /^(claude|codex)\//.test(path),
+      `capture wrote an unexpected path: ${path}`,
+    );
+  }
 });
 
 test('a second capture with nothing new captures nothing', async () => {
@@ -59,8 +111,8 @@ test('a second capture with nothing new captures nothing', async () => {
 });
 
 test('a clean second capture does not rewrite the lockfile at all', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
-  const mtimeBefore = statSync(lockPath()).mtimeMs;
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
+  const mtimeBefore = statSync(statePath()).mtimeMs;
 
   // Force the clock forward so a spurious rewrite would show up as a changed
   // mtime even on filesystems with coarse mtime resolution.
@@ -68,8 +120,8 @@ test('a clean second capture does not rewrite the lockfile at all', async () => 
 
   const code = await captureRun([]);
   assert.equal(code, 0);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
-  assert.equal(statSync(lockPath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
+  assert.equal(statSync(statePath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
 });
 
 // Fix round 1, finding 1: apply's --take-local hole (see apply.test.mjs) has
@@ -79,7 +131,7 @@ test('a clean second capture does not rewrite the lockfile at all', async () => 
 // repo version" is not a resolution capture can perform at all; it must
 // refuse the flag outright and point at apply, not attempt and fail silently.
 test('capture --take-repo is refused outright — the flag does not fit capture\'s direction', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
   let stderr = '';
   const originalError = console.error;
   console.error = (msg) => { stderr += String(msg) + '\n'; };
@@ -91,13 +143,13 @@ test('capture --take-repo is refused outright — the flag does not fit capture\
   }
   assert.notEqual(code, 0, '--take-repo must not be silently accepted by capture');
   assert.match(stderr, /apply --take-repo/, 'must point the user at the command that actually supports it');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
   assert.deepEqual(capturedPaths(), [], 'a refused flag must not stage anything for commit');
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
   const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
 
   const code = await captureRun([], [bogusEntry]);
 
@@ -107,7 +159,7 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   // not touch the lockfile.
   assert.equal(code, 0);
   assert.deepEqual(capturedPaths(), []);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
 });
 
 test('the manifest path resolves inside the fixture repo, never the real one', async () => {
