@@ -12,7 +12,7 @@ import {
 
 const MARKETPLACE = {
   id: 'cm-market', label: 'context-mode marketplace', target: 'claude',
-  type: 'marketplace', default: true, marketplace: 'mksglu/context-mode',
+  type: 'marketplace', default: true, marketplace: 'mksglu/context-mode', name: 'context-mode',
 };
 const PLUGIN = {
   id: 'cm', label: 'context-mode', target: 'claude',

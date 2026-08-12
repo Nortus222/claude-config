@@ -12,7 +12,7 @@ import {
 
 const MARKETPLACE = {
   id: 'cm-market-codex', label: 'context-mode marketplace', target: 'codex',
-  type: 'marketplace', default: true, marketplace: 'mksglu/context-mode',
+  type: 'marketplace', default: true, marketplace: 'mksglu/context-mode', name: 'context-mode',
 };
 const PLUGIN = {
   id: 'cm-codex', label: 'context-mode', target: 'codex',
@@ -103,16 +103,35 @@ test('an absent plugin and an absent marketplace read as missing', async () => {
   assert.equal(adapters.marketplace.inspect(MARKETPLACE).state, 'missing');
 });
 
-// The marketplace is named by the tail of `owner/repo`, which is what Codex
-// records as the marketplace name.
-test('an owner/repo source matches the marketplace name Codex records', async () => {
+// The registered name is declared, not derived. Observed on a real machine:
+// `mksglu/context-mode` registers as `context-mode` (the repo) while
+// `thedotmack/claude-mem` registers as `thedotmack` (the owner) — no rule maps
+// a source to a name, and guessing meant inspection never matched, so the
+// marketplace was re-added on every single run.
+test('the declared name is what matches, whatever shape the source takes', async () => {
   const state = await readCodexState({ capture: captureFor() });
   const adapters = codexPluginAdapters({ state });
+
   assert.equal(
     adapters.marketplace.inspect({ ...MARKETPLACE, marketplace: 'https://github.com/mksglu/context-mode.git' }).state,
     'installed',
-    'a git URL still resolves to the same marketplace name',
+    'the source shape is irrelevant; the declared name is what Codex recorded',
   );
+});
+
+test('a marketplace whose name is the owner rather than the repo still matches', async () => {
+  const state = await readCodexState({
+    capture: captureFor({ marketplaces: JSON.stringify({ marketplaces: [{ name: 'thedotmack' }] }) }),
+  });
+  const adapters = codexPluginAdapters({ state });
+
+  const ownerNamed = { ...MARKETPLACE, marketplace: 'thedotmack/claude-mem', name: 'thedotmack' };
+  assert.equal(adapters.marketplace.inspect(ownerNamed).state, 'installed');
+
+  // The tail-of-source guess this replaced would have looked for `claude-mem`
+  // and found nothing.
+  const guessed = { ...MARKETPLACE, marketplace: 'thedotmack/claude-mem', name: 'claude-mem' };
+  assert.equal(adapters.marketplace.inspect(guessed).state, 'missing');
 });
 
 // A machine without codex on PATH is a machine with no Codex plugins, not a

@@ -25,12 +25,13 @@ export function codexMarketplaceListCommand() {
   return { cmd: 'codex', args: ['plugin', 'marketplace', 'list', '--json'] };
 }
 
-// Codex's marketplace name is the tail of whatever source added it:
-// `mksglu/context-mode` and `https://github.com/mksglu/context-mode.git` both
-// register as `context-mode`.
-export function marketplaceNameOf(source) {
-  const tail = String(source ?? '').split('/').pop() ?? '';
-  return tail.replace(/\.git$/, '');
+// A marketplace's registered name comes from its own manifest, not from the
+// source that added it: `mksglu/context-mode` registers as `context-mode` (the
+// repo) while `thedotmack/claude-mem` registers as `thedotmack` (the owner).
+// No rule derives one from the other, so the manifest declares it and this
+// reads what was declared.
+export function marketplaceNameOf(item) {
+  return item.name;
 }
 
 // Read once, up front, rather than per item: inspection would otherwise spawn
@@ -77,7 +78,7 @@ const EMPTY = { plugins: new Set(), marketplaces: new Set(), errors: [] };
 export function codexPluginAdapters({ state = EMPTY, spawn = spawnCommand } = {}) {
   const marketplace = {
     inspect: (item) =>
-      state.marketplaces.has(marketplaceNameOf(item.marketplace))
+      state.marketplaces.has(marketplaceNameOf(item))
         ? { state: 'installed', note: 'already added' }
         : { state: 'missing', note: '' },
     describe: (item) => {

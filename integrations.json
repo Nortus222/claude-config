@@ -22,7 +22,8 @@
       "target": "claude",
       "type": "marketplace",
       "default": true,
-      "marketplace": "mksglu/context-mode"
+      "marketplace": "mksglu/context-mode",
+      "name": "context-mode"
     },
     {
       "id": "context-mode-claude",
@@ -39,7 +40,8 @@
       "target": "claude",
       "type": "marketplace",
       "default": true,
-      "marketplace": "thedotmack/claude-mem"
+      "marketplace": "thedotmack/claude-mem",
+      "name": "thedotmack"
     },
     {
       "id": "claude-mem-claude",
@@ -55,7 +57,8 @@
       "target": "codex",
       "type": "marketplace",
       "default": true,
-      "marketplace": "mksglu/context-mode"
+      "marketplace": "mksglu/context-mode",
+      "name": "context-mode"
     },
     {
       "id": "context-mode-codex",

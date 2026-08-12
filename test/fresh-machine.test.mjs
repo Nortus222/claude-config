@@ -71,7 +71,15 @@ function claudePatch(file, key) {
   writeFileSync(path, JSON.stringify(current));
 }
 
-const marketplaceName = (source) => String(source).split('/').pop().replace(/\\.git$/, '');
+// A marketplace registers under the name in its own manifest, which no rule
+// derives from the source. Both real shapes are modelled here, as observed on
+// a real machine: mksglu/context-mode registers as the repo name,
+// thedotmack/claude-mem as the owner name.
+const REGISTERED_AS = {
+  'mksglu/context-mode': 'context-mode',
+  'thedotmack/claude-mem': 'thedotmack',
+};
+const marketplaceName = (source) => REGISTERED_AS[String(source)] ?? String(source).split('/').pop();
 
 if (agent === 'claude') {
   if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'add') {
