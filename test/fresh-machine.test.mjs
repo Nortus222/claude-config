@@ -1,0 +1,274 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, delimiter } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
+
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+const BIN = join(REPO, 'bin', 'nortuscc.mjs');
+
+// A genuinely empty home: no ~/.claude, no ~/.codex, no ~/.agents, no state.
+// Every path nortuscc can reach is inside it, so this acceptance test can
+// never observe — or disturb — the developer's real machine.
+function emptyHomeFixture() {
+  const home = mkdtempSync(join(tmpdir(), 'nortuscc-fresh-'));
+  return {
+    home,
+    claude: join(home, '.claude'),
+    codex: join(home, '.codex'),
+    agents: join(home, '.agents', 'skills'),
+    state: join(home, 'state'),
+    log: join(home, 'installer.log'),
+  };
+}
+
+// Fake `claude`, `codex` and `npx`. Each logs its argv as one JSON line and
+// writes only inside the test home — no network, no real installer, and the
+// plugin state they record is what makes a rerun detectably idempotent.
+function fakeNativeInstallers(env) {
+  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
+
+  const script = (name) => `#!/usr/bin/env node
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+const argv = process.argv.slice(2);
+appendFileSync(process.env.NORTUSCC_TEST_LOG, JSON.stringify({ cmd: ${JSON.stringify(name)}, args: argv }) + '\\n');
+
+// Record what a real installer would record, so a second run inspects as
+// already installed instead of repeating the work.
+const agentDir = ${JSON.stringify(name)} === 'codex' ? process.env.NORTUSCC_CODEX_DIR : process.env.NORTUSCC_CLAUDE_DIR;
+
+function patch(file, key) {
+  const dir = join(agentDir, 'plugins');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, file);
+  const current = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+  const target = file === 'installed_plugins.json' ? (current.plugins ??= {}) : current;
+  target[key] = {};
+  writeFileSync(path, JSON.stringify(current));
+}
+
+if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'add') {
+  patch('known_marketplaces.json', String(argv[3]).split('/').pop());
+} else if (argv[0] === 'plugin' && argv[1] === 'install') {
+  patch('installed_plugins.json', argv[2]);
+} else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
+  // The installer writes into the shared store, which nortuscc only reads.
+  const names = [];
+  for (let i = argv.indexOf('--skill') + 1; i < argv.length && !argv[i].startsWith('--'); i += 1) {
+    names.push(argv[i]);
+  }
+  for (const skill of names) mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
+} else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'list') {
+  // Every agent sees the whole shared store, which is what one store and
+  // explicit --agent installs are supposed to produce.
+  const store = process.env.NORTUSCC_AGENTS_DIR;
+  const skills = existsSync(store) ? readdirSync(store).map((n) => ({ name: n })) : [];
+  process.stdout.write(JSON.stringify({ skills }));
+}
+`;
+
+  for (const name of ['claude', 'codex', 'npx']) {
+    const path = join(dir, name);
+    writeFileSync(path, script(name));
+    chmodSync(path, 0o755);
+  }
+  return dir;
+}
+
+function readInstallerLog(env) {
+  if (!existsSync(env.log)) return [];
+  return readFileSync(env.log, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function runCli(args, { env, fixtureBinDir }) {
+  const childEnv = {
+    ...process.env,
+    PATH: `${fixtureBinDir}${delimiter}${process.env.PATH}`,
+    NORTUSCC_CLAUDE_DIR: env.claude,
+    NORTUSCC_CODEX_DIR: env.codex,
+    NORTUSCC_AGENTS_DIR: env.agents,
+    NORTUSCC_STATE_DIR: env.state,
+    NORTUSCC_REPO_DIR: REPO,
+    NORTUSCC_TEST_LOG: env.log,
+  };
+  try {
+    const { stdout, stderr } = await run(process.execPath, [BIN, ...args], { env: childEnv });
+    return { code: 0, stdout, stderr };
+  } catch (err) {
+    return { code: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? '' };
+  }
+}
+
+// Marketplaces before the plugins that come from them, and each agent's own
+// CLI doing its own installing. Derived from the committed manifest's order,
+// so this breaks loudly if a declaration is added without a decision about
+// where it belongs.
+function expectedDefaultInstallCalls() {
+  return [
+    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
+    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'thedotmack/claude-mem'] },
+    { cmd: 'codex', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
+    { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
+    { cmd: 'claude', args: ['plugin', 'install', 'context-mode@context-mode'] },
+    { cmd: 'claude', args: ['plugin', 'install', 'claude-mem@thedotmack'] },
+    { cmd: 'codex', args: ['plugin', 'install', 'context-mode@context-mode'] },
+  ];
+}
+
+test('fresh machine setup installs selected defaults for both agents', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'all', '--yes'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(
+    readFileSync(join(env.claude, 'CLAUDE.md'), 'utf8'),
+    readFileSync(join(REPO, 'claude', 'CLAUDE.md'), 'utf8'),
+  );
+  assert.equal(
+    readFileSync(join(env.codex, 'AGENTS.md'), 'utf8'),
+    readFileSync(join(REPO, 'codex', 'AGENTS.md'), 'utf8'),
+  );
+
+  const log = readInstallerLog(env);
+  const nativeCalls = log.filter((entry) => entry.cmd !== 'npx');
+  assert.deepEqual(nativeCalls, expectedDefaultInstallCalls());
+
+  // Claude's settings.json is user-owned. A fresh machine that never had one
+  // must not end up with a file this tool invented.
+  assert.equal(existsSync(join(env.claude, 'settings.json')), false);
+});
+
+test('every shared skill is installed for both agents, in one call per source', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'all', '--yes'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+  assert.equal(result.code, 0, result.stderr);
+
+  const skillCalls = readInstallerLog(env).filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add');
+  assert.ok(skillCalls.length > 0, 'a fresh machine is missing every shared skill');
+
+  for (const call of skillCalls) {
+    const agentAt = call.args.indexOf('--agent');
+    assert.ok(agentAt > 0, 'every add names its agents explicitly');
+    assert.deepEqual(call.args.slice(agentAt, agentAt + 3), ['--agent', 'claude-code', 'codex']);
+    assert.ok(call.args.includes('--global'));
+    assert.ok(call.args.includes('--yes'));
+  }
+
+  // One invocation per source repo, not one per skill.
+  const sources = skillCalls.map((call) => call.args[3]);
+  assert.deepEqual([...new Set(sources)].sort(), sources.sort());
+});
+
+// Re-running setup is meant to be safe: it selects only incomplete work, which
+// is what lets a partial first run be resumed by running it again.
+test('a second setup run installs nothing and still exits 0', async () => {
+  const env = emptyHomeFixture();
+  const bin = fakeNativeInstallers(env);
+
+  assert.equal((await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir: bin })).code, 0);
+  const afterFirst = readInstallerLog(env).length;
+
+  const second = await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir: bin });
+  assert.equal(second.code, 0, second.stderr);
+
+  const added = readInstallerLog(env).slice(afterFirst).filter((entry) => entry.cmd !== 'npx');
+  assert.deepEqual(added, [], 'a satisfied machine must not re-run a single native installer');
+});
+
+test('a Codex-only setup never runs the Claude installer or writes ~/.claude', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'codex', '--yes'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(existsSync(join(env.codex, 'AGENTS.md')));
+  assert.equal(existsSync(join(env.claude, 'CLAUDE.md')), false);
+
+  const log = readInstallerLog(env);
+  assert.deepEqual(log.filter((entry) => entry.cmd === 'claude'), [], 'a Codex run must never invoke the Claude CLI');
+  assert.ok(log.some((entry) => entry.cmd === 'codex'));
+
+  for (const call of log.filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add')) {
+    const agentAt = call.args.indexOf('--agent');
+    assert.deepEqual(call.args.slice(agentAt, agentAt + 2), ['--agent', 'codex']);
+  }
+});
+
+test('a Claude-only setup never runs the Codex installer or writes ~/.codex', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'claude', '--yes'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(existsSync(join(env.claude, 'CLAUDE.md')));
+  assert.equal(existsSync(join(env.codex, 'AGENTS.md')), false);
+  assert.deepEqual(readInstallerLog(env).filter((entry) => entry.cmd === 'codex'), []);
+});
+
+// Category opt-outs have to reach the child processes, not merely the report.
+//
+// The run still ends non-zero, and that is the honest answer: setup finishes
+// with a status report, and a machine that declined its declared integrations
+// and skills is genuinely not in agreement with the repo. The opt-out governs
+// what gets installed, not what status is willing to say about the result.
+test('--no-plugins and --no-skills reach the installers, not just the report', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'all', '--yes', '--no-plugins', '--no-skills'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+
+  assert.deepEqual(readInstallerLog(env), [], 'declining every category must spawn nothing');
+
+  // Configuration is not a declinable category, so it still landed.
+  assert.ok(existsSync(join(env.claude, 'CLAUDE.md')));
+  assert.ok(existsSync(join(env.codex, 'AGENTS.md')));
+
+  assert.equal(result.code, 1, 'the closing status still reports what was declined as missing');
+  assert.match(result.stdout, /--- status ---/, 'the run reached its status report rather than failing early');
+});
+
+// Without a terminal to choose on, an unattended run must refuse rather than
+// block forever or silently pick for the user.
+test('a non-TTY setup without --yes refuses and installs nothing', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'all'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env),
+  });
+
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /--yes/);
+  assert.deepEqual(readInstallerLog(env), []);
+});
+
+test('state lands in the neutral location, never inside an agent directory', async () => {
+  const env = emptyHomeFixture();
+  await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir: fakeNativeInstallers(env) });
+
+  assert.ok(existsSync(join(env.state, 'state.json')));
+  assert.equal(existsSync(join(env.claude, '.nortuscc-lock.json')), false);
+
+  const state = JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8'));
+  assert.deepEqual(Object.keys(state.files).sort(), ['claude:CLAUDE.md', 'codex:AGENTS.md']);
+});

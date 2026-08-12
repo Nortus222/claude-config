@@ -45,7 +45,7 @@ export function emitManifest(groups) {
   const head =
     '# Skills expected on every machine, grouped by the repo they install from.\n' +
     '# Regenerate with: nortuscc capture\n' +
-    '# Install with:    nortuscc apply --skills\n\n';
+    '# Install with:    nortuscc apply --install\n\n';
 
   return (
     head +
