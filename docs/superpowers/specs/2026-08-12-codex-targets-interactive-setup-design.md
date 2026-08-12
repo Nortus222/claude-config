@@ -19,8 +19,8 @@ configuration with permissions, UI preferences, and machine-specific state.
 ## Goals
 
 1. Support Claude Code, Codex, or both through a consistent `--target` option.
-2. Manage only Claude `CLAUDE.md` and helper commands, Codex `AGENTS.md`, and
-   shared skills as portable agent configuration.
+2. Manage only Claude `CLAUDE.md`, Codex `AGENTS.md`, and shared skills as
+   portable agent configuration.
 3. Stop tracking and syncing Claude's complete `settings.json` without deleting
    any machine's local settings.
 4. Give users interactive control over first-time installation of hooks,
@@ -40,6 +40,9 @@ configuration with permissions, UI preferences, and machine-specific state.
 - Automatically upgrading integrations whose lifecycle is owned by their
   native installer.
 - Deleting the old Claude settings file or old nortuscc lock during migration.
+- Retaining Claude-only helper wrappers for sandbox permission allowlists or
+  versioned plugin-cache paths. Full-access operation and native skill installs
+  make those wrappers unnecessary.
 
 ## Command interface
 
@@ -85,7 +88,6 @@ Interactive installation uses these automation controls:
 ```text
 claude/
   CLAUDE.md
-  bin/
   hooks/
 codex/
   AGENTS.md
@@ -101,11 +103,16 @@ Sync manifest entries carry a target:
 
 ```js
 [
-  { target: 'claude', src: 'claude/bin', dest: 'bin', mode: 'link' },
   { target: 'claude', src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
   { target: 'codex', src: 'codex/AGENTS.md', dest: 'AGENTS.md', mode: 'copy' },
 ]
 ```
+
+The implementation deletes `claude/bin/sp` and `claude/bin/sdd-pkg.sh`, removes
+their instructions from the managed `CLAUDE.md`, and stops syncing `claude/bin`.
+It does not delete pre-existing copies under `~/.claude/bin`; they simply become
+unmanaged. Skill scripts are invoked through paths exposed by the native skill
+installation instead of through a Claude plugin-cache wrapper.
 
 Resolution uses the target to select `~/.claude` or `~/.codex`. Commands filter
 the common manifest instead of maintaining separate command implementations.
