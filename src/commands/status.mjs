@@ -5,7 +5,9 @@ import { readLock } from '../lock.mjs';
 import { inspectCopy } from '../copy.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
-import { loadPluginState, pluginReport } from '../plugins.mjs';
+import { readIntegrations } from '../integrations/manifest.mjs';
+import { integrationPlan } from '../integrations/runner.mjs';
+import { defaultAdapters } from '../integrations/adapters.mjs';
 import {
   readSkillsManifest,
   readSkillLock,
@@ -43,18 +45,25 @@ export async function run(args = []) {
   const lines = rows.map((r) => formatRow(r.dest, r.state, noteFor(r)));
   process.stdout.write('\n' + section('config', lines));
 
-  const { settings, installed, marketplaces } = loadPluginState();
-  const plugins = pluginReport(settings, installed, marketplaces);
-  const pluginLines =
-    plugins.commands.length === 0
-      ? [formatRow('all enabled', 'installed', '')]
-      : [
-          ...plugins.missingMarketplaces.map((m) => formatRow(m, 'no marketplace', '')),
-          ...plugins.missingPlugins.map((p) => formatRow(p, 'not installed', '')),
-          '',
-          ...plugins.commands.map((c) => `  ${c}`),
-        ];
-  process.stdout.write(section('plugins', pluginLines));
+  // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`
+  // and `apply --install` are the only paths that act on this.
+  const { integrations, errors } = readIntegrations();
+  const adapters = defaultAdapters();
+  const planned = errors.length ? [] : integrationPlan({ integrations, target, adapters });
+  const pending = planned.filter((item) => item.state !== 'installed');
+
+  const integrationLines = errors.length
+    ? errors.map((message) => formatRow('manifest', 'invalid', message))
+    : planned.length === 0
+      ? [formatRow('none declared', 'satisfied', '')]
+      : pending.length === 0
+        ? [formatRow('all declared', 'installed', '')]
+        : [
+            ...pending.map((item) => formatRow(item.label, item.state, item.note)),
+            '',
+            '  nortuscc apply --install',
+          ];
+  process.stdout.write(section('integrations', integrationLines));
 
   const skills = reconcile({
     groups: readSkillsManifest(),
@@ -86,9 +95,12 @@ export async function run(args = []) {
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
 
+  // A selected integration that is missing or blocked is as actionable as a
+  // drifted file: the machine is not in agreement with what the repo declares.
   if (
     actionable.length === 0 &&
-    plugins.commands.length === 0 &&
+    errors.length === 0 &&
+    pending.length === 0 &&
     skills.missing.length === 0 &&
     broken.length === 0
   ) {

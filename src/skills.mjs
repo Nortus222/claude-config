@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { agentsSkillsDir, repoRoot, claudeDir } from './resolve.mjs';
-import { isPlainObject } from './plugins.mjs';
+import { isPlainObject } from './json.mjs';
 
 const MANIFEST = () => join(repoRoot(), 'skills-manifest.txt');
 // .skill-lock.json is a sibling of the skills dir under ~/.agents. Deriving it
