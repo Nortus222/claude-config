@@ -584,6 +584,70 @@ test('an unreadable skill listing is reported as unknown, not as nothing exposed
   });
 });
 
+// The report is filtered by target end to end: a Codex run must not name a
+// Claude plugin or Claude's instruction file, and vice versa.
+test('Codex status omits Claude integrations', async () => {
+  await onCleanMachine('codex-only-report', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          { id: 'cm-claude', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+          { id: 'srv-codex', label: 'files server', target: 'codex', type: 'mcp', default: true, command: 'mcp-files' },
+        ],
+      }),
+    );
+
+    const codex = await runCaptured(() => fx.run(['--target', 'codex']));
+    assert.match(codex.output, /AGENTS\.md/);
+    assert.match(codex.output, /Codex MCP|files server/);
+    assert.doesNotMatch(codex.output, /Claude plugins/);
+    assert.doesNotMatch(codex.output, /CLAUDE\.md/);
+
+    const claude = await runCaptured(() => fx.run(['--target', 'claude']));
+    assert.match(claude.output, /CLAUDE\.md/);
+    assert.doesNotMatch(claude.output, /AGENTS\.md/);
+    assert.doesNotMatch(claude.output, /files server/);
+  });
+});
+
+// status is the read-only verb: it reports what an install would do and never
+// does it.
+test('status reports a missing integration as actionable without installing it', async () => {
+  await onCleanMachine('integration-actionable', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          { id: 'cm-claude', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+        ],
+      }),
+    );
+
+    const { code, output } = await runCaptured(() => fx.run(['--target', 'claude']));
+    assert.equal(code, 1, 'a declared integration this machine lacks is actionable');
+    assert.match(output, /context-mode/);
+    assert.match(output, /apply --install/, 'the report names the command that would install it');
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// An invalid manifest is reported, not acted on, and never silently ignored.
+test('an invalid integrations.json is reported and makes status exit non-zero', async () => {
+  await onCleanMachine('integration-invalid', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({ version: 1, integrations: [{ id: 'x', label: 'x', target: 'cursor', type: 'plugin', default: true, plugin: 'a@b' }] }),
+    );
+
+    const { code, output } = await runCaptured(() => fx.run());
+    assert.equal(code, 1);
+    assert.match(output, /invalid/);
+  });
+});
+
 // A bare machine has nothing canonical to ask about, and asking anyway would
 // spawn the installer during a read-only command.
 test('status never inspects exposure when no canonical skill is installed', async () => {

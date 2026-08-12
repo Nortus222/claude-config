@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -70,6 +70,39 @@ test('capture --target codex then picks up the Codex edit that was left behind',
   assert.equal(await captureRun(['--target', 'codex']), 0);
   assert.deepEqual(capturedPaths(), ['codex/AGENTS.md']);
   assert.equal(readFileSync(join(repo, 'codex', 'AGENTS.md'), 'utf8'), '# codex only\n');
+});
+
+// Capture writes instruction files and the shared skill manifest, and nothing
+// else. Local MCP servers, hooks and plugins are machine state — often with
+// credentials in their arguments — and turning them into repository
+// declarations is exactly what the design forbids.
+test('capture never imports local MCP configuration', async () => {
+  writeFileSync(join(repo, 'integrations.json'), JSON.stringify({ version: 1, integrations: [] }));
+  const manifestBefore = readFileSync(join(repo, 'integrations.json'), 'utf8');
+
+  writeFileSync(join(codex, 'config.toml'), '[mcp_servers.private]\ncommand="secret"\n');
+  writeFileSync(join(codex, 'AGENTS.md'), '# codex local edit\n');
+
+  assert.equal(await captureRun(['--target', 'codex']), 0);
+
+  assert.equal(
+    readFileSync(join(repo, 'integrations.json'), 'utf8'),
+    manifestBefore,
+    'capture must never write an integration declaration',
+  );
+  assert.deepEqual(capturedPaths(), ['codex/AGENTS.md']);
+  assert.equal(existsSync(join(repo, 'config.toml')), false, 'local Codex configuration is never copied into the repo');
+});
+
+test('capture writes nothing outside the instruction files and the skill manifest', async () => {
+  writeFileSync(join(claude, 'CLAUDE.md'), '# another local edit\n');
+  await captureRun([]);
+  for (const path of capturedPaths()) {
+    assert.ok(
+      path === 'skills-manifest.txt' || /^(claude|codex)\//.test(path),
+      `capture wrote an unexpected path: ${path}`,
+    );
+  }
 });
 
 test('a second capture with nothing new captures nothing', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { execSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -168,6 +168,52 @@ test('pull with nothing new succeeds and delegates to apply', async () => {
         '# from repo\n',
         'apply must have run and copied the repo file down to the machine',
       );
+    },
+  );
+});
+
+// A pull can bring down a newly declared integration. Reporting it keeps the
+// user informed; installing it would turn a routine `pull` into an unattended
+// run of third-party installers.
+test('pull reports a newly declared integration but does not install it', async () => {
+  const { work } = createRemoteAndClone('nortuscc-pull-integrations');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-pull-integrations-home-');
+
+  writeFileSync(
+    join(work, 'integrations.json'),
+    JSON.stringify({
+      version: 1,
+      integrations: [
+        { id: 'cm', label: 'context-mode', target: 'claude', type: 'plugin', default: true, plugin: 'context-mode@context-mode' },
+      ],
+    }),
+  );
+
+  await withFixtureEnv(
+    {
+      NORTUSCC_CLAUDE_DIR: claude,
+      NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents,
+      NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
+    },
+    async () => {
+      const chunks = [];
+      const original = process.stdout.write;
+      process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
+      let code;
+      try {
+        code = await pullRun([]);
+      } finally {
+        process.stdout.write = original;
+      }
+      const output = chunks.join('');
+
+      assert.equal(code, 0, 'a reportable integration is not a pull failure');
+      assert.match(output, /context-mode/, 'the newly declared integration is named');
+      assert.match(output, /apply --install/, 'the report names the command that would install it');
+      // Nothing was installed: no Claude plugin state was written.
+      assert.equal(existsSync(join(claude, 'plugins')), false);
     },
   );
 });
