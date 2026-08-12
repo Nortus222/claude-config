@@ -13,9 +13,9 @@ import {
   readSkillLock,
   installedSkillNames,
   reconcile,
-  brokenSkillLinks,
-  claudeSkillsDir,
+  skillExposure,
 } from '../skills.mjs';
+import { agentIdsFor, readExposure } from '../skills-cli.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -34,7 +34,11 @@ export function configReport(entries = SYNC) {
   });
 }
 
-export async function run(args = []) {
+export async function run(args = [], deps = {}) {
+  // Injected so tests can answer "what can each agent see?" without spawning
+  // the real installer, which would reach the network and the live machine.
+  const { inspectExposure = readExposure } = deps;
+
   const { target, error } = parseTarget(args);
   if (error) {
     console.error(`nortuscc: ${error}`);
@@ -80,14 +84,30 @@ export async function run(args = []) {
   if (skills.local.length) {
     skillLines.push(formatRow('local', String(skills.local.length), skills.local.join(', ')));
   }
-  const broken = brokenSkillLinks();
-  if (broken.length) {
-    skillLines.push(formatRow('broken links', String(broken.length), broken.join(', ')));
+  // Canonical presence and agent exposure are different questions: a skill can
+  // sit in the shared store and still be invisible to one selected agent. Ask
+  // the installer, per agent, rather than guessing at its layout.
+  const agents = agentIdsFor(target);
+  // Nothing canonical to ask about means nothing to ask: a bare machine should
+  // not spawn the installer just to be told it has no skills.
+  const { list, errors: exposureErrors } =
+    skills.ok.length > 0 ? await inspectExposure(agents) : { list: {}, errors: [] };
+  const exposure = skillExposure({ names: skills.ok, agents, list });
+
+  if (exposure.partial.length) {
+    skillLines.push(
+      formatRow(
+        'partial',
+        String(exposure.partial.length),
+        exposure.partial.map((p) => `${p.name} (missing from ${p.missingAgents.join(', ')})`).join(', '),
+      ),
+    );
   }
+  for (const message of exposureErrors) skillLines.push(formatRow('exposure', 'unknown', message));
+
   if (!skillLines.length) skillLines.push(formatRow('manifest', 'satisfied', ''));
-  if (skills.missing.length) skillLines.push('', '  nortuscc apply --skills');
-  if (broken.length) {
-    skillLines.push('', `  remove stale links under ${claudeSkillsDir()} after confirming`);
+  if (skills.missing.length || exposure.partial.length) {
+    skillLines.push('', '  nortuscc apply --install');
   }
   process.stdout.write(section('skills', skillLines));
 
@@ -102,7 +122,8 @@ export async function run(args = []) {
     errors.length === 0 &&
     pending.length === 0 &&
     skills.missing.length === 0 &&
-    broken.length === 0
+    exposure.partial.length === 0 &&
+    exposureErrors.length === 0
   ) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;

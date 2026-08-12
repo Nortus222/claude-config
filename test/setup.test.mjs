@@ -310,7 +310,14 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
 
     let code;
     try {
-      code = await run([]);
+      // The closing status run would otherwise ask the real installer which
+      // agents can see `known-skill` — a network call this suite must not make.
+      code = await run([], {
+        inspectExposure: async () => ({
+          list: { 'claude-code': ['known-skill'], codex: ['known-skill'] },
+          errors: [],
+        }),
+      });
     } finally {
       process.stdout.write = originalWrite;
     }

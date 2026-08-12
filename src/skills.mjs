@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { agentsSkillsDir, repoRoot, claudeDir } from './resolve.mjs';
+import { agentsSkillsDir, repoRoot } from './resolve.mjs';
 import { isPlainObject } from './json.mjs';
 
 const MANIFEST = () => join(repoRoot(), 'skills-manifest.txt');
@@ -154,33 +154,26 @@ export function manifestPath() {
   return MANIFEST();
 }
 
-export function claudeSkillsDir() {
-  return join(claudeDir(), 'skills');
-}
+// There is one shared skill store, so "installed" and "usable by this agent"
+// are different questions. This answers the second from the installer's own
+// per-agent listing, which replaced a scan of ~/.claude/skills that guessed at
+// a layout the installer owns and answered for Claude alone.
+//
+// `list` maps an installer agent id to the names that agent can see. An agent
+// with no entry counts as seeing nothing: whether that is a genuinely empty
+// agent or a failed read is the caller's to report, and readExposure keeps a
+// failed read out of `list` entirely rather than passing off an empty one.
+export function skillExposure({ names, agents, list = {} }) {
+  const exposed = [];
+  const partial = [];
+  const missing = [];
 
-// skills-check.sh's one behaviour that is not about the manifest: entries
-// under ~/.claude/skills are symlinks into ~/.agents/skills, and a skill
-// removed from ~/.agents/skills without also removing its Claude-side link
-// leaves a broken link behind. Use lstat, not stat, to see the link itself
-// rather than follow it into ENOENT — the same distinction link.mjs's
-// inspectLink relies on.
-export function brokenSkillLinks() {
-  const dir = claudeSkillsDir();
-  if (!existsSync(dir)) return [];
-
-  const broken = [];
-  for (const name of readdirSync(dir)) {
-    const linkPath = join(dir, name);
-    let stat;
-    try {
-      stat = lstatSync(linkPath);
-    } catch {
-      continue; // vanished between readdir and lstat; nothing to report
-    }
-    if (!stat.isSymbolicLink()) continue;
-    // existsSync follows the link and swallows ENOENT, so false here means
-    // the link's target is gone.
-    if (!existsSync(linkPath)) broken.push(name);
+  for (const name of names) {
+    const missingAgents = agents.filter((agent) => !(list[agent] ?? []).includes(name));
+    if (missingAgents.length === 0) exposed.push(name);
+    else if (missingAgents.length === agents.length) missing.push(name);
+    else partial.push({ name, missingAgents });
   }
-  return broken.sort();
+
+  return { exposed, partial, missing };
 }

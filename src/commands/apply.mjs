@@ -5,7 +5,7 @@ import { readLock, writeLock } from '../lock.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
-import { installGroups } from '../skills-cli.mjs';
+import { installGroups, agentIdsFor } from '../skills-cli.mjs';
 
 // Turns installGroups' per-source {source, ok} results into report lines and
 // a failure count, kept separate from installGroups itself so the mapping
@@ -104,7 +104,9 @@ export async function run(allArgs = [], entries = SYNC) {
     if (skills.missing.length === 0) {
       lines.push(formatRow('skills', 'satisfied', ''));
     } else {
-      const results = await installGroups(installArgs(skills.missing));
+      // The selected agents are named explicitly, so a --target codex run
+      // installs for Codex and nothing else.
+      const results = await installGroups(installArgs(skills.missing), { agents: agentIdsFor(target) });
       const summary = summarizeSkillsInstall(skills.missing, results);
       lines.push(...summary.lines);
       skillsFailed = summary.failed;

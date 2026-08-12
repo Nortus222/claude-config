@@ -394,7 +394,12 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     }
     writeLock(lock);
 
-    const exitCode = await isolatedRun();
+    // 'have' is installed, so status would otherwise ask the real installer
+    // which agents can see it — a network call, and a spawn the constraints
+    // forbid. The stub answers for both agents.
+    const exitCode = await isolatedRun([], {
+      inspectExposure: () => ({ list: { 'claude-code': ['have'], codex: ['have'] }, errors: [] }),
+    });
 
     assert.equal(exitCode, 1, 'a manifest skill missing from the agents skills dir makes the run dirty');
     const output = chunks.join('');
@@ -531,23 +536,63 @@ test('status reports Codex drift under its own destination name', async () => {
   });
 });
 
-// I3: brokenSkillLinks() was entirely unpinned — replacing the call with []
-// left the whole suite green — even though preserving it from the deleted
-// skills-check.sh is called out in the design.
-test('status reports a broken skill link and exits non-zero', async () => {
-  await onCleanMachine('broken-skill', async (fx) => {
-    assert.equal((await runCaptured(fx.run)).code, 0, 'the fixture machine must start genuinely clean');
+// The successor to the broken-symlink scan: a skill present in the shared
+// store but invisible to one selected agent is partially installed, and a
+// machine in that state is not in agreement. Asked of the installer rather
+// than inferred from a directory layout it owns.
+test('status reports a skill one selected agent cannot see, and exits non-zero', async () => {
+  await onCleanMachine('partial-skill', async (fx) => {
+    mkdirSync(join(fx.agents, 'review'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nreview\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { review: { source: 'a/b' } } }),
+    );
 
-    // A skill removed from ~/.agents/skills without removing its Claude-side link.
-    const claudeSkills = join(fx.claude, 'skills');
-    mkdirSync(claudeSkills, { recursive: true });
-    symlinkSync(join(fx.agents, 'ghost-skill'), join(claudeSkills, 'ghost-skill'), 'dir');
+    const seenByBoth = () => ({ list: { 'claude-code': ['review'], codex: ['review'] }, errors: [] });
+    const clean = await runCaptured(() => fx.run([], { inspectExposure: seenByBoth }));
+    assert.equal(clean.code, 0, 'a skill both agents can see leaves the machine in agreement');
 
-    const { code, output } = await runCaptured(fx.run);
-    assert.equal(code, 1, 'a broken skill link must make status exit non-zero');
-    assert.match(output, /broken links/, 'the broken-link row is printed');
-    assert.match(output, /ghost-skill/, 'the stale link is named');
+    const claudeOnly = () => ({ list: { 'claude-code': ['review'], codex: [] }, errors: [] });
+    const { code, output } = await runCaptured(() => fx.run([], { inspectExposure: claudeOnly }));
+
+    assert.equal(code, 1, 'a partially exposed skill must make status exit non-zero');
+    assert.match(output, /partial/, 'the partial row is printed');
+    assert.match(output, /review/, 'the skill is named');
+    assert.match(output, /codex/, 'the agent that cannot see it is named');
     assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// A listing that could not be read is not a listing of nothing. Reporting it
+// as "no skills exposed" would drive a reinstall of every shared skill.
+test('an unreadable skill listing is reported as unknown, not as nothing exposed', async () => {
+  await onCleanMachine('exposure-error', async (fx) => {
+    mkdirSync(join(fx.agents, 'review'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nreview\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { review: { source: 'a/b' } } }),
+    );
+
+    const broken = () => ({ list: {}, errors: ['could not list skills for codex'] });
+    const { code, output } = await runCaptured(() => fx.run([], { inspectExposure: broken }));
+
+    assert.equal(code, 1);
+    assert.match(output, /unknown/);
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// A bare machine has nothing canonical to ask about, and asking anyway would
+// spawn the installer during a read-only command.
+test('status never inspects exposure when no canonical skill is installed', async () => {
+  await onCleanMachine('no-exposure-call', async (fx) => {
+    let called = false;
+    const spy = () => { called = true; return { list: {}, errors: [] }; };
+    const { code } = await runCaptured(() => fx.run([], { inspectExposure: spy }));
+    assert.equal(code, 0);
+    assert.equal(called, false, 'a read-only command must not spawn the installer for nothing');
   });
 });
 

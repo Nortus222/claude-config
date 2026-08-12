@@ -31,6 +31,15 @@ const entry = (path, hash) => ({
   source: 'o/r', sourceUrl: URL, skillPath: `${path}/SKILL.md`, skillFolderHash: hash,
 });
 
+// Every selected agent already sees every fixture skill, so post-update
+// reconciliation is a no-op. Injected rather than defaulted: the real
+// inspection spawns `npx skills list`, which reaches the network and the
+// developer's live machine.
+const SEES_EVERYTHING = async () => ({
+  list: { 'claude-code': ['fresh', 'stale', 'wizard'], codex: ['fresh', 'stale', 'wizard'] },
+  errors: [],
+});
+
 // Two installed skills: `stale` has moved upstream, `fresh` has not.
 function baseDeps(overrides = {}) {
   return {
@@ -39,6 +48,7 @@ function baseDeps(overrides = {}) {
     inspectSource: async () => ({ trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]), skillPaths: [] }),
     preserve: () => '/backup/path',
     runUpdate: async () => true,
+    inspectExposure: SEES_EVERYTHING,
     ...overrides,
   };
 }
@@ -57,6 +67,7 @@ const AVAILABLE_DEPS = (overrides = {}) => ({
   runUpdate: async () => true,
   runRemove: async () => true,
   installGroups: async () => [],
+  inspectExposure: SEES_EVERYTHING,
   writeManifest: () => {},
   ...overrides,
 });
@@ -275,6 +286,7 @@ test('a still-hashless skill is not reported as updated', async () => {
       inspectSource: async () => ({ trees: new Map([['s/nohash', 'somehash']]), skillPaths: [] }),
       preserve: () => '/b',
       runUpdate: async () => true,
+      inspectExposure: async () => ({ list: { 'claude-code': ['nohash'], codex: ['nohash'] }, errors: [] }),
     });
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
@@ -297,6 +309,7 @@ test("the backup line names the shared backup directory, not the last skill's pa
       inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
       preserve: (abs, rel) => `/fake/per-skill/${rel}`,
       runUpdate: async () => true,
+      inspectExposure: async () => ({ list: { 'claude-code': ['one', 'two'], codex: ['one', 'two'] }, errors: [] }),
     });
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');
@@ -433,6 +446,7 @@ test('a skill whose backup returns null is named as unprotected, not silently se
       inspectSource: async () => ({ trees: new Map([['s/one', 'new1'], ['s/two', 'new2']]), skillPaths: [] }),
       preserve: (abs, rel) => (rel.includes('one') ? '/backup/one' : null),
       runUpdate: async () => true,
+      inspectExposure: async () => ({ list: { 'claude-code': ['one', 'two'], codex: ['one', 'two'] }, errors: [] }),
     });
   } finally { process.stdout.write = orig; }
   const out = chunks.join('');

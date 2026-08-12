@@ -13,7 +13,9 @@ function flag(args, name) {
   return i >= 0 ? args[i + 1] : null;
 }
 
-export async function run(allArgs = []) {
+// `deps` is forwarded to the closing status run, so a test can answer "what
+// can each agent see?" without spawning the real installer.
+export async function run(allArgs = [], deps = {}) {
   const { target, rest: args, error } = parseTarget(allArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
@@ -84,5 +86,5 @@ export async function run(allArgs = []) {
   if (applied !== 0) return applied;
 
   console.log('\n--- status ---');
-  return await statusRun(['--target', target]);
+  return await statusRun(['--target', target], deps);
 }

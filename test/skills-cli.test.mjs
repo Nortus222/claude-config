@@ -7,6 +7,10 @@ import {
   runUpdate,
   buildRemoveCommand,
   runRemove,
+  buildListCommand,
+  readExposure,
+  SKILL_AGENTS,
+  agentIdsFor,
 } from '../src/skills-cli.mjs';
 
 // `skills add --skill` is variadic and space-separated, exactly like `update`
@@ -75,6 +79,108 @@ test('installGroups outside dry-run calls the runner once per group with the bui
   assert.deepEqual(calls[0], buildCommand({ source: 'a/b', skills: ['one', 'two'] }));
   assert.deepEqual(calls[1], buildCommand({ source: 'c/d', skills: ['three'] }));
   assert.deepEqual(res, [{ source: 'a/b', ok: true }, { source: 'c/d', ok: true }]);
+});
+
+// --- explicit agents ---------------------------------------------------------
+
+test('skill add names exact skills and both selected agents', () => {
+  const command = buildCommand({
+    source: 'owner/repo', skills: ['one', 'two'], agents: ['claude-code', 'codex'],
+  });
+  assert.deepEqual(command.args, [
+    '-y', 'skills', 'add', 'owner/repo', '--skill', 'one', 'two',
+    '--agent', 'claude-code', 'codex', '--global', '--yes',
+  ]);
+});
+
+// `--agent` is variadic in the same way `--skill` is, so the names go in
+// space-separated and the trailing flags still land.
+test('a single selected agent produces a single --agent value', () => {
+  const { args } = buildCommand({ source: 'a/b', skills: ['x'], agents: ['codex'] });
+  assert.deepEqual(args, [
+    '-y', 'skills', 'add', 'a/b', '--skill', 'x', '--agent', 'codex', '--global', '--yes',
+  ]);
+});
+
+// Being explicit is the point: without --agent the installer decides which
+// agents get the skill, which is exactly the guess --target exists to replace.
+test('the agent list is never comma-joined and never omitted when given', () => {
+  const { args } = buildCommand({ source: 'a/b', skills: ['x'], agents: ['claude-code', 'codex'] });
+  assert.ok(!args.some((a) => a.includes(',')));
+  assert.ok(args.includes('--agent'));
+  assert.deepEqual(args.slice(-2), ['--global', '--yes']);
+});
+
+test('nortuscc targets map to the installer\'s own agent ids', () => {
+  assert.deepEqual(SKILL_AGENTS, { claude: 'claude-code', codex: 'codex' });
+  assert.deepEqual(agentIdsFor('all'), ['claude-code', 'codex']);
+  assert.deepEqual(agentIdsFor('claude'), ['claude-code']);
+  assert.deepEqual(agentIdsFor('codex'), ['codex']);
+});
+
+test('buildListCommand asks one agent at a time for machine-readable output', () => {
+  assert.deepEqual(buildListCommand('codex'), {
+    cmd: 'npx',
+    args: ['-y', 'skills', 'list', '--global', '--agent', 'codex', '--json'],
+  });
+});
+
+test('installGroups passes the selected agents through to every group', async () => {
+  const calls = [];
+  const run = async (command) => { calls.push(command); return true; };
+  await installGroups(
+    [{ source: 'a/b', skills: ['one'] }, { source: 'c/d', skills: ['two'] }],
+    { agents: ['claude-code', 'codex'], run },
+  );
+  for (const call of calls) {
+    assert.deepEqual(call.args.slice(call.args.indexOf('--agent'), call.args.indexOf('--global')), [
+      '--agent', 'claude-code', 'codex',
+    ]);
+  }
+});
+
+// --- exposure inspection -----------------------------------------------------
+
+test('readExposure asks each selected agent and collects one list per agent', async () => {
+  const calls = [];
+  const { list, errors } = await readExposure(['claude-code', 'codex'], {
+    run: async (command) => {
+      calls.push(command);
+      const agent = command.args[command.args.indexOf('--agent') + 1];
+      return { ok: true, stdout: JSON.stringify({ skills: [{ name: `for-${agent}` }] }) };
+    },
+  });
+
+  assert.deepEqual(calls.map((c) => c.args[c.args.indexOf('--agent') + 1]), ['claude-code', 'codex']);
+  assert.deepEqual(list, { 'claude-code': ['for-claude-code'], codex: ['for-codex'] });
+  assert.deepEqual(errors, []);
+});
+
+// Malformed output is an inspection error, not an empty successful list.
+// Reading it as "this agent has no skills" would report every shared skill as
+// partially installed and drive a reinstall of all of them.
+test('unparseable output is an inspection error, not an empty list', async () => {
+  const { list, errors } = await readExposure(['codex'], {
+    run: async () => ({ ok: true, stdout: 'not json at all' }),
+  });
+  assert.ok(errors.length > 0);
+  assert.match(errors.join('\n'), /codex/);
+  assert.equal(list.codex, undefined, 'a failed read must not masquerade as an empty list');
+});
+
+test('a failed list command is an inspection error too', async () => {
+  const { errors } = await readExposure(['codex'], {
+    run: async () => ({ ok: false, stdout: '', note: 'could not launch `npx`' }),
+  });
+  assert.ok(errors.length > 0);
+});
+
+test('readExposure accepts a bare array of names as well as a skills object', async () => {
+  const { list, errors } = await readExposure(['codex'], {
+    run: async () => ({ ok: true, stdout: JSON.stringify(['plain', 'names']) }),
+  });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(list.codex, ['plain', 'names']);
 });
 
 test('buildUpdateCommand names every skill and stays global and non-interactive', () => {
