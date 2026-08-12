@@ -173,7 +173,9 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 // in the same order.
 export async function installFor(target, args, { takeRepo = false, deps = {} } = {}) {
   const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
-  const wiring = deps.sections ? deps : defaultInstallDeps(target, { force: takeRepo });
+  const wiring = deps.sections
+    ? deps
+    : await defaultInstallDeps(target, { force: takeRepo, codexState: deps.codexState });
 
   if (wiring.integrationErrors?.length) {
     for (const message of wiring.integrationErrors) console.error(`nortuscc: ${message}`);

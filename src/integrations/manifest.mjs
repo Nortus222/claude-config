@@ -78,8 +78,18 @@ function validateOne(item, index, { repo, seen }) {
   if (item.type === 'plugin' && (typeof item.plugin !== 'string' || !item.plugin)) {
     errors.push(`${where}: a plugin needs a 'plugin' name`);
   }
-  if (item.type === 'marketplace' && (typeof item.marketplace !== 'string' || !item.marketplace)) {
-    errors.push(`${where}: a marketplace needs a 'marketplace' source`);
+  if (item.type === 'marketplace') {
+    if (typeof item.marketplace !== 'string' || !item.marketplace) {
+      errors.push(`${where}: a marketplace needs a 'marketplace' source`);
+    }
+    // The registered name comes from the marketplace's own manifest and cannot
+    // be derived from the source — `mksglu/context-mode` registers as
+    // `context-mode`, `thedotmack/claude-mem` as `thedotmack`. Guessing meant
+    // inspection never matched and the marketplace was re-added every run, so
+    // it has to be stated.
+    if (typeof item.name !== 'string' || !item.name) {
+      errors.push(`${where}: a marketplace needs the 'name' it registers as (not derivable from the source)`);
+    }
   }
   if (item.type === 'mcp' && (typeof item.command !== 'string' || !item.command)) {
     errors.push(`${where}: an mcp server needs a 'command'`);

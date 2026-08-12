@@ -203,7 +203,11 @@ test('pull reports a newly declared integration but does not install it', async 
       process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
       let code;
       try {
-        code = await pullRun([]);
+        // An empty Codex probe: without it, pull shells out to the real
+        // `codex` CLI to ask what this machine has installed.
+        code = await pullRun([], {
+          codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
+        });
       } finally {
         process.stdout.write = original;
       }

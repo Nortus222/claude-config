@@ -35,7 +35,13 @@ mkdirSync(join(fixtureRepo, 'codex'), { recursive: true });
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
 writeFileSync(join(fixtureRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
-const { configReport, run } = await import('../src/commands/status.mjs');
+const { configReport, run: rawRun } = await import('../src/commands/status.mjs');
+
+// Codex answers "what is installed?" through its own CLI, so status would
+// otherwise spawn the real `codex` against the developer's machine. Every run
+// in this file gets an empty probe unless the test says otherwise.
+const emptyCodex = () => ({ plugins: new Set(), marketplaces: new Set(), errors: [] });
+const run = (args = [], deps = {}) => rawRun(args, { codexState: emptyCodex(), ...deps });
 
 test('configReport returns one row per manifest entry', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
@@ -249,7 +255,9 @@ test('run() does not write any files to claude dir and does not create new direc
 
   try {
     // Reimport to get fresh functions bound to isolated paths
-    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
+    const isolatedRun = (args = [], runDeps = {}) =>
+      rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
@@ -376,7 +384,9 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   };
 
   try {
-    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
+    const isolatedRun = (args = [], runDeps = {}) =>
+      rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');
@@ -449,7 +459,9 @@ async function onCleanMachine(prefix, fn) {
   process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   try {
-    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
+    const isolatedRun = (args = [], runDeps = {}) =>
+      rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
     const { SYNC } = await import('../src/manifest.mjs');
     const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
     const { resolveEntry } = await import('../src/resolve.mjs');

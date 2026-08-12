@@ -119,10 +119,13 @@ function skillSection(target) {
   };
 }
 
-export function defaultInstallDeps(target, { force = false, adapters = defaultAdapters() } = {}) {
-  const integrations = integrationSection(target, adapters);
+export async function defaultInstallDeps(target, { force = false, adapters, codexState } = {}) {
+  const resolved = adapters ?? (await defaultAdapters({ codexState }));
+  const integrations = integrationSection(target, resolved);
   return {
-    integrationErrors: integrations.errors,
+    // A manifest that will not validate and Codex state that could not be read
+    // are both reasons to stop before installing anything.
+    integrationErrors: [...integrations.errors, ...(resolved.errors ?? [])],
     sections: {
       config: configSection(target, { force }),
       integrations,

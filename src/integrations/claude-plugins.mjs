@@ -37,14 +37,14 @@ function knownMarketplaces(dir) {
   return readJson(join(dir, 'plugins', 'known_marketplaces.json'));
 }
 
-// A plugin is named `<plugin>@<marketplace>`; the marketplace entry Claude
-// records is keyed by the marketplace's own name, which is the part after the
-// `@` of the plugins that come from it — not the `owner/repo` source used to
-// add it.
+// A plugin is named `<plugin>@<marketplace>`, and the marketplace entry Claude
+// records is keyed by that same marketplace name — which comes from the
+// marketplace's own manifest, not from the `owner/repo` source used to add it.
+// `mksglu/context-mode` registers as `context-mode`; `thedotmack/claude-mem`
+// registers as `thedotmack`. Deriving it from the source matched neither
+// reliably, so the manifest declares it.
 function marketplaceKey(item) {
-  const source = item.marketplace ?? '';
-  const tail = source.split('/').pop() ?? source;
-  return tail;
+  return item.name;
 }
 
 export function claudePluginAdapters({ claudeDir = realClaudeDir, spawn = spawnCommand } = {}) {
