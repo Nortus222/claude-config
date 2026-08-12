@@ -237,6 +237,91 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
 // drive the reporting logic directly with crafted results — never through a
 // real install — matching the reviewer's guidance that dryRun already covers
 // installGroups' own wiring and no injectable-spawn seam is needed here.
+// --- apply --install ----------------------------------------------------------
+
+// Injected sections stand in for the real ones, so this exercises apply's
+// wiring into the shared workflow without a child process.
+function fixtureSections(calls) {
+  const install = async (items) =>
+    items.map((item) => { calls.push(item.id); return { id: item.id, label: item.label, ok: true }; });
+  return {
+    isTTY: false,
+    sections: {
+      config: { items: () => [], install },
+      integrations: {
+        items: () => [{ id: 'plugin:x', type: 'plugin', group: 'g', label: 'x', state: 'missing', default: true }],
+        install,
+      },
+      skills: { items: () => [], install },
+    },
+  };
+}
+
+test('apply without --install reconciles configuration and installs nothing', async () => {
+  const calls = [];
+  const code = await run([], SYNC, fixtureSections(calls));
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [], 'apply is configuration-only unless --install is asked for');
+});
+
+test('apply --install runs the shared workflow', async () => {
+  const calls = [];
+  const code = await run(['--install', '--yes'], SYNC, fixtureSections(calls));
+  assert.equal(code, 0);
+  assert.deepEqual(calls, ['plugin:x']);
+});
+
+// A configuration conflict is the one decision only the user can make.
+// Installing on top of it would bury that decision under installer output.
+test('a configuration conflict stops apply before anything is installed', async () => {
+  const conflictHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-conflict-'));
+  const conflictClaude = join(conflictHome, '.claude');
+  const conflictCodex = join(conflictHome, '.codex');
+  mkdirSync(conflictClaude, { recursive: true });
+  mkdirSync(conflictCodex, { recursive: true });
+
+  const saved = [
+    process.env.NORTUSCC_CLAUDE_DIR,
+    process.env.NORTUSCC_CODEX_DIR,
+    process.env.NORTUSCC_STATE_DIR,
+  ];
+  process.env.NORTUSCC_CLAUDE_DIR = conflictClaude;
+  process.env.NORTUSCC_CODEX_DIR = conflictCodex;
+  process.env.NORTUSCC_STATE_DIR = join(conflictHome, 'state');
+
+  const calls = [];
+  try {
+    // Seed a baseline, then move both sides apart: a genuine conflict.
+    assert.equal(await run([]), 0);
+    writeFileSync(join(conflictClaude, 'CLAUDE.md'), '# local change\n');
+    const { readLock, writeLock, setBaseline, hashText } = await import('../src/lock.mjs');
+    const lock = readLock();
+    setBaseline(lock, 'claude:CLAUDE.md', hashText('# a baseline neither side has'));
+    writeLock(lock);
+
+    const code = await run(['--install', '--yes'], SYNC, fixtureSections(calls));
+    assert.equal(code, 1, 'an unresolved conflict must fail the run');
+    assert.deepEqual(calls, [], 'nothing may be installed while a conflict is unresolved');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR, process.env.NORTUSCC_STATE_DIR] = saved;
+  }
+});
+
+test('--skills still installs skills and warns that it is deprecated', async () => {
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => { output += chunk.toString(); return true; };
+  let code;
+  try {
+    code = await run(['--skills']);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.equal(code, 0);
+  assert.match(output, /--skills is deprecated/);
+  assert.match(output, /--install/, 'the warning must name the replacement');
+});
+
 test('summarizeSkillsInstall reports every skill installed when every source succeeds', () => {
   const missing = [
     { name: 'one', source: 'a/b' },

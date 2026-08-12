@@ -71,6 +71,29 @@ test('usage documents the action flags', () => {
   assert.match(out, /--prune/);
 });
 
+test('usage advertises the installation flags', () => {
+  const out = usage();
+  assert.match(out, /--install/);
+  assert.match(out, /--yes/);
+  for (const category of ['hooks', 'mcp', 'plugins', 'skills']) {
+    assert.match(out, new RegExp(`--no-${category}`), `usage should list --no-${category}`);
+  }
+});
+
+// The shared workflow is something setup and apply do, not a verb of its own:
+// `nortuscc install` would be a third way to reach the same code with none of
+// the configuration reconciliation that has to happen first.
+test('install is not a public verb', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, [BIN, 'install'], { encoding: 'utf8' }),
+    (e) => {
+      assert.equal(e.status, 2);
+      assert.match(e.stderr, /unknown command 'install'/);
+      return true;
+    },
+  );
+});
+
 test('usage advertises the target option and its three values', () => {
   const out = usage();
   assert.match(out, /--target claude\|codex\|all/);

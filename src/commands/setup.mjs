@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { readLock, writeLock, migrateLegacyState } from '../lock.mjs';
 import { repoRoot, isGitCheckout, statePath } from '../resolve.mjs';
 import { parseTarget } from '../targets.mjs';
-import { run as applyRun } from './apply.mjs';
+import { run as applyRun, installFor } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
 
 const DEFAULT_REPO = 'https://github.com/Nortus222/claude-config.git';
@@ -77,13 +77,22 @@ export async function run(allArgs = [], deps = {}) {
   lock.repo = root;
   writeLock(lock);
 
-  // setup always installs skills: a bare machine is exactly when they are wanted.
-  // The target is put back explicitly — the filter below keeps setup's own
-  // flags out of apply, and would otherwise drop it and reconcile both agents
-  // on a `setup --target codex`.
+  // Configuration first, so a conflict is decided before any installer runs.
+  // The target is put back explicitly — the filter keeps setup's own flags out
+  // of apply, and would otherwise drop it and reconcile both agents on a
+  // `setup --target codex`.
   const forwarded = ['--target', target, ...args.filter((a) => a.startsWith('--take-'))];
-  const applied = await applyRun(['--skills', ...forwarded]);
+  const applied = await applyRun(forwarded);
   if (applied !== 0) return applied;
+
+  // setup always offers the full workflow: a bare machine is exactly when
+  // integrations and skills are wanted. Re-running it is idempotent, because
+  // everything already in place is offered as satisfied and never reinstalled.
+  const installed = await installFor(target, args, {
+    takeRepo: args.includes('--take-repo'),
+    deps,
+  });
+  if (installed !== 0) return installed;
 
   console.log('\n--- status ---');
   return await statusRun(['--target', target], deps);

@@ -259,23 +259,16 @@ test('stale lock.repo pointing at a directory with no .git falls back to module 
   }
 });
 
-// Test 4: Probe A — --skills must be composed into the applyRun(...) call.
-//
-// Fixture has a real, correctly source-grouped skills-manifest.txt naming one
-// skill, and that skill is pre-installed into the temp agents/skills dir. That
-// keeps skills.missing empty, so apply's --skills branch takes the
-// "satisfied" path and never calls installGroups — nothing is spawned, no
-// network is touched. Without --skills, apply's `if (args.includes('--skills'))`
-// block is skipped entirely and no "skills" row is ever produced, so the row's
-// presence is a clean, honest signal that only depends on the flag.
+// setup always runs the shared installation workflow after configuration, and
+// re-running it must be a no-op. The fixture's one manifest skill is
+// pre-installed and its integrations manifest is absent, so every offered item
+// is already satisfied: the workflow reports there is nothing to do and
+// spawns nothing.
 //
 // The assertion is scoped to the text setup prints before its own
-// "--- status ---" banner (i.e. apply's report only) because status.mjs runs
-// its own, unconditional skills reconciliation afterward and would otherwise
-// print its own "manifest satisfied" line regardless of whether --skills was
-// ever passed to apply — that's exactly what let this probe pass vacuously
-// before.
-test('setup composes --skills into apply, producing a "skills satisfied" row', async () => {
+// "--- status ---" banner, because status runs its own reconciliation
+// afterwards and would otherwise satisfy the match regardless.
+test('setup runs the shared install workflow, which is a no-op when nothing is missing', async () => {
   const skillsTestRepo = createTestRepo('nortuscc-skills-repo-');
   writeFileSync(join(skillsTestRepo, 'skills-manifest.txt'), '[test-source]\nknown-skill\n');
   execSync('git add .', { cwd: skillsTestRepo, stdio: 'ignore' });
@@ -324,11 +317,11 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
 
     assert.equal(code, 0);
 
-    const applyReport = output.split('--- status ---')[0];
+    const beforeStatus = output.split('--- status ---')[0];
     assert.match(
-      applyReport,
-      /^\s*skills\s+satisfied\b/m,
-      'apply report should include a "skills satisfied" row, which only appears when setup composed --skills into the applyRun(...) call',
+      beforeStatus,
+      /nothing to install; everything selected is already in place/,
+      'setup must reach the shared workflow, and a fully satisfied machine must install nothing',
     );
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;

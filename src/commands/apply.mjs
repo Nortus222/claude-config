@@ -6,6 +6,9 @@ import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
 import { installGroups, agentIdsFor } from '../skills-cli.mjs';
+import { parseInstallFlags } from '../install-plan.mjs';
+import { defaultInstallDeps } from '../install-sections.mjs';
+import { runInstall } from './install.mjs';
 
 // Turns installGroups' per-source {source, ok} results into report lines and
 // a failure count, kept separate from installGroups itself so the mapping
@@ -28,7 +31,7 @@ export function summarizeSkillsInstall(missing, results) {
 // entries defaults to SYNC; the parameter exists so tests can inject a bogus
 // manifest entry to exercise the unknown-mode path, the same pattern
 // configReport uses in status.mjs.
-export async function run(allArgs = [], entries = SYNC) {
+export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // Target first, before any other flag parsing: --target and its value must
   // never reach a parser that would read them as something else, and an
   // invalid target has to exit 2 before a single file is written.
@@ -95,7 +98,14 @@ export async function run(allArgs = [], entries = SYNC) {
     lines.push(formatRow(entry.dest, res.action, noteFor(res)));
   }
 
-  if (args.includes('--skills')) {
+  // --skills is the compatibility alias: it installs missing skills and
+  // nothing else, which is what it always did. --install is the full workflow.
+  const skillsAlias = args.includes('--skills');
+  if (skillsAlias && !args.includes('--install')) {
+    process.stdout.write(
+      "\nnortuscc: --skills is deprecated; use 'nortuscc apply --install --no-hooks --no-mcp --no-plugins'\n",
+    );
+
     const skills = reconcile({
       groups: readSkillsManifest(),
       lock: readSkillLock(),
@@ -132,6 +142,9 @@ export async function run(allArgs = [], entries = SYNC) {
     process.stdout.write('\nRestart the affected agent to load the synced instructions.\n');
   }
 
+  // A configuration conflict stops the run before installation. Installing on
+  // top of an unresolved conflict would bury the one thing the user has to
+  // decide under a wall of installer output.
   if (refused > 0) {
     process.stdout.write(
       `\n${refused} conflict(s) refused. Resolve with:\n` +
@@ -146,7 +159,33 @@ export async function run(allArgs = [], entries = SYNC) {
     return 1;
   }
 
+  if (args.includes('--install')) {
+    // --skills alongside --install narrows the workflow to skills alone,
+    // which is what --skills has always meant.
+    const aliasOptOuts = skillsAlias ? ['--no-hooks', '--no-mcp', '--no-plugins'] : [];
+    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps });
+  }
+
   return 0;
+}
+
+// Shared by apply --install and by setup, so both offer exactly the same rows
+// in the same order.
+export async function installFor(target, args, { takeRepo = false, deps = {} } = {}) {
+  const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
+  const wiring = deps.sections ? deps : defaultInstallDeps(target, { force: takeRepo });
+
+  if (wiring.integrationErrors?.length) {
+    for (const message of wiring.integrationErrors) console.error(`nortuscc: ${message}`);
+    console.error('nortuscc: integrations.json is invalid; nothing was installed.');
+    return 2;
+  }
+
+  return await runInstall({
+    target,
+    flags,
+    deps: { ...wiring, isTTY: deps.isTTY, select: deps.select, confirm: deps.confirm },
+  });
 }
 
 function noteFor(res) {
