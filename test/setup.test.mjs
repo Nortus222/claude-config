@@ -27,26 +27,31 @@ function createTestHome() {
   const claude = join(home, '.claude');
   const codex = join(home, '.codex');
   const agents = join(home, '.agents', 'skills');
+  // nortuscc's own state lives outside every agent dir, so it needs its own
+  // override — without it these runs write the developer's real state file.
+  const state = join(home, 'state');
   mkdirSync(claude, { recursive: true });
   mkdirSync(codex, { recursive: true });
   mkdirSync(agents, { recursive: true });
-  return { home, claude, codex, agents };
+  return { home, claude, codex, agents, state };
 }
 
 // Test 1: setup updates lock.repo
 test('setup updates lock.repo with the repo root', async () => {
   const testRepo = createTestRepo();
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   // Save and clear env
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     process.env.NORTUSCC_REPO_DIR = testRepo;
 
@@ -60,6 +65,7 @@ test('setup updates lock.repo with the repo root', async () => {
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -68,16 +74,18 @@ test('setup updates lock.repo with the repo root', async () => {
 // Test 2: Probe B — when apply returns non-zero, status should not run
 test('when apply returns non-zero, setup short-circuits before status (no banner)', async () => {
   const testRepo = createTestRepo();
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     process.env.NORTUSCC_REPO_DIR = testRepo;
 
@@ -118,6 +126,7 @@ test('when apply returns non-zero, setup short-circuits before status (no banner
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -126,16 +135,18 @@ test('when apply returns non-zero, setup short-circuits before status (no banner
 // Test 3: lock.repo fallback
 test('lock.repo is used as fallback', async () => {
   const testRepo = createTestRepo();
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     process.env.NORTUSCC_REPO_DIR = testRepo;
 
@@ -152,6 +163,7 @@ test('lock.repo is used as fallback', async () => {
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -165,16 +177,18 @@ test('lock.repo is used as fallback', async () => {
 // that no longer exists -- without this guard every command would appear
 // to be broken, when the real problem is just a stale record.
 test('stale lock.repo pointing at a nonexistent path falls back to module location', async () => {
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     delete process.env.NORTUSCC_REPO_DIR;
 
@@ -197,6 +211,7 @@ test('stale lock.repo pointing at a nonexistent path falls back to module locati
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -208,17 +223,19 @@ test('stale lock.repo pointing at a nonexistent path falls back to module locati
 // and the directory got reused, or recreated by something else) is exactly
 // as unsafe as a nonexistent one and must fail the same way.
 test('stale lock.repo pointing at a directory with no .git falls back to module location', async () => {
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
   const notAGitRepo = mkdtempSync(join(tmpdir(), 'nortuscc-not-a-repo-'));
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     delete process.env.NORTUSCC_REPO_DIR;
 
@@ -237,6 +254,7 @@ test('stale lock.repo pointing at a directory with no .git falls back to module 
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -264,19 +282,21 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
   execSync('git add .', { cwd: skillsTestRepo, stdio: 'ignore' });
   execSync('git commit -m "add skills manifest"', { cwd: skillsTestRepo, stdio: 'ignore' });
 
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
   // Pre-install the manifest's only named skill so reconcile() reports it as
   // already satisfied, never missing.
   mkdirSync(join(agents, 'known-skill'), { recursive: true });
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     process.env.NORTUSCC_REPO_DIR = skillsTestRepo;
 
@@ -307,6 +327,7 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -322,16 +343,18 @@ test('setup composes --skills into apply, producing a "skills satisfied" row', a
 // genuinely arrives.
 test('setup forwards --take-repo to apply, resolving a conflict', async () => {
   const testRepo = createTestRepo('nortuscc-take-repo-');
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     process.env.NORTUSCC_REPO_DIR = testRepo;
 
@@ -362,6 +385,7 @@ test('setup forwards --take-repo to apply, resolving a conflict', async () => {
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -378,16 +402,18 @@ test('setup forwards --take-repo to apply, resolving a conflict', async () => {
 // check -- before any network I/O -- rather than hanging or reaching out.
 test('setup --dir pointing at an existing directory does not attempt to clone', async () => {
   const existingRepo = createTestRepo('nortuscc-existing-dir-');
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     delete process.env.NORTUSCC_REPO_DIR;
 
@@ -419,6 +445,7 @@ test('setup --dir pointing at an existing directory does not attempt to clone', 
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
@@ -437,16 +464,18 @@ test('setup --dir naming an existing non-git directory is refused and lock.repo 
   const notARepo = mkdtempSync(join(tmpdir(), 'nortuscc-interrupted-clone-'));
   writeFileSync(join(notARepo, 'partial'), 'left behind by an interrupted clone\n');
   const goodRepo = createTestRepo('nortuscc-i1-good-');
-  const { claude, codex, agents } = createTestHome();
+  const { claude, codex, agents, state } = createTestHome();
 
   const savedClaude = process.env.NORTUSCC_CLAUDE_DIR;
   const savedCodex = process.env.NORTUSCC_CODEX_DIR;
+  const savedState = process.env.NORTUSCC_STATE_DIR;
   const savedAgents = process.env.NORTUSCC_AGENTS_DIR;
   const savedRepo = process.env.NORTUSCC_REPO_DIR;
 
   try {
     process.env.NORTUSCC_CLAUDE_DIR = claude;
     process.env.NORTUSCC_CODEX_DIR = codex;
+    process.env.NORTUSCC_STATE_DIR = state;
     process.env.NORTUSCC_AGENTS_DIR = agents;
     delete process.env.NORTUSCC_REPO_DIR;
 
@@ -484,6 +513,7 @@ test('setup --dir naming an existing non-git directory is refused and lock.repo 
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = savedClaude;
     process.env.NORTUSCC_CODEX_DIR = savedCodex;
+    process.env.NORTUSCC_STATE_DIR = savedState;
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }

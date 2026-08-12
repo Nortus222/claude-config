@@ -102,7 +102,11 @@ export async function run(allArgs = [], entries = SYNC) {
     // --take-local is refused above before this loop ever runs, so the only
     // force this command ever applies is --take-repo, discarding the local
     // side of a conflict.
-    const res = applyCopy(src, dest, entry.dest, lock, { force: takeRepo });
+    const res = applyCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
+      force: takeRepo,
+      relative: entry.dest,
+      agent: entry.target,
+    });
     if (res.action === 'refused') refused += 1;
     if (res.action === 'copied') changed = true;
     lines.push(formatRow(entry.dest, res.action, noteFor(res)));

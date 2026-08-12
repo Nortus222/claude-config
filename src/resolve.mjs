@@ -18,6 +18,26 @@ export function isGitCheckout(path) {
 // bury the report it is meant to draw attention to.
 let warnedStaleRepo = false;
 
+// The `repo` field of whichever state record exists, or null. Read straight
+// off disk rather than through lock.mjs, which imports this module — the same
+// import-cycle dodge the old lockfile read used.
+//
+// The legacy lock is consulted only as a fallback, so a machine that has not
+// been migrated yet still resolves its repo on the very first command, before
+// anything has had a chance to write neutral state.
+function recordedRepo() {
+  for (const path of [statePath(), legacyLockPath()]) {
+    if (!existsSync(path)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8'));
+      if (parsed.repo && typeof parsed.repo === 'string') return parsed.repo;
+    } catch {
+      // Corrupt record: try the next one, then fall through to the module location
+    }
+  }
+  return null;
+}
+
 // src/ lives directly under the repo root. The override lets tests that WRITE
 // to the repo side (capture) point at a throwaway fixture instead of mutating
 // tracked files.
@@ -27,30 +47,20 @@ export function repoRoot() {
     return process.env.NORTUSCC_REPO_DIR;
   }
 
-  // Priority 2: recorded lock.repo if it's a valid, existing git checkout
-  // Read lockfile directly to avoid import cycle with lock.mjs
-  const lockFilePath = lockPath();
-  if (existsSync(lockFilePath)) {
-    try {
-      const lock = JSON.parse(readFileSync(lockFilePath, 'utf8'));
-      if (lock.repo && typeof lock.repo === 'string') {
-        if (isGitCheckout(lock.repo)) {
-          return lock.repo;
-        }
-        // Stale path: warn once, then fall through to the module location.
-        // Falling through silently is what made a poisoned lock.repo invisible
-        // — every command would quietly sync against a different repo than the
-        // one the user believes is recorded.
-        if (!warnedStaleRepo) {
-          warnedStaleRepo = true;
-          console.error(
-            `nortuscc: recorded repo '${lock.repo}' is not a git checkout; ` +
-              `using ${resolve(here, '..')} instead. Re-run 'nortuscc setup --dir <path>' to fix the record.`,
-          );
-        }
-      }
-    } catch {
-      // Corrupt lockfile: ignore and fall through
+  // Priority 2: the recorded repo, if it is a valid, existing git checkout
+  const recorded = recordedRepo();
+  if (recorded) {
+    if (isGitCheckout(recorded)) return recorded;
+    // Stale path: warn once, then fall through to the module location.
+    // Falling through silently is what made a poisoned repo record invisible
+    // — every command would quietly sync against a different repo than the
+    // one the user believes is recorded.
+    if (!warnedStaleRepo) {
+      warnedStaleRepo = true;
+      console.error(
+        `nortuscc: recorded repo '${recorded}' is not a git checkout; ` +
+          `using ${resolve(here, '..')} instead. Re-run 'nortuscc setup --dir <path>' to fix the record.`,
+      );
     }
   }
 
@@ -82,12 +92,28 @@ export function agentsSkillsDir() {
   return process.env.NORTUSCC_AGENTS_DIR || join(homedir(), '.agents', 'skills');
 }
 
-export function lockPath() {
+// Machine state is nortuscc's own bookkeeping, not any agent's configuration,
+// so it lives outside both ~/.claude and ~/.codex. NORTUSCC_STATE_DIR is the
+// complete override: point it at a throwaway directory and nothing this
+// process records can reach the developer's real machine state.
+export function stateRoot() {
+  if (process.env.NORTUSCC_STATE_DIR) return process.env.NORTUSCC_STATE_DIR;
+  if (process.platform === 'win32') return join(process.env.APPDATA ?? '', 'nortuscc');
+  return join(homedir(), '.config', 'nortuscc');
+}
+
+export function statePath() {
+  return join(stateRoot(), 'state.json');
+}
+
+// Where state lived when Claude Code was the only target. Read during
+// migration and as a repo fallback; never written, never removed.
+export function legacyLockPath() {
   return join(claudeDir(), '.nortuscc-lock.json');
 }
 
 export function backupRoot() {
-  return join(claudeDir(), 'backups');
+  return join(stateRoot(), 'backups');
 }
 
 // Turn a manifest entry into absolute paths on both sides. The destination

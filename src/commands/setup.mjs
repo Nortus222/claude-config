@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readLock, writeLock } from '../lock.mjs';
-import { repoRoot, isGitCheckout } from '../resolve.mjs';
+import { readLock, writeLock, migrateLegacyState } from '../lock.mjs';
+import { repoRoot, isGitCheckout, statePath } from '../resolve.mjs';
+import { parseTarget } from '../targets.mjs';
 import { run as applyRun } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
 
@@ -12,9 +13,24 @@ function flag(args, name) {
   return i >= 0 ? args[i + 1] : null;
 }
 
-export async function run(args = []) {
+export async function run(allArgs = []) {
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+
   const dir = flag(args, '--dir');
   const url = flag(args, '--repo') ?? DEFAULT_REPO;
+
+  // Import the pre-Codex lock before anything reads or writes state, so a
+  // machine that has been managed before keeps its recorded baselines instead
+  // of reporting every managed file as never synced. The old lock is left
+  // exactly where it is.
+  const migration = migrateLegacyState();
+  if (migration.migrated) {
+    console.log(`migrated existing nortuscc state -> ${statePath()}`);
+  }
 
   // When --dir is given and empty, clone into it. Otherwise this CLI is already
   // running from a clone, which is the npx-from-GitHub case.
@@ -60,9 +76,13 @@ export async function run(args = []) {
   writeLock(lock);
 
   // setup always installs skills: a bare machine is exactly when they are wanted.
-  const applied = await applyRun(['--skills', ...args.filter((a) => a.startsWith('--take-'))]);
+  // The target is put back explicitly — the filter below keeps setup's own
+  // flags out of apply, and would otherwise drop it and reconcile both agents
+  // on a `setup --target codex`.
+  const forwarded = ['--target', target, ...args.filter((a) => a.startsWith('--take-'))];
+  const applied = await applyRun(['--skills', ...forwarded]);
   if (applied !== 0) return applied;
 
   console.log('\n--- status ---');
-  return await statusRun();
+  return await statusRun(['--target', target]);
 }

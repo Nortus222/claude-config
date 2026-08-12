@@ -23,10 +23,11 @@ process.env.NORTUSCC_REPO_DIR = repo;
 process.env.NORTUSCC_CLAUDE_DIR = claude;
 process.env.NORTUSCC_CODEX_DIR = codex;
 process.env.NORTUSCC_AGENTS_DIR = join(home, 'agents-skills');
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 const { run: applyRun } = await import('../src/commands/apply.mjs');
 const { run: captureRun, capturedPaths } = await import('../src/commands/capture.mjs');
-const { lockPath } = await import('../src/resolve.mjs');
+const { statePath } = await import('../src/resolve.mjs');
 
 const repoClaudeMd = join(repo, 'claude', 'CLAUDE.md');
 
@@ -77,8 +78,8 @@ test('a second capture with nothing new captures nothing', async () => {
 });
 
 test('a clean second capture does not rewrite the lockfile at all', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
-  const mtimeBefore = statSync(lockPath()).mtimeMs;
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
+  const mtimeBefore = statSync(statePath()).mtimeMs;
 
   // Force the clock forward so a spurious rewrite would show up as a changed
   // mtime even on filesystems with coarse mtime resolution.
@@ -86,8 +87,8 @@ test('a clean second capture does not rewrite the lockfile at all', async () => 
 
   const code = await captureRun([]);
   assert.equal(code, 0);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
-  assert.equal(statSync(lockPath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
+  assert.equal(statSync(statePath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
 });
 
 // Fix round 1, finding 1: apply's --take-local hole (see apply.test.mjs) has
@@ -97,7 +98,7 @@ test('a clean second capture does not rewrite the lockfile at all', async () => 
 // repo version" is not a resolution capture can perform at all; it must
 // refuse the flag outright and point at apply, not attempt and fail silently.
 test('capture --take-repo is refused outright — the flag does not fit capture\'s direction', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
   let stderr = '';
   const originalError = console.error;
   console.error = (msg) => { stderr += String(msg) + '\n'; };
@@ -109,13 +110,13 @@ test('capture --take-repo is refused outright — the flag does not fit capture\
   }
   assert.notEqual(code, 0, '--take-repo must not be silently accepted by capture');
   assert.match(stderr, /apply --take-repo/, 'must point the user at the command that actually supports it');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
   assert.deepEqual(capturedPaths(), [], 'a refused flag must not stage anything for commit');
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
   const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
 
   const code = await captureRun([], [bogusEntry]);
 
@@ -125,7 +126,7 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   // not touch the lockfile.
   assert.equal(code, 0);
   assert.deepEqual(capturedPaths(), []);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
 });
 
 test('the manifest path resolves inside the fixture repo, never the real one', async () => {

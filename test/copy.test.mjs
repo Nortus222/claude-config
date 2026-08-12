@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-copy-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 mkdirSync(process.env.NORTUSCC_CLAUDE_DIR, { recursive: true });
 
 const { inspectCopy, applyCopy, captureCopy } = await import('../src/copy.mjs');

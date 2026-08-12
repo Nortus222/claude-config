@@ -12,6 +12,8 @@ process.env.NORTUSCC_CLAUDE_DIR = claude;
 // future test that forgets to override `preserve` fails loudly on a missing
 // fixture instead of silently reading the real ~/.agents/skills.
 process.env.NORTUSCC_AGENTS_DIR = join(claude, '.agents', 'skills');
+// backupDir() now resolves under the state root rather than ~/.claude.
+process.env.NORTUSCC_STATE_DIR = join(claude, 'state');
 
 // Task 8 adds manifest handling to update.mjs (readSkillsManifest/manifestPath
 // are not dependency-injected — only writeManifest is). Without this, `before`

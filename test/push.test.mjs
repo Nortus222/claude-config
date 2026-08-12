@@ -40,10 +40,13 @@ function createTestHome(prefix) {
   const claude = join(home, '.claude');
   const codex = join(home, '.codex');
   const agents = join(home, '.agents', 'skills');
+  // nortuscc's own state lives outside every agent dir, so it needs its own
+  // override — without it these runs write the developer's real state file.
+  const state = join(home, 'state');
   mkdirSync(claude, { recursive: true });
   mkdirSync(codex, { recursive: true });
   mkdirSync(agents, { recursive: true });
-  return { home, claude, codex, agents };
+  return { home, claude, codex, agents, state };
 }
 
 function headSha(dir) {
@@ -60,6 +63,7 @@ async function withFixtureEnv(env, fn) {
     'NORTUSCC_CODEX_DIR',
     'NORTUSCC_AGENTS_DIR',
     'NORTUSCC_REPO_DIR',
+    'NORTUSCC_STATE_DIR',
   ];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, env);
@@ -134,7 +138,7 @@ function createStandaloneRepo(prefix) {
 
 test('push refuses without an explicit message and stages nothing', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-nomsg');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-nomsg-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-nomsg-home-');
 
   await withFixtureEnv(
     {
@@ -142,6 +146,7 @@ test('push refuses without an explicit message and stages nothing', async () => 
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       const shaBefore = headSha(work);
@@ -156,7 +161,7 @@ test('push refuses without an explicit message and stages nothing', async () => 
 
 test('push refuses when -m is given with no value', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-emptym');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-emptym-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-emptym-home-');
 
   await withFixtureEnv(
     {
@@ -164,6 +169,7 @@ test('push refuses when -m is given with no value', async () => {
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       const code = await pushRun(['-m']);
@@ -174,7 +180,7 @@ test('push refuses when -m is given with no value', async () => {
 
 test('push with nothing captured reports a no-op and makes no commit', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-noop');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-noop-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-noop-home-');
 
   await withFixtureEnv(
     {
@@ -182,6 +188,7 @@ test('push with nothing captured reports a no-op and makes no commit', async () 
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       // Seed the local machine so it exactly matches the repo: capture will
@@ -199,7 +206,7 @@ test('push with nothing captured reports a no-op and makes no commit', async () 
 
 test('push stages only manifest-owned captured paths, commits with the given message, and pushes to the local remote', async () => {
   const { bare, work } = createRemoteAndClone('nortuscc-push-full');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-full-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-full-home-');
 
   await withFixtureEnv(
     {
@@ -207,6 +214,7 @@ test('push stages only manifest-owned captured paths, commits with the given mes
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -243,7 +251,7 @@ test('push stages only manifest-owned captured paths, commits with the given mes
 // to prevent.
 test('push forwards its target to capture and commits only that agent\'s file', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-target');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-target-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-target-home-');
 
   await withFixtureEnv(
     {
@@ -251,6 +259,7 @@ test('push forwards its target to capture and commits only that agent\'s file', 
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -275,7 +284,7 @@ test('push forwards its target to capture and commits only that agent\'s file', 
 
 test('push does not commit or push when capture refuses a conflict', async () => {
   const { bare, work } = createRemoteAndClone('nortuscc-push-conflict');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-conflict-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-conflict-home-');
 
   await withFixtureEnv(
     {
@@ -283,6 +292,7 @@ test('push does not commit or push when capture refuses a conflict', async () =>
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -310,7 +320,7 @@ test('push does not commit or push when capture refuses a conflict', async () =>
 
 test('push forwards --take-local to capture, resolving a conflict in the local file\'s favor', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-takelocal');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-takelocal-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-takelocal-home-');
 
   await withFixtureEnv(
     {
@@ -318,6 +328,7 @@ test('push forwards --take-local to capture, resolving a conflict in the local f
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -337,7 +348,7 @@ test('push forwards --take-local to capture, resolving a conflict in the local f
 
 test('push accepts --message as an alias for -m', async () => {
   const { work } = createRemoteAndClone('nortuscc-push-longflag');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-longflag-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-longflag-home-');
 
   await withFixtureEnv(
     {
@@ -345,6 +356,7 @@ test('push accepts --message as an alias for -m', async () => {
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -359,7 +371,7 @@ test('push accepts --message as an alias for -m', async () => {
 
 test('a retried push after a failed non-fast-forward attempt must not report success', async () => {
   const { bare, work } = createRemoteAndClone('nortuscc-push-retry');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-retry-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-retry-home-');
 
   await withFixtureEnv(
     {
@@ -367,6 +379,7 @@ test('a retried push after a failed non-fast-forward attempt must not report suc
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);
@@ -415,7 +428,7 @@ test('a retried push after a failed non-fast-forward attempt must not report suc
 
 test('push on a fresh branch with no upstream and nothing captured is a genuine no-op, not a crash', async () => {
   const work = createStandaloneRepo('nortuscc-push-noupstream');
-  const { claude, codex, agents } = createTestHome('nortuscc-push-noupstream-home-');
+  const { claude, codex, agents, state } = createTestHome('nortuscc-push-noupstream-home-');
 
   await withFixtureEnv(
     {
@@ -423,6 +436,7 @@ test('push on a fresh branch with no upstream and nothing captured is a genuine 
       NORTUSCC_CODEX_DIR: codex,
       NORTUSCC_AGENTS_DIR: agents,
       NORTUSCC_REPO_DIR: work,
+      NORTUSCC_STATE_DIR: state,
     },
     async () => {
       assert.equal(await applyRun([]), 0);

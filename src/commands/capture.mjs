@@ -64,7 +64,11 @@ export async function run(allArgs = [], entries = SYNC) {
     }
 
     const { src, dest } = resolveEntry(entry);
-    const res = captureCopy(src, dest, entry.dest, lock, { force: takeLocal });
+    const res = captureCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
+      force: takeLocal,
+      relative: entry.dest,
+      agent: entry.target,
+    });
 
     if (res.action === 'refused') refused += 1;
     if (res.action === 'copied') captured.push(entry.src);

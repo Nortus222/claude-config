@@ -16,6 +16,9 @@ import { join, dirname, relative } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-link-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
+// Backups follow nortuscc's state out of ~/.claude, so redirecting the Claude
+// dir alone no longer keeps a clobbered-path backup off the real machine.
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 mkdirSync(process.env.NORTUSCC_CLAUDE_DIR, { recursive: true });
 
 const { inspectLink, ensureLink } = await import('../src/link.mjs');

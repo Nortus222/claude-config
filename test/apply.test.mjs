@@ -14,12 +14,15 @@ process.env.NORTUSCC_CLAUDE_DIR = claude;
 // per manifest entry, so leaving the Codex side unset points AGENTS.md at the
 // developer's real ~/.codex and the suite writes to the live machine.
 process.env.NORTUSCC_CODEX_DIR = codex;
+// Machine state no longer lives under ~/.claude, so redirecting the agent dirs
+// is no longer enough to keep a run off the developer's machine.
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 const { run, summarizeSkillsInstall } = await import('../src/commands/apply.mjs');
 const { SYNC } = await import('../src/manifest.mjs');
 const { resolveEntry } = await import('../src/resolve.mjs');
 const { readLock } = await import('../src/lock.mjs');
-const { lockPath, backupRoot } = await import('../src/resolve.mjs');
+const { statePath, backupRoot } = await import('../src/resolve.mjs');
 
 test('apply on a bare machine copies every managed file', async () => {
   const code = await run([]);
@@ -94,11 +97,17 @@ test('an invalid --target exits 2 before apply writes anything', async () => {
   }
 });
 
-test('apply records a baseline for every copied file', async () => {
+// Baselines are keyed by target. Keying by dest alone would let a future
+// entry pair — say two agents that both call their file AGENTS.md — silently
+// share one baseline, so each agent's apply would read the other's hash as
+// its own and report a clean machine that had never been synced.
+test('apply records a baseline per target, never one shared by dest name', async () => {
   const lock = readLock();
-  for (const entry of SYNC.filter((e) => e.mode === 'copy')) {
-    assert.ok(lock.files[entry.dest], `no baseline recorded for ${entry.dest}`);
-    assert.match(lock.files[entry.dest].hash, /^sha256:/);
+  for (const entry of SYNC) {
+    const key = `${entry.target}:${entry.dest}`;
+    assert.ok(lock.files[key], `no baseline recorded for ${key}`);
+    assert.match(lock.files[key].hash, /^sha256:/);
+    assert.equal(lock.files[entry.dest], undefined, `${entry.dest} must not be keyed without its target`);
   }
 });
 
@@ -114,8 +123,8 @@ test('apply is idempotent — a second run changes nothing and still exits 0', a
 });
 
 test('a clean second run does not rewrite the lockfile at all', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
-  const mtimeBefore = statSync(lockPath()).mtimeMs;
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
+  const mtimeBefore = statSync(statePath()).mtimeMs;
 
   // Force the clock forward so a spurious rewrite would show up as a changed
   // mtime even on filesystems with coarse mtime resolution.
@@ -123,8 +132,8 @@ test('a clean second run does not rewrite the lockfile at all', async () => {
 
   const code = await run([]);
   assert.equal(code, 0);
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
-  assert.equal(statSync(lockPath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'lockfile bytes must be untouched on a clean run');
+  assert.equal(statSync(statePath()).mtimeMs, mtimeBefore, 'lockfile must not be rewritten on a clean run');
 });
 
 test('apply leaves a local-only edit alone and exits 0', async () => {
@@ -150,7 +159,7 @@ test('apply --take-repo overwrites the local edit', async () => {
 // a resolution apply can perform at all; it must refuse the flag outright
 // and point at capture, not attempt and fail silently.
 test('apply --take-local is refused outright — the flag does not fit apply\'s direction', async () => {
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
   let stderr = '';
   const originalError = console.error;
   console.error = (msg) => { stderr += String(msg) + '\n'; };
@@ -162,7 +171,7 @@ test('apply --take-local is refused outright — the flag does not fit apply\'s 
   }
   assert.notEqual(code, 0, '--take-local must not be silently accepted by apply');
   assert.match(stderr, /capture --take-local/, 'must point the user at the command that actually supports it');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'a refused flag must not touch the lockfile');
 });
 
 // Fix round 1, finding 2: bootstrap.sh printed a restart reminder on every
@@ -207,7 +216,7 @@ test('a clean apply run prints no restart reminder', async () => {
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
   const bogusEntry = { target: 'claude', src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
-  const lockBytesBefore = readFileSync(lockPath(), 'utf8');
+  const lockBytesBefore = readFileSync(statePath(), 'utf8');
 
   const code = await run([], [bogusEntry]);
 
@@ -217,7 +226,7 @@ test('an unknown mode is reported and left alone, not treated as a conflict', as
   // not touch the lockfile.
   assert.equal(code, 0);
   assert.equal(existsSync(join(claude, 'some-file')), false, 'apply must not write an entry with an unknown mode');
-  assert.equal(readFileSync(lockPath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
+  assert.equal(readFileSync(statePath(), 'utf8'), lockBytesBefore, 'an unknown-mode entry must not touch the lockfile');
 });
 
 // Fix round 2, finding 1: installGroups' per-source results were discarded,

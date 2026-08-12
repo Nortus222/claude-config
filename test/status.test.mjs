@@ -24,6 +24,7 @@ mkdirSync(process.env.NORTUSCC_CODEX_DIR, { recursive: true });
 // so these tests never read the real ~/.agents/skills or the real, unrecoverable
 // ~/.agents/.skill-lock.json.
 process.env.NORTUSCC_AGENTS_DIR = join(home, '.agents', 'skills');
+process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 // A fixture repo carrying one instruction file per target, so tests never read
 // the real repo's tracked files.
@@ -87,8 +88,8 @@ test('an invalid --target makes status exit 2 without reporting', async () => {
 });
 
 test('run() returns 1 on a dirty machine and does not write lockfile', async () => {
-  const { lockPath } = await import('../src/resolve.mjs');
-  const lockFile = lockPath();
+  const { statePath } = await import('../src/resolve.mjs');
+  const lockFile = statePath();
 
   // Capture initial state
   let lockExistedBefore = false;
@@ -149,7 +150,7 @@ test('run() returns 0 on a clean machine', async () => {
     const hash = hashFile(src);
     if (hash) {
       copyFileSync(src, dest);
-      setBaseline(lock, entry.dest, hash);
+      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
     }
   }
   writeLock(lock);
@@ -241,10 +242,12 @@ test('run() does not write any files to claude dir and does not create new direc
   const origCodexDir = process.env.NORTUSCC_CODEX_DIR;
   const origRepoDir = process.env.NORTUSCC_REPO_DIR;
   const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
+  const origStateDir = process.env.NORTUSCC_STATE_DIR;
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
   process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   try {
     // Reimport to get fresh functions bound to isolated paths
@@ -265,7 +268,7 @@ test('run() does not write any files to claude dir and does not create new direc
       const hash = hashFile(src);
       if (hash) {
         copyFileSync(src, dest);
-        setBaseline(lock, entry.dest, hash);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
@@ -328,6 +331,7 @@ test('run() does not write any files to claude dir and does not create new direc
     process.env.NORTUSCC_CODEX_DIR = origCodexDir;
     process.env.NORTUSCC_REPO_DIR = origRepoDir;
     process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
+    process.env.NORTUSCC_STATE_DIR = origStateDir;
   }
 });
 
@@ -360,10 +364,12 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   const origCodexDir = process.env.NORTUSCC_CODEX_DIR;
   const origRepoDir = process.env.NORTUSCC_REPO_DIR;
   const origAgentsDir = process.env.NORTUSCC_AGENTS_DIR;
+  const origStateDir = process.env.NORTUSCC_STATE_DIR;
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
   process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   const originalWrite = process.stdout.write.bind(process.stdout);
   const chunks = [];
@@ -386,7 +392,7 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
       const hash = hashFile(src);
       if (hash) {
         copyFileSync(src, dest);
-        setBaseline(lock, entry.dest, hash);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
@@ -402,6 +408,7 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     process.env.NORTUSCC_CODEX_DIR = origCodexDir;
     process.env.NORTUSCC_REPO_DIR = origRepoDir;
     process.env.NORTUSCC_AGENTS_DIR = origAgentsDir;
+    process.env.NORTUSCC_STATE_DIR = origStateDir;
   }
 });
 
@@ -432,11 +439,13 @@ async function onCleanMachine(prefix, fn) {
     codex: process.env.NORTUSCC_CODEX_DIR,
     repo: process.env.NORTUSCC_REPO_DIR,
     agents: process.env.NORTUSCC_AGENTS_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
   };
   process.env.NORTUSCC_CLAUDE_DIR = isolatedClaudeDir;
   process.env.NORTUSCC_CODEX_DIR = isolatedCodexDir;
   process.env.NORTUSCC_REPO_DIR = isolatedRepo;
   process.env.NORTUSCC_AGENTS_DIR = isolatedAgentsSkillsDir;
+  process.env.NORTUSCC_STATE_DIR = join(isolatedHome, 'state');
 
   try {
     const { run: isolatedRun } = await import('../src/commands/status.mjs');
@@ -446,13 +455,11 @@ async function onCleanMachine(prefix, fn) {
 
     const lock = readLock();
     for (const entry of SYNC) {
-      {
-        const { src, dest } = resolveEntry(entry);
-        const hash = hashFile(src);
-        if (hash) {
-          copyFileSync(src, dest);
-          setBaseline(lock, entry.dest, hash);
-        }
+      const { src, dest } = resolveEntry(entry);
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
     }
     writeLock(lock);
@@ -470,6 +477,7 @@ async function onCleanMachine(prefix, fn) {
     process.env.NORTUSCC_CODEX_DIR = saved.codex;
     process.env.NORTUSCC_REPO_DIR = saved.repo;
     process.env.NORTUSCC_AGENTS_DIR = saved.agents;
+    process.env.NORTUSCC_STATE_DIR = saved.state;
   }
 }
 

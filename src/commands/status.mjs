@@ -24,7 +24,9 @@ export function configReport(entries = SYNC) {
     if (mode === 'link') {
       return { dest: entry.dest, mode, state: inspectLink(dest, src).state };
     } else if (mode === 'copy') {
-      const baseline = lock.files[entry.dest]?.hash;
+      // Keyed by target so Claude's CLAUDE.md and Codex's AGENTS.md can never
+      // share one baseline; entry.dest stays the display name.
+      const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
       return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
     } else {
       // Unknown mode: surface as a visible error rather than silently misdispatching
