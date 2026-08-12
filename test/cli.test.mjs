@@ -14,7 +14,7 @@ function usage() {
 
 test('--help prints the usage text and exits 0', () => {
   const out = usage();
-  assert.match(out, /Usage: nortuscc <command> \[options\]/);
+  assert.match(out, /Usage: nortuscc <command> \[--target claude\|codex\|all\] \[options\]/);
   for (const verb of ['setup', 'status', 'apply', 'capture', 'pull', 'push']) {
     assert.match(out, new RegExp(`\\b${verb}\\b`), `usage should list ${verb}`);
   }
@@ -69,4 +69,38 @@ test('usage documents the action flags', () => {
   const out = usage();
   assert.match(out, /--add/);
   assert.match(out, /--prune/);
+});
+
+test('usage advertises the target option and its three values', () => {
+  const out = usage();
+  assert.match(out, /--target claude\|codex\|all/);
+  assert.match(out, /default is 'all'/);
+});
+
+// An invalid target has to be refused before any command does work. status is
+// the safe verb to prove it with: it returns 2 from its own target check
+// before reading a single file, so this exercises real dispatch without
+// touching the developer's live ~/.claude.
+test('an unknown --target exits 2 without running the command', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, [BIN, 'status', '--target', 'cursor'], { encoding: 'utf8' }),
+    (e) => {
+      assert.equal(e.status, 2);
+      assert.match(e.stderr, /claude\|codex\|all/);
+      return true;
+    },
+  );
+});
+
+test('a repeated --target exits 2', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, [BIN, 'status', '--target', 'claude', '--target', 'codex'], {
+      encoding: 'utf8',
+    }),
+    (e) => {
+      assert.equal(e.status, 2);
+      assert.match(e.stderr, /once/);
+      return true;
+    },
+  );
 });

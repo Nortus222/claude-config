@@ -1,4 +1,5 @@
 import { SYNC } from '../manifest.mjs';
+import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock } from '../lock.mjs';
 import { inspectLink } from '../link.mjs';
@@ -32,8 +33,14 @@ export function configReport(entries = SYNC) {
   });
 }
 
-export async function run() {
-  const rows = configReport();
+export async function run(args = []) {
+  const { target, error } = parseTarget(args);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+
+  const rows = configReport(entriesForTarget(SYNC, target));
   const lines = rows.map((r) => formatRow(r.dest, r.state, noteFor(r)));
   process.stdout.write('\n' + section('config', lines));
 

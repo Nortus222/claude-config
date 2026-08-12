@@ -3,7 +3,10 @@ const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'update'];
 
 const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
-Usage: nortuscc <command> [options]
+Usage: nortuscc <command> [--target claude|codex|all] [options]
+
+Every command accepts --target. It selects which agent's instruction file is
+read or written; the default is 'all', meaning both Claude and Codex.
 
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, install skills, report
@@ -16,6 +19,10 @@ Commands:
                                     --take-local resolves a conflict by keeping the local version
   pull                              git pull --ff-only, then apply
   push -m MSG                       capture, then commit and push
+
+Examples:
+  nortuscc status --target codex    report only what Codex owns
+  nortuscc apply --target claude    write ~/.claude/CLAUDE.md and nothing else
 
 Run 'nortuscc status' first; it changes nothing.`;
 

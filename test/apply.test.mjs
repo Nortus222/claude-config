@@ -6,8 +6,14 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-apply-'));
 const claude = join(home, '.claude');
+const codex = join(home, '.codex');
 mkdirSync(claude, { recursive: true });
+mkdirSync(codex, { recursive: true });
 process.env.NORTUSCC_CLAUDE_DIR = claude;
+// Both agent dirs must be redirected, not just Claude's. apply writes one file
+// per manifest entry, so leaving the Codex side unset points AGENTS.md at the
+// developer's real ~/.codex and the suite writes to the live machine.
+process.env.NORTUSCC_CODEX_DIR = codex;
 
 const { run, summarizeSkillsInstall } = await import('../src/commands/apply.mjs');
 const { SYNC } = await import('../src/manifest.mjs');
@@ -15,13 +21,76 @@ const { resolveEntry } = await import('../src/resolve.mjs');
 const { readLock } = await import('../src/lock.mjs');
 const { lockPath, backupRoot } = await import('../src/resolve.mjs');
 
-test('apply on a bare machine links dirs and copies files', async () => {
+test('apply on a bare machine copies every managed file', async () => {
   const code = await run([]);
   assert.equal(code, 0);
 
   for (const entry of SYNC) {
     const { dest } = resolveEntry(entry);
     assert.ok(existsSync(dest), `${entry.dest} should exist after apply`);
+  }
+});
+
+// --target is the whole point of tagging entries, and "did not write the other
+// agent's file" is the half that a filter bug leaves silently broken: writing
+// too much still leaves the named target correct.
+test('apply --target claude writes CLAUDE.md and never touches the Codex side', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-solo-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  try {
+    assert.equal(await run(['--target', 'claude']), 0);
+    assert.ok(existsSync(join(soloClaude, 'CLAUDE.md')), 'the named target is written');
+    assert.equal(existsSync(join(soloCodex, 'AGENTS.md')), false, 'the other target is untouched');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
+  }
+});
+
+test('apply --target codex writes AGENTS.md and never touches the Claude side', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-solo-codex-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  try {
+    assert.equal(await run(['--target', 'codex']), 0);
+    assert.ok(existsSync(join(soloCodex, 'AGENTS.md')), 'the named target is written');
+    assert.equal(existsSync(join(soloClaude, 'CLAUDE.md')), false, 'the other target is untouched');
+  } finally {
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
+  }
+});
+
+test('an invalid --target exits 2 before apply writes anything', async () => {
+  const soloHome = mkdtempSync(join(tmpdir(), 'nortuscc-apply-badtarget-'));
+  const soloClaude = join(soloHome, '.claude');
+  const soloCodex = join(soloHome, '.codex');
+  mkdirSync(soloClaude, { recursive: true });
+  mkdirSync(soloCodex, { recursive: true });
+
+  const saved = [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR];
+  process.env.NORTUSCC_CLAUDE_DIR = soloClaude;
+  process.env.NORTUSCC_CODEX_DIR = soloCodex;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await run(['--target', 'cursor']), 2);
+    assert.equal(existsSync(join(soloClaude, 'CLAUDE.md')), false);
+    assert.equal(existsSync(join(soloCodex, 'AGENTS.md')), false);
+  } finally {
+    console.error = originalError;
+    [process.env.NORTUSCC_CLAUDE_DIR, process.env.NORTUSCC_CODEX_DIR] = saved;
   }
 });
 
@@ -137,7 +206,7 @@ test('a clean apply run prints no restart reminder', async () => {
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
-  const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
+  const bogusEntry = { target: 'claude', src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
   const lockBytesBefore = readFileSync(lockPath(), 'utf8');
 
   const code = await run([], [bogusEntry]);

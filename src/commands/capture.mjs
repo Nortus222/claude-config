@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { SYNC } from '../manifest.mjs';
+import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
@@ -14,7 +15,14 @@ export function capturedPaths() {
   return [...lastCaptured];
 }
 
-export async function run(args = [], entries = SYNC) {
+export async function run(allArgs = [], entries = SYNC) {
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+  const selected = entriesForTarget(entries, target);
+
   const takeLocal = args.includes('--take-local');
   const takeRepo = args.includes('--take-repo');
 
@@ -43,7 +51,7 @@ export async function run(args = [], entries = SYNC) {
   const captured = [];
   let refused = 0;
 
-  for (const entry of entries) {
+  for (const entry of selected) {
     // Linked directories need no capture: the repo IS the live copy.
     if (entry.mode === 'link') continue;
 

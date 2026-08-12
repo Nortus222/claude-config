@@ -1,4 +1,5 @@
 import { SYNC } from '../manifest.mjs';
+import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { ensureLink, inspectLink } from '../link.mjs';
@@ -28,7 +29,17 @@ export function summarizeSkillsInstall(missing, results) {
 // entries defaults to SYNC; the parameter exists so tests can inject a bogus
 // manifest entry to exercise the unknown-mode path, the same pattern
 // configReport uses in status.mjs.
-export async function run(args = [], entries = SYNC) {
+export async function run(allArgs = [], entries = SYNC) {
+  // Target first, before any other flag parsing: --target and its value must
+  // never reach a parser that would read them as something else, and an
+  // invalid target has to exit 2 before a single file is written.
+  const { target, rest: args, error } = parseTarget(allArgs);
+  if (error) {
+    console.error(`nortuscc: ${error}`);
+    return 2;
+  }
+  const selected = entriesForTarget(entries, target);
+
   const takeRepo = args.includes('--take-repo');
   const takeLocal = args.includes('--take-local');
 
@@ -62,7 +73,7 @@ export async function run(args = [], entries = SYNC) {
   // clean, idempotent no-op run.
   let changed = false;
 
-  for (const entry of entries) {
+  for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
 
     if (mode === 'link') {

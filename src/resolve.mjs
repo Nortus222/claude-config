@@ -62,6 +62,22 @@ export function claudeDir() {
   return process.env.NORTUSCC_CLAUDE_DIR || join(homedir(), '.claude');
 }
 
+export function codexDir() {
+  return process.env.NORTUSCC_CODEX_DIR || join(homedir(), '.codex');
+}
+
+const AGENT_DIRS = { claude: claudeDir, codex: codexDir };
+
+// The one place a target becomes a filesystem path. It throws rather than
+// defaulting, because every other outcome of an unrecognised target — writing
+// under ~/.claude, or under the home directory itself — is a write to
+// somewhere the user never named.
+export function agentDir(target) {
+  const dir = AGENT_DIRS[target];
+  if (!dir) throw new Error(`nortuscc: unknown target '${target}'`);
+  return dir();
+}
+
 export function agentsSkillsDir() {
   return process.env.NORTUSCC_AGENTS_DIR || join(homedir(), '.agents', 'skills');
 }
@@ -74,11 +90,13 @@ export function backupRoot() {
   return join(claudeDir(), 'backups');
 }
 
-// Turn a manifest entry into absolute paths on both sides.
+// Turn a manifest entry into absolute paths on both sides. The destination
+// side is chosen by the entry's own target, so a Claude entry can never land
+// in ~/.codex and vice versa.
 export function resolveEntry(entry) {
   return {
     ...entry,
     src: join(repoRoot(), entry.src),
-    dest: join(claudeDir(), entry.dest),
+    dest: join(agentDir(entry.target), entry.dest),
   };
 }

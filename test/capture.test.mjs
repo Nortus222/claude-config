@@ -10,17 +10,18 @@ import { join } from 'node:path';
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-capture-'));
 const repo = join(home, 'repo');
 const claude = join(home, '.claude');
+const codex = join(home, '.codex');
 
-mkdirSync(join(repo, 'claude', 'bin'), { recursive: true });
-mkdirSync(join(repo, 'claude', 'hooks'), { recursive: true });
-writeFileSync(join(repo, 'claude', 'bin', 'sp'), 'echo sp\n');
-writeFileSync(join(repo, 'claude', 'hooks', 'h.mjs'), '// hook\n');
-writeFileSync(join(repo, 'claude', 'settings.json'), '{"a":1}\n');
+mkdirSync(join(repo, 'claude'), { recursive: true });
+mkdirSync(join(repo, 'codex'), { recursive: true });
 writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# from repo\n');
+writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# codex from repo\n');
 mkdirSync(claude, { recursive: true });
+mkdirSync(codex, { recursive: true });
 
 process.env.NORTUSCC_REPO_DIR = repo;
 process.env.NORTUSCC_CLAUDE_DIR = claude;
+process.env.NORTUSCC_CODEX_DIR = codex;
 process.env.NORTUSCC_AGENTS_DIR = join(home, 'agents-skills');
 
 const { run: applyRun } = await import('../src/commands/apply.mjs');
@@ -32,6 +33,7 @@ const repoClaudeMd = join(repo, 'claude', 'CLAUDE.md');
 test('seed the machine from the fixture repo', async () => {
   assert.equal(await applyRun([]), 0);
   assert.equal(readFileSync(join(claude, 'CLAUDE.md'), 'utf8'), '# from repo\n');
+  assert.equal(readFileSync(join(codex, 'AGENTS.md'), 'utf8'), '# codex from repo\n');
 });
 
 test('capture with no local changes captures nothing', async () => {
@@ -46,11 +48,27 @@ test('capture copies a local edit back into the repo', async () => {
   assert.ok(capturedPaths().includes('claude/CLAUDE.md'));
 });
 
-test('capture ignores linked directories entirely', async () => {
-  assert.ok(
-    !capturedPaths().some((p) => p.includes('bin') || p.includes('hooks')),
-    'linked dirs need no capture — the repo IS the live copy',
+// A Claude-side edit must not drag the Codex file into the same capture, and
+// vice versa: --target is what keeps one agent's local edit from being
+// committed as if it were the other's.
+test('capture --target claude captures only the Claude instruction file', async () => {
+  writeFileSync(join(claude, 'CLAUDE.md'), '# claude only\n');
+  writeFileSync(join(codex, 'AGENTS.md'), '# codex only\n');
+
+  assert.equal(await captureRun(['--target', 'claude']), 0);
+  assert.deepEqual(capturedPaths(), ['claude/CLAUDE.md']);
+  assert.equal(readFileSync(join(repo, 'claude', 'CLAUDE.md'), 'utf8'), '# claude only\n');
+  assert.equal(
+    readFileSync(join(repo, 'codex', 'AGENTS.md'), 'utf8'),
+    '# codex from repo\n',
+    'the unselected target must be left exactly as the repo had it',
   );
+});
+
+test('capture --target codex then picks up the Codex edit that was left behind', async () => {
+  assert.equal(await captureRun(['--target', 'codex']), 0);
+  assert.deepEqual(capturedPaths(), ['codex/AGENTS.md']);
+  assert.equal(readFileSync(join(repo, 'codex', 'AGENTS.md'), 'utf8'), '# codex only\n');
 });
 
 test('a second capture with nothing new captures nothing', async () => {
