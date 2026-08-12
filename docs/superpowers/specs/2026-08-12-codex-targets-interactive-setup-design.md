@@ -43,6 +43,9 @@ configuration with permissions, UI preferences, and machine-specific state.
 - Retaining Claude-only helper wrappers for sandbox permission allowlists or
   versioned plugin-cache paths. Full-access operation and native skill installs
   make those wrappers unnecessary.
+- Retaining the private context-mode plugin-cache repair hook. Context-mode's
+  native installation owns its hooks, MCP configuration, and cache-path
+  normalization.
 
 ## Command interface
 
@@ -88,7 +91,6 @@ Interactive installation uses these automation controls:
 ```text
 claude/
   CLAUDE.md
-  hooks/
 codex/
   AGENTS.md
 integrations.json
@@ -113,6 +115,14 @@ their instructions from the managed `CLAUDE.md`, and stops syncing `claude/bin`.
 It does not delete pre-existing copies under `~/.claude/bin`; they simply become
 unmanaged. Skill scripts are invoked through paths exposed by the native skill
 installation instead of through a Claude plugin-cache wrapper.
+
+The implementation also deletes `claude/hooks/context-mode-cache-heal.mjs` and
+does not recreate its SessionStart registration. Context-mode is installed and
+inspected through its native integration. Existing machine-local copies and
+registrations become unmanaged rather than being deleted automatically.
+
+Because no remaining configuration uses linked directories, the generic link
+reconciliation module and its link-specific states and tests are removed.
 
 Resolution uses the target to select `~/.claude` or `~/.codex`. Commands filter
 the common manifest instead of maintaining separate command implementations.
@@ -150,10 +160,11 @@ duplicate IDs, unsupported targets, missing referenced files, and fields that
 appear to contain secret values. Environment-variable names may be committed;
 their values may not.
 
-The first manifest represents the integrations currently implied by
-`claude/settings.json`: the context-mode cache-repair hook, the official
-Superpowers plugin, context-mode, and claude-mem. Codex MCP entries are added
-explicitly rather than captured from local `config.toml`.
+The first manifest represents the portable integrations currently implied by
+`claude/settings.json`: the official Superpowers plugin, context-mode, and
+claude-mem. Context-mode uses its native installation on each selected target;
+the private cache-repair hook is not carried forward. Other Codex MCP entries
+are added explicitly rather than captured from local `config.toml`.
 
 ## Native installation adapters
 
@@ -211,6 +222,10 @@ as partially installed. Update continues through `npx skills update`; nortuscc
 then reconciles agent exposure using the installer. Capture regenerates the
 single manifest from canonical installed skills with recorded sources, retaining
 the existing shrink guard.
+
+The old Claude-only scan for broken links under `~/.claude/skills` is removed.
+Target-aware inspection through `npx skills` becomes the single source of truth
+for whether a selected agent can use a shared skill.
 
 ## Interactive setup
 
@@ -280,7 +295,9 @@ Claude settings and Codex configuration are otherwise user-owned.
 ## Implementation sequence
 
 1. Add target parsing, target-aware resolution, neutral state, and migration.
-2. Remove tracked Claude settings and add Codex `AGENTS.md` synchronization.
+2. Remove tracked Claude settings, helper scripts, the private context-mode
+   repair hook, and obsolete directory-link machinery; add Codex `AGENTS.md`
+   synchronization.
 3. Add and validate the integration manifest and native adapters.
 4. Build the shared interactive installation selector and automation controls.
 5. Make skill installation and reporting explicitly agent-aware.
