@@ -89,6 +89,40 @@ test('manifest order is preserved within a type', () => {
   assert.deepEqual(plan.map((p) => p.id), ['first', 'second']);
 });
 
+// Grouped by the agent that owns the work. Typed alone, a Codex marketplace
+// landed under "Claude plugins" and the two agents' context-mode rows were
+// indistinguishable in the picker — the user could not tell which agent a row
+// would act on.
+test('groups name the agent that owns the work, not just the declaration type', () => {
+  const codexMarketplace = { ...MARKETPLACE, id: 'cm-codex', target: 'codex' };
+  const plan = integrationPlan({
+    integrations: [MARKETPLACE, codexMarketplace, PLUGIN, MCP, HOOK],
+    target: 'all',
+    adapters: adaptersWithRecorder([]),
+  });
+
+  const groupOf = (id) => plan.find((p) => p.id === id).group;
+  assert.equal(groupOf('cm-market'), 'Claude plugins');
+  assert.equal(groupOf('cm-codex'), 'Codex plugins', 'a Codex marketplace is not a Claude plugin');
+  assert.equal(groupOf('cm'), 'Claude plugins');
+  assert.equal(groupOf('srv'), 'Codex MCP');
+  assert.equal(groupOf('hk'), 'Claude hooks');
+});
+
+// Two agents can declare the same upstream integration. If the rows are
+// distinguishable only by group, the group has to be part of what the user
+// reads — otherwise the picker shows two identical lines.
+test('the same integration on two agents lands in two different groups', () => {
+  const plan = integrationPlan({
+    integrations: [PLUGIN, { ...PLUGIN, id: 'cm-codex', target: 'codex' }],
+    target: 'all',
+    adapters: adaptersWithRecorder([]),
+  });
+  const groups = plan.map((p) => p.group);
+  assert.deepEqual(groups, ['Claude plugins', 'Codex plugins']);
+  assert.equal(new Set(groups).size, 2, 'identical labels must still be told apart by group');
+});
+
 test('a plan for one target excludes the other agent entirely', () => {
   const plan = integrationPlan({
     integrations: [PLUGIN, MCP],

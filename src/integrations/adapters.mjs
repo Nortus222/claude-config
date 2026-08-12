@@ -1,5 +1,5 @@
 import { claudePluginAdapters } from './claude-plugins.mjs';
-import { codexPluginAdapters } from './codex-plugins.mjs';
+import { codexPluginAdapters, readCodexState } from './codex-plugins.mjs';
 import { claudeHookAdapter } from './claude-hooks.mjs';
 import { codexMcpAdapter } from './codex-mcp.mjs';
 
@@ -15,14 +15,21 @@ function byTarget(claude, codex) {
   };
 }
 
-export function defaultAdapters(deps = {}) {
+// Async because Codex answers "what is installed?" through its CLI rather than
+// a file anyone else may read. The state is read once here, up front, so
+// inspection stays synchronous and does not spawn a process per declaration.
+export async function defaultAdapters(deps = {}) {
   const claude = claudePluginAdapters(deps.claudePlugins);
-  const codex = codexPluginAdapters(deps.codexPlugins);
+  const codexState = deps.codexState ?? (await readCodexState(deps.codexProbe));
+  const codex = codexPluginAdapters({ ...deps.codexPlugins, state: codexState });
 
   return {
     hook: claudeHookAdapter(deps.claudeHooks),
     marketplace: byTarget(claude.marketplace, codex.marketplace),
     plugin: byTarget(claude.plugin, codex.plugin),
     mcp: codexMcpAdapter(deps.codexMcp),
+    // Surfaced so a caller can report "Codex state could not be read" rather
+    // than quietly presenting everything as missing.
+    errors: codexState.errors,
   };
 }

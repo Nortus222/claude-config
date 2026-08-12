@@ -310,6 +310,9 @@ test('setup runs the shared install workflow, which is a no-op when nothing is m
           list: { 'claude-code': ['known-skill'], codex: ['known-skill'] },
           errors: [],
         }),
+        // Likewise for Codex's own plugin state, which it reports through its
+        // CLI rather than a file anyone may read.
+        codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
       });
     } finally {
       process.stdout.write = originalWrite;

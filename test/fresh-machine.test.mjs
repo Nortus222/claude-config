@@ -27,9 +27,16 @@ function emptyHomeFixture() {
   };
 }
 
-// Fake `claude`, `codex` and `npx`. Each logs its argv as one JSON line and
-// writes only inside the test home — no network, no real installer, and the
-// plugin state they record is what makes a rerun detectably idempotent.
+// Fake `claude`, `codex` and `npx`, each modelling the surface of the tool it
+// stands in for — they are not interchangeable:
+//
+//   claude  keeps plugin state in ~/.claude/plugins/*.json, which nortuscc reads
+//   codex   has no such file; it answers `plugin list --json` and installs with
+//           `plugin add` (there is no `plugin install`)
+//   npx     drives the shared skill store
+//
+// Only mutating commands are logged, so the log means "what was installed".
+// Everything written stays inside the test home: no network, no real installer.
 function fakeNativeInstallers(env) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
 
@@ -38,14 +45,24 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync, ex
 import { join } from 'node:path';
 
 const argv = process.argv.slice(2);
-appendFileSync(process.env.NORTUSCC_TEST_LOG, JSON.stringify({ cmd: ${JSON.stringify(name)}, args: argv }) + '\\n');
+const agent = ${JSON.stringify(name)};
+const log = () => appendFileSync(process.env.NORTUSCC_TEST_LOG, JSON.stringify({ cmd: agent, args: argv }) + '\\n');
 
-// Record what a real installer would record, so a second run inspects as
-// already installed instead of repeating the work.
-const agentDir = ${JSON.stringify(name)} === 'codex' ? process.env.NORTUSCC_CODEX_DIR : process.env.NORTUSCC_CLAUDE_DIR;
+// Codex keeps its snapshots under an internal root and reports through its
+// CLI, so the fake keeps a private file the CLI answers from rather than one
+// nortuscc is allowed to read.
+const codexState = join(process.env.NORTUSCC_CODEX_DIR, 'fake-codex-state.json');
+function codexRead() {
+  if (!existsSync(codexState)) return { plugins: [], marketplaces: [] };
+  return JSON.parse(readFileSync(codexState, 'utf8'));
+}
+function codexWrite(state) {
+  mkdirSync(process.env.NORTUSCC_CODEX_DIR, { recursive: true });
+  writeFileSync(codexState, JSON.stringify(state));
+}
 
-function patch(file, key) {
-  const dir = join(agentDir, 'plugins');
+function claudePatch(file, key) {
+  const dir = join(process.env.NORTUSCC_CLAUDE_DIR, 'plugins');
   mkdirSync(dir, { recursive: true });
   const path = join(dir, file);
   const current = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
@@ -54,23 +71,55 @@ function patch(file, key) {
   writeFileSync(path, JSON.stringify(current));
 }
 
-if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'add') {
-  patch('known_marketplaces.json', String(argv[3]).split('/').pop());
-} else if (argv[0] === 'plugin' && argv[1] === 'install') {
-  patch('installed_plugins.json', argv[2]);
-} else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
-  // The installer writes into the shared store, which nortuscc only reads.
-  const names = [];
-  for (let i = argv.indexOf('--skill') + 1; i < argv.length && !argv[i].startsWith('--'); i += 1) {
-    names.push(argv[i]);
+const marketplaceName = (source) => String(source).split('/').pop().replace(/\\.git$/, '');
+
+if (agent === 'claude') {
+  if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'add') {
+    log(); claudePatch('known_marketplaces.json', marketplaceName(argv[3]));
+  } else if (argv[0] === 'plugin' && argv[1] === 'install') {
+    log(); claudePatch('installed_plugins.json', argv[2]);
   }
-  for (const skill of names) mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
-} else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'list') {
-  // Every agent sees the whole shared store, which is what one store and
-  // explicit --agent installs are supposed to produce.
-  const store = process.env.NORTUSCC_AGENTS_DIR;
-  const skills = existsSync(store) ? readdirSync(store).map((n) => ({ name: n })) : [];
-  process.stdout.write(JSON.stringify({ skills }));
+} else if (agent === 'codex') {
+  if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'add') {
+    log();
+    const state = codexRead();
+    state.marketplaces.push(marketplaceName(argv[3]));
+    codexWrite(state);
+  } else if (argv[0] === 'plugin' && argv[1] === 'add') {
+    log();
+    const state = codexRead();
+    state.plugins.push(argv[2]);
+    codexWrite(state);
+  } else if (argv[0] === 'plugin' && argv[1] === 'marketplace' && argv[2] === 'list') {
+    const state = codexRead();
+    process.stdout.write(JSON.stringify({ marketplaces: state.marketplaces.map((name) => ({ name })) }));
+  } else if (argv[0] === 'plugin' && argv[1] === 'list') {
+    const state = codexRead();
+    process.stdout.write(JSON.stringify({
+      installed: state.plugins.map((pluginId) => ({ pluginId, installed: true })),
+      available: [],
+    }));
+  } else if (argv[0] === 'plugin' && argv[1] === 'install') {
+    // The real CLI has no such subcommand; failing loudly here is what keeps
+    // this fixture honest about the bug it was written for.
+    process.stderr.write("error: unrecognized subcommand 'install'\\n");
+    process.exit(2);
+  }
+} else if (agent === 'npx') {
+  if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
+    log();
+    const names = [];
+    for (let i = argv.indexOf('--skill') + 1; i < argv.length && !argv[i].startsWith('--'); i += 1) {
+      names.push(argv[i]);
+    }
+    for (const skill of names) mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
+  } else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'list') {
+    // Every agent sees the whole shared store, which is what one store and
+    // explicit --agent installs are supposed to produce.
+    const store = process.env.NORTUSCC_AGENTS_DIR;
+    const skills = existsSync(store) ? readdirSync(store).map((n) => ({ name: n })) : [];
+    process.stdout.write(JSON.stringify({ skills }));
+  }
 }
 `;
 
@@ -121,7 +170,8 @@ function expectedDefaultInstallCalls() {
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
     { cmd: 'claude', args: ['plugin', 'install', 'context-mode@context-mode'] },
     { cmd: 'claude', args: ['plugin', 'install', 'claude-mem@thedotmack'] },
-    { cmd: 'codex', args: ['plugin', 'install', 'context-mode@context-mode'] },
+    // Codex installs with `add`; it has no `install` subcommand.
+    { cmd: 'codex', args: ['plugin', 'add', 'context-mode@context-mode'] },
   ];
 }
 

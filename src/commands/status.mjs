@@ -35,9 +35,10 @@ export function configReport(entries = SYNC) {
 }
 
 export async function run(args = [], deps = {}) {
-  // Injected so tests can answer "what can each agent see?" without spawning
-  // the real installer, which would reach the network and the live machine.
-  const { inspectExposure = readExposure } = deps;
+  // Both probes are injected so tests can answer "what can each agent see?"
+  // and "what does Codex have installed?" without spawning the real installer
+  // or the real `codex` CLI, either of which reaches the live machine.
+  const { inspectExposure = readExposure, codexState } = deps;
 
   const { target, error } = parseTarget(args);
   if (error) {
@@ -52,7 +53,7 @@ export async function run(args = [], deps = {}) {
   // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`
   // and `apply --install` are the only paths that act on this.
   const { integrations, errors } = readIntegrations();
-  const adapters = defaultAdapters();
+  const adapters = await defaultAdapters({ codexState });
   const planned = errors.length ? [] : integrationPlan({ integrations, target, adapters });
   const pending = planned.filter((item) => item.state !== 'installed');
 

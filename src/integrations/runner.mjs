@@ -17,12 +17,20 @@ export function categoryOf(type) {
   return CATEGORY[type] ?? type;
 }
 
-export const GROUP_LABEL = {
-  hook: 'Claude hooks',
-  marketplace: 'Claude plugins',
-  plugin: 'plugins',
-  mcp: 'Codex MCP',
-};
+// Grouped by the agent that owns the work, not by declaration type. Typed
+// alone, a Codex marketplace landed under "Claude plugins" and the two agents'
+// context-mode rows were indistinguishable in the picker — the user could not
+// tell which agent a row would act on.
+const AGENT_LABEL = { claude: 'Claude', codex: 'Codex' };
+
+export function groupLabel(item) {
+  const agent = AGENT_LABEL[item.target] ?? item.target;
+  switch (item.type) {
+    case 'hook': return `${agent} hooks`;
+    case 'mcp': return `${agent} MCP`;
+    default: return `${agent} plugins`;
+  }
+}
 
 // Argument arrays only, never a shell string: marketplace names, plugin names
 // and MCP commands all come from a manifest, and a shell would make quoting
@@ -34,6 +42,19 @@ export function spawnCommand({ cmd, args }) {
     // The child never launching at all is silent otherwise: inherited stdio
     // has nothing to show when there is no child.
     child.on('error', (err) => resolve({ ok: false, note: `could not launch \`${cmd}\`: ${err.message}` }));
+  });
+}
+
+// Same contract, but stdout is captured instead of inherited: an agent's
+// `--json` state output is read, not shown. stderr still inherits, so a real
+// error the user needs to see is not swallowed.
+export function captureCommand({ cmd, args }) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'inherit'], shell: false });
+    let stdout = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.on('close', (code) => resolve({ ok: code === 0, stdout, note: code === 0 ? '' : `exited ${code}` }));
+    child.on('error', (err) => resolve({ ok: false, stdout: '', note: `could not launch \`${cmd}\`: ${err.message}` }));
   });
 }
 
@@ -51,7 +72,7 @@ export function integrationPlan({ integrations, target, disabled = new Set(), ad
       return {
         ...item,
         index,
-        group: GROUP_LABEL[item.type] ?? item.type,
+        group: groupLabel(item),
         state: inspected.state,
         note: inspected.note ?? '',
       };

@@ -11,7 +11,7 @@ import { run as applyRun } from './apply.mjs';
 // machine against it. --ff-only refuses to invent a merge -- a divergent
 // remote is reported and left for the owner to resolve in the repo, exactly
 // like every other place this CLI refuses rather than guesses.
-export async function run(allArgs = []) {
+export async function run(allArgs = [], deps = {}) {
   // Validated here rather than left to apply: an invalid target must exit 2
   // before the pull runs, not after the repo has already moved.
   const { target, rest, error } = parseTarget(allArgs);
@@ -44,7 +44,8 @@ export async function run(allArgs = []) {
       return applied;
     }
 
-    const pending = integrationPlan({ integrations, target, adapters: defaultAdapters() })
+    const adapters = await defaultAdapters({ codexState: deps.codexState });
+    const pending = integrationPlan({ integrations, target, adapters })
       .filter((item) => item.state !== 'installed');
 
     if (pending.length) {
