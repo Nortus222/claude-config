@@ -9,6 +9,20 @@ commands, PR target, and any stricter rules.
 - After a complete, self-reviewed design, proceed directly to planning when no decision genuinely requires me.
 - Ask only blocking questions; note reasonable defaults and continue.
 
+## Code taste
+
+- Prefer the simplest solution that fully addresses the problem. Solve complex problems with clear code before adding architectural complexity.
+- Apply YAGNI: add abstractions, layers, and extensibility only when current requirements justify them.
+- Apply DRY with judgment. Keep small duplication when removing it would introduce a harder abstraction.
+- Propose bold changes when they remove essential complexity and leave the system simpler. Explain why the change is worth its scope.
+- Keep changes within the task's scope. Highlight worthwhile refactors or improvements, including why they matter, but do not implement them without the user's approval.
+
+## Communication and comments
+
+- Be concise. Focus explanations and progress updates on why a change matters.
+- Write concise comments that state a function's purpose or contract, not a narration of its implementation.
+- Update affected comments whenever code behavior changes.
+
 ## Git and worktrees
 
 The main checkout is a read-only integration checkout. Keep it on its current integration branch. Do not
