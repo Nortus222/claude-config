@@ -6,7 +6,7 @@
 
 **Architecture:** Insert the same two policy sections into both tracked instruction files, preserving their platform-specific rules. Validate textual parity directly, then run the existing synchronization test suite.
 
-**Tech Stack:** Markdown, POSIX shell, Node.js `node:test`
+**Tech Stack:** Markdown, Zsh shell, Node.js `node:test`
 
 ## Global Constraints
 
