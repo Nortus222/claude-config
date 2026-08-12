@@ -32,7 +32,6 @@ const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-'));
 process.env.NORTUSCC_REPO_DIR = fixtureRepo;
 mkdirSync(join(fixtureRepo, 'claude'), { recursive: true });
 mkdirSync(join(fixtureRepo, 'codex'), { recursive: true });
-writeFileSync(join(fixtureRepo, 'claude', 'settings.json'), JSON.stringify({}));
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
 writeFileSync(join(fixtureRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
@@ -222,7 +221,6 @@ test('run() does not write any files to claude dir and does not create new direc
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-readonly-'));
   mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
   mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
 
@@ -350,7 +348,6 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-skills-missing-'));
   mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
   mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
   // A real source-grouped manifest naming two skills.
@@ -430,7 +427,6 @@ async function onCleanMachine(prefix, fn) {
   const isolatedRepo = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-repo-`));
   mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
   mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
-  writeFileSync(join(isolatedRepo, 'claude', 'settings.json'), JSON.stringify({}));
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
 

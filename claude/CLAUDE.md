@@ -29,7 +29,6 @@ implement, stage, commit, switch branches, or merge feature work there.
 - Before the first commit, review `git diff HEAD` plus untracked files.
 - After commits exist, review the feature branch against the repository-declared PR target with
   `git diff <target>...HEAD`.
-- Use `bash ~/.claude/bin/sdd-pkg.sh ...` for review packages; do not assemble them with shell redirects.
 - Run targeted tests during implementation. Run a full solution build once at the end of a task batch, unless
   I explicitly request another full build.
 - Report what was tested and what remains unverified. A successful build is not a passing test suite.
@@ -37,7 +36,8 @@ implement, stage, commit, switch branches, or merge feature work there.
 ## Superpowers helpers
 
 - Prefer `superpowers:subagent-driven-development` for same-session plan execution.
-- Use `bash ~/.claude/bin/sp <skill> <script> [args...]`; do not use versioned plugin-cache paths.
+- Invoke a skill's scripts through the paths its native installation exposes; do not reach into a
+  versioned plugin cache.
 - Repository-specific skills may add orchestration, but they do not replace the Git rules above.
 
 ## Completion

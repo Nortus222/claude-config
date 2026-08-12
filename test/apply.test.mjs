@@ -194,7 +194,10 @@ test('apply prints a restart reminder when it actually changed a copied file', a
     process.stdout.write = originalWrite;
   }
   assert.equal(code, 0);
-  assert.match(output, /Restart Claude Code/, 'a run that changed a file must remind the user to restart');
+  assert.match(output, /Restart the affected agent/, 'a run that changed a file must remind the user to restart');
+  // settings.json is user-owned now, so the reminder must not imply this
+  // command wrote it.
+  assert.doesNotMatch(output, /settings/, 'the reminder must not name a file apply does not write');
 });
 
 test('a clean apply run prints no restart reminder', async () => {
@@ -211,7 +214,7 @@ test('a clean apply run prints no restart reminder', async () => {
     process.stdout.write = originalWrite;
   }
   assert.equal(code, 0);
-  assert.doesNotMatch(output, /Restart Claude Code/, 'a no-op run must stay silent — no false reminder');
+  assert.doesNotMatch(output, /Restart the affected agent/, 'a no-op run must stay silent — no false reminder');
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {

@@ -15,7 +15,6 @@ function createTestRepo(prefix = 'nortuscc-setup-repo-') {
   mkdirSync(join(repo, 'codex'), { recursive: true });
   writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# test\n');
   writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# test codex\n');
-  writeFileSync(join(repo, 'claude', 'settings.json'), '{"version": 1}\n');
   execSync('git add .', { cwd: repo, stdio: 'ignore' });
   execSync('git commit -m "initial"', { cwd: repo, stdio: 'ignore' });
   return repo;

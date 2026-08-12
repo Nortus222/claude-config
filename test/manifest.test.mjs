@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,4 +78,39 @@ test('both supported agents have a managed instruction file', () => {
 
 test('repoRoot points at the repo containing package.json', () => {
   assert.ok(existsSync(`${repoRoot()}/package.json`));
+});
+
+// --- retirement --------------------------------------------------------------
+
+// settings.json mixed portable rules with permissions, UI preferences and
+// machine-specific state; bin/ and hooks/ were Claude-only wrappers that native
+// skill installation replaces. None of them are managed any more, and a link
+// mode with no remaining entry is machinery with nothing to drive.
+test('the sync manifest contains no settings, helper, hook, or link entry', () => {
+  assert.equal(SYNC.some((entry) => entry.mode === 'link'), false);
+  assert.equal(SYNC.some((entry) => /settings|bin|hooks/.test(entry.src)), false);
+});
+
+test('the retired assets are gone from the repository', () => {
+  for (const path of [
+    'claude/settings.json',
+    'claude/bin/sp',
+    'claude/bin/sdd-pkg.sh',
+    'claude/hooks/context-mode-cache-heal.mjs',
+  ]) {
+    assert.equal(existsSync(join(repoRoot(), path)), false, `${path} must no longer be tracked`);
+  }
+});
+
+// The managed instruction file is what every agent reads at startup. Leaving
+// an instruction to run a wrapper this repo no longer ships would send every
+// future session at a path that does not exist.
+test('Claude instructions do not name retired helpers', () => {
+  const text = readFileSync(join(repoRoot(), 'claude', 'CLAUDE.md'), 'utf8');
+  assert.doesNotMatch(text, /sdd-pkg|\.claude\/bin\/sp/);
+});
+
+test('Codex instructions do not name retired helpers either', () => {
+  const text = readFileSync(join(repoRoot(), 'codex', 'AGENTS.md'), 'utf8');
+  assert.doesNotMatch(text, /sdd-pkg|\.claude\/bin\/sp/);
 });

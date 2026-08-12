@@ -125,12 +125,10 @@ function createStandaloneRepo(prefix) {
   execSync('git init -b main', { cwd: work, stdio: 'ignore' });
   execSync('git config user.email "test@example.com"', { cwd: work, stdio: 'ignore' });
   execSync('git config user.name "Test"', { cwd: work, stdio: 'ignore' });
-  mkdirSync(join(work, 'claude', 'bin'), { recursive: true });
-  mkdirSync(join(work, 'claude', 'hooks'), { recursive: true });
-  writeFileSync(join(work, 'claude', 'bin', '.gitkeep'), '');
-  writeFileSync(join(work, 'claude', 'hooks', '.gitkeep'), '');
-  writeFileSync(join(work, 'claude', 'settings.json'), '{"version":1}\n');
+  mkdirSync(join(work, 'claude'), { recursive: true });
+  mkdirSync(join(work, 'codex'), { recursive: true });
   writeFileSync(join(work, 'claude', 'CLAUDE.md'), '# from repo\n');
+  writeFileSync(join(work, 'codex', 'AGENTS.md'), '# codex from repo\n');
   execSync('git add .', { cwd: work, stdio: 'ignore' });
   execSync('git commit -m "initial"', { cwd: work, stdio: 'ignore' });
   return work;

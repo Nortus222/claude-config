@@ -2,7 +2,6 @@ import { SYNC } from '../manifest.mjs';
 import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock } from '../lock.mjs';
-import { inspectLink } from '../link.mjs';
 import { inspectCopy } from '../copy.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
@@ -21,9 +20,7 @@ export function configReport(entries = SYNC) {
   const lock = readLock();
   return entries.map((entry) => {
     const { src, dest, mode } = resolveEntry(entry);
-    if (mode === 'link') {
-      return { dest: entry.dest, mode, state: inspectLink(dest, src).state };
-    } else if (mode === 'copy') {
+    if (mode === 'copy') {
       // Keyed by target so Claude's CLAUDE.md and Codex's AGENTS.md can never
       // share one baseline; entry.dest stays the display name.
       const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
@@ -105,9 +102,6 @@ export async function run(args = []) {
 
 function noteFor(row) {
   switch (row.state) {
-    case 'clobbered': return 'a real path sits where a link belongs';
-    case 'wrong-target': return 'link points somewhere else';
-    case 'broken-link': return 'link points at a path that no longer exists';
     case 'conflict': return 'changed in the repo AND here';
     case 'local-ahead': return 'local edits not in the repo';
     case 'repo-ahead': return 'repo has newer content';

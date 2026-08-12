@@ -2,7 +2,6 @@ import { SYNC } from '../manifest.mjs';
 import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
-import { ensureLink, inspectLink } from '../link.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
@@ -67,29 +66,13 @@ export async function run(allArgs = [], entries = SYNC) {
   const lines = [];
   let refused = 0;
   let skillsFailed = 0;
-  let linksUnresolved = 0;
-  // Tracks whether this run actually wrote anything to ~/.claude, so the
-  // restart reminder below only fires when it is true and stays silent on a
-  // clean, idempotent no-op run.
+  // Tracks whether this run actually wrote anything to an agent directory, so
+  // the restart reminder below only fires when it is true and stays silent on
+  // a clean, idempotent no-op run.
   let changed = false;
 
   for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
-
-    if (mode === 'link') {
-      // Read the state before ensureLink fixes it — ensureLink always reports
-      // 'linked' on success, whether or not it had to do anything, so the
-      // pre-state is the only way to tell a repair from a no-op.
-      const { state: preState } = inspectLink(dest, src);
-      const res = ensureLink(dest, src, entry.dest);
-      if (preState !== 'linked') changed = true;
-      // ensureLink reports the post-state honestly, so a link it rebuilt over a
-      // repo path that is simply not there stays visible instead of being
-      // reported as a success apply did not achieve.
-      if (res.state !== 'linked') linksUnresolved += 1;
-      lines.push(formatRow(entry.dest, res.state, noteForLink(res, src)));
-      continue;
-    }
 
     if (mode !== 'copy') {
       // Unknown mode: apply has no idea how to remediate this entry, so it is
@@ -137,13 +120,14 @@ export async function run(allArgs = [], entries = SYNC) {
 
   process.stdout.write('\n' + section('apply', lines));
 
-  // settings.json and CLAUDE.md are only read by Claude Code at startup, so a
-  // successful apply that changed anything has no visible effect until the
-  // user restarts — bootstrap.sh printed this reminder unconditionally on
-  // every run; here it is conditioned on actually having changed something,
-  // so a clean re-run stays silent.
+  // Instruction files are only read by an agent at startup, so a successful
+  // apply that changed anything has no visible effect until the user restarts
+  // — bootstrap.sh printed this reminder unconditionally on every run; here it
+  // is conditioned on actually having changed something, so a clean re-run
+  // stays silent. It no longer names settings.json: that file is user-owned
+  // and this command does not write it.
   if (changed) {
-    process.stdout.write('\nRestart Claude Code to load the synced settings.\n');
+    process.stdout.write('\nRestart the affected agent to load the synced instructions.\n');
   }
 
   if (refused > 0) {
@@ -155,26 +139,12 @@ export async function run(allArgs = [], entries = SYNC) {
     return 1;
   }
 
-  if (linksUnresolved > 0) {
-    process.stdout.write(
-      `\n${linksUnresolved} link(s) still lead nowhere: the repo path they need is missing.\n` +
-        '  Check that the repo recorded in ~/.claude/.nortuscc-lock.json still exists,\n' +
-        '  then re-run: nortuscc apply\n',
-    );
-    return 1;
-  }
-
   if (skillsFailed > 0) {
     process.stdout.write(`\n${skillsFailed} skill(s) failed to install. See output above for details.\n`);
     return 1;
   }
 
   return 0;
-}
-
-function noteForLink(res, src) {
-  if (res.state !== 'linked') return `target missing in the repo: ${src}`;
-  return res.backedUp ? `backed up -> ${res.backedUp}` : '';
 }
 
 function noteFor(res) {

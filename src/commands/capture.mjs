@@ -52,9 +52,6 @@ export async function run(allArgs = [], entries = SYNC) {
   let refused = 0;
 
   for (const entry of selected) {
-    // Linked directories need no capture: the repo IS the live copy.
-    if (entry.mode === 'link') continue;
-
     if (entry.mode !== 'copy') {
       // Unknown mode: capture has no idea how to remediate this entry, so it is
       // reported and left alone rather than guessed at — the same treatment
