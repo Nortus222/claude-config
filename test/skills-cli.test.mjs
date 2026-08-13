@@ -11,7 +11,6 @@ import {
   readExposure,
   SKILL_AGENTS,
   agentIdsFor,
-  installAgentIdsFor,
 } from '../src/skills-cli.mjs';
 
 // `skills add --skill` is variadic and space-separated, exactly like `update`
@@ -117,9 +116,6 @@ test('nortuscc targets map to the installer\'s own agent ids', () => {
   assert.deepEqual(agentIdsFor('all'), ['claude-code', 'codex']);
   assert.deepEqual(agentIdsFor('claude'), ['claude-code']);
   assert.deepEqual(agentIdsFor('codex'), ['codex']);
-  assert.deepEqual(installAgentIdsFor('all'), ['*']);
-  assert.deepEqual(installAgentIdsFor('claude'), ['claude-code']);
-  assert.deepEqual(installAgentIdsFor('codex'), ['codex']);
 });
 
 test('buildListCommand asks one agent at a time for machine-readable output', () => {

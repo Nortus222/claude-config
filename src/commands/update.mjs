@@ -11,7 +11,6 @@ import {
   installGroups as realInstallGroups,
   readExposure as realReadExposure,
   agentIdsFor,
-  installAgentIdsFor,
 } from '../skills-cli.mjs';
 import {
   readSkillLock,
@@ -324,11 +323,10 @@ export async function run(allArgs = [], deps = {}) {
   // returned a result for cannot read as ok in one place and failed in the
   // other.
   const agents = agentIdsFor(target);
-  const installAgents = installAgentIdsFor(target);
   let okAddSources = new Set();
   if (actions.add.length) {
     const groups = installArgs(actions.add);
-    const installResults = await installGroups(groups, { agents: installAgents });
+    const installResults = await installGroups(groups, { agents });
     okAddSources = new Set(installResults.filter((r) => r.ok).map((r) => r.source));
     if (groups.some((g) => !okAddSources.has(g.source))) failed = true;
   }
@@ -347,8 +345,8 @@ export async function run(allArgs = [], deps = {}) {
 
     const repairs = exposureRepairs({ names: canonical, agents, list, lock: readLock() });
     if (repairs.length) {
-      process.stdout.write(`\nre-exposing ${repairs.reduce((n, g) => n + g.skills.length, 0)} skill(s) to ${installAgents.join(', ')}\n`);
-      const repaired = await installGroups(repairs, { agents: installAgents });
+      process.stdout.write(`\nre-exposing ${repairs.reduce((n, g) => n + g.skills.length, 0)} skill(s) to ${agents.join(', ')}\n`);
+      const repaired = await installGroups(repairs, { agents });
       if (repaired.some((r) => !r.ok)) failed = true;
     }
   }

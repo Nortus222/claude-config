@@ -142,15 +142,14 @@ belong on every machine and which repo each installs from; `nortuscc` drives
 `npx skills` to fetch them into the shared store at `~/.agents/skills`, which is
 where Codex looks natively and where Claude's installation points.
 
-There is **one** shared store. A default install uses the installer's all-provider
-selector, while an explicit target remains scoped to that provider:
+There is **one** shared store, and installs name their agents explicitly:
 
 ```bash
-npx -y skills add owner/repo --skill one two --agent '*' --global --yes
+npx -y skills add owner/repo --skill one two --agent claude-code codex --global --yes
 ```
 
 So "installed" and "usable by this agent" are separate questions. `status`
-still inspects only the selected agent. It reports a skill that exists in the store but is invisible to a selected agent
+reports a skill that exists in the store but is invisible to a selected agent
 as **partial**, and names the agent that cannot see it. A listing that cannot be
 read is reported as unknown rather than as an empty one — treating a failed read
 as "no skills" would drive a reinstall of everything.
