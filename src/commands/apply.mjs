@@ -5,7 +5,7 @@ import { readLock, writeLock } from '../lock.mjs';
 import { applyCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
-import { installGroups, agentIdsFor } from '../skills-cli.mjs';
+import { installGroups, installAgentIdsFor } from '../skills-cli.mjs';
 import { parseInstallFlags } from '../install-plan.mjs';
 import { defaultInstallDeps } from '../install-sections.mjs';
 import { runInstall } from './install.mjs';
@@ -114,9 +114,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
     if (skills.missing.length === 0) {
       lines.push(formatRow('skills', 'satisfied', ''));
     } else {
-      // The selected agents are named explicitly, so a --target codex run
-      // installs for Codex and nothing else.
-      const results = await installGroups(installArgs(skills.missing), { agents: agentIdsFor(target) });
+      const results = await installGroups(installArgs(skills.missing), { agents: installAgentIdsFor(target) });
       const summary = summarizeSkillsInstall(skills.missing, results);
       lines.push(...summary.lines);
       skillsFailed = summary.failed;

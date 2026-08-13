@@ -209,7 +209,7 @@ test('fresh machine setup installs selected defaults for both agents', async () 
   assert.equal(existsSync(join(env.claude, 'settings.json')), false);
 });
 
-test('every shared skill is installed for both agents, in one call per source', async () => {
+test('default shared-skill installs use the upstream all-agent selector, once per source', async () => {
   const env = emptyHomeFixture();
   const result = await runCli(['setup', '--target', 'all', '--yes'], {
     env,
@@ -222,8 +222,8 @@ test('every shared skill is installed for both agents, in one call per source', 
 
   for (const call of skillCalls) {
     const agentAt = call.args.indexOf('--agent');
-    assert.ok(agentAt > 0, 'every add names its agents explicitly');
-    assert.deepEqual(call.args.slice(agentAt, agentAt + 3), ['--agent', 'claude-code', 'codex']);
+    assert.ok(agentAt > 0, 'every add names its install target explicitly');
+    assert.deepEqual(call.args.slice(agentAt, agentAt + 2), ['--agent', '*']);
     assert.ok(call.args.includes('--global'));
     assert.ok(call.args.includes('--yes'));
   }

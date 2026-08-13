@@ -12,6 +12,12 @@ export function agentIdsFor(target) {
   return selectedTargets(target).map((name) => SKILL_AGENTS[name]);
 }
 
+// The upstream all-agent selector exposes default installs to every supported
+// provider. Explicit targets keep their narrow installer ids.
+export function installAgentIdsFor(target) {
+  return target === 'all' ? ['*'] : agentIdsFor(target);
+}
+
 // --skill restores a precise subset rather than everything a repo publishes;
 // --global keeps skills in ~/.agents/skills rather than a project directory.
 //
@@ -22,9 +28,8 @@ export function agentIdsFor(target) {
 // them as available, which reads as the repo being wrong rather than the
 // argument. Single-skill installs were unaffected, which is why it survived.
 // The variadic stops at the next flag, so --global and --yes still land.
-// `--agent` is variadic in the same way, and naming the agents explicitly is
-// the point: left off, the installer decides which agents receive the skill,
-// which is exactly the guess --target exists to replace.
+// `--agent` is variadic in the same way. The caller provides either the
+// upstream all-agent selector or the ids for an explicit target.
 export function buildCommand({ source, skills, agents = [] }) {
   return {
     cmd: 'npx',

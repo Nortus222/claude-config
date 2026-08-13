@@ -7,7 +7,7 @@ import { readIntegrations } from './integrations/manifest.mjs';
 import { integrationPlan, runIntegrations } from './integrations/runner.mjs';
 import { defaultAdapters } from './integrations/adapters.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from './skills.mjs';
-import { installGroups, agentIdsFor } from './skills-cli.mjs';
+import { installGroups, installAgentIdsFor } from './skills-cli.mjs';
 
 // The real wiring behind the three sections runInstall drives. Kept apart from
 // the workflow itself so the workflow stays testable without a filesystem, a
@@ -86,7 +86,7 @@ function integrationSection(target, adapters) {
 }
 
 function skillSection(target) {
-  const agents = agentIdsFor(target);
+  const installAgents = installAgentIdsFor(target);
   const missing = reconcile({
     groups: readSkillsManifest(),
     lock: readSkillLock(),
@@ -102,12 +102,12 @@ function skillSection(target) {
         state: 'missing',
         default: true,
         source: skill.source,
-        describe: `npx skills add ${skill.source} --skill ${skill.name} --agent ${agents.join(' ')}`,
+        describe: `npx skills add ${skill.source} --skill ${skill.name} --agent ${installAgents.join(' ')}`,
       })),
 
     install: async (items) => {
       const groups = installArgs(items.map((i) => ({ name: i.label, source: i.source })));
-      const results = await installGroups(groups, { agents });
+      const results = await installGroups(groups, { agents: installAgents });
       const okSources = new Set(results.filter((r) => r.ok).map((r) => r.source));
       return items.map((item) => ({
         id: item.id,
