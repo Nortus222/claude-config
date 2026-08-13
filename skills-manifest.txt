@@ -33,3 +33,6 @@ writing-for-agents
 
 [vercel-labs/skills]
 find-skills
+
+[cursor/plugins]
+unslop
