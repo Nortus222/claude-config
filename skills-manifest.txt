@@ -12,7 +12,6 @@ unslop
 ask-matt
 code-review
 codebase-design
-design-an-interface
 diagnosing-bugs
 domain-modeling
 grill-me
@@ -35,7 +34,6 @@ wait-what
 wayfinder
 wizard
 writing-for-agents
-writing-great-skills
 
 [vercel-labs/skills]
 find-skills
