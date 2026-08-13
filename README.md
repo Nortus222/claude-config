@@ -231,5 +231,5 @@ to. Every command reads that table; nothing else needs to change.
 npm test    # node:test, no dependencies
 ```
 
-Windows support is unverified: the code avoids colons in backup filenames and
-resolves `%APPDATA%` for state, but no one has run `setup` there.
+Windows support was verified on 2026-08-12 with a full `setup` run. State
+resolved through `%APPDATA%`, and backup filenames worked without colons.
