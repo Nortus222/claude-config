@@ -1,14 +1,18 @@
 # Skills expected on every machine, grouped by the repo they install from.
 # Regenerate with: nortuscc capture
-# Install with:    nortuscc apply --skills
+# Install with:    nortuscc apply --install
 
 [Nortus222/agent-skills]
 explain
+
+[cursor/plugins]
+unslop
 
 [mattpocock/skills]
 ask-matt
 code-review
 codebase-design
+design-an-interface
 diagnosing-bugs
 domain-modeling
 grill-me
@@ -23,6 +27,7 @@ resolving-merge-conflicts
 setup-matt-pocock-skills
 tdd
 teach
+to-questionnaire
 to-spec
 to-tickets
 triage
@@ -30,9 +35,7 @@ wait-what
 wayfinder
 wizard
 writing-for-agents
+writing-great-skills
 
 [vercel-labs/skills]
 find-skills
-
-[cursor/plugins]
-unslop
