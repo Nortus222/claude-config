@@ -16,7 +16,8 @@ Skills-only machines (use this repo's skill set, keep your own instruction files
 
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, then install interactively
-  status                            read-only: config / integrations / skills
+  status                            report: cli / config / integrations / skills
+                                    offers to update nortuscc when it is behind
   apply [--install] [--take-repo]   repo -> machine
                                     --install also offers missing integrations and skills
                                     --take-repo resolves a conflict by discarding the local version
@@ -37,7 +38,8 @@ Examples:
   nortuscc status --target codex    report only what Codex owns
   nortuscc apply --target claude    write ~/.claude/CLAUDE.md and nothing else
 
-Run 'nortuscc status' first; it changes nothing.`;
+Run 'nortuscc status' first. It writes nothing on its own; the one thing it
+can change is nortuscc itself, and only after you say yes.`;
 
 const [verb, ...rest] = process.argv.slice(2);
 
