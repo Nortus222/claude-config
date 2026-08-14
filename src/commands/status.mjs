@@ -17,6 +17,7 @@ import {
 } from '../skills.mjs';
 import { agentIdsFor } from '../skills-cli.mjs';
 import { readLinkExposure } from '../skill-links.mjs';
+import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -41,14 +42,23 @@ export async function run(args = [], deps = {}) {
   // agent directories or spawning the real `codex` CLI.
   const { inspectExposure = readLinkExposure, codexState } = deps;
 
-  const { target, error } = parseTarget(args);
+  // Before --target, so a global flag never reaches the target parser as a
+  // stray value.
+  const { rest: modeArgs, manageConfig } = parseConfigMode(args);
+
+  const { target, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
   }
 
-  const rows = configReport(entriesForTarget(SYNC, target));
-  const lines = rows.map((r) => formatRow(r.dest, r.state, noteFor(r)));
+  // A skills-only machine reports the section as unmanaged rather than
+  // omitting it: silence would read as "clean", which is the one thing it is
+  // not — nothing here has looked at those files at all.
+  const rows = manageConfig ? configReport(entriesForTarget(SYNC, target)) : [];
+  const lines = manageConfig
+    ? rows.map((r) => formatRow(r.dest, r.state, noteFor(r)))
+    : [formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE)];
   process.stdout.write('\n' + section('config', lines));
 
   // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`

@@ -6,6 +6,7 @@ import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
 import { formatRow, section } from '../report.mjs';
 import { installedGroups, emitManifest, readSkillLock, manifestPath, readSkillsManifest, installedSkillNames } from '../skills.mjs';
+import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 
 let lastCaptured = [];
 
@@ -16,12 +17,17 @@ export function capturedPaths() {
 }
 
 export async function run(allArgs = [], entries = SYNC) {
-  const { target, rest: args, error } = parseTarget(allArgs);
+  const { rest: modeArgs, manageConfig } = parseConfigMode(allArgs);
+
+  const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
   }
-  const selected = entriesForTarget(entries, target);
+  // Skills-only cuts both directions. A machine whose instruction files are its
+  // own must not push them into the repo either, or the first `push` would
+  // publish the user's private rules to someone else's config repo.
+  const selected = manageConfig ? entriesForTarget(entries, target) : [];
 
   const takeLocal = args.includes('--take-local');
   const takeRepo = args.includes('--take-repo');
@@ -50,6 +56,8 @@ export async function run(allArgs = [], entries = SYNC) {
   const lines = [];
   const captured = [];
   let refused = 0;
+
+  if (!manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
 
   for (const entry of selected) {
     if (entry.mode !== 'copy') {

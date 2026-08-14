@@ -8,6 +8,12 @@ Usage: nortuscc <command> [--target claude|codex|all] [options]
 Every command accepts --target. It selects which agent's instruction file is
 read or written; the default is 'all', meaning both Claude and Codex.
 
+Skills-only machines (use this repo's skill set, keep your own instruction files):
+  --skills-only                     record it; CLAUDE.md and AGENTS.md are then
+                                    never read, written or captured
+  --no-skills-only                  record it off again
+  --with-config                     manage config for this one run
+
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, then install interactively
   status                            read-only: config / integrations / skills

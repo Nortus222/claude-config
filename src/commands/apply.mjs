@@ -9,6 +9,7 @@ import { installGroups, agentIdsFor } from '../skills-cli.mjs';
 import { parseInstallFlags } from '../install-plan.mjs';
 import { defaultInstallDeps } from '../install-sections.mjs';
 import { runInstall } from './install.mjs';
+import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 
 // Turns installGroups' per-source {source, ok} results into report lines and
 // a failure count, kept separate from installGroups itself so the mapping
@@ -35,12 +36,17 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // Target first, before any other flag parsing: --target and its value must
   // never reach a parser that would read them as something else, and an
   // invalid target has to exit 2 before a single file is written.
-  const { target, rest: args, error } = parseTarget(allArgs);
+  const { rest: modeArgs, manageConfig, persist } = parseConfigMode(allArgs);
+
+  const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
   }
-  const selected = entriesForTarget(entries, target);
+  // The whole point of the mode: on a skills-only machine no instruction file
+  // is read, written or backed up, so the user's own CLAUDE.md is never
+  // overwritten from a repo that is not theirs.
+  const selected = manageConfig ? entriesForTarget(entries, target) : [];
 
   const takeRepo = args.includes('--take-repo');
   const takeLocal = args.includes('--take-local');
@@ -66,6 +72,10 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
   const lock = readLock();
   const before = JSON.stringify(lock);
+  // Recorded by the commands that already write state — setup and apply — and
+  // honoured by all of them. status stays read-only, so `status --skills-only`
+  // narrows that one report without deciding anything for the next command.
+  if (persist !== null) lock.skillsOnly = persist;
   const lines = [];
   let refused = 0;
   let skillsFailed = 0;
@@ -73,6 +83,8 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // the restart reminder below only fires when it is true and stays silent on
   // a clean, idempotent no-op run.
   let changed = false;
+
+  if (!manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
 
   for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
@@ -163,7 +175,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
     // --skills alongside --install narrows the workflow to skills alone,
     // which is what --skills has always meant.
     const aliasOptOuts = skillsAlias ? ['--no-hooks', '--no-mcp', '--no-plugins'] : [];
-    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps });
+    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps, manageConfig });
   }
 
   return 0;
@@ -171,11 +183,11 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
 // Shared by apply --install and by setup, so both offer exactly the same rows
 // in the same order.
-export async function installFor(target, args, { takeRepo = false, deps = {} } = {}) {
+export async function installFor(target, args, { takeRepo = false, deps = {}, manageConfig = true } = {}) {
   const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
   const wiring = deps.sections
     ? deps
-    : await defaultInstallDeps(target, { force: takeRepo, codexState: deps.codexState });
+    : await defaultInstallDeps(target, { force: takeRepo, codexState: deps.codexState, manageConfig });
 
   if (wiring.integrationErrors?.length) {
     for (const message of wiring.integrationErrors) console.error(`nortuscc: ${message}`);

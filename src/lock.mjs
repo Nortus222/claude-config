@@ -24,7 +24,7 @@ export function hashFile(path) {
 }
 
 function emptyLock() {
-  return { version: LOCK_VERSION, repo: null, files: {} };
+  return { version: LOCK_VERSION, repo: null, skillsOnly: false, files: {} };
 }
 
 // Shape-check whatever JSON was on disk. A record that isn't the shape we
@@ -40,7 +40,15 @@ function parseState(text) {
   ) {
     return null;
   }
-  return { version: parsed.version ?? LOCK_VERSION, repo: parsed.repo ?? null, files: parsed.files };
+  // skillsOnly is read strictly: anything but a literal true means this machine
+  // manages its instruction files, which is the behaviour every state record
+  // written before the flag existed was describing.
+  return {
+    version: parsed.version ?? LOCK_VERSION,
+    repo: parsed.repo ?? null,
+    skillsOnly: parsed.skillsOnly === true,
+    files: parsed.files,
+  };
 }
 
 function readStateFile(path) {

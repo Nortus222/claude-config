@@ -23,6 +23,29 @@ leaves the directory behind, and syncing from a half-made one would record a
 repo path that every later command silently resolves away from. `setup` refuses
 it instead: remove the directory and re-run.
 
+### Using it for skills alone
+
+This repo's `claude/CLAUDE.md` and `codex/AGENTS.md` are one person's rules. If
+you are here for the skill set and have instruction files of your own, say so
+once:
+
+```bash
+npx github:Nortus222/claude-config setup --dir ~/dev/claude-config --skills-only
+```
+
+The choice is recorded in machine state, so every later command honours it with
+no flag to remember — `apply` never writes your `CLAUDE.md`, and `capture` never
+publishes it into the repo. `status` reports the section as `skills-only`
+rather than staying silent, because silence would read as "clean" when nothing
+has looked at those files at all.
+
+Integrations and skills stay managed. Decline those per install with
+`--no-hooks` / `--no-mcp` / `--no-plugins` / `--no-skills`, or point the repo at
+your own fork and edit `skills-manifest.txt`.
+
+`--with-config` syncs config for a single run without changing the setting;
+`--no-skills-only` records it off for good.
+
 ## Targets
 
 Every command takes `--target claude|codex|all`. The default is `all`.
@@ -33,6 +56,16 @@ nortuscc apply  --target claude  # write ~/.claude/CLAUDE.md and nothing else
 ```
 
 An invalid or repeated `--target` exits 2 before anything is read or written.
+
+`--target` picks *which* agent, never *whether*. To manage no instruction files
+at all — this repo's skills, your own rules — see
+[Using it for skills alone](#using-it-for-skills-alone):
+
+```bash
+nortuscc apply --skills-only     # record it; CLAUDE.md and AGENTS.md are left alone
+nortuscc apply --with-config     # sync them for this run only
+nortuscc apply --no-skills-only  # record it off again
+```
 
 ## Daily use
 
@@ -49,9 +82,9 @@ prompt or a scheduled check.
 
 | Command | Effect |
 | --- | --- |
-| `setup [--repo URL] [--dir PATH]` | Clone if absent, apply, then install interactively |
+| `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, apply, then install interactively |
 | `status` | Read-only report: config, integrations, skills |
-| `apply [--install] [--take-repo]` | Repo → machine. `--install` also offers missing integrations and skills |
+| `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
 | `capture` | Machine → repo, including regenerating the skills manifest |
 | `pull` | `git pull --ff-only`, then apply. Reports new integrations; installs them only with `--install` |
@@ -103,6 +136,12 @@ than one agent:
 
 It is written atomically (temp file plus rename), so an interrupted write can
 never leave a half-parsed file that makes every managed file look unsynced.
+
+It records where the repo lives, a baseline hash per synced file, and
+`skillsOnly` — the [skills-only](#using-it-for-skills-alone) setting. That last
+one is read strictly: anything but a literal `true` means this machine manages
+its instruction files, which is what every state record written before the flag
+existed was describing.
 
 On first use, the older `~/.claude/.nortuscc-lock.json` is imported once: the
 recorded repo and the `CLAUDE.md` baseline come across as `claude:CLAUDE.md`,
@@ -206,6 +245,23 @@ The test suite never spawns a real installer: the acceptance tests put fake
 home, and every other test injects its own runner. Keep it that way.
 
 ### Staying current
+
+`update` and `pull` update different things, and neither implies the other:
+
+| | updates | leaves alone |
+| --- | --- | --- |
+| `nortuscc update` | the installed **skills**, from their own source repos | this repo, and so the CLI |
+| `nortuscc pull` | this **repo** (`git pull --ff-only`), then applies it | installed skills |
+
+`update` clones each *skill* source into a temp directory to compare tree SHAs;
+it never touches the claude-config checkout. So a machine running the CLI from a
+checkout — `--dir`, or an `npm link` — is still on the code it had before, and
+`nortuscc pull` is what moves it forward. Running the CLI through
+`npx github:Nortus222/claude-config` instead means there is no checkout to
+update; each invocation resolves the repo itself.
+
+Order matters when a release changes both: `pull` first, then `update`, so the
+skill pass runs on the newer code and against the newer `skills-manifest.txt`.
 
 `nortuscc update` refreshes the skills a machine already has, then re-checks
 agent exposure and asks the installer to re-expose anything a selected agent

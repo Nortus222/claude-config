@@ -13,8 +13,11 @@ import { installGroups, agentIdsFor } from './skills-cli.mjs';
 // the workflow itself so the workflow stays testable without a filesystem, a
 // child process, or a terminal.
 
-function configSection(target, { force = false } = {}) {
-  const entries = entriesForTarget(SYNC, target);
+function configSection(target, { force = false, manageConfig = true } = {}) {
+  // A skills-only machine offers no instruction files to install, so the
+  // section is empty rather than absent — runInstall counts items, and an
+  // empty section is already the "nothing to do here" it understands.
+  const entries = manageConfig ? entriesForTarget(SYNC, target) : [];
 
   return {
     items: () =>
@@ -119,7 +122,7 @@ function skillSection(target) {
   };
 }
 
-export async function defaultInstallDeps(target, { force = false, adapters, codexState } = {}) {
+export async function defaultInstallDeps(target, { force = false, adapters, codexState, manageConfig = true } = {}) {
   const resolved = adapters ?? (await defaultAdapters({ codexState }));
   const integrations = integrationSection(target, resolved);
   return {
@@ -127,7 +130,7 @@ export async function defaultInstallDeps(target, { force = false, adapters, code
     // are both reasons to stop before installing anything.
     integrationErrors: [...integrations.errors, ...(resolved.errors ?? [])],
     sections: {
-      config: configSection(target, { force }),
+      config: configSection(target, { force, manageConfig }),
       integrations,
       skills: skillSection(target),
     },
