@@ -120,13 +120,25 @@ if (agent === 'claude') {
     for (let i = argv.indexOf('--skill') + 1; i < argv.length && !argv[i].startsWith('--'); i += 1) {
       names.push(argv[i]);
     }
-    for (const skill of names) mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
-  } else if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'list') {
-    // Every agent sees the whole shared store, which is what one store and
-    // explicit --agent installs are supposed to produce.
-    const store = process.env.NORTUSCC_AGENTS_DIR;
-    const skills = existsSync(store) ? readdirSync(store).map((n) => ({ name: n })) : [];
-    process.stdout.write(JSON.stringify({ skills }));
+    const agents = [];
+    for (let i = argv.indexOf('--agent') + 1; i > 0 && i < argv.length && !argv[i].startsWith('--'); i += 1) {
+      agents.push(argv[i]);
+    }
+    // The real installer does two things per skill: it puts the skill in the
+    // shared store, and it places a copy under the skills directory of every
+    // agent named by --agent. Only the second makes the skill loadable, so a
+    // fixture that did the first alone reported a machine whose skills no
+    // agent could load as fully installed.
+    const agentDirs = {
+      'claude-code': process.env.NORTUSCC_CLAUDE_DIR,
+      codex: process.env.NORTUSCC_CODEX_DIR,
+    };
+    for (const skill of names) {
+      mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
+      for (const name of agents) {
+        if (agentDirs[name]) mkdirSync(join(agentDirs[name], 'skills', skill), { recursive: true });
+      }
+    }
   }
 }
 `;
