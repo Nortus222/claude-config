@@ -23,6 +23,29 @@ leaves the directory behind, and syncing from a half-made one would record a
 repo path that every later command silently resolves away from. `setup` refuses
 it instead: remove the directory and re-run.
 
+### Using it for skills alone
+
+This repo's `claude/CLAUDE.md` and `codex/AGENTS.md` are one person's rules. If
+you are here for the skill set and have instruction files of your own, say so
+once:
+
+```bash
+npx github:Nortus222/claude-config setup --dir ~/dev/claude-config --skills-only
+```
+
+The choice is recorded in machine state, so every later command honours it with
+no flag to remember — `apply` never writes your `CLAUDE.md`, and `capture` never
+publishes it into the repo. `status` reports the section as `skills-only`
+rather than staying silent, because silence would read as "clean" when nothing
+has looked at those files at all.
+
+Integrations and skills stay managed. Decline those per install with
+`--no-hooks` / `--no-mcp` / `--no-plugins` / `--no-skills`, or point the repo at
+your own fork and edit `skills-manifest.txt`.
+
+`--with-config` syncs config for a single run without changing the setting;
+`--no-skills-only` records it off for good.
+
 ## Targets
 
 Every command takes `--target claude|codex|all`. The default is `all`.

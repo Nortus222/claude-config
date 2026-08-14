@@ -5,6 +5,7 @@ import { repoRoot, isGitCheckout, statePath } from '../resolve.mjs';
 import { parseTarget } from '../targets.mjs';
 import { run as applyRun, installFor } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
+import { parseConfigMode } from '../config-mode.mjs';
 
 const DEFAULT_REPO = 'https://github.com/Nortus222/claude-config.git';
 
@@ -16,7 +17,11 @@ function flag(args, name) {
 // `deps` is forwarded to the closing status run, so a test can answer "what
 // can each agent see?" without spawning the real installer.
 export async function run(allArgs = [], deps = {}) {
-  const { target, rest: args, error } = parseTarget(allArgs);
+  // setup is where a machine says what it wants managed, so it is the one
+  // command that records the choice rather than merely honouring it.
+  const { rest: modeArgs, persist, manageConfig } = parseConfigMode(allArgs);
+
+  const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
@@ -72,10 +77,19 @@ export async function run(allArgs = [], deps = {}) {
     console.log('commit: unknown (not a git checkout)');
   }
 
-  // Record where the repo lives so later runs work from any directory.
+  // Record where the repo lives so later runs work from any directory, and
+  // what this machine wants managed. Written before apply runs, so the very
+  // first apply already honours a `setup --skills-only` rather than syncing
+  // the instruction files once and respecting the choice only from the next
+  // command onward.
   const lock = readLock();
   lock.repo = root;
+  if (persist !== null) lock.skillsOnly = persist;
   writeLock(lock);
+
+  if (!manageConfig) {
+    console.log('skills-only: this machine keeps its own CLAUDE.md and AGENTS.md');
+  }
 
   // Configuration first, so a conflict is decided before any installer runs.
   // The target is put back explicitly — the filter keeps setup's own flags out
@@ -91,6 +105,7 @@ export async function run(allArgs = [], deps = {}) {
   const installed = await installFor(target, args, {
     takeRepo: args.includes('--take-repo'),
     deps,
+    manageConfig,
   });
   if (installed !== 0) return installed;
 
