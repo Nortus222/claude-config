@@ -166,11 +166,27 @@ There is **one** shared store, and installs name their agents explicitly:
 npx -y skills add owner/repo --skill one two --agent claude-code codex --global --yes
 ```
 
-So "installed" and "usable by this agent" are separate questions. `status`
-reports a skill that exists in the store but is invisible to a selected agent
-as **partial**, and names the agent that cannot see it. A listing that cannot be
-read is reported as unknown rather than as an empty one — treating a failed read
-as "no skills" would drive a reinstall of everything.
+So "installed" and "usable by this agent" are separate questions — but not
+equally so for both agents, and the difference decides where `status` looks:
+
+| agent | loads from | so a store skill is |
+| --- | --- | --- |
+| Codex | `~/.agents/skills` — the store itself | already loadable |
+| Claude | `~/.claude/skills`, and nowhere else | loadable only once linked there |
+
+The installer says as much per skill, reporting `universal: Codex` alongside
+`symlink → Claude Code`. Claude is therefore the only agent a skill can be
+installed for and still be unloadable by, and `~/.codex/skills` holds just
+Codex's built-in `.system` set. Checking that directory for shared skills
+reports every one of them as missing from Codex forever — a `status` that can
+never come back clean and an `update` that reinstalls on every run, since
+installing again cannot change which directory Codex reads.
+
+`status` reports a skill that exists in the store but is invisible to a selected
+agent as **partial**, and names the agent that cannot see it; one no selected
+agent can load is **unlinked**. A directory that cannot be read is reported as
+unknown rather than as an empty one — treating a failed read as "no skills"
+would drive a reinstall of everything.
 
 Skills present on a machine but absent from the manifest are reported and never
 removed — that is how a machine carries the shared set plus its own extras. Run

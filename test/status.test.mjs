@@ -626,11 +626,16 @@ test('an exposure gap is pointed at update, not at apply --install', async () =>
   });
 });
 
-// The default probe reads the agent directories rather than taking an injected
+// The default probe reads the real directories rather than taking an injected
 // answer, so the wiring is exercised end to end at least once: without this,
 // every exposure test could pass against a double while the real status
 // command read the wrong place entirely.
-test('with no probe injected, status reads the agent\'s own skills directory', async () => {
+//
+// It also pins the asymmetry. A skill in the store is already loadable by
+// Codex and not yet by Claude, so linking it for Claude is the whole repair —
+// and the machine has to go quiet once that is done. Asserting a Codex
+// placement here instead is what let status stay permanently non-zero.
+test('with no probe injected, status reads the real directories and converges', async () => {
   await onCleanMachine('exposure-default-probe', async (fx) => {
     mkdirSync(join(fx.agents, 'wayfinder'), { recursive: true });
     writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nwayfinder\n');
@@ -640,14 +645,15 @@ test('with no probe injected, status reads the agent\'s own skills directory', a
     );
 
     const unplaced = await runCaptured(() => fx.run());
-    assert.equal(unplaced.code, 1, 'a skill in the store but in no agent directory is drift');
-    assert.match(unplaced.output, /unlinked/);
+    assert.equal(unplaced.code, 1, 'a store skill Claude cannot load is drift');
+    assert.match(unplaced.output, /partial/);
+    assert.match(unplaced.output, /claude-code/, 'Claude is the agent that cannot load it');
+    assert.doesNotMatch(unplaced.output, /missing from.*codex/, 'Codex loads from the store');
 
     mkdirSync(join(fx.claude, 'skills', 'wayfinder'), { recursive: true });
-    mkdirSync(join(fx.codex, 'skills', 'wayfinder'), { recursive: true });
 
     const placed = await runCaptured(() => fx.run());
-    assert.equal(placed.code, 0, 'placing it for both agents brings the machine into agreement');
+    assert.equal(placed.code, 0, 'linking it for Claude alone brings the machine into agreement');
     assert.match(placed.output, /everything is in agreement/);
   });
 });
