@@ -42,11 +42,21 @@ export function updatableSkills(lock, installedNames) {
 // Grouped by sourceUrl, because that is what gets cloned — two sources that
 // differ only in shorthand would otherwise be fetched twice. Plain code-point
 // ordering, not localeCompare, so the order is locale-independent.
-export function sourcesOf(entries) {
+//
+// `exact` names the sources the manifest pinned. It is keyed by source rather
+// than by url because that is what the manifest writes; two shorthands for one
+// url that disagree about pinning collapse to the first, which is the same
+// first-wins rule the grouping itself already applies.
+export function sourcesOf(entries, exact = new Set()) {
   const byUrl = new Map();
   for (const entry of entries) {
     if (!byUrl.has(entry.sourceUrl)) {
-      byUrl.set(entry.sourceUrl, { source: entry.source, sourceUrl: entry.sourceUrl, paths: [] });
+      byUrl.set(entry.sourceUrl, {
+        source: entry.source,
+        sourceUrl: entry.sourceUrl,
+        paths: [],
+        exact: exact.has(entry.source),
+      });
     }
     byUrl.get(entry.sourceUrl).paths.push(entry.path);
   }

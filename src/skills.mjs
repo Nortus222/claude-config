@@ -17,7 +17,17 @@ function sourceOf(meta) {
   return isPlainObject(meta) && typeof meta.source === 'string' && meta.source ? meta.source : null;
 }
 
-const HEADER = /^\[(.+)\]$/;
+// A header is the source in brackets, optionally followed by one marker.
+// `exact` is the only marker there is; see EXACT.
+const HEADER = /^\[([^\]]+)\]\s*(\S*)\s*$/;
+
+// A source repo can hold far more skills than a machine wants from it:
+// cursor/plugins is a monorepo of 82, of which this manifest names one. An
+// exact source is taken at its word — the skills listed under it are the only
+// ones nortuscc will ever consider from that repo, so `update` neither offers
+// the other 81 nor spends a tree listing discovering them. Sources without the
+// marker are still scanned, which is how a new skill upstream gets noticed.
+const EXACT = 'exact';
 
 // Source-grouped format. Provenance has to live in the repo to be restorable:
 // the skill lock is machine-local and empty on a fresh machine.
@@ -31,7 +41,11 @@ export function parseManifest(text) {
 
     const header = line.match(HEADER);
     if (header) {
-      current = { source: header[1], skills: [] };
+      // An unrecognised marker leaves the group unpinned rather than failing
+      // the read: every command that reports anything has to parse this file
+      // first, and a typo here should not take `status` down with it. It stays
+      // visible as the pin plainly not taking effect.
+      current = { source: header[1].trim(), skills: [], exact: header[2] === EXACT };
       groups.push(current);
       continue;
     }
@@ -45,14 +59,21 @@ export function emitManifest(groups) {
   const head =
     '# Skills expected on every machine, grouped by the repo they install from.\n' +
     '# Regenerate with: nortuscc capture\n' +
-    '# Install with:    nortuscc apply --install\n\n';
+    '# Install with:    nortuscc apply --install\n' +
+    `# A source marked '${EXACT}' is limited to the skills listed under it.\n\n`;
 
   return (
     head +
     groups
-      .map((g) => `[${g.source}]\n${g.skills.join('\n')}\n`)
+      .map((g) => `[${g.source}]${g.exact ? ` ${EXACT}` : ''}\n${g.skills.join('\n')}\n`)
       .join('\n')
   );
+}
+
+// The sources a manifest pins, by name. Kept here rather than derived at each
+// call site so "what does exact mean" has one answer.
+export function exactSources(groups) {
+  return new Set(groups.filter((g) => g.exact).map((g) => g.source));
 }
 
 export function groupsFromLock(lock) {
@@ -143,10 +164,22 @@ export function installedSkillNames() {
 // "what is installed". They differ whenever a skill folder is removed without
 // its lock entry, which is exactly the state a prune leaves behind — so a
 // manifest regenerated from the lock alone would restore what a prune removed.
-export function installedGroups(lock, installedNames) {
+//
+// `declared` is the manifest being regenerated. The lock records where a skill
+// came from but not how the manifest chose to treat that source, so a rewrite
+// built from the lock alone would drop every `exact` marker — silently
+// unpinning a source on the next capture. Taking the previous manifest as an
+// argument, rather than leaving each caller to reapply the markers, is what
+// makes that impossible to forget.
+export function installedGroups(lock, installedNames, declared = []) {
   const present = new Set(installedNames);
+  const exact = exactSources(declared);
   return groupsFromLock(lock)
-    .map((group) => ({ source: group.source, skills: group.skills.filter((n) => present.has(n)) }))
+    .map((group) => ({
+      source: group.source,
+      skills: group.skills.filter((n) => present.has(n)),
+      exact: exact.has(group.source),
+    }))
     .filter((group) => group.skills.length > 0);
 }
 

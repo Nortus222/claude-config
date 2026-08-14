@@ -204,8 +204,8 @@ test('capture regenerates the manifest from the installed skills, grouped by sou
 
   const written = readFileSync(manifestPath(), 'utf8');
   assert.deepEqual(parseManifest(written), [
-    { source: 'baz/qux', skills: ['gamma'] },
-    { source: 'foo/bar', skills: ['alpha', 'beta'] },
+    { source: 'baz/qux', skills: ['gamma'], exact: false },
+    { source: 'foo/bar', skills: ['alpha', 'beta'], exact: false },
   ]);
   assert.ok(!written.includes('homegrown'), 'a skill with no recorded source must never be written to the manifest');
   assert.ok(capturedPaths().includes('skills-manifest.txt'), 'a manifest write must be staged for commit');
@@ -240,8 +240,8 @@ test('--allow-shrink permits writing a smaller manifest', async () => {
 
   const written = parseManifest(readFileSync(manifestPath(), 'utf8'));
   assert.deepEqual(written, [
-    { source: 'baz/qux', skills: ['gamma'] },
-    { source: 'foo/bar', skills: ['alpha'] },
+    { source: 'baz/qux', skills: ['gamma'], exact: false },
+    { source: 'foo/bar', skills: ['alpha'], exact: false },
   ]);
   assert.ok(capturedPaths().includes('skills-manifest.txt'));
 });
@@ -275,8 +275,8 @@ test('capture excludes a lock entry whose skill folder no longer exists', async 
   const written = readFileSync(manifestPath(), 'utf8');
   assert.ok(!written.includes('ghost'), 'a lock entry with no folder on disk must never reach the manifest');
   assert.deepEqual(parseManifest(written), [
-    { source: 'baz/qux', skills: ['gamma'] },
-    { source: 'foo/bar', skills: ['alpha'] },
+    { source: 'baz/qux', skills: ['gamma'], exact: false },
+    { source: 'foo/bar', skills: ['alpha'], exact: false },
   ]);
 });
 

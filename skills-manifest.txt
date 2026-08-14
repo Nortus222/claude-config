@@ -1,11 +1,12 @@
 # Skills expected on every machine, grouped by the repo they install from.
 # Regenerate with: nortuscc capture
 # Install with:    nortuscc apply --install
+# A source marked 'exact' is limited to the skills listed under it.
 
 [Nortus222/agent-skills]
 explain
 
-[cursor/plugins]
+[cursor/plugins] exact
 unslop
 
 [mattpocock/skills]

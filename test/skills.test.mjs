@@ -11,6 +11,7 @@ import {
   installArgs,
   skillExposure,
   installedGroups,
+  exactSources,
 } from '../src/skills.mjs';
 import * as skillsModule from '../src/skills.mjs';
 
@@ -26,8 +27,8 @@ grill-me
 test('parseManifest groups skills under their source', () => {
   const g = parseManifest(SAMPLE);
   assert.deepEqual(g, [
-    { source: 'Nortus222/agent-skills', skills: ['explain'] },
-    { source: 'mattpocock/skills', skills: ['teach', 'grill-me'] },
+    { source: 'Nortus222/agent-skills', skills: ['explain'], exact: false },
+    { source: 'mattpocock/skills', skills: ['teach', 'grill-me'], exact: false },
   ]);
 });
 
@@ -36,7 +37,50 @@ test('parseManifest ignores comments and blank lines', () => {
 });
 
 test('parseManifest drops names that precede any source header', () => {
-  assert.deepEqual(parseManifest('orphan\n[a/b]\nreal\n'), [{ source: 'a/b', skills: ['real'] }]);
+  assert.deepEqual(parseManifest('orphan\n[a/b]\nreal\n'), [{ source: 'a/b', skills: ['real'], exact: false }]);
+});
+
+// --- exact sources -----------------------------------------------------------
+
+// cursor/plugins is a monorepo of 82 skills, of which this machine wants one.
+// The marker is what stops `update` from offering the other 81.
+test('a source marked exact is pinned to the skills listed under it', () => {
+  const groups = parseManifest('[cursor/plugins] exact\nunslop\n\n[m/s]\ntdd\n');
+  assert.deepEqual(groups, [
+    { source: 'cursor/plugins', skills: ['unslop'], exact: true },
+    { source: 'm/s', skills: ['tdd'], exact: false },
+  ]);
+  assert.deepEqual([...exactSources(groups)], ['cursor/plugins']);
+});
+
+test('the exact marker survives a rewrite', () => {
+  const groups = parseManifest('[cursor/plugins] exact\nunslop\n');
+  assert.deepEqual(parseManifest(emitManifest(groups)), groups);
+  assert.match(emitManifest(groups), /^\[cursor\/plugins\] exact$/m);
+});
+
+// Every command parses this file before it can report anything, so a typo must
+// not take `status` down with it. The pin plainly not applying is the signal.
+test('an unrecognised marker leaves the source unpinned rather than failing', () => {
+  assert.deepEqual(parseManifest('[a/b] exakt\none\n'), [
+    { source: 'a/b', skills: ['one'], exact: false },
+  ]);
+});
+
+// The lock records where a skill came from, never how the manifest chose to
+// treat that source. Regenerating from the lock alone would unpin it silently.
+test('regenerating the manifest carries the exact marker across', () => {
+  const lock = { skills: { unslop: { source: 'cursor/plugins' }, tdd: { source: 'm/s' } } };
+  const declared = parseManifest('[cursor/plugins] exact\nunslop\n');
+
+  const carried = installedGroups(lock, ['unslop', 'tdd'], declared);
+  assert.deepEqual(carried, [
+    { source: 'cursor/plugins', skills: ['unslop'], exact: true },
+    { source: 'm/s', skills: ['tdd'], exact: false },
+  ]);
+
+  const dropped = installedGroups(lock, ['unslop', 'tdd']);
+  assert.equal(dropped[0].exact, false, 'with no manifest to consult nothing is pinned');
 });
 
 test('emit then parse round-trips', () => {
@@ -196,40 +240,40 @@ const meta = (source) => ({ source, sourceUrl: `https://github.com/${source}.git
 
 test('installedGroups keeps a skill whose folder is present', () => {
   const lock = locked({ tdd: meta('o/r') });
-  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'] }]);
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'], exact: false }]);
 });
 
 test('installedGroups drops a lock entry whose folder is gone', () => {
   // The lock outlives the folder — this is the whole reason the function
   // exists, and why regenerating the manifest from the lock alone is wrong.
   const lock = locked({ tdd: meta('o/r'), ghost: meta('o/r') });
-  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'] }]);
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/r', skills: ['tdd'], exact: false }]);
 });
 
 test('installedGroups drops a source group that empties', () => {
   const lock = locked({ tdd: meta('o/one'), ghost: meta('o/two') });
-  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/one', skills: ['tdd'] }]);
+  assert.deepEqual(installedGroups(lock, ['tdd']), [{ source: 'o/one', skills: ['tdd'], exact: false }]);
 });
 
 test('installedGroups includes a newly adopted skill', () => {
   const lock = locked({ tdd: meta('o/r'), wizard: meta('o/r') });
   assert.deepEqual(installedGroups(lock, ['tdd', 'wizard']), [
-    { source: 'o/r', skills: ['tdd', 'wizard'] },
+    { source: 'o/r', skills: ['tdd', 'wizard'], exact: false },
   ]);
 });
 
 test('installedGroups creates a group for a source new to the manifest', () => {
   const lock = locked({ tdd: meta('o/one'), fresh: meta('o/new') });
   assert.deepEqual(installedGroups(lock, ['tdd', 'fresh']), [
-    { source: 'o/new', skills: ['fresh'] },
-    { source: 'o/one', skills: ['tdd'] },
+    { source: 'o/new', skills: ['fresh'], exact: false },
+    { source: 'o/one', skills: ['tdd'], exact: false },
   ]);
 });
 
 test('installedGroups ignores a skill on disk with no lock entry', () => {
   // Hand-authored: nothing could install it, so it never enters the manifest.
   assert.deepEqual(installedGroups(locked({ tdd: meta('o/r') }), ['tdd', 'mine']), [
-    { source: 'o/r', skills: ['tdd'] },
+    { source: 'o/r', skills: ['tdd'], exact: false },
   ]);
 });
 

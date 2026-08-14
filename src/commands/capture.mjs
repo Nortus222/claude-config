@@ -85,8 +85,8 @@ export async function run(allArgs = [], entries = SYNC) {
   // handing every other machine a skill this one deliberately removed. It also
   // keeps the shrink guard below honest: a lingering entry would pad the count
   // and let a genuine shrink through unnoticed.
-  const groups = installedGroups(readSkillLock(), installedSkillNames());
   const manifestBefore = readSkillsManifest();
+  const groups = installedGroups(readSkillLock(), installedSkillNames(), manifestBefore);
   const beforeCount = manifestBefore.reduce((n, g) => n + g.skills.length, 0);
   const afterCount = groups.reduce((n, g) => n + g.skills.length, 0);
 
