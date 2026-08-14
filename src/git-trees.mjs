@@ -46,11 +46,16 @@ export function buildLsTreeArgs() {
 // yet can still be seen. Splitting these into two exported functions would
 // double the clones per source to save renaming one function.
 //
+// `discover` is what an exact source turns off. The per-folder SHAs are still
+// read — a pinned skill is still checked for being outdated — but the repo is
+// no longer listed for skills nobody asked about. That is the difference
+// between asking a monorepo about one skill and asking it about all 82.
+//
 // Returns null if the source could not be cloned — the caller reports every
 // skill from that source as unknown rather than assuming it is current. A path
 // present in `trees` with a null value exists in the lock but no longer exists
 // upstream.
-export async function inspectSource(sourceUrl, paths, { run = runGit } = {}) {
+export async function inspectSource(sourceUrl, paths, { run = runGit, discover = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-trees-'));
   try {
     const cloned = await run(buildCloneArgs(sourceUrl, dir));
@@ -63,6 +68,8 @@ export async function inspectSource(sourceUrl, paths, { run = runGit } = {}) {
       // real answer about the skill, not a failure of the check.
       trees.set(path, res.code === 0 && res.out ? res.out : null);
     }
+
+    if (!discover) return { trees, skillPaths: [] };
 
     const listed = await run(buildLsTreeArgs(), { cwd: dir });
     const skillPaths = listed.code === 0

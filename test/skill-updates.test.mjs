@@ -52,9 +52,21 @@ test('sourcesOf dedupes by sourceUrl and collects every path', () => {
     { name: 'c', source: 's/two', sourceUrl: 'u2', path: 'p/c', hash: 'z' },
   ];
   assert.deepEqual(sourcesOf(entries), [
-    { source: 's/one', sourceUrl: 'u1', paths: ['p/a', 'p/b'] },
-    { source: 's/two', sourceUrl: 'u2', paths: ['p/c'] },
+    { source: 's/one', sourceUrl: 'u1', paths: ['p/a', 'p/b'], exact: false },
+    { source: 's/two', sourceUrl: 'u2', paths: ['p/c'], exact: false },
   ]);
+});
+
+// The manifest pins by source name, which is what it writes; sourcesOf groups
+// by url, which is what gets cloned. This is where the two meet.
+test('sourcesOf marks the sources the manifest pinned', () => {
+  const entries = [
+    { name: 'unslop', source: 'cursor/plugins', sourceUrl: 'u1', path: 'pstack/skills/unslop', hash: 'x' },
+    { name: 'tdd', source: 'm/s', sourceUrl: 'u2', path: 'p/tdd', hash: 'y' },
+  ];
+  const grouped = sourcesOf(entries, new Set(['cursor/plugins']));
+  assert.equal(grouped.find((g) => g.source === 'cursor/plugins').exact, true);
+  assert.equal(grouped.find((g) => g.source === 'm/s').exact, false);
 });
 
 test('planUpdates calls a matching tree SHA current', () => {

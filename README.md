@@ -142,6 +142,24 @@ belong on every machine and which repo each installs from; `nortuscc` drives
 `npx skills` to fetch them into the shared store at `~/.agents/skills`, which is
 where Codex looks natively and where Claude's installation points.
 
+### Exact sources
+
+By default `update` lists a source repo and offers everything in it that is not
+installed yet, which is how a new skill upstream gets noticed. That is the wrong
+default for a monorepo: `cursor/plugins` holds 82 skills and this machine wants
+one of them. Marking the source **exact** limits it to the skills named under it:
+
+```
+[cursor/plugins] exact
+unslop
+```
+
+An exact source is still checked for updates — the tree SHA of each named skill
+is still compared — but the repo is never listed, so the other 81 are neither
+offered nor paid for. `exact` is the only marker; a source without it keeps
+being scanned, and an unrecognised marker leaves the source unpinned rather than
+failing the read. `capture` carries the marker across when it rewrites the file.
+
 There is **one** shared store, and installs name their agents explicitly:
 
 ```bash

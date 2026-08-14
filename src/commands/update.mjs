@@ -21,6 +21,7 @@ import {
   readSkillsManifest,
   installArgs,
   skillExposure,
+  exactSources,
 } from '../skills.mjs';
 import { parseTarget } from '../targets.mjs';
 import { agentsSkillsDir } from '../resolve.mjs';
@@ -223,11 +224,14 @@ export async function run(allArgs = [], deps = {}) {
   const entries = updatableSkills(lock, installedNames);
 
   // One clone per source yields both the tree SHAs and the repo's full skill
-  // list, so discovering what is available costs no extra network.
+  // list, so discovering what is available costs no extra network. An exact
+  // source skips the listing half: the manifest has already said which of its
+  // skills this machine wants, so the rest of the repo is not on offer.
+  const exact = exactSources(readSkillsManifest());
   const remoteTrees = new Map();
   const upstreamBySource = new Map();
-  for (const { source, sourceUrl, paths } of sourcesOf(entries)) {
-    const found = await inspectSource(sourceUrl, paths);
+  for (const { source, sourceUrl, paths, exact: pinned } of sourcesOf(entries, exact)) {
+    const found = await inspectSource(sourceUrl, paths, { discover: !pinned });
     if (!found) continue;
     remoteTrees.set(sourceUrl, found.trees);
     upstreamBySource.set(source, upstreamSkills(found.skillPaths));
@@ -356,7 +360,7 @@ export async function run(allArgs = [], deps = {}) {
   // ran, rather than diffing what we intended to do.
   if (actions.add.length || actions.remove.length) {
     const before = readSkillsManifest();
-    const groups = installedGroups(readLock(), installed());
+    const groups = installedGroups(readLock(), installed(), before);
     const outcome = manifestOutcome({ before, groups, prunedNames: removeOk ? actions.remove : [] });
     if (outcome.write) {
       writeManifest(emitManifest(groups));

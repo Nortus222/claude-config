@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -674,6 +674,55 @@ test('the report lists an upstream skill that is not installed as available', as
   try {
     await run(['--check'], AVAILABLE_DEPS());
   } finally { process.stdout.write = orig; }
+  assert.match(chunks.join(''), /available.*wizard/s);
+});
+
+// A source repo can hold far more skills than a machine wants from it. Pinning
+// it in the manifest is what stops `update` offering the rest — and the saving
+// is the tree listing itself, not a filter applied after paying for it.
+test('an exact source is never scanned, so nothing from it is offered', async () => {
+  const manifest = join(fixtureRepo, 'skills-manifest.txt');
+  writeFileSync(manifest, '[o/r] exact\nfresh\nstale\n');
+
+  const seen = [];
+  // Mirrors the real inspectSource: discovery off means no listing is produced.
+  const recording = async (_url, _paths, opts = {}) => {
+    seen.push(opts.discover);
+    return {
+      trees: new Map([['s/stale', 'new'], ['s/fresh', 'same']]),
+      skillPaths: opts.discover === false ? [] : ['s/wizard/SKILL.md'],
+    };
+  };
+
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], AVAILABLE_DEPS({ inspectSource: recording }));
+  } finally {
+    process.stdout.write = orig;
+    rmSync(manifest, { force: true });
+  }
+
+  assert.deepEqual(seen, [false], 'the pinned source is inspected with discovery off');
+  assert.doesNotMatch(chunks.join(''), /wizard/, 'nothing from a pinned source is offered');
+});
+
+// The pin is per source, so an unpinned one in the same run keeps discovering.
+test('a source with no marker is still scanned', async () => {
+  const manifest = join(fixtureRepo, 'skills-manifest.txt');
+  writeFileSync(manifest, '[o/r]\nfresh\nstale\n');
+
+  const chunks = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  try {
+    await run(['--check'], AVAILABLE_DEPS());
+  } finally {
+    process.stdout.write = orig;
+    rmSync(manifest, { force: true });
+  }
+
   assert.match(chunks.join(''), /available.*wizard/s);
 });
 

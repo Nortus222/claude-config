@@ -110,3 +110,24 @@ test('inspectSource ignores files that merely contain SKILL.md in their name', a
   const res = await inspectSource(ORIGIN_URL, []);
   assert.ok(!res.skillPaths.some((p) => p.endsWith('NOT-SKILL.md')));
 });
+
+// --- exact sources -----------------------------------------------------------
+
+// What an exact source buys: the version check still runs, but the repo is
+// never listed. For cursor/plugins that is the difference between asking about
+// one skill and being handed 82.
+test('discover: false keeps the tree SHAs and drops the repo listing', async () => {
+  const res = await inspectSource(ORIGIN_URL, ['skills/tdd'], { discover: false });
+  assert.equal(res.trees.get('skills/tdd'), EXPECTED, 'a pinned skill is still checked for being outdated');
+  assert.deepEqual(res.skillPaths, [], 'nothing from the repo is on offer');
+});
+
+test('discover: false never runs the listing at all', async () => {
+  const commands = [];
+  const run = async (args) => {
+    commands.push(args[0]);
+    return { code: 0, out: 'deadbeef', err: '' };
+  };
+  await inspectSource(ORIGIN_URL, ['skills/tdd'], { run, discover: false });
+  assert.deepEqual(commands, ['clone', 'rev-parse'], 'ls-tree is skipped, not just discarded');
+});
