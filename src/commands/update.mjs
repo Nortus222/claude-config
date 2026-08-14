@@ -9,9 +9,9 @@ import {
   runUpdate as realRunUpdate,
   runRemove as realRunRemove,
   installGroups as realInstallGroups,
-  readExposure as realReadExposure,
   agentIdsFor,
 } from '../skills-cli.mjs';
+import { readLinkExposure as realReadExposure } from '../skill-links.mjs';
 import {
   readSkillLock,
   installedSkillNames,

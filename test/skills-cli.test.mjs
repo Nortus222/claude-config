@@ -7,8 +7,6 @@ import {
   runUpdate,
   buildRemoveCommand,
   runRemove,
-  buildListCommand,
-  readExposure,
   SKILL_AGENTS,
   agentIdsFor,
 } from '../src/skills-cli.mjs';
@@ -118,13 +116,6 @@ test('nortuscc targets map to the installer\'s own agent ids', () => {
   assert.deepEqual(agentIdsFor('codex'), ['codex']);
 });
 
-test('buildListCommand asks one agent at a time for machine-readable output', () => {
-  assert.deepEqual(buildListCommand('codex'), {
-    cmd: 'npx',
-    args: ['-y', 'skills', 'list', '--global', '--agent', 'codex', '--json'],
-  });
-});
-
 test('installGroups passes the selected agents through to every group', async () => {
   const calls = [];
   const run = async (command) => { calls.push(command); return true; };
@@ -137,50 +128,6 @@ test('installGroups passes the selected agents through to every group', async ()
       '--agent', 'claude-code', 'codex',
     ]);
   }
-});
-
-// --- exposure inspection -----------------------------------------------------
-
-test('readExposure asks each selected agent and collects one list per agent', async () => {
-  const calls = [];
-  const { list, errors } = await readExposure(['claude-code', 'codex'], {
-    run: async (command) => {
-      calls.push(command);
-      const agent = command.args[command.args.indexOf('--agent') + 1];
-      return { ok: true, stdout: JSON.stringify({ skills: [{ name: `for-${agent}` }] }) };
-    },
-  });
-
-  assert.deepEqual(calls.map((c) => c.args[c.args.indexOf('--agent') + 1]), ['claude-code', 'codex']);
-  assert.deepEqual(list, { 'claude-code': ['for-claude-code'], codex: ['for-codex'] });
-  assert.deepEqual(errors, []);
-});
-
-// Malformed output is an inspection error, not an empty successful list.
-// Reading it as "this agent has no skills" would report every shared skill as
-// partially installed and drive a reinstall of all of them.
-test('unparseable output is an inspection error, not an empty list', async () => {
-  const { list, errors } = await readExposure(['codex'], {
-    run: async () => ({ ok: true, stdout: 'not json at all' }),
-  });
-  assert.ok(errors.length > 0);
-  assert.match(errors.join('\n'), /codex/);
-  assert.equal(list.codex, undefined, 'a failed read must not masquerade as an empty list');
-});
-
-test('a failed list command is an inspection error too', async () => {
-  const { errors } = await readExposure(['codex'], {
-    run: async () => ({ ok: false, stdout: '', note: 'could not launch `npx`' }),
-  });
-  assert.ok(errors.length > 0);
-});
-
-test('readExposure accepts a bare array of names as well as a skills object', async () => {
-  const { list, errors } = await readExposure(['codex'], {
-    run: async () => ({ ok: true, stdout: JSON.stringify(['plain', 'names']) }),
-  });
-  assert.deepEqual(errors, []);
-  assert.deepEqual(list.codex, ['plain', 'names']);
 });
 
 test('buildUpdateCommand names every skill and stays global and non-interactive', () => {

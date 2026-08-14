@@ -15,7 +15,8 @@ import {
   reconcile,
   skillExposure,
 } from '../skills.mjs';
-import { agentIdsFor, readExposure } from '../skills-cli.mjs';
+import { agentIdsFor } from '../skills-cli.mjs';
+import { readLinkExposure } from '../skill-links.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -36,9 +37,9 @@ export function configReport(entries = SYNC) {
 
 export async function run(args = [], deps = {}) {
   // Both probes are injected so tests can answer "what can each agent see?"
-  // and "what does Codex have installed?" without spawning the real installer
-  // or the real `codex` CLI, either of which reaches the live machine.
-  const { inspectExposure = readExposure, codexState } = deps;
+  // and "what does Codex have installed?" without reading the developer's own
+  // agent directories or spawning the real `codex` CLI.
+  const { inspectExposure = readLinkExposure, codexState } = deps;
 
   const { target, error } = parseTarget(args);
   if (error) {
