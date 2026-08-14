@@ -143,7 +143,11 @@ export async function run(args = [], deps = {}) {
     return 0;
   }
 
-  process.stdout.write('\n' + suggestions(actionable) + '\n');
+  // suggestions() speaks only for the config rows. Skills and integrations
+  // already printed their own advice in their own sections, so a run made
+  // dirty by those alone has nothing to add here and prints nothing.
+  const advice = suggestions(actionable);
+  if (advice) process.stdout.write('\n' + advice + '\n');
   return 1;
 }
 
