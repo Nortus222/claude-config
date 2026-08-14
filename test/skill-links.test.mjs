@@ -4,34 +4,48 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { agentSkillsDir, exposedSkillNames, readLinkExposure } from '../src/skill-links.mjs';
+import { agentSkillsDirs, exposedSkillNames, readLinkExposure } from '../src/skill-links.mjs';
 
-// Each test gets its own ~/.claude and ~/.codex through the same env overrides
-// the rest of the suite uses, so nothing here reads the developer's machine.
+// Each test gets its own ~/.claude, ~/.codex and shared store through the same
+// env overrides the rest of the suite uses, so nothing here reads the
+// developer's machine. The store override matters as much as the other two:
+// Codex loads from the store, so leaving it unset would answer Codex's half of
+// every assertion below from the developer's real ~/.agents/skills.
 function onIsolatedAgents(prefix, fn) {
   const home = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-`));
   const claude = join(home, '.claude');
   const codex = join(home, '.codex');
+  const store = join(home, '.agents', 'skills');
   mkdirSync(claude, { recursive: true });
   mkdirSync(codex, { recursive: true });
+  mkdirSync(store, { recursive: true });
 
-  const saved = { claude: process.env.NORTUSCC_CLAUDE_DIR, codex: process.env.NORTUSCC_CODEX_DIR };
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+  };
   process.env.NORTUSCC_CLAUDE_DIR = claude;
   process.env.NORTUSCC_CODEX_DIR = codex;
+  process.env.NORTUSCC_AGENTS_DIR = store;
 
   try {
-    return fn({ home, claude, codex });
+    return fn({ home, claude, codex, store });
   } finally {
     process.env.NORTUSCC_CLAUDE_DIR = saved.claude;
     process.env.NORTUSCC_CODEX_DIR = saved.codex;
+    process.env.NORTUSCC_AGENTS_DIR = saved.agents;
     rmSync(home, { recursive: true, force: true });
   }
 }
 
-test('the skills directory is the agent directory the rest of the tool already resolves', () => {
-  onIsolatedAgents('links-dir', (fx) => {
-    assert.equal(agentSkillsDir('claude'), join(fx.claude, 'skills'));
-    assert.equal(agentSkillsDir('codex'), join(fx.codex, 'skills'));
+// The asymmetry this whole file turns on. Claude loads from its own directory
+// and nowhere else; Codex loads from the shared store, which is where the
+// installer puts the skill in the first place.
+test('Claude loads from its own directory, Codex from the shared store', () => {
+  onIsolatedAgents('links-dirs', (fx) => {
+    assert.deepEqual(agentSkillsDirs('claude'), [join(fx.claude, 'skills')]);
+    assert.deepEqual(agentSkillsDirs('codex'), [fx.store, join(fx.codex, 'skills')]);
   });
 });
 
@@ -95,17 +109,44 @@ test('exposure is keyed by installer agent id, not by nortuscc target', () => {
   });
 });
 
-// The regression this module exists for. `npx skills list` answered from its
-// lockfile and reported this skill as visible to both agents, so status called
-// the machine clean while the skill was loadable by neither.
-test('a skill in the store that reached no agent is exposed to no agent', () => {
+// The regression this module exists for, stated correctly. `npx skills list`
+// answered from its lockfile and called this skill visible to both agents,
+// while Claude could not load it. Codex could: the store is Codex's own read
+// path, so landing in the store is the whole of exposing a skill to it.
+test('a skill only in the store is exposed to Codex but not to Claude', () => {
   onIsolatedAgents('links-store-only', (fx) => {
-    mkdirSync(join(fx.home, '.agents', 'skills', 'wayfinder'), { recursive: true });
+    mkdirSync(join(fx.store, 'wayfinder'), { recursive: true });
     mkdirSync(join(fx.claude, 'skills'), { recursive: true });
     mkdirSync(join(fx.codex, 'skills'), { recursive: true });
 
     const { list } = readLinkExposure(['claude-code', 'codex']);
-    assert.deepEqual(list, { 'claude-code': [], codex: [] });
+    assert.deepEqual(list, { 'claude-code': [], codex: ['wayfinder'] });
+  });
+});
+
+// Reporting a skill as missing from Codex when Codex can load it made `status`
+// permanently non-zero and gave `update` 28 repairs it would redo on every run,
+// since installing them again could not change the directory being read.
+test('the store alone settles Codex, so a repaired machine converges', () => {
+  onIsolatedAgents('links-converges', (fx) => {
+    mkdirSync(join(fx.store, 'tdd'), { recursive: true });
+    mkdirSync(join(fx.claude, 'skills'), { recursive: true });
+    symlinkSync(join(fx.store, 'tdd'), join(fx.claude, 'skills', 'tdd'));
+
+    const { list } = readLinkExposure(['claude-code', 'codex']);
+    assert.deepEqual(list, { 'claude-code': ['tdd'], codex: ['tdd'] });
+  });
+});
+
+// A machine that does keep skills in ~/.codex/skills is still read; the store
+// is listed first, not instead.
+test('Codex sees its own directory as well as the store, without duplicates', () => {
+  onIsolatedAgents('links-codex-union', (fx) => {
+    mkdirSync(join(fx.store, 'shared'), { recursive: true });
+    mkdirSync(join(fx.codex, 'skills', 'shared'), { recursive: true });
+    mkdirSync(join(fx.codex, 'skills', 'local-only'), { recursive: true });
+
+    assert.deepEqual(exposedSkillNames('codex'), ['local-only', 'shared']);
   });
 });
 
