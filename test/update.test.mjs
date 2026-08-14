@@ -33,8 +33,7 @@ const entry = (path, hash) => ({
 
 // Every selected agent already sees every fixture skill, so post-update
 // reconciliation is a no-op. Injected rather than defaulted: the real
-// inspection spawns `npx skills list`, which reaches the network and the
-// developer's live machine.
+// inspection reads the developer's own ~/.claude and ~/.codex.
 const SEES_EVERYTHING = async () => ({
   list: { 'claude-code': ['fresh', 'stale', 'wizard'], codex: ['fresh', 'stale', 'wizard'] },
   errors: [],
