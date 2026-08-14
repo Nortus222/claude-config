@@ -18,6 +18,9 @@ import {
 import { agentIdsFor } from '../skills-cli.mjs';
 import { readLinkExposure } from '../skill-links.mjs';
 import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
+import { cliVersion } from '../cli-version.mjs';
+import { confirm as realConfirm } from '../prompt.mjs';
+import { run as realPull } from './pull.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -40,7 +43,14 @@ export async function run(args = [], deps = {}) {
   // Both probes are injected so tests can answer "what can each agent see?"
   // and "what does Codex have installed?" without reading the developer's own
   // agent directories or spawning the real `codex` CLI.
-  const { inspectExposure = readLinkExposure, codexState } = deps;
+  const {
+    inspectExposure = readLinkExposure,
+    codexState,
+    cliState = cliVersion,
+    confirm = realConfirm,
+    pull = realPull,
+    isTTY = process.stdin.isTTY,
+  } = deps;
 
   // Before --target, so a global flag never reaches the target parser as a
   // stray value.
@@ -50,6 +60,34 @@ export async function run(args = [], deps = {}) {
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
+  }
+
+  // First, before anything else is read. Everything below is computed by the
+  // code in this checkout and against the manifests in it, so a stale checkout
+  // produces a stale report — and the report is what the user would act on.
+  const cli = cliState();
+  if (cli.state !== 'unmanaged' && cli.state !== 'current') {
+    const row = cli.state === 'behind'
+      ? formatRow('nortuscc', 'behind', `${cli.remote}/${cli.branch} is at ${cli.sha}`)
+      : formatRow('nortuscc', 'unknown', cli.note ?? '');
+    process.stdout.write('\n' + section('cli', [row]));
+  }
+
+  if (cli.state === 'behind') {
+    // Only ever on an explicit yes, and never asked where nothing can answer:
+    // a scheduled status must not block on a prompt. Without a terminal this
+    // reports and exits non-zero, which is the same answer a decline gives.
+    const update = isTTY ? await confirm('Update nortuscc now?', { isTTY }) : false;
+
+    if (update) {
+      const code = await pull(['--target', target], { codexState });
+      if (code !== 0) return code;
+      // Deliberately does not go on to report. Every line below would come
+      // from the modules this process already loaded — the old ones — and a
+      // report the user cannot trust is worse than one they have to re-run.
+      process.stdout.write('\nnortuscc updated. Re-run `nortuscc status` to report on the new version.\n');
+      return 0;
+    }
   }
 
   // A skills-only machine reports the section as unmanaged rather than
@@ -138,9 +176,16 @@ export async function run(args = [], deps = {}) {
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
 
+  // Reached only by declining the update, or by having no terminal to be asked
+  // on — which is the same answer. `unknown` is deliberately not counted: an
+  // unreachable remote is being offline, which is ordinary and offers the user
+  // nothing to do, unlike an exposure read that failed against local files.
+  const cliBehind = cli.state === 'behind';
+
   // A selected integration that is missing or blocked is as actionable as a
   // drifted file: the machine is not in agreement with what the repo declares.
   if (
+    cliBehind === false &&
     actionable.length === 0 &&
     errors.length === 0 &&
     pending.length === 0 &&
@@ -156,7 +201,12 @@ export async function run(args = [], deps = {}) {
   // suggestions() speaks only for the config rows. Skills and integrations
   // already printed their own advice in their own sections, so a run made
   // dirty by those alone has nothing to add here and prints nothing.
-  const advice = suggestions(actionable);
+  const advice = [
+    // Named even though the prompt just offered it: a declined prompt is gone,
+    // and a run with no terminal was never asked in the first place.
+    ...(cliBehind ? ['  nortuscc pull     update nortuscc itself'] : []),
+    suggestions(actionable),
+  ].filter(Boolean).join('\n');
   if (advice) process.stdout.write('\n' + advice + '\n');
   return 1;
 }

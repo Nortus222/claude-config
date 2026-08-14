@@ -70,7 +70,7 @@ nortuscc apply --no-skills-only  # record it off again
 ## Daily use
 
 ```bash
-nortuscc status              # read-only; changes nothing
+nortuscc status              # reports; only ever writes if you accept its update prompt
 nortuscc pull                # git pull, then bring this machine up to date
 nortuscc push -m "rules: ..." # share local edits
 ```
@@ -83,7 +83,7 @@ prompt or a scheduled check.
 | Command | Effect |
 | --- | --- |
 | `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, apply, then install interactively |
-| `status` | Read-only report: config, integrations, skills |
+| `status` | Report: cli, config, integrations, skills. Offers to update nortuscc when behind |
 | `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
 | `capture` | Machine → repo, including regenerating the skills manifest |
@@ -262,6 +262,33 @@ update; each invocation resolves the repo itself.
 
 Order matters when a release changes both: `pull` first, then `update`, so the
 skill pass runs on the newer code and against the newer `skills-manifest.txt`.
+
+You do not have to remember to check. `status` compares this checkout against
+the remote on every run and offers the update:
+
+```
+cli
+  nortuscc         behind       origin/main is at 7f098e9
+
+Update nortuscc now? [y/N]
+```
+
+Accepting runs `pull` and then stops, telling you to re-run — every later line
+of a report would come from the modules the process already loaded, and a report
+you cannot trust is worse than one you have to run twice. Declining exits
+non-zero and names `nortuscc pull`, because the prompt is gone by then.
+
+The check asks `git ls-remote`, never `fetch`: a fetch writes refs into `.git`,
+and `status` must not change the repo it reports on. It asks "do we already have
+the remote's tip?" rather than counting commits — a checkout that is *ahead* by
+unpushed commits has the tip and is correctly left alone.
+
+Nothing is asked where nothing can answer: with no terminal, `status` reports
+and exits non-zero rather than blocking a scheduled run on a prompt. An
+unreachable remote is reported as `unknown` and does **not** fail the run —
+being offline is ordinary and offers nothing to act on, unlike an exposure read
+that failed against local files. Running via `npx github:…` has no checkout to
+compare, so the section stays silent.
 
 `nortuscc update` refreshes the skills a machine already has, then re-checks
 agent exposure and asks the installer to re-expose anything a selected agent
