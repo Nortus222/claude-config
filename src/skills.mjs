@@ -155,13 +155,12 @@ export function manifestPath() {
 }
 
 // There is one shared skill store, so "installed" and "usable by this agent"
-// are different questions. This answers the second from the installer's own
-// per-agent listing, which replaced a scan of ~/.claude/skills that guessed at
-// a layout the installer owns and answered for Claude alone.
+// are different questions. This classifies the second; src/skill-links.mjs
+// answers it, per agent, from the directory that agent loads from.
 //
 // `list` maps an installer agent id to the names that agent can see. An agent
 // with no entry counts as seeing nothing: whether that is a genuinely empty
-// agent or a failed read is the caller's to report, and readExposure keeps a
+// agent or a failed read is the caller's to report, and the probe keeps a
 // failed read out of `list` entirely rather than passing off an empty one.
 export function skillExposure({ names, agents, list = {} }) {
   const exposed = [];

@@ -15,7 +15,8 @@ import {
   reconcile,
   skillExposure,
 } from '../skills.mjs';
-import { agentIdsFor, readExposure } from '../skills-cli.mjs';
+import { agentIdsFor } from '../skills-cli.mjs';
+import { readLinkExposure } from '../skill-links.mjs';
 
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
@@ -36,9 +37,9 @@ export function configReport(entries = SYNC) {
 
 export async function run(args = [], deps = {}) {
   // Both probes are injected so tests can answer "what can each agent see?"
-  // and "what does Codex have installed?" without spawning the real installer
-  // or the real `codex` CLI, either of which reaches the live machine.
-  const { inspectExposure = readExposure, codexState } = deps;
+  // and "what does Codex have installed?" without reading the developer's own
+  // agent directories or spawning the real `codex` CLI.
+  const { inspectExposure = readLinkExposure, codexState } = deps;
 
   const { target, error } = parseTarget(args);
   if (error) {
@@ -86,11 +87,11 @@ export async function run(args = [], deps = {}) {
     skillLines.push(formatRow('local', String(skills.local.length), skills.local.join(', ')));
   }
   // Canonical presence and agent exposure are different questions: a skill can
-  // sit in the shared store and still be invisible to one selected agent. Ask
-  // the installer, per agent, rather than guessing at its layout.
+  // sit in the shared store and still be loadable by no selected agent. Read
+  // each agent's own skills directory to tell the two apart.
   const agents = agentIdsFor(target);
   // Nothing canonical to ask about means nothing to ask: a bare machine should
-  // not spawn the installer just to be told it has no skills.
+  // not go looking through agent directories to be told it has no skills.
   const { list, errors: exposureErrors } =
     skills.ok.length > 0 ? await inspectExposure(agents) : { list: {}, errors: [] };
   const exposure = skillExposure({ names: skills.ok, agents, list });
@@ -104,12 +105,23 @@ export async function run(args = [], deps = {}) {
       ),
     );
   }
+  // Present in the store and loadable by none of the selected agents. Reported
+  // apart from `missing` above, which is the store's own answer: these are
+  // installed, so an install has nothing to add, and were silently dropped
+  // from this report for as long as the probe above could not produce them.
+  if (exposure.missing.length) {
+    skillLines.push(formatRow('unlinked', String(exposure.missing.length), exposure.missing.join(', ')));
+  }
   for (const message of exposureErrors) skillLines.push(formatRow('exposure', 'unknown', message));
 
   if (!skillLines.length) skillLines.push(formatRow('manifest', 'satisfied', ''));
-  if (skills.missing.length || exposure.partial.length) {
-    skillLines.push('', '  nortuscc apply --install');
-  }
+  // Each gap names the command that can close it. `apply --install` installs
+  // what the store lacks and would find nothing to do for a skill already in
+  // it; re-placing that skill into an agent's directory is `update`'s job.
+  const repairs = [];
+  if (skills.missing.length) repairs.push('  nortuscc apply --install');
+  if (exposure.partial.length || exposure.missing.length) repairs.push('  nortuscc update');
+  if (repairs.length) skillLines.push('', ...repairs);
   process.stdout.write(section('skills', skillLines));
 
   const actionable = rows.filter(
@@ -124,13 +136,18 @@ export async function run(args = [], deps = {}) {
     pending.length === 0 &&
     skills.missing.length === 0 &&
     exposure.partial.length === 0 &&
+    exposure.missing.length === 0 &&
     exposureErrors.length === 0
   ) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }
 
-  process.stdout.write('\n' + suggestions(actionable) + '\n');
+  // suggestions() speaks only for the config rows. Skills and integrations
+  // already printed their own advice in their own sections, so a run made
+  // dirty by those alone has nothing to add here and prints nothing.
+  const advice = suggestions(actionable);
+  if (advice) process.stdout.write('\n' + advice + '\n');
   return 1;
 }
 

@@ -37,15 +37,11 @@ export function buildCommand({ source, skills, agents = [] }) {
   };
 }
 
-// One agent per invocation: the installer answers for the agent it is asked
-// about, and merging two agents' answers from a single call would lose which
-// of them could actually see each skill.
-export function buildListCommand(agent) {
-  return {
-    cmd: 'npx',
-    args: ['-y', 'skills', 'list', '--global', '--agent', agent, '--json'],
-  };
-}
+// `skills list --agent <id>` is deliberately not wrapped here. It answers from
+// the installer's lockfile rather than the filesystem, returning every
+// globally installed skill whichever agent is named, so it cannot answer "can
+// this agent load this skill?" — see src/skill-links.mjs, which reads the
+// agent's own directory instead.
 
 function runOne({ cmd, args }) {
   return new Promise((resolve) => {
@@ -61,53 +57,6 @@ function runOne({ cmd, args }) {
       resolve(false);
     });
   });
-}
-
-// Captures stdout rather than inheriting it: `list --json` is read, not shown.
-function captureOne({ cmd, args }) {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      stdio: ['ignore', 'pipe', 'inherit'],
-      shell: process.platform === 'win32',
-    });
-    let stdout = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.on('close', (code) => resolve({ ok: code === 0, stdout }));
-    child.on('error', (err) => resolve({ ok: false, stdout: '', note: `could not launch \`${cmd}\`: ${err.message}` }));
-  });
-}
-
-// The installer's own answer to "can this agent use this skill?". Accepts
-// either `{skills: [{name}]}` or a bare array of names, since the shape is
-// the installer's to change.
-function parseNames(text) {
-  const parsed = JSON.parse(text);
-  const rows = Array.isArray(parsed) ? parsed : parsed?.skills;
-  if (!Array.isArray(rows)) throw new Error('expected a list of skills');
-  return rows.map((row) => (typeof row === 'string' ? row : row?.name)).filter((n) => typeof n === 'string');
-}
-
-// Output that cannot be parsed is an inspection error, never an empty list.
-// Reading a failed read as "this agent has no skills" would report every
-// shared skill as partially installed and drive a reinstall of all of them.
-export async function readExposure(agents, { run = captureOne } = {}) {
-  const list = {};
-  const errors = [];
-
-  for (const agent of agents) {
-    const result = await run(buildListCommand(agent));
-    if (!result?.ok) {
-      errors.push(`could not list skills for ${agent}${result?.note ? `: ${result.note}` : ''}`);
-      continue;
-    }
-    try {
-      list[agent] = parseNames(result.stdout ?? '');
-    } catch (err) {
-      errors.push(`could not read the skill list for ${agent}: ${err.message}`);
-    }
-  }
-
-  return { list, errors };
 }
 
 export async function installGroups(groups, { agents = [], dryRun = false, run = runOne } = {}) {

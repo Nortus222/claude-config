@@ -550,8 +550,8 @@ test('status reports Codex drift under its own destination name', async () => {
 
 // The successor to the broken-symlink scan: a skill present in the shared
 // store but invisible to one selected agent is partially installed, and a
-// machine in that state is not in agreement. Asked of the installer rather
-// than inferred from a directory layout it owns.
+// machine in that state is not in agreement. Read from each agent's own skills
+// directory, which is where that agent loads from.
 test('status reports a skill one selected agent cannot see, and exits non-zero', async () => {
   await onCleanMachine('partial-skill', async (fx) => {
     mkdirSync(join(fx.agents, 'review'), { recursive: true });
@@ -573,6 +573,82 @@ test('status reports a skill one selected agent cannot see, and exits non-zero',
     assert.match(output, /review/, 'the skill is named');
     assert.match(output, /codex/, 'the agent that cannot see it is named');
     assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// The regression that made this whole check worthless. skillExposure has always
+// separated "no selected agent can load this" from "some can", but status
+// rendered only the partial row and gated agreement on it alone, so a skill
+// loadable by nobody printed nothing and still reported a machine in
+// agreement. That is the exact state 18 skills on the author's machine were
+// in: recorded as installed, present in the store, placed for neither agent.
+test('status reports a skill no selected agent can load, and exits non-zero', async () => {
+  await onCleanMachine('unlinked-skill', async (fx) => {
+    mkdirSync(join(fx.agents, 'wayfinder'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nwayfinder\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { wayfinder: { source: 'a/b' } } }),
+    );
+
+    const seenByNeither = () => ({ list: { 'claude-code': [], codex: [] }, errors: [] });
+    const { code, output } = await runCaptured(() => fx.run([], { inspectExposure: seenByNeither }));
+
+    assert.equal(code, 1, 'a skill no agent can load must make status exit non-zero');
+    assert.match(output, /unlinked/, 'the unlinked row is printed');
+    assert.match(output, /wayfinder/, 'the skill is named');
+    assert.doesNotMatch(output, /everything is in agreement/);
+  });
+});
+
+// A status that names a problem and then suggests a command that cannot fix it
+// is worse than one that stays quiet. `apply --install` builds its work from
+// the skills the store lacks, so it finds nothing to do for a skill already in
+// the store; re-placing that skill into an agent's directory is `update`'s job.
+test('an exposure gap is pointed at update, not at apply --install', async () => {
+  await onCleanMachine('exposure-advice', async (fx) => {
+    mkdirSync(join(fx.agents, 'wayfinder'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nwayfinder\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { wayfinder: { source: 'a/b' } } }),
+    );
+
+    const seenByNeither = () => ({ list: { 'claude-code': [], codex: [] }, errors: [] });
+    const { output } = await runCaptured(() => fx.run([], { inspectExposure: seenByNeither }));
+
+    assert.match(output, /nortuscc update/, 'the command that can re-place the skill is named');
+    assert.doesNotMatch(
+      output,
+      /apply --install/,
+      'nothing is missing from the store, so an install has nothing to offer',
+    );
+  });
+});
+
+// The default probe reads the agent directories rather than taking an injected
+// answer, so the wiring is exercised end to end at least once: without this,
+// every exposure test could pass against a double while the real status
+// command read the wrong place entirely.
+test('with no probe injected, status reads the agent\'s own skills directory', async () => {
+  await onCleanMachine('exposure-default-probe', async (fx) => {
+    mkdirSync(join(fx.agents, 'wayfinder'), { recursive: true });
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[a/b]\nwayfinder\n');
+    writeFileSync(
+      join(fx.home, '.agents', '.skill-lock.json'),
+      JSON.stringify({ skills: { wayfinder: { source: 'a/b' } } }),
+    );
+
+    const unplaced = await runCaptured(() => fx.run());
+    assert.equal(unplaced.code, 1, 'a skill in the store but in no agent directory is drift');
+    assert.match(unplaced.output, /unlinked/);
+
+    mkdirSync(join(fx.claude, 'skills', 'wayfinder'), { recursive: true });
+    mkdirSync(join(fx.codex, 'skills', 'wayfinder'), { recursive: true });
+
+    const placed = await runCaptured(() => fx.run());
+    assert.equal(placed.code, 0, 'placing it for both agents brings the machine into agreement');
+    assert.match(placed.output, /everything is in agreement/);
   });
 });
 
