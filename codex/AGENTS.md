@@ -40,6 +40,22 @@ implement, stage, commit, switch branches, or merge feature work there.
   feature branch may be removed. Never discard an unmerged or dirty worktree.
 - Preserve unrelated changes and never stage files outside the task.
 
+## Attribution
+
+Anything you publish under my account should say what wrote it. Name the model and the harness you are
+running as, never a generic "AI assistant".
+
+- Every pull request you open ends with the model and harness as the last line of its body:
+  `Model: <model> · Harness: <harness>`. Keep it last when you revise a PR body.
+- Every comment you post — PR review, review reply, issue comment — opens with a GitHub note alert, so
+  nobody reads it as me writing by hand:
+
+      > [!NOTE]
+      > <model> via <harness>, on behalf of Ihor.
+
+- Do not add a `Co-Authored-By` trailer for the model to commit messages. The PR body carries the
+  attribution; commits stay mine.
+
 ## Review and verification
 
 - Before the first commit, review `git diff HEAD` plus untracked files.
