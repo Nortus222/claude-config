@@ -4,6 +4,7 @@
 # A source marked 'exact' is limited to the skills listed under it.
 
 [Nortus222/agent-skills]
+deploy-mobile-apps
 explain
 
 [cursor/plugins] exact
