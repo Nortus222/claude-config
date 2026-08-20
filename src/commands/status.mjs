@@ -114,17 +114,32 @@ export async function run(args = [], deps = {}) {
   const planned = errors.length ? [] : integrationPlan({ integrations, target, adapters });
   const pending = planned.filter((item) => item.state !== 'installed');
 
+  // Versions are reported, never declared: `claude plugin install` has no
+  // version flag, so a pin in integrations.json could not be honoured and
+  // would manufacture permanent drift against auto-updating marketplaces.
+  // Diffing two machines' output is what this is for.
+  const showVersions = statusArgs.includes('--versions');
+  const versionOf = new Map(inventory.pluginVersions);
+
   const integrationLines = errors.length
     ? errors.map((message) => formatRow('manifest', 'invalid', message))
     : planned.length === 0
       ? [formatRow('none declared', 'satisfied', '')]
-      : pending.length === 0
-        ? [formatRow('all declared', 'installed', '')]
-        : [
-            ...pending.map((item) => formatRow(item.label, item.state, item.note)),
-            '',
-            '  nortuscc apply --install',
-          ];
+      : showVersions
+        ? planned.map((item) =>
+            formatRow(
+              item.label,
+              item.state,
+              item.type === 'plugin' ? (versionOf.get(item.plugin) ?? 'unknown') : item.note,
+            ),
+          )
+        : pending.length === 0
+          ? [formatRow('all declared', 'installed', '')]
+          : [
+              ...pending.map((item) => formatRow(item.label, item.state, item.note)),
+              '',
+              '  nortuscc apply --install',
+            ];
   process.stdout.write(section('integrations', integrationLines));
 
   const skills = reconcile({

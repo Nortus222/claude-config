@@ -904,3 +904,56 @@ test('--strict on a clean machine still exits zero and agrees', async () => {
   assert.match(output, /everything is in agreement/);
 });
 
+function withPlugin(home) {
+  mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+  writeFileSync(
+    join(home, '.claude', 'plugins', 'installed_plugins.json'),
+    JSON.stringify({ version: 2, plugins: { 'superpowers@claude-plugins-official': [{ scope: 'user', version: '6.3.0' }] } }),
+  );
+  writeFileSync(
+    join(home, '.claude', 'plugins', 'known_marketplaces.json'),
+    JSON.stringify({ 'claude-plugins-official': {} }),
+  );
+}
+
+test('--versions prints the installed version of a declared plugin', async () => {
+  const setup = (home, repoDir) => {
+    withPlugin(home);
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{
+          id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+          type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+        }],
+      }),
+    );
+  };
+
+  const plain = await statusOutput([], setup);
+  assert.doesNotMatch(plain.output, /6\.3\.0/);
+
+  const detailed = await statusOutput(['--versions'], setup);
+  assert.match(detailed.output, /superpowers\s+installed\s+6\.3\.0/);
+});
+
+// An absent version must never be mistaken for a matching one.
+test('--versions reports an unreadable version as unknown', async () => {
+  const setup = (home, repoDir) => {
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ 'a@claude-plugins-official': true }));
+    writeFileSync(join(home, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'claude-plugins-official': {} }));
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{ id: 'a', label: 'a', target: 'claude', type: 'plugin', default: true, plugin: 'a@claude-plugins-official' }],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /a\s+installed\s+unknown/);
+});
+

@@ -19,6 +19,7 @@ Commands:
   status [--strict] [--versions]   report: cli / config / integrations / skills
                                     and what is installed but undeclared
                                     --strict exits non-zero on undeclared items
+                                    --versions shows each plugin's installed version
                                     offers to update nortuscc when it is behind
   apply [--install] [--take-repo]   repo -> machine
                                     --install also offers missing integrations and skills
