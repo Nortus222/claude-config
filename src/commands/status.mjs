@@ -239,17 +239,22 @@ export async function run(args = [], deps = {}) {
 
   // A selected integration that is missing or blocked is as actionable as a
   // drifted file: the machine is not in agreement with what the repo declares.
-  if (
-    cliBehind === false &&
-    inventoryDirty === false &&
-    actionable.length === 0 &&
-    errors.length === 0 &&
-    pending.length === 0 &&
-    skills.missing.length === 0 &&
-    exposure.partial.length === 0 &&
-    exposure.missing.length === 0 &&
-    exposureErrors.length === 0
-  ) {
+  //
+  // An undeclared item is not, on its own, a machine out of agreement with
+  // what it declared — every condition below is. Default stays informational
+  // so a scheduled run does not start failing the day this ships; Task 9's
+  // --strict is what makes it actionable.
+  const otherDirty =
+    cliBehind ||
+    actionable.length > 0 ||
+    errors.length > 0 ||
+    pending.length > 0 ||
+    skills.missing.length > 0 ||
+    exposure.partial.length > 0 ||
+    exposure.missing.length > 0 ||
+    exposureErrors.length > 0;
+
+  if (!otherDirty && !inventoryDirty) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }
@@ -264,20 +269,6 @@ export async function run(args = [], deps = {}) {
     suggestions(actionable),
   ].filter(Boolean).join('\n');
   if (advice) process.stdout.write('\n' + advice + '\n');
-
-  // An undeclared item is not, on its own, a machine out of agreement with
-  // what it declared — every other condition above is. Default stays
-  // informational so a scheduled run does not start failing the day this
-  // ships; Task 9's --strict is what makes it actionable.
-  const otherDirty =
-    cliBehind ||
-    actionable.length > 0 ||
-    errors.length > 0 ||
-    pending.length > 0 ||
-    skills.missing.length > 0 ||
-    exposure.partial.length > 0 ||
-    exposure.missing.length > 0 ||
-    exposureErrors.length > 0;
 
   if (otherDirty) return 1;
   return strict ? 1 : 0;
