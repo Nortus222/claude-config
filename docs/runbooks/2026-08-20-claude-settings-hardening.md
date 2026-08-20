@@ -258,9 +258,8 @@ Deleting the script or the settings entry therefore reverts on the next
 session start, exactly as it did on 2026-08-12.
 
 **Cost.** 53 fires in the 13-day window, no stdout, no measurable duration.
-It is the cheapest entry in the entire hook table; the two expensive hooks
-(context-mode's `PreToolUse:Agent` at 187.6s, claude-mem's `Stop` at 235.6s)
-both belong to plugins and are unrelated to this one.
+It is the cheapest entry in the entire hook table. The expensive hooks all
+belong to context-mode — see [Disabling costly plugin hooks](#disabling-costly-plugin-hooks).
 
 ### The decision
 
@@ -273,9 +272,128 @@ There is no third option and no reason to want one. If context-mode is ever
 dropped, delete `~/.claude/hooks/context-mode-cache-heal.mjs` and the
 `hooks.SessionStart` entry in the same pass — nothing will re-add them.
 
-Worth separating clearly: this hook is not what context-mode costs. Its
-`PreToolUse:Agent` hook injected 2,548 KB (~637k tokens) over 229 fires and
-187.6s of latency in the same window. That is the entry to scrutinise.
+Worth separating clearly: this hook is not what context-mode costs. See below.
+
+## Disabling costly plugin hooks
+
+### Corrected attribution
+
+An earlier draft of this audit blamed claude-mem for a 236s `Stop` hook. That
+was wrong. Hook commands are recorded with the literal `${CLAUDE_PLUGIN_ROOT}`
+rather than an expanded path, so grepping the command for a plugin name
+attributes nothing. The reliable discriminator is command *shape*:
+
+- context-mode: `node "${CLAUDE_PLUGIN_ROOT}/hooks/<name>.mjs"`
+- claude-mem: shell form, always beginning `export PATH=...`
+- superpowers: `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"`
+
+Re-attributed over the same 13-day window:
+
+| Owner | Fires | Latency | Injected | ~Tokens |
+| --- | ---: | ---: | ---: | ---: |
+| **context-mode** | 651 | **663.8s** | **3,375 KB** | 864k |
+| claude-mem | 63 | 98.4s | 255 KB | 65k |
+| superpowers | 26 | 11.0s | 92 KB | 23k |
+| this repo's cache-heal | 56 | 0s | 0 KB | 0 |
+
+context-mode owns **86% of all hook latency and 91% of all injected context**.
+claude-mem's real cost is roughly a seventh of what the earlier draft claimed —
+its weak read/write ratio still stands on its own, but the latency case against
+it does not.
+
+Per-hook, worst first:
+
+| Hook | Fires | Latency | Injected |
+| --- | ---: | ---: | ---: |
+| `context-mode :: Stop` | 309 | 236.3s | 1 KB |
+| `context-mode :: PreToolUse:Agent` | 229 | 187.6s | 2,548 KB |
+| `context-mode :: PreToolUse:Bash` | 25 | 139.7s | 19 KB |
+| `claude-mem :: SessionStart:startup` | 52 | 84.8s | 255 KB |
+| `context-mode :: UserPromptSubmit` | 2 | 60.6s | 0 KB |
+| `context-mode :: SessionStart:resume` | 30 | 6.7s | 664 KB |
+
+`PreToolUse:Bash` at 5.6s per fire and `UserPromptSubmit` at 30s per fire are
+anomalously slow for how rarely they run. Not addressed here; worth watching.
+
+### There is no supported per-hook switch
+
+Claude Code's hooks documentation is explicit: *"There is no way to disable an
+individual hook while keeping it in the configuration."* `disableAllHooks` is
+the only lever and it is all-or-nothing — it would take superpowers' skill
+injection down too. context-mode itself exposes no opt-out; the only
+`CONTEXT_MODE_*` variables its hooks read are `DEBUG`, `PLATFORM`,
+`PROJECT_DIR`, `SESSION_SUFFIX`, `EMBEDDED_PLUGIN_TOOLS`,
+`SUPPRESS_SECURITY_WARNING`, `HOOK_STDIN_IDLE_MS` and a few security-bundle
+paths. None gate hook registration.
+
+The one granular lever is the plugin's own `hooks/hooks.json` inside the plugin
+cache. Each hook is a separate array entry keyed by event and matcher, so
+`PreToolUse` with `matcher: "Agent"` can be removed without touching the other
+ten `PreToolUse` entries.
+
+### Does the edit survive?
+
+Yes — verified, not assumed. context-mode runs three self-repair layers at boot
+from `start.mjs`. Running all three against an edited `hooks.json`:
+
+```
+healPartialInstall -> {"healed":[],"stillMissing":[],"skipped":"not-partial"}
+integrity ok: true | missing: 0
+normalizeHooks -> undefined
+EDIT SURVIVED
+```
+
+`heal-partial-install` only re-copies files that are **missing**; the integrity
+check only asserts existence; `normalizeHooksJsonOnly` only rewrites stale
+version path segments, and context-mode's hooks.json has none because it uses
+`${CLAUDE_PLUGIN_ROOT}` throughout.
+
+**A plugin update does not survive** — it replaces the whole cache directory.
+Re-run the script after any context-mode update.
+
+### The tool
+
+`docs/runbooks/disable-plugin-hooks.mjs` — zero dependencies, Node 18+, resolves
+the live install path from `installed_plugins.json` rather than hardcoding a
+version.
+
+It sits outside `bin/` deliberately: it is a maintenance script, not part of the
+`nortuscc` CLI surface, so it is not held to that module's test-first bar.
+
+```bash
+# See what a plugin declares
+node docs/runbooks/disable-plugin-hooks.mjs --plugin context-mode@context-mode --list
+
+# Preview
+node docs/runbooks/disable-plugin-hooks.mjs \
+  --plugin context-mode@context-mode --disable PreToolUse:Agent --dry-run
+
+# Apply — backs the pristine file up to
+# ~/.claude/backups/plugin-hooks-<plugin>/hooks.json.orig on first run
+node docs/runbooks/disable-plugin-hooks.mjs \
+  --plugin context-mode@context-mode --disable PreToolUse:Agent
+
+# Undo
+node docs/runbooks/disable-plugin-hooks.mjs --plugin context-mode@context-mode --restore
+```
+
+Restart Claude Code for a change to take effect. The script is idempotent — a
+second run reports `no change`.
+
+### Applied on this machine
+
+`PreToolUse:Agent` only. 229 fires, 187.6s and ~652k tokens per fortnight, and
+the loss is small: subagents stop receiving context-mode's protocol injection on
+dispatch, and every subagent dispatched in the window was `general-purpose` doing
+file work. `PreToolUse` went from 9 entries to 8; all other events untouched.
+
+Deliberately **not** disabled:
+
+- **`Stop`** (236.3s) is the largest single saving, but it is context-mode's
+  turn-end session capture and feeds the `session-events` index that
+  `ctx_search` reads. That is real functionality, used 10 times in the window.
+- **`SessionStart`** injection is the plugin's core value.
+- **claude-mem's hooks** — 98.4s total is not where the money is.
 
 The one thing worth knowing: a third-party plugin writes to your global
 `settings.json`. On a fresh machine, install context-mode *before* auditing
