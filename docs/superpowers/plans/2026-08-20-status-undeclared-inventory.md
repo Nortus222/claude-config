@@ -840,7 +840,7 @@ git commit -m "feat: probe agents and claude skill links"
 
 **Files:**
 - Modify: `src/inventory-probe.mjs`
-- Test: `test/inventory-probe.test.mjs` (created here)
+- Test: `test/inventory-probe.test.mjs` (extend Task 5's file)
 
 **Interfaces:**
 - Consumes: `userScopeInstalls`, `knownMarketplaces` (Task 4); `observedAgents`, `observedSkillLinks` (Task 5).
