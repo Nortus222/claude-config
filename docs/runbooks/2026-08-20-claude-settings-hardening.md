@@ -1,0 +1,520 @@
+# Claude settings hardening — 2026-08-20
+
+A config audit of `~/.claude/settings.json` found dead entries, unbounded write
+grants, and one flag that cannot fire. This runbook records what changed, why,
+and how to apply the same result on another machine.
+
+`settings.json` is **not** synced by `nortuscc` — see *What is synced, and what
+is not* in the README. That is deliberate and unchanged. This file is the
+procedure, not the payload.
+
+## Why these specific changes
+
+Evidence came from 256 transcript JSONL files under `~/.claude/projects`
+(37,248 events, 26 sessions, 2026-08-07 → 2026-08-20) and the T3 Code event
+store at `~/.t3/userdata/state.sqlite`.
+
+The governing fact: **every T3 Code thread runs `runtime_mode: full-access`,
+which maps to Claude Code's `bypassPermissions`.** Zero approval events appear
+across 51,091 T3 orchestration events. In that mode Claude Code "disables
+permission prompts and safety checks so tool calls execute immediately,
+including writes to protected paths."
+
+So the allowlist is consulted only when `claude` is launched from a bare
+terminal, never from T3. A large allowlist buys nothing in the common path and
+still carries its full blast radius in the uncommon one. It shrinks to a
+read-only core.
+
+## Changes
+
+### 1. `permissions.allow`: 35 rules → 17
+
+Removed every `Write` and `Edit` rule, everything that mutates state, and every
+rule that never matched.
+
+| Removed | Hits in window | Why |
+| --- | --- | --- |
+| `Write(**/*.md)` | 155 | Unanchored — every markdown file on the machine, not just the repo in play |
+| `Edit(**/*.md)` | 606 | Same |
+| `Write(**/.git/**)` | 19 | Grants writes to `.git/hooks/*` in **any** repo on disk; a file dropped in `.git/hooks/pre-commit` executes on the next commit |
+| `Edit(**/.git/**)` | 39 | Same code-execution path |
+| `Write(.git/**)` | 0 | Dead relative-path duplicate |
+| `Edit(.git/**)` | 0 | Dead relative-path duplicate |
+| `Bash(sed:*)` | 218 | `sed -i` writes files |
+| `Bash(mkdir:*)` | 35 | Mutates |
+| `Bash(echo:*)` | 159 | Prefix rule does not bound `echo x > file` |
+| `Bash(git -C:*)` | 14 | Any git subcommand in any directory, including `push` and `reset --hard` |
+| `Bash(git config:*)` | 1 | Writes — can set `core.hooksPath` or a credential helper |
+| `Bash(git submodule:*)` | 1 | Mutates |
+| `Bash(dotnet build:*)` | 0 | Build scripts are arbitrary code execution |
+| `Bash(dotnet test:*)` | 0 | Same |
+| `Bash(dart analyze:*)` | 0 | Never matched |
+| `Bash(sort:*)` | 0 | Never matched in 5,263 Bash calls |
+| `Read(//tmp/**)` | 0 | Double-slash artifact of an old path-normalisation bug; cannot match |
+| `Read(//private/tmp/**)` | 0 | Same |
+
+Kept — read-only inspection only:
+
+```
+Bash(cd:*)  Bash(ls:*)  Bash(cat:*)  Bash(head:*)  Bash(tail:*)
+Bash(wc:*)  Bash(grep:*)  Bash(find:*)
+Bash(git status:*)  Bash(git diff:*)  Bash(git show:*)
+Bash(git log:*)  Bash(git rev-parse:*)  Bash(git ls-files:*)
+Read(/tmp/**)  Read(/private/tmp/**)
+Read(~/.claude/plugins/cache/claude-plugins-official/superpowers/**)
+```
+
+`Bash(cd:*)` stays because `cd` alone cannot mutate anything. Note that
+prefix rules match the **first token**; Claude Code decomposes compound
+commands and evaluates each part, so `cd x && rm -rf y` is not auto-approved
+by the `cd` rule.
+
+Expect more approval prompts in bare-terminal sessions — `sed`, `mkdir` and
+`echo` were carrying real traffic. That is the intended trade, not a
+regression. Re-add individually if a specific one becomes noise.
+
+### 2. `permissions.additionalDirectories`: removed
+
+Held `/Users/nortus/Developer/emanageOne`. There is no `/Users/nortus` on this
+machine — a leftover from the previous username. It could never match.
+
+### 3. `agentPushNotifEnabled`: removed
+
+Documented as *"When Remote Control is connected, allow Claude to send proactive
+push notifications to your phone."* Remote Control has never been connected —
+`~/.claude.json` carries `remoteControlUpsellSeenCount: 2` and no connection
+state. The flag was inert. Default is `false`, so deleting the key and setting
+it to `false` are equivalent; deleting keeps the file honest.
+
+### 4. Then, later the same day
+
+`enabledPlugins`, `extraKnownMarketplaces` and `hooks` were left alone in this
+first pass, then all three changed when context-mode and claude-mem were
+uninstalled — see [Removing context-mode and claude-mem](#removing-context-mode-and-claude-mem).
+`effortLevel`, `tui` and `theme` were never touched.
+
+## Replicating on another machine
+
+Back up first. Nothing here is destructive on its own, but the rule stands.
+
+```bash
+mkdir -p ~/.claude/backups/settings-audit-$(date -u +%Y-%m-%dT%H-%M-%SZ)
+cp -p ~/.claude/settings.json \
+  ~/.claude/backups/settings-audit-*/settings.json
+```
+
+Apply the same removals without hand-editing, so machine-specific keys survive:
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+
+DROP_RULES = {
+    "Write(**/*.md)", "Edit(**/*.md)",
+    "Write(**/.git/**)", "Edit(**/.git/**)",
+    "Write(.git/**)", "Edit(.git/**)",
+    "Bash(sed:*)", "Bash(mkdir:*)", "Bash(echo:*)",
+    "Bash(git -C:*)", "Bash(git config:*)", "Bash(git submodule:*)",
+    "Bash(dotnet build:*)", "Bash(dotnet test:*)", "Bash(dart analyze:*)",
+    "Bash(sort:*)",
+    "Read(//tmp/**)", "Read(//private/tmp/**)",
+}
+
+p = pathlib.Path.home() / ".claude" / "settings.json"
+s = json.loads(p.read_text())
+
+perms = s.get("permissions", {})
+before = len(perms.get("allow", []))
+perms["allow"] = [r for r in perms.get("allow", []) if r not in DROP_RULES]
+perms.pop("additionalDirectories", None)
+s.pop("agentPushNotifEnabled", None)
+
+p.write_text(json.dumps(s, indent=2) + "\n")
+print(f"allow: {before} -> {len(perms['allow'])}")
+EOF
+```
+
+The script is idempotent — verified byte-identical after a second run. It
+preserves the original rule order rather than rewriting it, so the result is
+the same 17-rule set in whatever order that machine already had. Order among
+`allow` rules does not affect evaluation.
+
+Verify:
+
+```bash
+python3 -c "
+import json,pathlib
+d=json.loads((pathlib.Path.home()/'.claude/settings.json').read_text())
+a=d['permissions']['allow']
+assert not [r for r in a if r.startswith(('Write','Edit'))], 'write rules remain'
+assert 'additionalDirectories' not in d['permissions']
+assert 'agentPushNotifEnabled' not in d
+print('ok —', len(a), 'allow rules')
+"
+```
+
+### Machine-specific values — do not copy verbatim
+
+- `permissions.additionalDirectories` on another machine may hold a **valid**
+  path. Check before removing; only the `/Users/nortus/...` entry was dead.
+- `hooks.SessionStart` embedded an **absolute path** to
+  `~/.claude/hooks/context-mode-cache-heal.mjs`. It is gone now that context-mode
+  is uninstalled. If you ever reinstall context-mode, never hand-copy that entry
+  between machines — the plugin writes it with the correct path itself.
+
+## The SessionStart hook — what it actually is
+
+`hooks.SessionStart` runs
+`"/Users/ihor/.claude/hooks/context-mode-cache-heal.mjs"`. It was left in place
+pending a decision. The facts:
+
+**You did not write it.** The context-mode plugin does. On every boot,
+`~/.claude/plugins/cache/context-mode/context-mode/<version>/start.mjs`:
+
+1. Writes the script to `$CLAUDE_CONFIG_DIR/hooks/context-mode-cache-heal.mjs`
+   if it is missing *or its content differs* from the version the plugin
+   expects.
+2. Re-asserts the shebang and exec bit on Unix.
+3. Reads `settings.json`, checks whether any `SessionStart` entry contains
+   `context-mode-cache-heal`, and **appends one if not**, writing the file back.
+
+That third step is why it reappeared after the 2026-08-12 manual cleanup, and
+why `claude/hooks/context-mode-cache-heal.mjs` was deleted from this repo in
+the codex-targets change — syncing a file that redeploys itself is pointless.
+
+**What it fixes.** `anthropics/claude-code#46915`: when Claude Code
+auto-updates, `plugins/installed_plugins.json` can keep an `installPath`
+pointing at a version directory that no longer exists. `CLAUDE_PLUGIN_ROOT`
+then resolves to nothing and the plugin's hooks and MCP server silently fail to
+load. The script re-points that stale path at the highest version directory
+actually present in the cache. Issue #727 added normalisation of stale version
+segments baked into an existing `hooks.json`.
+
+**Blast radius.** Narrow by construction. The loop is guarded by
+`if (k !== "context-mode@context-mode") continue;` — it will not touch any
+other plugin's install state.
+
+### Is the bug still real? No — fixed upstream, on this version
+
+The GitHub trail is misleading. All four related issues were closed by bots for
+inactivity, none marked fixed:
+
+| Issue | Closed | Reason |
+| --- | --- | --- |
+| #46915 | 2026-05-24 | stale / duplicate |
+| #39328 | 2026-04-25 | not planned / stale |
+| #40442 | 2026-03-29 | not planned |
+| #35165 | 2026-03-20 | duplicate |
+
+The fixes landed anyway, and the changelog names them:
+
+- **2.1.128** — *"Fixed stale `installed_plugins.json` entries pointing at
+  deleted cache directories polluting PATH"*
+- **2.1.142** — *"Fixed plugin cache cleanup deleting the active plugin version
+  directory when no installation metadata is present"*
+- **2.1.81** — *"Fixed plugin hooks blocking prompt submission when the plugin
+  directory is deleted mid-session"*
+- **2.1.94** — *"Fixed plugin hooks failing with `No such file or directory`
+  when `CLAUDE_PLUGIN_ROOT` was not set"*
+
+This machine runs **2.1.236**, past all four.
+
+The cache layout confirms it structurally. Directories are now version-named
+and old versions are **retained**, which is the opposite of the behaviour the
+hook was written against:
+
+```
+claude-plugins-official/superpowers: version-named=[6.2.0, 6.3.0] hash-named=[b62616fc12f6]
+context-mode/context-mode:           version-named=[1.0.169]      hash-named=[]
+thedotmack/claude-mem:               version-named=[13.13.1]      hash-named=[]
+```
+
+`b62616fc12f6` (2026-08-07) is a relic of the old hash-named scheme; the
+version-named dirs date from 2026-08-12. The migration happened between those
+two dates. `installed_plugins.json` is now schema `version: 2` and records
+`version`, `installedAt`, `lastUpdated` and `gitCommitSha` explicitly.
+
+**Empirically the hook is a no-op.** Replaying its exact decision tree against
+current state:
+
+- `installPath` exists → branch A (symlink repair) never fires.
+- Branch B imports `normalize-hooks.mjs` and calls `normalizeHooksJsonOnly`,
+  but context-mode's `hooks.json` uses `${CLAUDE_PLUGIN_ROOT}` throughout with
+  **zero baked version paths** — nothing to rewrite.
+
+So it runs 53 times per fortnight and does nothing, which matches the measured
+cost: no stdout, no measurable duration.
+
+### It still cannot be removed
+
+context-mode **1.0.169 is the current release** (npm and GitHub, published
+2026-06-29). Every commit since is `ci: update install stats` — the plugin is in
+maintenance-only mode and the obsolete hook still ships.
+
+`start.mjs` is the plugin's **MCP server entrypoint**
+(`plugin.json` → `mcpServers.context-mode.args`), so it executes on every
+session that loads context-mode. The heal-deploy block sits at roughly line 305
+and is **unguarded** — the only `process.env.VITEST` escapes start at line 441,
+after it. There is no `CONTEXT_MODE_*` opt-out for it.
+
+Deleting the script or the settings entry therefore reverts on the next
+session start, exactly as it did on 2026-08-12.
+
+**Cost.** 53 fires in the 13-day window, no stdout, no measurable duration.
+It is the cheapest entry in the entire hook table. The expensive hooks all
+belong to context-mode — see [Disabling costly plugin hooks](#disabling-costly-plugin-hooks).
+
+### The decision — superseded
+
+The analysis stood: the hook is **vestigial, not load-bearing**. It guards a bug
+Claude Code fixed by 2.1.142 and provably does nothing on 2.1.236, but it was
+unremovable while context-mode was installed.
+
+That constraint is gone. context-mode was uninstalled later the same day, so the
+hook and its script were deleted for good — see
+[Removing context-mode and claude-mem](#removing-context-mode-and-claude-mem).
+`~/.claude/hooks` is now empty and removed; `settings.json` has no `hooks` key.
+
+Worth separating clearly: this hook is not what context-mode costs. See below.
+
+## Disabling costly plugin hooks
+
+### Corrected attribution
+
+An earlier draft of this audit blamed claude-mem for a 236s `Stop` hook. That
+was wrong. Hook commands are recorded with the literal `${CLAUDE_PLUGIN_ROOT}`
+rather than an expanded path, so grepping the command for a plugin name
+attributes nothing. The reliable discriminator is command *shape*:
+
+- context-mode: `node "${CLAUDE_PLUGIN_ROOT}/hooks/<name>.mjs"`
+- claude-mem: shell form, always beginning `export PATH=...`
+- superpowers: `"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"`
+
+Re-attributed over the same 13-day window:
+
+| Owner | Fires | Latency | Injected | ~Tokens |
+| --- | ---: | ---: | ---: | ---: |
+| **context-mode** | 651 | **663.8s** | **3,375 KB** | 864k |
+| claude-mem | 63 | 98.4s | 255 KB | 65k |
+| superpowers | 26 | 11.0s | 92 KB | 23k |
+| this repo's cache-heal | 56 | 0s | 0 KB | 0 |
+
+context-mode owns **86% of all hook latency and 91% of all injected context**.
+claude-mem's real cost is roughly a seventh of what the earlier draft claimed —
+its weak read/write ratio still stands on its own, but the latency case against
+it does not.
+
+Per-hook, worst first:
+
+| Hook | Fires | Latency | Injected |
+| --- | ---: | ---: | ---: |
+| `context-mode :: Stop` | 309 | 236.3s | 1 KB |
+| `context-mode :: PreToolUse:Agent` | 229 | 187.6s | 2,548 KB |
+| `context-mode :: PreToolUse:Bash` | 25 | 139.7s | 19 KB |
+| `claude-mem :: SessionStart:startup` | 52 | 84.8s | 255 KB |
+| `context-mode :: UserPromptSubmit` | 2 | 60.6s | 0 KB |
+| `context-mode :: SessionStart:resume` | 30 | 6.7s | 664 KB |
+
+`PreToolUse:Bash` at 5.6s per fire and `UserPromptSubmit` at 30s per fire are
+anomalously slow for how rarely they run. Not addressed here; worth watching.
+
+### There is no supported per-hook switch
+
+Claude Code's hooks documentation is explicit: *"There is no way to disable an
+individual hook while keeping it in the configuration."* `disableAllHooks` is
+the only lever and it is all-or-nothing — it would take superpowers' skill
+injection down too. context-mode itself exposes no opt-out; the only
+`CONTEXT_MODE_*` variables its hooks read are `DEBUG`, `PLATFORM`,
+`PROJECT_DIR`, `SESSION_SUFFIX`, `EMBEDDED_PLUGIN_TOOLS`,
+`SUPPRESS_SECURITY_WARNING`, `HOOK_STDIN_IDLE_MS` and a few security-bundle
+paths. None gate hook registration.
+
+The one granular lever is the plugin's own `hooks/hooks.json` inside the plugin
+cache. Each hook is a separate array entry keyed by event and matcher, so
+`PreToolUse` with `matcher: "Agent"` can be removed without touching the other
+ten `PreToolUse` entries.
+
+### Does the edit survive?
+
+Yes — verified, not assumed. context-mode runs three self-repair layers at boot
+from `start.mjs`. Running all three against an edited `hooks.json`:
+
+```
+healPartialInstall -> {"healed":[],"stillMissing":[],"skipped":"not-partial"}
+integrity ok: true | missing: 0
+normalizeHooks -> undefined
+EDIT SURVIVED
+```
+
+`heal-partial-install` only re-copies files that are **missing**; the integrity
+check only asserts existence; `normalizeHooksJsonOnly` only rewrites stale
+version path segments, and context-mode's hooks.json has none because it uses
+`${CLAUDE_PLUGIN_ROOT}` throughout.
+
+**A plugin update does not survive** — it replaces the whole cache directory.
+Re-run the script after any context-mode update.
+
+### The tool
+
+`docs/runbooks/disable-plugin-hooks.mjs` — zero dependencies, Node 18+, resolves
+the live install path from `installed_plugins.json` rather than hardcoding a
+version.
+
+It sits outside `bin/` deliberately: it is a maintenance script, not part of the
+`nortuscc` CLI surface, so it is not held to that module's test-first bar.
+
+```bash
+# See what a plugin declares
+node docs/runbooks/disable-plugin-hooks.mjs --plugin context-mode@context-mode --list
+
+# Preview
+node docs/runbooks/disable-plugin-hooks.mjs \
+  --plugin context-mode@context-mode --disable PreToolUse:Agent --dry-run
+
+# Apply — backs the pristine file up to
+# ~/.claude/backups/plugin-hooks-<plugin>/hooks.json.orig on first run
+node docs/runbooks/disable-plugin-hooks.mjs \
+  --plugin context-mode@context-mode --disable PreToolUse:Agent
+
+# Undo
+node docs/runbooks/disable-plugin-hooks.mjs --plugin context-mode@context-mode --restore
+```
+
+Restart Claude Code for a change to take effect. The script is idempotent — a
+second run reports `no change`.
+
+### Applied on this machine
+
+`PreToolUse:Agent` only. 229 fires, 187.6s and ~652k tokens per fortnight, and
+the loss is small: subagents stop receiving context-mode's protocol injection on
+dispatch, and every subagent dispatched in the window was `general-purpose` doing
+file work. `PreToolUse` went from 9 entries to 8; all other events untouched.
+
+Deliberately **not** disabled:
+
+- **`Stop`** (236.3s) is the largest single saving, but it is context-mode's
+  turn-end session capture and feeds the `session-events` index that
+  `ctx_search` reads. That is real functionality, used 10 times in the window.
+- **`SessionStart`** injection is the plugin's core value.
+- **claude-mem's hooks** — 98.4s total is not where the money is.
+
+The one thing worth knowing: a third-party plugin writes to your global
+`settings.json`. On a fresh machine, install context-mode *before* auditing
+`settings.json`, or the audit will flag a hook that is about to reappear.
+
+## Open items
+
+Not addressed in this pass:
+
+- **`permissions.ask`, not `permissions.deny`.** An earlier draft recommended a
+  `deny` list for secrets. That was wrong for this setup: `bypassPermissions`
+  skips deny rules along with everything else. Explicit **`ask`** rules *do*
+  still prompt in bypass mode, as do `rm`/`rmdir` against critical paths. If a
+  real guardrail is wanted under T3 full-access, `ask` is the only mechanism
+  that survives.
+- `attribution.commit` / `attribution.pr` — 129 of 370 commits since 2026-07-01
+  carry a `Co-Authored-By: Claude` trailer that `CLAUDE.md` forbids.
+- `cleanupPeriodDays` — default 30; the audit window was 13 days.
+- `skillOverrides` — 29 skills installed, 14 invoked in the window.
+- `~/.claude/agents/awesome-claude-agents` — 30 agent definitions, symlinked
+  2025-07-31, invoked zero times against 230 `general-purpose` dispatches.
+- 18 project-level `.claude/settings.local.json` files under `~/Developer`
+  holding 151 distinct allow rules, several dating to 2025-11.
+
+## Removing context-mode and claude-mem
+
+Decided after the hook attribution above: between them the two plugins accounted
+for **762s of the 773s** of hook latency measured over the 13-day window, and
+**3,630 KB of 3,721 KB** of injected context. Disabling one hook was treating a
+symptom. This is the trial — run without both and see what is actually missed.
+
+superpowers stays. It cost 11s and 92 KB, and it ships from the official
+marketplace Claude Code already knows, so **no extra marketplace is needed at
+all** once these two are gone.
+
+### What was removed, both agents
+
+```bash
+# Claude
+claude plugin uninstall claude-mem@thedotmack
+claude plugin uninstall context-mode@context-mode
+claude plugin marketplace remove context-mode --scope user
+claude plugin marketplace remove thedotmack  --scope user
+
+# Codex — it had context-mode natively installed too
+codex plugin remove context-mode@context-mode
+codex plugin marketplace remove context-mode
+```
+
+Uninstalling prunes `enabledPlugins` for you; removing the marketplaces empties
+`extraKnownMarketplaces`. Both keys were then dropped from `settings.json` by
+hand, along with the now-orphaned `hooks.SessionStart` entry:
+
+```bash
+rm ~/.claude/hooks/context-mode-cache-heal.mjs
+rmdir ~/.claude/hooks
+```
+
+Resulting `settings.json` — five keys, no hooks, no marketplaces:
+
+```json
+{
+  "permissions": { "allow": [ /* 17 read-only rules */ ] },
+  "enabledPlugins": { "superpowers@claude-plugins-official": true },
+  "effortLevel": "high",
+  "tui": "fullscreen",
+  "theme": "auto"
+}
+```
+
+### Your data is still on disk
+
+Uninstalling a plugin does **not** delete what it wrote. Both stores were left
+intact deliberately, so this trial is reversible and nothing is lost:
+
+| Path | Size | What it is |
+| --- | ---: | --- |
+| `~/.claude-mem/` | 45 MB | claude-mem's SQLite DB — 2,855 observations, 2026-08-08 onward |
+| `~/.claude/context-mode/` | 41 MB | context-mode's FTS5 knowledge base and session captures |
+
+Delete them only after deciding the trial is permanent. The claude-mem database
+is the only record of session history older than the 30-day transcript window.
+
+### `integrations.json`
+
+Reduced to a single entry, `superpowers-claude`. Two tests that were coupled to
+the old manifest were updated in the same change:
+
+- `integrations-manifest.test.mjs` asserted the manifest *contains*
+  `mksglu/context-mode` and `thedotmack/claude-mem`. Now asserts superpowers is
+  the only declared plugin, plus a new case pinning "no marketplace, nothing for
+  codex".
+- `fresh-machine.test.mjs` hardcoded the expected seven-call native installer
+  sequence; now one call. Its Codex-only test also asserted
+  `log.some(cmd === 'codex')`, which only held because a Codex *integration* was
+  declared. Rewritten to assert the Codex path still installs skills — the
+  property the test is actually named for, and manifest-independent.
+
+Full suite after the change: **551 tests, 551 pass, 0 fail.**
+
+### Removing them here does not uninstall them elsewhere
+
+`nortuscc` only ever *offers missing* integrations; it has no prune path for
+them. Dropping these entries stops a new machine being offered them, but a
+machine that already has them keeps them until the uninstall commands above are
+run there too. That asymmetry is the reason those commands are in this runbook
+rather than only in a commit message.
+
+### Reverting
+
+`git revert` the manifest change, then on each machine:
+
+```bash
+claude plugin marketplace add mksglu/context-mode
+claude plugin marketplace add thedotmack/claude-mem
+claude plugin install context-mode@context-mode
+claude plugin install claude-mem@thedotmack
+```
+
+context-mode will redeploy its own SessionStart cache-heal hook into
+`settings.json` on first boot; that is expected and needs no action.

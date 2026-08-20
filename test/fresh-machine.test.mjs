@@ -182,16 +182,12 @@ async function runCli(args, { env, fixtureBinDir }) {
 // CLI doing its own installing. Derived from the committed manifest's order,
 // so this breaks loudly if a declaration is added without a decision about
 // where it belongs.
+// Since 2026-08-20 the manifest declares one plugin and no marketplace:
+// context-mode and claude-mem were dropped after a cost audit, and superpowers
+// ships from the official marketplace Claude Code already knows.
 function expectedDefaultInstallCalls() {
   return [
-    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
-    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'thedotmack/claude-mem'] },
-    { cmd: 'codex', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
-    { cmd: 'claude', args: ['plugin', 'install', 'context-mode@context-mode'] },
-    { cmd: 'claude', args: ['plugin', 'install', 'claude-mem@thedotmack'] },
-    // Codex installs with `add`; it has no `install` subcommand.
-    { cmd: 'codex', args: ['plugin', 'add', 'context-mode@context-mode'] },
   ];
 }
 
@@ -274,9 +270,14 @@ test('a Codex-only setup never runs the Claude installer or writes ~/.claude', a
 
   const log = readInstallerLog(env);
   assert.deepEqual(log.filter((entry) => entry.cmd === 'claude'), [], 'a Codex run must never invoke the Claude CLI');
-  assert.ok(log.some((entry) => entry.cmd === 'codex'));
 
-  for (const call of log.filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add')) {
+  // Assert the Codex path did real work, without assuming the manifest declares
+  // a Codex *integration* — since 2026-08-20 it declares none, so the only
+  // Codex-native work left is installing skills.
+  const skillAdds = log.filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add');
+  assert.ok(skillAdds.length > 0, 'a Codex run must still install skills');
+
+  for (const call of skillAdds) {
     const agentAt = call.args.indexOf('--agent');
     assert.deepEqual(call.args.slice(agentAt, agentAt + 2), ['--agent', 'codex']);
   }

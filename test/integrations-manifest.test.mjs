@@ -147,16 +147,21 @@ test('the committed integrations.json is valid and declares the agreed defaults'
   assert.ok(byId.has('superpowers-claude'));
   assert.equal(byId.get('superpowers-claude').plugin, 'superpowers@claude-plugins-official');
 
-  const marketplaces = integrations.filter((i) => i.type === 'marketplace').map((i) => i.marketplace);
-  assert.ok(marketplaces.includes('mksglu/context-mode'));
-  assert.ok(marketplaces.includes('thedotmack/claude-mem'));
-
   const plugins = integrations.filter((i) => i.type === 'plugin').map((i) => i.plugin);
-  assert.ok(plugins.includes('context-mode@context-mode'));
-  assert.ok(plugins.includes('claude-mem@thedotmack'));
+  assert.deepEqual(plugins, ['superpowers@claude-plugins-official'], 'superpowers is the only declared plugin');
+});
 
-  // Codex gets context-mode through its own native installation.
-  assert.ok(integrations.some((i) => i.target === 'codex' && i.plugin === 'context-mode@context-mode'));
+// context-mode and claude-mem were dropped on 2026-08-20 after a cost audit:
+// between them they accounted for 762s of the 773s of hook latency measured
+// over a 13-day window. superpowers ships from the official marketplace Claude
+// Code already knows, so no extra marketplace needs declaring at all.
+test('the committed manifest declares no marketplace and nothing for codex', async () => {
+  const realRepo = fileURLToPath(new URL('..', import.meta.url));
+  const { readIntegrations } = await import('../src/integrations/manifest.mjs');
+  const { integrations } = readIntegrations({ repo: realRepo });
+
+  assert.deepEqual(integrations.filter((i) => i.type === 'marketplace'), []);
+  assert.deepEqual(integrations.filter((i) => i.target === 'codex'), []);
 });
 
 // The design retires the private cache-repair hook rather than relocating it:
