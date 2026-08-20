@@ -186,6 +186,12 @@ export function probe({
   }
 
   if ((target === 'all' || target === 'codex') && codexState) {
+    // A Codex CLI that could not be launched, or whose output could not be
+    // parsed, reports empty sets. Surfacing its errors is what stops that from
+    // reading as "Codex has nothing installed" — the failure this whole report
+    // exists to make visible.
+    for (const message of codexState.errors ?? []) errors.push({ category: 'codex', message });
+
     // Codex reports no version through its CLI, so its plugins are recorded
     // with an unknown one rather than left out of the version report entirely.
     for (const name of codexState.plugins ?? []) {

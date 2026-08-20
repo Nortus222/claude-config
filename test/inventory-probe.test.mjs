@@ -171,3 +171,19 @@ test('--target codex observes codex plugins and no claude-side categories', () =
   assert.deepEqual(result.observed.plugins.map((p) => p.key), ['c@cm']);
   assert.deepEqual(result.observed.marketplaces.map((m) => m.key), ['cm']);
 });
+
+test('probe surfaces codex read failures rather than reporting an empty machine', () => {
+  const { claudeDir, agentsSkills } = homeWithStore();
+  const codexState = {
+    plugins: new Set(),
+    marketplaces: new Set(),
+    errors: ['could not list Codex plugins: spawn ENOENT'],
+  };
+
+  const { observed, errors } = probe({ target: 'codex', integrations: [], codexState, claudeDir, agentsSkills });
+
+  assert.deepEqual(observed.plugins, [], 'an unreachable CLI genuinely observed nothing');
+  assert.equal(errors.length, 1, 'but that is reported as a failed read, not as a clean one');
+  assert.equal(errors[0].category, 'codex');
+  assert.match(errors[0].message, /could not list Codex plugins/);
+});
