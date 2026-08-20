@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { observedAgents, observedSkillLinks } from '../src/inventory-probe.mjs';
+import { observedAgents, observedSkillLinks, observedHooks, declaredHookCommands, probe } from '../src/inventory-probe.mjs';
 
 function homeWithStore() {
   const home = mkdtempSync(join(tmpdir(), 'nortuscc-probe-home-'));
@@ -98,4 +98,76 @@ test('a store that cannot be resolved is an error, not "everything is undeclared
   assert.deepEqual(items, [], 'no skill is relabelled undeclared because the store could not be read');
   assert.equal(errors.length, 1);
   assert.equal(errors[0].category, 'skills');
+});
+
+const settings = (home, value) =>
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(value));
+
+test('no settings file, and settings without hooks, observe nothing', () => {
+  const a = homeWithStore();
+  assert.deepEqual(observedHooks({ claudeDir: a.claudeDir }), { items: [], errors: [] });
+
+  const b = homeWithStore();
+  settings(b.home, { theme: 'dark' });
+  assert.deepEqual(observedHooks({ claudeDir: b.claudeDir }), { items: [], errors: [] });
+});
+
+test('a registration is observed, matched on command and displayed by event', () => {
+  const { home, claudeDir } = homeWithStore();
+  settings(home, { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node /h/x.mjs' }] }] } });
+
+  const { items } = observedHooks({ claudeDir });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].key, 'node /h/x.mjs');
+  assert.equal(items[0].label, 'SessionStart');
+});
+
+// The user's file, mid-edit or hand-broken, is never reported as "no hooks":
+// that would silently pass a category that was never checked.
+test('unparseable settings is an error, not an empty observation', () => {
+  const { home, claudeDir } = homeWithStore();
+  writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+
+  const { items, errors } = observedHooks({ claudeDir });
+  assert.deepEqual(items, []);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].category, 'hooks');
+});
+
+test('a declared hook yields the command that would be registered', () => {
+  const { claudeDir } = homeWithStore();
+  const hook = { id: 'h', label: 'h', target: 'claude', type: 'hook', default: true, event: 'SessionStart', file: 'claude/hooks/x.mjs' };
+  const commands = declaredHookCommands([hook], { claudeDir });
+  assert.equal(commands.length, 1);
+  assert.match(commands[0], /^node .*hooks[/\\]x\.mjs$/);
+});
+
+test('probe aggregates every category and reports plugin versions', () => {
+  const { home, claudeDir, agentsSkills } = homeWithStore();
+  mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+  writeFileSync(
+    join(home, '.claude', 'plugins', 'installed_plugins.json'),
+    JSON.stringify({ version: 2, plugins: { 'a@m': [{ scope: 'user', version: '1.2.3' }] } }),
+  );
+  writeFileSync(join(home, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({ m: {} }));
+
+  const result = probe({ target: 'all', integrations: [], claudeDir, agentsSkills });
+  assert.deepEqual(result.observed.plugins.map((p) => p.key), ['a@m']);
+  assert.deepEqual(result.observed.marketplaces.map((m) => m.key), ['m']);
+  assert.deepEqual(result.pluginVersions, [['a@m', '1.2.3']]);
+  assert.deepEqual(result.errors, []);
+});
+
+// Claude-side categories are not walked for a Codex-only report, exactly as
+// --target narrows every other section.
+test('--target codex observes codex plugins and no claude-side categories', () => {
+  const { home, claudeDir, agentsSkills } = homeWithStore();
+  mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+
+  const codexState = { plugins: new Set(['c@cm']), marketplaces: new Set(['cm']), errors: [] };
+  const result = probe({ target: 'codex', integrations: [], codexState, claudeDir, agentsSkills });
+
+  assert.deepEqual(result.observed.agents, []);
+  assert.deepEqual(result.observed.plugins.map((p) => p.key), ['c@cm']);
+  assert.deepEqual(result.observed.marketplaces.map((m) => m.key), ['cm']);
 });

@@ -6,9 +6,12 @@
 // readLinkExposure already keeps — so one unreadable directory cannot take a
 // whole status run down. A directory that is merely absent is not a failure: a
 // machine that never placed an agent has none.
-import { existsSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { claudeDir as realClaudeDir, agentsSkillsDir as realAgentsSkillsDir } from './resolve.mjs';
+import { isPlainObject } from './json.mjs';
+import { userScopeInstalls, knownMarketplaces } from './integrations/claude-plugins.mjs';
+import { hookCommand } from './integrations/claude-hooks.mjs';
 
 // Dot-prefixed entries are an agent's own bookkeeping rather than content,
 // exactly as exposedSkillNames already treats them.
@@ -98,4 +101,104 @@ export function observedSkillLinks({ claudeDir = realClaudeDir, agentsSkills = r
   } catch (err) {
     return { items: [], errors: [{ category: 'skills', message: `could not read ${dir}: ${err.message}` }] };
   }
+}
+
+// Every hook registered in the user's settings.json, keyed by the command that
+// identifies the registration and labelled by the event a reader recognises.
+//
+// Plugin-provided hooks do not appear here: they live in the plugin's own
+// configuration, not in this file, so a plugin's hooks are never reported as
+// the user's undeclared ones.
+export function observedHooks({ claudeDir = realClaudeDir } = {}) {
+  const path = join(claudeDir(), 'settings.json');
+  if (!existsSync(path)) return { items: [], errors: [] };
+
+  let settings;
+  try {
+    settings = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    // Distinguished from "no hooks" on purpose: the user's file, mid-edit or
+    // hand-broken, must not read as a category that was checked and found clean.
+    return { items: [], errors: [{ category: 'hooks', message: `could not parse ${path}` }] };
+  }
+  if (!isPlainObject(settings) || !isPlainObject(settings.hooks)) return { items: [], errors: [] };
+
+  const items = [];
+  for (const [event, groups] of Object.entries(settings.hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      for (const hook of group?.hooks ?? []) {
+        if (typeof hook?.command !== 'string' || !hook.command) continue;
+        items.push({ key: hook.command, label: event, note: hook.command });
+      }
+    }
+  }
+  return { items, errors: [] };
+}
+
+// What each declared hook would register. Computed here rather than in
+// inventory.mjs because it depends on where hooks are installed, and that is a
+// path — the one thing the pure module has none of.
+export function declaredHookCommands(integrations = [], { claudeDir = realClaudeDir } = {}) {
+  return integrations
+    .filter((item) => item.type === 'hook' && item.file)
+    .map((item) => hookCommand(item, { claudeDir }));
+}
+
+const named = (key) => ({ key, label: key, note: '' });
+
+// One observation of the whole machine, narrowed by --target exactly as every
+// other section is. Agents, skill links and hooks are Claude-side categories
+// and are not walked for a Codex-only report.
+//
+// Claude and Codex plugin ids share one `plugins` list, and their declarations
+// share one set. Under --target all that unions them, so a plugin declared for
+// one agent and installed on the other reads as declared — a narrow blind spot,
+// accepted because the alternative is a doubled shape through every function,
+// and because a report covering both agents was asked about both.
+export function probe({
+  target = 'all',
+  integrations = [],
+  codexState = null,
+  claudeDir = realClaudeDir,
+  agentsSkills = realAgentsSkillsDir,
+} = {}) {
+  const observed = { agents: [], plugins: [], marketplaces: [], hooks: [], skills: [] };
+  const errors = [];
+  const pluginVersions = [];
+
+  if (target === 'all' || target === 'claude') {
+    const agents = observedAgents({ claudeDir });
+    const skills = observedSkillLinks({ claudeDir, agentsSkills });
+    const hooks = observedHooks({ claudeDir });
+    observed.agents.push(...agents.items);
+    observed.skills.push(...skills.items);
+    observed.hooks.push(...hooks.items);
+    errors.push(...agents.errors, ...skills.errors, ...hooks.errors);
+
+    for (const { name, version } of userScopeInstalls(claudeDir())) {
+      observed.plugins.push(named(name));
+      pluginVersions.push([name, version]);
+    }
+    for (const name of Object.keys(knownMarketplaces(claudeDir()))) {
+      observed.marketplaces.push(named(name));
+    }
+  }
+
+  if ((target === 'all' || target === 'codex') && codexState) {
+    // Codex reports no version through its CLI, so its plugins are recorded
+    // with an unknown one rather than left out of the version report entirely.
+    for (const name of codexState.plugins ?? []) {
+      observed.plugins.push(named(name));
+      pluginVersions.push([name, null]);
+    }
+    for (const name of codexState.marketplaces ?? []) observed.marketplaces.push(named(name));
+  }
+
+  return {
+    observed,
+    hookCommands: declaredHookCommands(integrations, { claudeDir }),
+    pluginVersions,
+    errors,
+  };
 }
