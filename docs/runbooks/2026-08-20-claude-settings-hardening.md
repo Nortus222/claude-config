@@ -86,10 +86,12 @@ push notifications to your phone."* Remote Control has never been connected —
 state. The flag was inert. Default is `false`, so deleting the key and setting
 it to `false` are equivalent; deleting keeps the file honest.
 
-### 4. Unchanged
+### 4. Then, later the same day
 
-`enabledPlugins`, `extraKnownMarketplaces`, `effortLevel`, `tui`, `theme`, and
-`hooks` were not touched. See the hook note below.
+`enabledPlugins`, `extraKnownMarketplaces` and `hooks` were left alone in this
+first pass, then all three changed when context-mode and claude-mem were
+uninstalled — see [Removing context-mode and claude-mem](#removing-context-mode-and-claude-mem).
+`effortLevel`, `tui` and `theme` were never touched.
 
 ## Replicating on another machine
 
@@ -155,9 +157,10 @@ print('ok —', len(a), 'allow rules')
 
 - `permissions.additionalDirectories` on another machine may hold a **valid**
   path. Check before removing; only the `/Users/nortus/...` entry was dead.
-- `hooks.SessionStart` embeds an **absolute path** to
-  `~/.claude/hooks/context-mode-cache-heal.mjs`. Never hand-copy it between
-  machines — it self-installs with the correct path (see below).
+- `hooks.SessionStart` embedded an **absolute path** to
+  `~/.claude/hooks/context-mode-cache-heal.mjs`. It is gone now that context-mode
+  is uninstalled. If you ever reinstall context-mode, never hand-copy that entry
+  between machines — the plugin writes it with the correct path itself.
 
 ## The SessionStart hook — what it actually is
 
@@ -261,16 +264,16 @@ session start, exactly as it did on 2026-08-12.
 It is the cheapest entry in the entire hook table. The expensive hooks all
 belong to context-mode — see [Disabling costly plugin hooks](#disabling-costly-plugin-hooks).
 
-### The decision
+### The decision — superseded
 
-The hook is **vestigial, not load-bearing** — it guards a bug that Claude Code
-fixed by 2.1.142 and it provably does nothing on 2.1.236. But it is also
-unremovable while context-mode is enabled, and it costs nothing measurable.
+The analysis stood: the hook is **vestigial, not load-bearing**. It guards a bug
+Claude Code fixed by 2.1.142 and provably does nothing on 2.1.236, but it was
+unremovable while context-mode was installed.
 
-So: **keep context-mode → keep the hook**, and stop treating it as insurance.
-There is no third option and no reason to want one. If context-mode is ever
-dropped, delete `~/.claude/hooks/context-mode-cache-heal.mjs` and the
-`hooks.SessionStart` entry in the same pass — nothing will re-add them.
+That constraint is gone. context-mode was uninstalled later the same day, so the
+hook and its script were deleted for good — see
+[Removing context-mode and claude-mem](#removing-context-mode-and-claude-mem).
+`~/.claude/hooks` is now empty and removed; `settings.json` has no `hooks` key.
 
 Worth separating clearly: this hook is not what context-mode costs. See below.
 
@@ -417,3 +420,101 @@ Not addressed in this pass:
   2025-07-31, invoked zero times against 230 `general-purpose` dispatches.
 - 18 project-level `.claude/settings.local.json` files under `~/Developer`
   holding 151 distinct allow rules, several dating to 2025-11.
+
+## Removing context-mode and claude-mem
+
+Decided after the hook attribution above: between them the two plugins accounted
+for **762s of the 773s** of hook latency measured over the 13-day window, and
+**3,630 KB of 3,721 KB** of injected context. Disabling one hook was treating a
+symptom. This is the trial — run without both and see what is actually missed.
+
+superpowers stays. It cost 11s and 92 KB, and it ships from the official
+marketplace Claude Code already knows, so **no extra marketplace is needed at
+all** once these two are gone.
+
+### What was removed, both agents
+
+```bash
+# Claude
+claude plugin uninstall claude-mem@thedotmack
+claude plugin uninstall context-mode@context-mode
+claude plugin marketplace remove context-mode --scope user
+claude plugin marketplace remove thedotmack  --scope user
+
+# Codex — it had context-mode natively installed too
+codex plugin remove context-mode@context-mode
+codex plugin marketplace remove context-mode
+```
+
+Uninstalling prunes `enabledPlugins` for you; removing the marketplaces empties
+`extraKnownMarketplaces`. Both keys were then dropped from `settings.json` by
+hand, along with the now-orphaned `hooks.SessionStart` entry:
+
+```bash
+rm ~/.claude/hooks/context-mode-cache-heal.mjs
+rmdir ~/.claude/hooks
+```
+
+Resulting `settings.json` — five keys, no hooks, no marketplaces:
+
+```json
+{
+  "permissions": { "allow": [ /* 17 read-only rules */ ] },
+  "enabledPlugins": { "superpowers@claude-plugins-official": true },
+  "effortLevel": "high",
+  "tui": "fullscreen",
+  "theme": "auto"
+}
+```
+
+### Your data is still on disk
+
+Uninstalling a plugin does **not** delete what it wrote. Both stores were left
+intact deliberately, so this trial is reversible and nothing is lost:
+
+| Path | Size | What it is |
+| --- | ---: | --- |
+| `~/.claude-mem/` | 45 MB | claude-mem's SQLite DB — 2,855 observations, 2026-08-08 onward |
+| `~/.claude/context-mode/` | 41 MB | context-mode's FTS5 knowledge base and session captures |
+
+Delete them only after deciding the trial is permanent. The claude-mem database
+is the only record of session history older than the 30-day transcript window.
+
+### `integrations.json`
+
+Reduced to a single entry, `superpowers-claude`. Two tests that were coupled to
+the old manifest were updated in the same change:
+
+- `integrations-manifest.test.mjs` asserted the manifest *contains*
+  `mksglu/context-mode` and `thedotmack/claude-mem`. Now asserts superpowers is
+  the only declared plugin, plus a new case pinning "no marketplace, nothing for
+  codex".
+- `fresh-machine.test.mjs` hardcoded the expected seven-call native installer
+  sequence; now one call. Its Codex-only test also asserted
+  `log.some(cmd === 'codex')`, which only held because a Codex *integration* was
+  declared. Rewritten to assert the Codex path still installs skills — the
+  property the test is actually named for, and manifest-independent.
+
+Full suite after the change: **551 tests, 551 pass, 0 fail.**
+
+### Removing them here does not uninstall them elsewhere
+
+`nortuscc` only ever *offers missing* integrations; it has no prune path for
+them. Dropping these entries stops a new machine being offered them, but a
+machine that already has them keeps them until the uninstall commands above are
+run there too. That asymmetry is the reason those commands are in this runbook
+rather than only in a commit message.
+
+### Reverting
+
+`git revert` the manifest change, then on each machine:
+
+```bash
+claude plugin marketplace add mksglu/context-mode
+claude plugin marketplace add thedotmack/claude-mem
+claude plugin install context-mode@context-mode
+claude plugin install claude-mem@thedotmack
+```
+
+context-mode will redeploy its own SessionStart cache-heal hook into
+`settings.json` on first boot; that is expected and needs no action.
