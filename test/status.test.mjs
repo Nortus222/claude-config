@@ -650,7 +650,12 @@ test('with no probe injected, status reads the real directories and converges', 
     assert.match(unplaced.output, /claude-code/, 'Claude is the agent that cannot load it');
     assert.doesNotMatch(unplaced.output, /missing from.*codex/, 'Codex loads from the store');
 
-    mkdirSync(join(fx.claude, 'skills', 'wayfinder'), { recursive: true });
+    // A symlink into the shared store, matching what the real installer does
+    // (see skill-links.mjs) rather than a bare directory: the undeclared
+    // section now walks ~/.claude/skills for exactly this distinction, and a
+    // plain directory here would misreport as a stray, undeclared skill.
+    mkdirSync(join(fx.claude, 'skills'), { recursive: true });
+    symlinkSync(join(fx.agents, 'wayfinder'), join(fx.claude, 'skills', 'wayfinder'));
 
     const placed = await runCaptured(() => fx.run());
     assert.equal(placed.code, 0, 'linking it for Claude alone brings the machine into agreement');
@@ -781,5 +786,104 @@ test('the conflict suggestion names, for each direction, the command that accept
       'capture --take-repo exits 2 with a refusal, so status must never suggest it',
     );
   });
+});
+
+// Runs status against an isolated HOME and returns its printed output, so the
+// section can be asserted on without reading the developer's real machine.
+async function statusOutput(args = [], setup = () => {}, deps = {}) {
+  const isolated = mkdtempSync(join(tmpdir(), 'nortuscc-undeclared-'));
+  mkdirSync(join(isolated, '.claude'), { recursive: true });
+  mkdirSync(join(isolated, '.codex'), { recursive: true });
+  mkdirSync(join(isolated, '.agents', 'skills'), { recursive: true });
+  const repoDir = mkdtempSync(join(tmpdir(), 'nortuscc-undeclared-repo-'));
+  mkdirSync(join(repoDir, 'claude'), { recursive: true });
+  mkdirSync(join(repoDir, 'codex'), { recursive: true });
+  writeFileSync(join(repoDir, 'claude', 'CLAUDE.md'), '# Test');
+  writeFileSync(join(repoDir, 'codex', 'AGENTS.md'), '# Test codex');
+  setup(isolated, repoDir);
+
+  const saved = { ...process.env };
+  process.env.NORTUSCC_CLAUDE_DIR = join(isolated, '.claude');
+  process.env.NORTUSCC_CODEX_DIR = join(isolated, '.codex');
+  process.env.NORTUSCC_AGENTS_DIR = join(isolated, '.agents', 'skills');
+  process.env.NORTUSCC_STATE_DIR = join(isolated, 'state');
+  process.env.NORTUSCC_REPO_DIR = repoDir;
+
+  // Bring the config rows to a clean state, so the inventory section is the
+  // only thing that can make these runs dirty. Without this every row reads
+  // 'unmanaged', status is dirty on its own account, and "everything is in
+  // agreement" could never print — which is half of what this asserts.
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+  const { resolveEntry } = await import('../src/resolve.mjs');
+  const lock = readLock();
+  for (const entry of SYNC) {
+    const { src, dest } = resolveEntry(entry);
+    const hash = hashFile(src);
+    if (hash) {
+      copyFileSync(src, dest);
+      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
+    }
+  }
+  writeLock(lock);
+
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
+  try {
+    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const code = await isolatedRun(args, {
+      codexState: emptyCodex(),
+      inspectExposure: () => ({ list: {}, errors: [] }),
+      cliState: () => ({ state: 'unmanaged' }),
+      ...deps,
+    });
+    return { code, output: chunks.join('') };
+  } finally {
+    process.stdout.write = originalWrite;
+    for (const key of ['NORTUSCC_CLAUDE_DIR', 'NORTUSCC_CODEX_DIR', 'NORTUSCC_AGENTS_DIR', 'NORTUSCC_STATE_DIR', 'NORTUSCC_REPO_DIR']) {
+      process.env[key] = saved[key];
+    }
+  }
+}
+
+test('a clean machine says every category is declared rather than staying silent', async () => {
+  const { output } = await statusOutput();
+  assert.match(output, /undeclared/);
+  assert.match(output, /all categories\s+declared/);
+});
+
+test('an undeclared agent is named in the section', async () => {
+  const { output } = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'awesome-claude-agents'), { recursive: true });
+  });
+  assert.match(output, /agents\s+awesome-claude-agents/);
+});
+
+// The false-green this whole section exists to close.
+test('undeclared items suppress "everything is in agreement"', async () => {
+  const clean = await statusOutput();
+  assert.match(clean.output, /everything is in agreement/);
+
+  const dirty = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  });
+  assert.doesNotMatch(dirty.output, /everything is in agreement/);
+});
+
+// Informational by default, so a scheduled run does not start failing the day
+// this ships.
+test('undeclared items alone do not change the exit code', async () => {
+  const { code } = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  });
+  assert.equal(code, 0);
+});
+
+test('an unreadable category reports unknown rather than nothing', async () => {
+  const { output } = await statusOutput([], (home) => {
+    writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+  });
+  assert.match(output, /hooks\s+unknown/);
 });
 
