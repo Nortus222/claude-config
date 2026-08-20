@@ -181,7 +181,10 @@ edit to `integrations.json`, deliberately.
 same categories `status`'s undeclared section reports (`agents`, `plugins`,
 `marketplaces`, `hooks`, `skills`). Each value is a list of ids to accept as
 known extras rather than flag as undeclared — ids only, never a value, the
-same convention the rest of this file keeps. An unrecognised category key is
+same convention the rest of this file keeps (for `hooks`, that id is the full
+registered command, e.g. `node /Users/you/.claude/hooks/thing.mjs`, not a
+short name — it's the same string `status` prints in an undeclared hook row's
+note column, so it's copyable from there). An unrecognised category key is
 refused like any other manifest error. **Because this file is committed, an
 `allow` entry accepts that extra on every machine that checks out the repo,
 not just this one.**

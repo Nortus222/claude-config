@@ -992,6 +992,37 @@ test('--versions keeps the pending list and its repair hint for a missing plugin
   assert.match(output, /apply --install/, 'the repair hint must survive --versions');
 });
 
+// The regression the fix above traded one loss for another: making
+// pending.length === 0 the outer branch meant --versions only ever listed
+// versions when NOTHING was pending, hiding an installed plugin's version
+// the moment any other plugin was missing — precisely when diffing two
+// machines' output is most wanted.
+test('--versions shows an installed version alongside a pending plugin and its hint', async () => {
+  const setup = (home, repoDir) => {
+    withPlugin(home);
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          {
+            id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+            type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+          },
+          {
+            id: 'gone-claude', label: 'gone', target: 'claude',
+            type: 'plugin', default: true, plugin: 'gone@claude-plugins-official',
+          },
+        ],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /superpowers\s+installed\s+6\.3\.0/, 'the installed plugin still shows its version');
+  assert.match(output, /apply --install/, 'the repair hint must still name the missing plugin\'s fix');
+});
+
 // The join point of three seams that are each unit-tested on both sides and
 // never together: the allow list undeclared() reads, the declared hook set
 // declaredIds() is given, and the manifestDefects() spread. A mutation

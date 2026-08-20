@@ -136,7 +136,10 @@ export async function run(args = [], deps = {}) {
           ? planned.map((item) => formatRow(item.label, item.state, integrationNote(item)))
           : [formatRow('all declared', 'installed', '')]
         : [
-            ...pending.map((item) => formatRow(item.label, item.state, integrationNote(item))),
+            // --versions lists every planned item (so an installed plugin's
+            // version still prints), never just the pending ones; the hint
+            // stays regardless, since something here still needs `apply`.
+            ...(showVersions ? planned : pending).map((item) => formatRow(item.label, item.state, integrationNote(item))),
             '',
             '  nortuscc apply --install',
           ];
