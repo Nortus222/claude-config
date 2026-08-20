@@ -57,3 +57,29 @@ export function manifestDefects(integrations = []) {
 
   return rows;
 }
+
+// The categories the probe walks, in report order. `manifest` is not here: it
+// describes the repo rather than the machine and is produced by
+// manifestDefects, not by comparing against an observation.
+export const OBSERVED_CATEGORIES = ['agents', 'plugins', 'marketplaces', 'hooks', 'skills'];
+
+// Present on the machine, named by neither the manifest nor the allow list.
+//
+// An item carries `key` and `label` separately because they differ for hooks: a
+// hook is matched on its command, which is what uniquely identifies a
+// registration, but displays its event, which is what a reader recognises.
+export function undeclared({ observed = {}, declared = {}, allow = {} } = {}) {
+  const rows = [];
+
+  for (const category of OBSERVED_CATEGORIES) {
+    const isDeclared = declared[category] ?? new Set();
+    const isAllowed = new Set(allow[category] ?? []);
+
+    for (const found of observed[category] ?? []) {
+      if (isDeclared.has(found.key) || isAllowed.has(found.key)) continue;
+      rows.push({ category, key: found.key, label: found.label, note: found.note ?? '' });
+    }
+  }
+
+  return rows;
+}

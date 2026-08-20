@@ -6,6 +6,8 @@ import {
   marketplaceOf,
   declaredIds,
   manifestDefects,
+  OBSERVED_CATEGORIES,
+  undeclared,
 } from '../src/inventory.mjs';
 
 const plugin = (id, name) => ({ id, label: id, target: 'claude', type: 'plugin', default: true, plugin: name });
@@ -47,4 +49,63 @@ test('declaring the marketplace clears the defect', () => {
 // defect check blind to the built-in set would flag it on its first run.
 test('the built-in marketplace is not a manifest defect', () => {
   assert.deepEqual(manifestDefects([plugin('a', 'superpowers@claude-plugins-official')]), []);
+});
+
+const item = (key, note = '') => ({ key, label: key, note });
+
+test('OBSERVED_CATEGORIES covers every category the probe walks', () => {
+  assert.deepEqual([...OBSERVED_CATEGORIES].sort(), ['agents', 'hooks', 'marketplaces', 'plugins', 'skills']);
+});
+
+test('an observed item with no declaration is reported', () => {
+  const rows = undeclared({
+    observed: { plugins: [item('claude-mem@thedotmack')] },
+    declared: { plugins: new Set() },
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].category, 'plugins');
+  assert.equal(rows[0].label, 'claude-mem@thedotmack');
+});
+
+test('a declared item is not reported', () => {
+  const rows = undeclared({
+    observed: { plugins: [item('superpowers@claude-plugins-official')] },
+    declared: { plugins: new Set(['superpowers@claude-plugins-official']) },
+  });
+  assert.deepEqual(rows, []);
+});
+
+test('an allowed item is not reported', () => {
+  const rows = undeclared({
+    observed: { agents: [item('awesome-claude-agents')] },
+    declared: {},
+    allow: { agents: ['awesome-claude-agents'] },
+  });
+  assert.deepEqual(rows, []);
+});
+
+// An allow entry for one category must never quieten another.
+test('allow does not leak across categories', () => {
+  const rows = undeclared({
+    observed: { plugins: [item('x')] },
+    declared: {},
+    allow: { agents: ['x'] },
+  });
+  assert.equal(rows.length, 1);
+});
+
+// A hook matches on its command and displays its event; conflating the two
+// would match every hook that shares an event name.
+test('a hook is matched on its command, not its displayed event', () => {
+  const observed = { hooks: [{ key: 'node /h/a.mjs', label: 'SessionStart', note: 'node /h/a.mjs' }] };
+  assert.deepEqual(undeclared({ observed, declared: { hooks: new Set(['node /h/a.mjs']) } }), []);
+
+  const rows = undeclared({ observed, declared: { hooks: new Set(['node /h/b.mjs']) } });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].label, 'SessionStart');
+  assert.equal(rows[0].note, 'node /h/a.mjs');
+});
+
+test('missing observed categories and missing declared sets are empty, not errors', () => {
+  assert.deepEqual(undeclared({}), []);
 });
