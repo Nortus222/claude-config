@@ -245,8 +245,8 @@ export async function run(args = [], deps = {}) {
   //
   // An undeclared item is not, on its own, a machine out of agreement with
   // what it declared — every condition below is. Default stays informational
-  // so a scheduled run does not start failing the day this ships; Task 9's
-  // --strict is what makes it actionable.
+  // so a scheduled run does not start failing the day this ships; --strict is
+  // what makes it actionable.
   const otherDirty =
     cliBehind ||
     actionable.length > 0 ||
