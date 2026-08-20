@@ -1,0 +1,59 @@
+// Pure derivation for the undeclared inventory. No I/O and no node:fs import:
+// src/inventory-probe.mjs does every read and hands the results here, the same
+// split state.mjs and copy.mjs already draw.
+
+// Marketplaces Claude Code registers on its own behalf. The docs say the
+// official one is added "automatically the first time you start it
+// interactively", so reporting it would report Claude Code's behaviour as the
+// user's drift. Consulted by both declaredIds and manifestDefects from this one
+// constant, so the two can never disagree about what "built-in" means.
+export const BUILTIN_MARKETPLACES = new Set(['claude-plugins-official']);
+
+// The marketplace half of `plugin@marketplace`. A name with no suffix, or one
+// that is all suffix, yields null: neither is a marketplace this can check.
+export function marketplaceOf(plugin) {
+  const at = plugin.lastIndexOf('@');
+  return at > 0 ? plugin.slice(at + 1) : null;
+}
+
+// `hookCommands` is computed by the probe, which knows where hooks are
+// installed; keeping it a parameter is what keeps this module free of paths.
+export function declaredIds(integrations = [], hookCommands = []) {
+  const plugins = new Set();
+  const marketplaces = new Set(BUILTIN_MARKETPLACES);
+
+  for (const item of integrations) {
+    if (item.type === 'plugin' && item.plugin) plugins.add(item.plugin);
+    if (item.type === 'marketplace' && item.name) marketplaces.add(item.name);
+  }
+
+  return { plugins, marketplaces, hooks: new Set(hookCommands) };
+}
+
+// A declared plugin whose marketplace is neither declared nor built-in can
+// never be installed by `apply --install`: runIntegrations installs only
+// declared marketplaces. That is the repo being wrong rather than the machine,
+// which is why it is reported apart from the undeclared rows.
+//
+// It deliberately does not go through validateIntegrations, which is
+// fail-closed — an error there yields no integrations at all, and one missing
+// marketplace must not stop every other declaration from installing.
+export function manifestDefects(integrations = []) {
+  const { marketplaces } = declaredIds(integrations);
+  const rows = [];
+
+  for (const item of integrations) {
+    if (item.type !== 'plugin' || !item.plugin) continue;
+    const source = marketplaceOf(item.plugin);
+    if (source && !marketplaces.has(source)) {
+      rows.push({
+        category: 'manifest',
+        key: item.plugin,
+        label: item.plugin,
+        note: `marketplace '${source}' is not declared`,
+      });
+    }
+  }
+
+  return rows;
+}
