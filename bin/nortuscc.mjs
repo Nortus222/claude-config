@@ -16,7 +16,7 @@ Skills-only machines (use this repo's skill set, keep your own instruction files
 
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, then install interactively
-  status [--strict] [--versions]   report: cli / config / integrations / skills
+  status [--strict] [--versions]    report: cli / config / integrations / skills
                                     and what is installed but undeclared
                                     --strict exits non-zero on undeclared items
                                     --versions shows each plugin's installed version
