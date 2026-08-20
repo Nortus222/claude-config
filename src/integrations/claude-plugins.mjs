@@ -26,7 +26,7 @@ function readJson(path) {
   }
 }
 
-export function installedPlugins(dir) {
+function installedPlugins(dir) {
   const raw = readJson(join(dir, 'plugins', 'installed_plugins.json'));
   const nested = raw.plugins;
   if (nested !== null && typeof nested === 'object' && !Array.isArray(nested)) return nested;
