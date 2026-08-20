@@ -73,23 +73,65 @@ Stated plainly, because these are the reasons you might reverse:
 ## What you must configure by hand
 
 **This is the step that makes it worth doing, and it is not done yet.** All 11
-T3 projects currently have `scripts_json = []`.
+T3 projects currently have `scripts_json = []`. Without them a T3 worktree is a
+bare checkout with no dependencies, and the adoption gains only the
+terminal-cwd fix.
 
-Per project, in T3's project settings, add a startup script and enable
-**"Run automatically on worktree creation"**:
+Per project, in T3's project settings, add the script below and enable
+**"Run automatically on worktree creation"**.
 
-| Project | Suggested script |
+### Ignore the preview URL
+
+T3 scripts can open a URL in the in-app preview when they run. **No project here
+needs it.** None of them is a web app: `telemetry-triage`'s `triage` script is
+`bun run src/cli.ts`, `artpub` is a CLI, and the rest are Ansible, Flutter,
+.NET, and an Xcode target. No Next, no Vite, no dev server anywhere. The value
+of scripts here is dependency install, nothing more.
+
+### On-create scripts
+
+Ordered by how much a broken worktree costs. Commands are what the transcripts
+show actually being run, over the 2026-08-07 → 08-20 window.
+
+| Project | Script | Why |
+| --- | --- | --- |
+| `telemetry-triage` | `bun install` | Heaviest project in the window — 203 `bun run typecheck`, 129 `bun test`. Dead without `node_modules`. |
+| `artpub` | `pnpm install` | pnpm workspace over `packages/`. 56 test, 53 typecheck, 12 build. |
+| `pocketmanage` | `flutter pub get` | `pubspec.yaml` + `ios/` + `android/`. Non-functional until this runs. |
+| `pocketmanage_partner` | `flutter pub get` | Same. |
+| `pocketmanage_installers` | `flutter pub get` | Same. |
+| `shared-mic` | `python -m pip install -e 'harness[dev]'` | 100 `python -m pytest`. `harness/pyproject.toml` declares `cryptography>=42` and a `dev` extra with `pytest>=8`. |
+| `EMWS` | `dotnet restore` | `EMWS.sln`, five projects. |
+| `change_log_generator` | `dotnet restore` | 19 `dotnet run --project`. |
+| `homeserver` | `ansible-galaxy install -r requirements.yml` | An Ansible repo — `ansible.cfg`, `roles/`, `run.yml`. The `docker` calls in the window were inspecting test containers, not local services. |
+
+### Deliberately no script
+
+| Project | Why |
 | --- | --- |
-| `shared-mic` | dependency install, then the dev task |
-| `claude-config` | `npm test` |
-| `telemetry-triage` | dependency install |
-| Flutter/.NET projects | the restore/pub-get step |
+| `claude-config` | Zero dependencies by design, mandated by its own `CLAUDE.md`. `npm test` runs against stdlib `node:test`. An install step would be a no-op. |
+| `agent-skills` | 48 `python3 -m unittest` runs, all standard library. Nothing to install. |
+| `misc` | Not a project — it is the parent directory of `claude-config`, `shared-mic`, `artpub` and `agent-skills`. Worth removing from T3's project list rather than scripting. |
 
-Set the preview URL on the script for anything that serves HTTP, so the in-app
-preview opens when the worktree is created.
+### Optional manual scripts
 
-Without this, a T3 worktree is a bare checkout with no `node_modules` and the
-adoption gains you only the terminal-cwd fix.
+Separate from on-create, and purely for your own one-click use — the agent
+shells out directly and will not use them. Worth having for the commands run
+most often: `bun run typecheck` and `bun test` in `telemetry-triage`,
+`pnpm test` and `pnpm typecheck` in `artpub`. Do **not** mark these
+run-on-creation; they would slow every worktree.
+
+### Two caveats
+
+- **`symlinkDirectories: ["node_modules"]` may be wrong for `artpub`.** pnpm's
+  `node_modules` is a symlink farm into `.pnpm` with workspace-relative links,
+  so symlinking it wholesale can resolve to the wrong package roots. Fine for
+  bun and npm. If `artpub` misbehaves inside a *Claude-created* worktree, this
+  is the first suspect. It does not affect T3-created worktrees, which is why
+  the install script is the real mechanism.
+- **Flutter iOS builds may also need CocoaPods.** `flutter pub get` covers Dart
+  dependencies only. If a fresh worktree fails on iOS, extend the script to
+  `flutter pub get && (cd ios && pod install)`.
 
 ## Claude Code's own worktrees still exist
 
