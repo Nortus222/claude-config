@@ -978,3 +978,54 @@ test('--versions keeps the pending list and its repair hint for a missing plugin
   assert.match(output, /superpowers/, 'the missing plugin is still named');
   assert.match(output, /apply --install/, 'the repair hint must survive --versions');
 });
+
+// The join point of three seams that are each unit-tested on both sides and
+// never together: the allow list undeclared() reads, the declared hook set
+// declaredIds() is given, and the manifestDefects() spread. A mutation
+// dropping any one of them passed the whole suite before this test existed.
+test('undeclared honours allow, declared hooks, and manifest defects together', async () => {
+  const setup = (home, repoDir) => {
+    mkdirSync(join(repoDir, 'claude', 'hooks'), { recursive: true });
+    writeFileSync(join(repoDir, 'claude', 'hooks', 'session.mjs'), '// test hook\n');
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        allow: { agents: ['stray-agent'] },
+        integrations: [
+          {
+            id: 'session-hook', label: 'session hook', target: 'claude',
+            type: 'hook', default: true, event: 'SessionStart', file: 'claude/hooks/session.mjs',
+          },
+          {
+            id: 'bad-plugin', label: 'bad plugin', target: 'claude',
+            type: 'plugin', default: true, plugin: 'foo@undeclared-market',
+          },
+        ],
+      }),
+    );
+
+    // An undeclared agent that only the allow entry above should silence.
+    mkdirSync(join(home, '.claude', 'agents', 'stray-agent'), { recursive: true });
+
+    // The declared hook, registered under the path nortuscc installs hooks to
+    // (node <claudeDir>/hooks/<basename of file>), so it must read as
+    // declared rather than undeclared.
+    writeFileSync(
+      join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [{
+            hooks: [{ type: 'command', command: `node ${join(home, '.claude', 'hooks', 'session.mjs')}` }],
+          }],
+        },
+      }),
+    );
+  };
+
+  const { output } = await statusOutput([], setup);
+
+  assert.doesNotMatch(output, /stray-agent/, 'the allow list must silence the item it names');
+  assert.doesNotMatch(output, /hooks\s+SessionStart/, 'a declared hook must not be reported as undeclared');
+  assert.match(output, /manifest\s+foo@undeclared-market/, 'an undeclared marketplace is still reported');
+});
