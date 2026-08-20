@@ -191,6 +191,72 @@ segments baked into an existing `hooks.json`.
 `if (k !== "context-mode@context-mode") continue;` — it will not touch any
 other plugin's install state.
 
+### Is the bug still real? No — fixed upstream, on this version
+
+The GitHub trail is misleading. All four related issues were closed by bots for
+inactivity, none marked fixed:
+
+| Issue | Closed | Reason |
+| --- | --- | --- |
+| #46915 | 2026-05-24 | stale / duplicate |
+| #39328 | 2026-04-25 | not planned / stale |
+| #40442 | 2026-03-29 | not planned |
+| #35165 | 2026-03-20 | duplicate |
+
+The fixes landed anyway, and the changelog names them:
+
+- **2.1.128** — *"Fixed stale `installed_plugins.json` entries pointing at
+  deleted cache directories polluting PATH"*
+- **2.1.142** — *"Fixed plugin cache cleanup deleting the active plugin version
+  directory when no installation metadata is present"*
+- **2.1.81** — *"Fixed plugin hooks blocking prompt submission when the plugin
+  directory is deleted mid-session"*
+- **2.1.94** — *"Fixed plugin hooks failing with `No such file or directory`
+  when `CLAUDE_PLUGIN_ROOT` was not set"*
+
+This machine runs **2.1.236**, past all four.
+
+The cache layout confirms it structurally. Directories are now version-named
+and old versions are **retained**, which is the opposite of the behaviour the
+hook was written against:
+
+```
+claude-plugins-official/superpowers: version-named=[6.2.0, 6.3.0] hash-named=[b62616fc12f6]
+context-mode/context-mode:           version-named=[1.0.169]      hash-named=[]
+thedotmack/claude-mem:               version-named=[13.13.1]      hash-named=[]
+```
+
+`b62616fc12f6` (2026-08-07) is a relic of the old hash-named scheme; the
+version-named dirs date from 2026-08-12. The migration happened between those
+two dates. `installed_plugins.json` is now schema `version: 2` and records
+`version`, `installedAt`, `lastUpdated` and `gitCommitSha` explicitly.
+
+**Empirically the hook is a no-op.** Replaying its exact decision tree against
+current state:
+
+- `installPath` exists → branch A (symlink repair) never fires.
+- Branch B imports `normalize-hooks.mjs` and calls `normalizeHooksJsonOnly`,
+  but context-mode's `hooks.json` uses `${CLAUDE_PLUGIN_ROOT}` throughout with
+  **zero baked version paths** — nothing to rewrite.
+
+So it runs 53 times per fortnight and does nothing, which matches the measured
+cost: no stdout, no measurable duration.
+
+### It still cannot be removed
+
+context-mode **1.0.169 is the current release** (npm and GitHub, published
+2026-06-29). Every commit since is `ci: update install stats` — the plugin is in
+maintenance-only mode and the obsolete hook still ships.
+
+`start.mjs` is the plugin's **MCP server entrypoint**
+(`plugin.json` → `mcpServers.context-mode.args`), so it executes on every
+session that loads context-mode. The heal-deploy block sits at roughly line 305
+and is **unguarded** — the only `process.env.VITEST` escapes start at line 441,
+after it. There is no `CONTEXT_MODE_*` opt-out for it.
+
+Deleting the script or the settings entry therefore reverts on the next
+session start, exactly as it did on 2026-08-12.
+
 **Cost.** 53 fires in the 13-day window, no stdout, no measurable duration.
 It is the cheapest entry in the entire hook table; the two expensive hooks
 (context-mode's `PreToolUse:Agent` at 187.6s, claude-mem's `Stop` at 235.6s)
@@ -198,13 +264,18 @@ both belong to plugins and are unrelated to this one.
 
 ### The decision
 
-It is not really independent. Removing the `settings.json` entry does not stick
-— context-mode re-adds it on the next session start. The only way to be rid of
-it is to disable the context-mode plugin, at which point the hook becomes moot
-anyway.
+The hook is **vestigial, not load-bearing** — it guards a bug that Claude Code
+fixed by 2.1.142 and it provably does nothing on 2.1.236. But it is also
+unremovable while context-mode is enabled, and it costs nothing measurable.
 
-So: **keep context-mode → keep the hook.** There is no third option, and at
-zero measured cost there is no reason to want one.
+So: **keep context-mode → keep the hook**, and stop treating it as insurance.
+There is no third option and no reason to want one. If context-mode is ever
+dropped, delete `~/.claude/hooks/context-mode-cache-heal.mjs` and the
+`hooks.SessionStart` entry in the same pass — nothing will re-add them.
+
+Worth separating clearly: this hook is not what context-mode costs. Its
+`PreToolUse:Agent` hook injected 2,548 KB (~637k tokens) over 229 fires and
+187.6s of latency in the same window. That is the entry to scrutinise.
 
 The one thing worth knowing: a third-party plugin writes to your global
 `settings.json`. On a fresh machine, install context-mode *before* auditing
