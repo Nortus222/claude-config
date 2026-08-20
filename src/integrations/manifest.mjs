@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { repoRoot } from '../resolve.mjs';
 import { TARGETS } from '../targets.mjs';
+import { OBSERVED_CATEGORIES } from '../inventory.mjs';
 
 export const TYPES = ['hook', 'marketplace', 'plugin', 'mcp'];
 
@@ -115,18 +116,50 @@ function validateOne(item, index, { repo, seen }) {
   return errors;
 }
 
+// Extras that are present on purpose. Ids only — the same "may name environment
+// variables, never their values" convention the rest of this file keeps.
+function validateAllow(value, errors) {
+  if (value === undefined) return {};
+  if (!isPlainObject(value)) {
+    errors.push("integrations.json: 'allow' must be an object keyed by category");
+    return {};
+  }
+
+  const allow = {};
+  for (const [category, ids] of Object.entries(value)) {
+    if (!OBSERVED_CATEGORIES.includes(category)) {
+      errors.push(
+        `integrations.json: 'allow' names unknown category '${category}'; ` +
+          `expected one of ${OBSERVED_CATEGORIES.join(', ')}`,
+      );
+      continue;
+    }
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id)) {
+      errors.push(`integrations.json: 'allow.${category}' must be a list of ids`);
+      continue;
+    }
+    allow[category] = ids;
+  }
+  return allow;
+}
+
 // Validation runs before any adapter is called, and a manifest with any error
 // yields no integrations at all: installing "most of" a manifest the validator
 // refused is how a rejected declaration still reaches a child process.
 export function validateIntegrations(value, { repo } = {}) {
   const errors = [];
 
-  if (!isPlainObject(value)) return { integrations: [], errors: ['integrations.json must be a JSON object'] };
+  if (!isPlainObject(value)) {
+    return { integrations: [], allow: {}, errors: ['integrations.json must be a JSON object'] };
+  }
   if (value.version !== VERSION) {
     errors.push(`integrations.json version must be ${VERSION}, found ${JSON.stringify(value.version)}`);
   }
+
+  const allow = validateAllow(value.allow, errors);
+
   if (!Array.isArray(value.integrations)) {
-    return { integrations: [], errors: [...errors, "integrations.json needs an 'integrations' array"] };
+    return { integrations: [], allow: {}, errors: [...errors, "integrations.json needs an 'integrations' array"] };
   }
 
   const seen = new Set();
@@ -134,8 +167,10 @@ export function validateIntegrations(value, { repo } = {}) {
     errors.push(...validateOne(item, index, { repo, seen }));
   });
 
-  if (errors.length) return { integrations: [], errors };
-  return { integrations: value.integrations, errors: [] };
+  // An invalid manifest yields no allow list either: honouring exceptions from
+  // a document the validator refused would be trusting half of it.
+  if (errors.length) return { integrations: [], allow: {}, errors };
+  return { integrations: value.integrations, allow, errors: [] };
 }
 
 export function integrationsPath({ repo = repoRoot() } = {}) {
@@ -146,13 +181,13 @@ export function integrationsPath({ repo = repoRoot() } = {}) {
 // managed for its instruction files alone.
 export function readIntegrations({ repo = repoRoot() } = {}) {
   const path = integrationsPath({ repo });
-  if (!existsSync(path)) return { integrations: [], errors: [] };
+  if (!existsSync(path)) return { integrations: [], allow: {}, errors: [] };
 
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
-    return { integrations: [], errors: [`integrations.json is not valid JSON: ${err.message}`] };
+    return { integrations: [], allow: {}, errors: [`integrations.json is not valid JSON: ${err.message}`] };
   }
   return validateIntegrations(parsed, { repo });
 }
