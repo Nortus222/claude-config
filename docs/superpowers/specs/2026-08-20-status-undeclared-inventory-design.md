@@ -26,8 +26,17 @@ claude-mem from `integrations.json`, and says so in the file's own comment:
 > Removing them here stops new machines being offered them — it does not
 > uninstall them from a machine that already has them.
 
-So every machine that had them still has them, and nothing reports which ones.
-That is precisely the question this section answers.
+This machine was then cleaned by hand, and verified on 2026-08-20:
+`installed_plugins.json` holds `superpowers@claude-plugins-official` alone,
+`known_marketplaces.json` holds `claude-plugins-official` alone, and
+`~/.claude-mem` is gone entirely.
+
+That does not weaken the case, it sharpens it. The cleanup was manual and
+nothing recorded it, so `nortuscc status` said "everything is in agreement"
+before it and says the same after — it cannot confirm the runbook's uninstall
+step ran, or report which *other* machines still carry the plugins. Verifying a
+removal is the same capability as noticing an addition, and neither exists
+today.
 
 ## What "declared" means, per category
 
@@ -69,6 +78,21 @@ through `validateIntegrations`, which is fail-closed: an error there yields *no*
 integrations at all, and a missing marketplace declaration must not stop the
 other declarations from installing.
 
+**The built-in exemption applies to this check too**, and the repo's current
+state is the reason. `integrations.json` declares exactly one integration,
+`superpowers@claude-plugins-official`, and declares no marketplace at all. A
+defect check that did not consult the built-in set would flag the repo's only
+declaration as broken on its first run. A built-in marketplace counts as
+declared for both checks, from one shared constant, so the two can never
+disagree about what "built-in" means.
+
+One real edge this leaves open, stated rather than hidden: on a machine that has
+never started Claude Code interactively, the official marketplace has not been
+auto-added yet, and the docs say the install then fails with `Marketplace
+"claude-plugins-official" not found`. `integrations.json` already takes that
+position in its own note — "Ships from the official marketplace Claude Code
+already knows" — so this design keeps it rather than reopening it.
+
 **Only user-scope plugin installs count.** `installed_plugins.json` records a
 scope per install. A `project`-scoped plugin belongs to a repository and a
 `managed` one to an administrator; neither is the user's to declare, so neither
@@ -91,6 +115,17 @@ The skills row is deliberately narrow. `reconcile()` already reports store-level
 noise. The new check covers only the hole `reconcile` cannot see: an entry in
 `~/.claude/skills` that did not come from the shared store — a hand-placed
 directory, or a link pointing somewhere else. Claude loads it either way.
+
+**Resolve the link; never compare its text.** `~/.claude/skills` on this machine
+holds 29 links written two different ways: 21 relative
+(`../../.agents/skills/<name>`) and 8 absolute
+(`/Users/ihor/.agents/skills/<name>`). Both forms resolve to the same store.
+A draft of this check compared the raw link text against the relative form and
+reported all 8 absolute ones as undeclared — a false positive rate of 28% on a
+machine that is, in fact, clean. The check resolves each entry to a real path
+and compares that against the resolved store directory. Nothing else is
+acceptable: a category whose first run cries wolf is a category the user learns
+to skip.
 
 ## Versions: report, never pin
 
@@ -250,9 +285,14 @@ this way by `claude-plugins.mjs` and keeps that behaviour.
   expands.
 - Extended: `test/integrations-manifest.test.mjs` — `allow` validation.
 - Extended: `test/capture.test.mjs` — the no-adopt guard.
-- Manual: run `nortuscc status` on this machine and confirm
-  `claude-plugins-official` is not reported, since PR #14 leaves
-  `superpowers@claude-plugins-official` as the only declaration.
+- Manual: run `nortuscc status` on this machine. Verified state as of
+  2026-08-20 means every category is clean, so the section must print
+  `all categories  declared` and nothing else. Specifically: one user-scope
+  plugin (declared), one marketplace (`claude-plugins-official`, built-in), an
+  empty `~/.claude/agents`, no `hooks` key in `settings.json`, and 29 skill
+  links that all resolve into `~/.agents/skills`. Any row at all on this machine
+  is a false positive, and the 21-relative/8-absolute link split makes that a
+  live risk rather than a theoretical one.
 
 Test-first per the repo's convention, committing after each task.
 
