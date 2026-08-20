@@ -83,3 +83,19 @@ test('a broken link is observed as broken rather than silently skipped', () => {
   assert.equal(items.length, 1);
   assert.match(items[0].note, /broken link/);
 });
+
+test('a store that cannot be resolved is an error, not "everything is undeclared"', () => {
+  const { home, claudeDir } = homeWithStore();
+  mkdirSync(join(home, '.agents', 'skills', 'have'), { recursive: true });
+  symlinkSync(join(home, '.agents', 'skills', 'have'), join(home, '.claude', 'skills', 'have'));
+
+  // A store path whose parent is a regular file cannot be resolved, and fails
+  // with ENOTDIR rather than ENOENT: present, but unusable.
+  writeFileSync(join(home, 'blocker'), 'x');
+  const agentsSkills = () => join(home, 'blocker', 'skills');
+
+  const { items, errors } = observedSkillLinks({ claudeDir, agentsSkills });
+  assert.deepEqual(items, [], 'no skill is relabelled undeclared because the store could not be read');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].category, 'skills');
+});

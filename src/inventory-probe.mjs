@@ -62,9 +62,17 @@ export function observedSkillLinks({ claudeDir = realClaudeDir, agentsSkills = r
   let store = null;
   try {
     store = realpathSync(agentsSkills());
-  } catch {
-    // No store at all: every entry here came from somewhere else by definition.
-    store = null;
+  } catch (err) {
+    // Absent is not a failure: with no store at all, every entry here came from
+    // somewhere else by definition. A store that exists but cannot be resolved
+    // is a failed read, and reporting it as absent would relabel every
+    // store-linked skill as undeclared with nothing to say why.
+    if (err.code !== 'ENOENT') {
+      return {
+        items: [],
+        errors: [{ category: 'skills', message: `could not resolve ${agentsSkills()}: ${err.message}` }],
+      };
+    }
   }
 
   try {
