@@ -482,7 +482,7 @@ git commit -m "feat: validate the integrations allow list"
 **Files:**
 - Modify: `src/integrations/claude-plugins.mjs`
 - Modify: `src/integrations/adapters.mjs`
-- Test: `test/inventory-probe.test.mjs` (created here)
+- Test: `test/plugins.test.mjs` — the established home for `claude-plugins.mjs` tests, which already imports from that module. Do not start a second file for it.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -490,16 +490,10 @@ git commit -m "feat: validate the integrations allow list"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/inventory-probe.test.mjs`:
+Append to `test/plugins.test.mjs`, merging the two new names into its existing import from `../src/integrations/claude-plugins.mjs`. Its header already imports `mkdtempSync`, `mkdirSync`, `writeFileSync`, `tmpdir` and `join`, so add no new builtin imports:
 
 ```js
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-import { userScopeInstalls, knownMarketplaces } from '../src/integrations/claude-plugins.mjs';
+// added to the existing import: userScopeInstalls, knownMarketplaces
 
 function claudeHome(installed, marketplaces = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-probe-'));
@@ -613,7 +607,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/integrations/claude-plugins.mjs src/integrations/adapters.mjs test/inventory-probe.test.mjs
+git add src/integrations/claude-plugins.mjs src/integrations/adapters.mjs test/plugins.test.mjs
 git commit -m "feat: expose user-scope plugin installs and codex state"
 ```
 
@@ -623,7 +617,7 @@ git commit -m "feat: expose user-scope plugin installs and codex state"
 
 **Files:**
 - Modify: `src/inventory-probe.mjs` (created here)
-- Test: `test/inventory-probe.test.mjs`
+- Test: `test/inventory-probe.test.mjs` (created here)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -633,10 +627,15 @@ git commit -m "feat: expose user-scope plugin installs and codex state"
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `test/inventory-probe.test.mjs`:
+Create `test/inventory-probe.test.mjs`:
 
 ```js
-import { symlinkSync, rmSync } from 'node:fs';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { observedAgents, observedSkillLinks } from '../src/inventory-probe.mjs';
 
 function homeWithStore() {
@@ -841,7 +840,7 @@ git commit -m "feat: probe agents and claude skill links"
 
 **Files:**
 - Modify: `src/inventory-probe.mjs`
-- Test: `test/inventory-probe.test.mjs`
+- Test: `test/inventory-probe.test.mjs` (created here)
 
 **Interfaces:**
 - Consumes: `userScopeInstalls`, `knownMarketplaces` (Task 4); `observedAgents`, `observedSkillLinks` (Task 5).
@@ -1240,12 +1239,33 @@ Then, immediately after the `skills` section is written to stdout, add its rende
   const inventoryDirty = inventoryRows.length > 0 || inventory.errors.length > 0;
 ```
 
-Finally, add `inventoryDirty === false &&` to the list of conditions guarding the `everything is in agreement` branch, immediately after `cliBehind === false &&`.
+Add `inventoryDirty === false &&` to the list of conditions guarding the `everything is in agreement` branch, immediately after `cliBehind === false &&`.
+
+Finally, replace the command's final `return 1;` with the block below. Without it an undeclared-only run falls past the agreement branch and returns 1, and the spec's default is informational:
+
+```js
+  // An undeclared item is not, on its own, a machine out of agreement with
+  // what it declared — every other condition above is. Default stays
+  // informational so a scheduled run does not start failing the day this
+  // ships; Task 9's --strict is what makes it actionable.
+  const otherDirty =
+    cliBehind ||
+    actionable.length > 0 ||
+    errors.length > 0 ||
+    pending.length > 0 ||
+    skills.missing.length > 0 ||
+    exposure.partial.length > 0 ||
+    exposure.missing.length > 0 ||
+    exposureErrors.length > 0;
+
+  if (otherDirty) return 1;
+  return 0;
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npm test 2>&1 | tail -10`
-Expected: PASS. The exit-code test passes because undeclared rows do not yet reach any `return 1` path — Task 8 makes that deliberate rather than accidental.
+Expected: PASS, including the exit-code test — an undeclared-only run now returns 0 by construction rather than by accident.
 
 - [ ] **Step 5: Commit**
 
@@ -1300,28 +1320,14 @@ Expected: FAIL — `--strict` returns 0.
 In `src/commands/status.mjs`, add beside the `inventoryDirty` line from Task 7:
 
 ```js
-  // Default stays informational so a scheduled run does not start failing the
-  // day this ships. --strict is for CI or a login hook that wants drift to be
-  // actionable.
+  // For CI or a login hook that wants drift to be actionable. The default is
+  // informational, so an inventory finding alone is reported and forgiven.
   const strict = statusArgs.includes('--strict');
 ```
 
-Replace the command's final `return 1;` with:
+Task 7 left the command ending in `if (otherDirty) return 1;` followed by `return 0;`. Change only that last line:
 
 ```js
-  // An undeclared item is not, on its own, a machine out of agreement with what
-  // it declared — every other condition above is. Under --strict it is.
-  const otherDirty =
-    cliBehind ||
-    actionable.length > 0 ||
-    errors.length > 0 ||
-    pending.length > 0 ||
-    skills.missing.length > 0 ||
-    exposure.partial.length > 0 ||
-    exposure.missing.length > 0 ||
-    exposureErrors.length > 0;
-
-  if (otherDirty) return 1;
   return strict ? 1 : 0;
 ```
 
