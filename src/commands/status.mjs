@@ -121,25 +121,25 @@ export async function run(args = [], deps = {}) {
   const showVersions = statusArgs.includes('--versions');
   const versionOf = new Map(inventory.pluginVersions);
 
+  // --versions only swaps the note column for a version; it must never take
+  // the place of the pending list or its repair hint, which is the one line
+  // that tells a machine with a missing plugin how to fix it.
+  const integrationNote = (item) =>
+    showVersions && item.type === 'plugin' ? (versionOf.get(item.plugin) ?? 'unknown') : item.note;
+
   const integrationLines = errors.length
     ? errors.map((message) => formatRow('manifest', 'invalid', message))
     : planned.length === 0
       ? [formatRow('none declared', 'satisfied', '')]
-      : showVersions
-        ? planned.map((item) =>
-            formatRow(
-              item.label,
-              item.state,
-              item.type === 'plugin' ? (versionOf.get(item.plugin) ?? 'unknown') : item.note,
-            ),
-          )
-        : pending.length === 0
-          ? [formatRow('all declared', 'installed', '')]
-          : [
-              ...pending.map((item) => formatRow(item.label, item.state, item.note)),
-              '',
-              '  nortuscc apply --install',
-            ];
+      : pending.length === 0
+        ? showVersions
+          ? planned.map((item) => formatRow(item.label, item.state, integrationNote(item)))
+          : [formatRow('all declared', 'installed', '')]
+        : [
+            ...pending.map((item) => formatRow(item.label, item.state, integrationNote(item))),
+            '',
+            '  nortuscc apply --install',
+          ];
   process.stdout.write(section('integrations', integrationLines));
 
   const skills = reconcile({

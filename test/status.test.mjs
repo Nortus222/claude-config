@@ -957,3 +957,24 @@ test('--versions reports an unreadable version as unknown', async () => {
   assert.match(output, /a\s+installed\s+unknown/);
 });
 
+// --versions only adds a column; it must not swallow the pending list or the
+// hint that repairs it. A machine missing a declared plugin has to keep
+// naming `apply --install` whether or not --versions is passed.
+test('--versions keeps the pending list and its repair hint for a missing plugin', async () => {
+  const setup = (_home, repoDir) => {
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{
+          id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+          type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+        }],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /superpowers/, 'the missing plugin is still named');
+  assert.match(output, /apply --install/, 'the repair hint must survive --versions');
+});
