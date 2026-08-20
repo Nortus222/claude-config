@@ -182,17 +182,12 @@ async function runCli(args, { env, fixtureBinDir }) {
 // CLI doing its own installing. Derived from the committed manifest's order,
 // so this breaks loudly if a declaration is added without a decision about
 // where it belongs.
+//
+// Since context-mode and claude-mem were retired the manifest declares one
+// plugin from a marketplace Claude Code already knows, so there is no
+// marketplace step left and Codex has nothing native to install at all.
 function expectedDefaultInstallCalls() {
-  return [
-    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
-    { cmd: 'claude', args: ['plugin', 'marketplace', 'add', 'thedotmack/claude-mem'] },
-    { cmd: 'codex', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] },
-    { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
-    { cmd: 'claude', args: ['plugin', 'install', 'context-mode@context-mode'] },
-    { cmd: 'claude', args: ['plugin', 'install', 'claude-mem@thedotmack'] },
-    // Codex installs with `add`; it has no `install` subcommand.
-    { cmd: 'codex', args: ['plugin', 'add', 'context-mode@context-mode'] },
-  ];
+  return [{ cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] }];
 }
 
 test('fresh machine setup installs selected defaults for both agents', async () => {
@@ -274,7 +269,11 @@ test('a Codex-only setup never runs the Claude installer or writes ~/.claude', a
 
   const log = readInstallerLog(env);
   assert.deepEqual(log.filter((entry) => entry.cmd === 'claude'), [], 'a Codex run must never invoke the Claude CLI');
-  assert.ok(log.some((entry) => entry.cmd === 'codex'));
+  // Codex declares no native plugins now, so its own CLI is never called. The
+  // skill installs are what keep this from passing vacuously: the run has to
+  // have done Codex work for "no Claude work" to mean anything.
+  assert.deepEqual(log.filter((entry) => entry.cmd === 'codex'), []);
+  assert.ok(log.some((entry) => entry.cmd === 'npx' && entry.args[2] === 'add'));
 
   for (const call of log.filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add')) {
     const agentAt = call.args.indexOf('--agent');

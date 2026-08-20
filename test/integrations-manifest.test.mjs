@@ -147,16 +147,19 @@ test('the committed integrations.json is valid and declares the agreed defaults'
   assert.ok(byId.has('superpowers-claude'));
   assert.equal(byId.get('superpowers-claude').plugin, 'superpowers@claude-plugins-official');
 
-  const marketplaces = integrations.filter((i) => i.type === 'marketplace').map((i) => i.marketplace);
-  assert.ok(marketplaces.includes('mksglu/context-mode'));
-  assert.ok(marketplaces.includes('thedotmack/claude-mem'));
-
+  // context-mode and claude-mem were retired on 2026-08-20. Both are asserted absent
+  // rather than simply unlisted: an exact match is what stops either creeping back in
+  // as an incidental edit, and re-adding one should have to change this test first.
   const plugins = integrations.filter((i) => i.type === 'plugin').map((i) => i.plugin);
-  assert.ok(plugins.includes('context-mode@context-mode'));
-  assert.ok(plugins.includes('claude-mem@thedotmack'));
+  assert.deepEqual(plugins, ['superpowers@claude-plugins-official']);
 
-  // Codex gets context-mode through its own native installation.
-  assert.ok(integrations.some((i) => i.target === 'codex' && i.plugin === 'context-mode@context-mode'));
+  // Superpowers ships from the marketplace Claude Code already knows, so with the two
+  // third-party plugins gone there is no marketplace left to declare.
+  const marketplaces = integrations.filter((i) => i.type === 'marketplace');
+  assert.deepEqual(marketplaces, []);
+
+  // Codex's only integration was context-mode; it now declares nothing.
+  assert.deepEqual(integrations.filter((i) => i.target === 'codex'), []);
 });
 
 // The design retires the private cache-repair hook rather than relocating it:

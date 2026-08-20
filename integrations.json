@@ -15,59 +15,6 @@
       "default": true,
       "plugin": "superpowers@claude-plugins-official",
       "note": "Ships from the official marketplace Claude Code already knows."
-    },
-    {
-      "id": "context-mode-marketplace-claude",
-      "label": "context-mode marketplace",
-      "target": "claude",
-      "type": "marketplace",
-      "default": true,
-      "marketplace": "mksglu/context-mode",
-      "name": "context-mode"
-    },
-    {
-      "id": "context-mode-claude",
-      "label": "context-mode",
-      "target": "claude",
-      "type": "plugin",
-      "default": true,
-      "plugin": "context-mode@context-mode",
-      "note": "Owns its own hooks, MCP configuration and cache-path normalization."
-    },
-    {
-      "id": "claude-mem-marketplace",
-      "label": "claude-mem marketplace",
-      "target": "claude",
-      "type": "marketplace",
-      "default": true,
-      "marketplace": "thedotmack/claude-mem",
-      "name": "thedotmack"
-    },
-    {
-      "id": "claude-mem-claude",
-      "label": "claude-mem",
-      "target": "claude",
-      "type": "plugin",
-      "default": true,
-      "plugin": "claude-mem@thedotmack"
-    },
-    {
-      "id": "context-mode-marketplace-codex",
-      "label": "context-mode marketplace",
-      "target": "codex",
-      "type": "marketplace",
-      "default": true,
-      "marketplace": "mksglu/context-mode",
-      "name": "context-mode"
-    },
-    {
-      "id": "context-mode-codex",
-      "label": "context-mode",
-      "target": "codex",
-      "type": "plugin",
-      "default": true,
-      "plugin": "context-mode@context-mode",
-      "note": "Codex installs context-mode natively; nortuscc does not copy Claude's copy."
     }
   ]
 }
