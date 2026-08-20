@@ -208,6 +208,10 @@ export async function run(args = [], deps = {}) {
 
   const inventoryDirty = inventoryRows.length > 0 || inventory.errors.length > 0;
 
+  // For CI or a login hook that wants drift to be actionable. The default is
+  // informational, so an inventory finding alone is reported and forgiven.
+  const strict = statusArgs.includes('--strict');
+
   const actionable = rows.filter(
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
@@ -261,7 +265,7 @@ export async function run(args = [], deps = {}) {
     exposureErrors.length > 0;
 
   if (otherDirty) return 1;
-  return 0;
+  return strict ? 1 : 0;
 }
 
 function noteFor(row) {

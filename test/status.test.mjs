@@ -887,3 +887,20 @@ test('an unreadable category reports unknown rather than nothing', async () => {
   assert.match(output, /hooks\s+unknown/);
 });
 
+test('--strict makes an undeclared item exit non-zero', async () => {
+  const stray = (home) => mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  assert.equal((await statusOutput([], stray)).code, 0);
+  assert.equal((await statusOutput(['--strict'], stray)).code, 1);
+});
+
+test('--strict makes an unreadable category exit non-zero', async () => {
+  const broken = (home) => writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+  assert.equal((await statusOutput(['--strict'], broken)).code, 1);
+});
+
+test('--strict on a clean machine still exits zero and agrees', async () => {
+  const { code, output } = await statusOutput(['--strict']);
+  assert.equal(code, 0);
+  assert.match(output, /everything is in agreement/);
+});
+
