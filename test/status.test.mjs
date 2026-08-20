@@ -486,11 +486,20 @@ async function onCleanMachine(prefix, fn) {
       run: isolatedRun,
     });
   } finally {
-    process.env.NORTUSCC_CLAUDE_DIR = saved.claude;
-    process.env.NORTUSCC_CODEX_DIR = saved.codex;
-    process.env.NORTUSCC_REPO_DIR = saved.repo;
-    process.env.NORTUSCC_AGENTS_DIR = saved.agents;
-    process.env.NORTUSCC_STATE_DIR = saved.state;
+    const restore = {
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_REPO_DIR: saved.repo,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_STATE_DIR: saved.state,
+    };
+    for (const [key, value] of Object.entries(restore)) {
+      // Restoring an env var that was unset before the test would otherwise
+      // write the literal string "undefined", leaving it set for every test
+      // that runs after.
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
@@ -842,7 +851,11 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   } finally {
     process.stdout.write = originalWrite;
     for (const key of ['NORTUSCC_CLAUDE_DIR', 'NORTUSCC_CODEX_DIR', 'NORTUSCC_AGENTS_DIR', 'NORTUSCC_STATE_DIR', 'NORTUSCC_REPO_DIR']) {
-      process.env[key] = saved[key];
+      // Restoring an env var that was unset before the test would otherwise
+      // write the literal string "undefined", leaving it set for every test
+      // that runs after.
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
     }
   }
 }
