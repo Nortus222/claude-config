@@ -28,15 +28,27 @@ commands, PR target, and any stricter rules.
 The main checkout is a read-only integration checkout. Keep it on its current integration branch. Do not
 implement, stage, commit, switch branches, or merge feature work there.
 
-- Do feature work in a dedicated worktree on a dedicated feature branch. Default location:
-  `.claude/worktrees/<slug>`; a repository may specify another location.
+Feature work happens in a worktree. **T3 Code creates it — you do not.**
+
+- **Check before creating.** If the current directory is already a linked worktree, it is the one T3 made
+  for this thread. Work in it. Run `git rev-parse --git-common-dir`; a path other than `.git` means you are
+  in a linked worktree already.
+- **Never create a second worktree beside the one you were given.** That is the failure this rule exists to
+  prevent.
+- If there is no worktree — a bare terminal, or a thread started outside T3 — say so and ask before creating
+  one. Only then fall back to `git worktree add .claude/worktrees/<slug> -b <branch>`.
 - The repository's `CLAUDE.md` must name the branch that feature PRs target. Do not guess a missing target.
-- Inside the task's worktree, agents may create the feature branch, stage and commit their own changes, push
-  that branch, and open its PR without asking.
+- T3 names the branch, generated from the opening message. If it does not fit the repository's convention,
+  rename it once at the start with `git branch -m <name>` rather than making a new worktree.
+- Inside the task's worktree, agents may stage and commit their own changes, push that branch, and open its
+  PR without asking.
 - Never use `git stash`, force-push, or merge a PR. The owner controls integration.
-- After the owner merges the PR, the main checkout may be fast-forwarded and the task worktree and local
-  feature branch may be removed. Never discard an unmerged or dirty worktree.
+- **Do not remove worktrees.** T3 owns their lifecycle and offers removal when its thread is deleted. Never
+  discard an unmerged or dirty worktree.
 - Preserve unrelated changes and never stage files outside the task.
+
+Subagent isolation is separate and still yours to use: dispatching an agent with `isolation: worktree` gets
+it a temporary worktree that Claude Code sweeps automatically. That does not conflict with T3's.
 
 ## Attribution
 
