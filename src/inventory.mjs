@@ -2,12 +2,18 @@
 // src/inventory-probe.mjs does every read and hands the results here, the same
 // split state.mjs and copy.mjs already draw.
 
-// Marketplaces Claude Code registers on its own behalf. The docs say the
-// official one is added "automatically the first time you start it
-// interactively", so reporting it would report Claude Code's behaviour as the
-// user's drift. Consulted by both declaredIds and manifestDefects from this one
-// constant, so the two can never disagree about what "built-in" means.
-export const BUILTIN_MARKETPLACES = new Set(['claude-plugins-official']);
+// Marketplaces the agents register on their own behalf, never the user.
+//
+// Claude Code adds `claude-plugins-official` "automatically the first time you
+// start it interactively". Codex reserves `openai-curated` outright — `codex
+// plugin marketplace add` refuses the name, and it is rooted under Codex's
+// internal `.tmp/` snapshot directory — so it can only ever be Codex's own.
+// Reporting either would report an agent's behaviour as the user's drift.
+//
+// One shared constant, consulted by both declaredIds and manifestDefects, so
+// the two can never disagree about what "built-in" means. The two names cannot
+// collide, so this does not need to be split per agent.
+export const BUILTIN_MARKETPLACES = new Set(['claude-plugins-official', 'openai-curated']);
 
 // The marketplace half of `plugin@marketplace`. A name with no suffix, or one
 // that is all suffix, yields null: neither is a marketplace this can check.

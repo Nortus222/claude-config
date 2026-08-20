@@ -109,3 +109,14 @@ test('a hook is matched on its command, not its displayed event', () => {
 test('missing observed categories and missing declared sets are empty, not errors', () => {
   assert.deepEqual(undeclared({}), []);
 });
+
+// Verified on a real machine: Codex self-registers this one and reserves the
+// name, so it appeared as the single false positive on an otherwise clean
+// report until it was exempted here.
+test('the Codex built-in marketplace is exempt too', () => {
+  assert.ok(BUILTIN_MARKETPLACES.has('openai-curated'));
+  assert.ok(declaredIds([]).marketplaces.has('openai-curated'));
+
+  const observed = { marketplaces: [{ key: 'openai-curated', label: 'openai-curated', note: '' }] };
+  assert.deepEqual(undeclared({ observed, declared: declaredIds([]) }), []);
+});
