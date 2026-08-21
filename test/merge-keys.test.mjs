@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { readDocument, inspectMerge } from '../src/merge-keys.mjs';
+import { readDocument, inspectMerge, applyMerge } from '../src/merge-keys.mjs';
 import { hashValue, baselineKey } from '../src/settings-keys.mjs';
 
 const PREFIX = 'claude:settings.json';
+const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 function fixture({ repo, local }) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-merge-'));
@@ -83,4 +84,85 @@ test('an absent local file makes every owned key unmanaged', () => {
   const { src, dest } = fixture({ repo: { theme: 'auto', tui: 'fullscreen' } });
   const result = inspectMerge(src, dest, PREFIX, lockWith());
   assert.deepEqual(result.keys.map((k) => k.state), ['unmanaged', 'unmanaged']);
+});
+
+// The whole point: everything the repo does not name survives untouched.
+test('apply writes owned keys and leaves every other key alone', () => {
+  const { src, dest } = fixture({
+    repo: { theme: 'dark' },
+    local: { theme: 'auto', permissions: { allow: ['Bash(ls:*)'] }, enabledPlugins: { a: true } },
+  });
+  const lock = lockWith();
+
+  const result = applyMerge(src, dest, PREFIX, lock);
+  assert.equal(result.action, 'copied');
+
+  const after = read(dest);
+  assert.equal(after.theme, 'dark');
+  assert.deepEqual(after.permissions, { allow: ['Bash(ls:*)'] });
+  assert.deepEqual(after.enabledPlugins, { a: true });
+});
+
+test('apply records a baseline per key it wrote', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark' }, local: { theme: 'auto' } });
+  const lock = lockWith();
+  applyMerge(src, dest, PREFIX, lock);
+  assert.equal(lock.files[baselineKey('claude', 'settings.json', 'theme')].hash, hashValue('dark'));
+});
+
+test('apply creates the document when the machine has none', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark', tui: 'fullscreen' } });
+  assert.equal(applyMerge(src, dest, PREFIX, lockWith()).action, 'copied');
+  assert.deepEqual(read(dest), { theme: 'dark', tui: 'fullscreen' });
+});
+
+// apply's direction is repo -> machine; a local edit is capture's business.
+test('apply leaves a locally-ahead key alone', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: { theme: 'dark' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  assert.equal(applyMerge(src, dest, PREFIX, lock).action, 'skipped');
+  assert.equal(read(dest).theme, 'dark');
+});
+
+test('apply refuses a conflicting key and changes nothing', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark' }, local: { theme: 'light' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  const result = applyMerge(src, dest, PREFIX, lock);
+  assert.equal(result.action, 'refused');
+  assert.equal(read(dest).theme, 'light');
+});
+
+test('--take-repo resolves a conflicting key', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark' }, local: { theme: 'light' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  assert.equal(applyMerge(src, dest, PREFIX, lock, { force: true }).action, 'copied');
+  assert.equal(read(dest).theme, 'dark');
+});
+
+test('apply writes nothing when the local document cannot be parsed', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark' }, local: '{ not json' });
+  const result = applyMerge(src, dest, PREFIX, lockWith());
+  assert.equal(result.action, 'refused');
+  assert.equal(readFileSync(dest, 'utf8'), '{ not json');
+});
+
+test('an already-clean document is not rewritten', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: { theme: 'auto', permissions: {} } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+  assert.equal(applyMerge(src, dest, PREFIX, lock).action, 'skipped');
+});
+
+test('apply prunes the baseline of a key the repo no longer owns', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: { theme: 'auto' } });
+  const lock = lockWith({
+    [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') },
+    [baselineKey('claude', 'settings.json', 'gone')]: { hash: 'stale' },
+  });
+
+  applyMerge(src, dest, PREFIX, lock);
+  assert.equal(lock.files[baselineKey('claude', 'settings.json', 'gone')], undefined);
+  assert.ok(lock.files[baselineKey('claude', 'settings.json', 'theme')]);
 });

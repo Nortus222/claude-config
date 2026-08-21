@@ -73,3 +73,69 @@ export function inspectMerge(src, dest, prefix, lock) {
 
   return { state: rollUp(keys), keys, owned, repo: repo.value, local: local.existed ? local.value : {}, errors: [] };
 }
+
+function writeDocument(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  // Same serialization claude-hooks.mjs already uses for this file. It
+  // normalises the whole document's formatting on first write, which is worth
+  // knowing: the keys this tool does not own keep their values, not their
+  // whitespace.
+  writeFileSync(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
+}
+
+// Drop baselines for keys the repo file no longer names, so a key removed from
+// the manifest leaves no record behind to be reconciled against forever.
+function prune(lock, prefix, owned) {
+  for (const recorded of staleBaselineKeys(lock.files, prefix, owned)) delete lock.files[recorded];
+}
+
+// repo -> machine, per key. Refuses a conflict unless force is set, never
+// touches a key whose only change is local, and never touches a key the repo
+// file does not name.
+export function applyMerge(src, dest, prefix, lock, { force = false, relative = dest, agent = null } = {}) {
+  const inspected = inspectMerge(src, dest, prefix, lock);
+
+  if (inspected.state === 'missing-repo') return { action: 'skipped', backedUp: null, keys: [] };
+  if (inspected.state === 'unparseable-local') {
+    // Nothing is preserved because nothing is being overwritten — the file is
+    // exactly as the user left it.
+    return { action: 'refused', backedUp: null, keys: [] };
+  }
+
+  const conflicts = inspected.keys.filter((k) => k.state === 'conflict');
+  if (conflicts.length > 0 && !force) {
+    // Preserve the local side even though nothing is being written, so the
+    // user can resolve from a stable copy while continuing to work.
+    return { action: 'refused', backedUp: preserveCopy(dest, relative, agent), keys: conflicts };
+  }
+
+  const writing = inspected.keys.filter(
+    (k) => NEEDS_APPLY.has(k.state) || (force && k.state === 'conflict'),
+  );
+
+  if (writing.length === 0) {
+    // Converged: both sides already agree, so only the baseline is stale.
+    // Restamping without writing keeps a clean machine's settings file — and
+    // its mtime — untouched by a no-op run.
+    for (const { key } of inspected.keys) {
+      setBaseline(lock, `${prefix}#${key}`, hashValue(inspected.repo[key]));
+    }
+    prune(lock, prefix, inspected.owned);
+    return { action: 'skipped', backedUp: null, keys: [] };
+  }
+
+  // Copy rather than move: the rest of this document has to stay where it is,
+  // because what follows rewrites it in place rather than replacing it.
+  const backedUp = preserveCopy(dest, relative, agent);
+
+  const next = { ...inspected.local };
+  for (const { key } of writing) next[key] = inspected.repo[key];
+  writeDocument(dest, next);
+
+  for (const { key } of inspected.keys) {
+    setBaseline(lock, `${prefix}#${key}`, hashValue(inspected.repo[key]));
+  }
+  prune(lock, prefix, inspected.owned);
+
+  return { action: 'copied', backedUp, keys: writing };
+}
