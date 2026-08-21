@@ -60,6 +60,9 @@ export async function run(allArgs = [], entries = SYNC) {
   // A settings file that fails to parse as JSON — separate from a conflict,
   // since neither --take-repo nor --take-local can fix invalid JSON.
   let unreadable = 0;
+  // A local value validateOwnedKeys refused to write into the repo — separate
+  // from both, since the fix is editing the local value, not a flag.
+  let invalidValue = 0;
 
   if (!manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
 
@@ -74,9 +77,11 @@ export async function run(allArgs = [], entries = SYNC) {
       });
       // An unparseable local file is not a conflict --take-local can
       // resolve — it is counted apart, so the trailer below never offers a
-      // flag that cannot fix invalid JSON.
+      // flag that cannot fix invalid JSON. Same for a value validateOwnedKeys
+      // refused: no flag on this command can force a credential into the repo.
       if (res.action === 'refused') {
         if (res.reason === 'unparseable-local') unreadable += 1;
+        else if (res.reason === 'invalid-capture') invalidValue += 1;
         else refused += 1;
       }
       if (res.action === 'copied') captured.push(entry.src);
@@ -146,16 +151,25 @@ export async function run(allArgs = [], entries = SYNC) {
         '  fix the JSON by hand, then re-run capture\n',
     );
   }
+  if (invalidValue > 0) {
+    process.stdout.write(
+      `\n${invalidValue} key(s) held a value that looks like a credential and were left uncaptured.\n` +
+        '  this file is committed; fix the local value, then re-run capture\n',
+    );
+  }
   if (refused > 0) {
     process.stdout.write(`\n${refused} conflict(s) refused. Use --take-local to keep the local version.\n`);
   }
-  if (refused > 0 || unreadable > 0) return 1;
+  if (refused > 0 || unreadable > 0 || invalidValue > 0) return 1;
   return 0;
 }
 
 function noteFor(res) {
   if (res.action === 'refused' && res.reason === 'unparseable-local') {
     return 'could not be parsed as JSON — fix it by hand, then re-run';
+  }
+  if (res.action === 'refused' && res.reason === 'invalid-capture') {
+    return 'looks like a credential — nothing captured';
   }
   if (res.action === 'refused') return 'conflict — nothing changed';
   if (res.backedUp) return `backed up -> ${res.backedUp}`;

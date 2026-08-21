@@ -383,3 +383,22 @@ test('capture writes a local settings key back to the repo without adopting extr
   assert.equal(captured.theme, 'dark');
   assert.deepEqual(Object.keys(captured), ['theme'], 'capture never adopts an undeclared key');
 });
+
+// validateOwnedKeys only runs when the repo file is READ, never on what
+// capture is about to WRITE. Without that guard this test would stage a
+// token into a file `push` commits.
+test('capture refuses a local value that looks like a credential and exits non-zero', async () => {
+  const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  writeFileSync(settingsSrc, JSON.stringify({ theme: 'auto' }) + '\n');
+  writeFileSync(
+    join(claude, 'settings.json'),
+    JSON.stringify({ theme: 'ghp_abcdefgh12345678' }) + '\n',
+  );
+
+  const before = readFileSync(settingsSrc, 'utf8');
+  const code = await captureRun([]);
+
+  assert.equal(code, 1);
+  assert.equal(readFileSync(settingsSrc, 'utf8'), before, 'the repo file is not touched');
+  assert.deepEqual(capturedPaths(), [], 'nothing is reported as captured');
+});

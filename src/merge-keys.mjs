@@ -192,12 +192,20 @@ export function captureMerge(src, dest, prefix, lock, { force = false, relative 
     return { action: 'skipped', backedUp: null, keys: [] };
   }
 
+  const next = { ...inspected.repo };
+  for (const { key } of writing) next[key] = inspected.local[key];
+
+  // validateOwnedKeys only runs when reading the repo file, which guards
+  // every direction but this one: a local value that looks like a credential
+  // would otherwise land straight in a committed file, ready for `push` to
+  // stage. Refuse before touching disk, the same as any other blocked state.
+  const errors = validateOwnedKeys(next);
+  if (errors.length) return { action: 'refused', backedUp: null, keys: writing, reason: 'invalid-capture', errors };
+
   // The repo file is a working-tree file: an uncommitted edit to it is not
   // recoverable from git, so preserve it before it is rewritten.
   const backedUp = preserveCopy(src, `${relative}.repo`, agent);
 
-  const next = { ...inspected.repo };
-  for (const { key } of writing) next[key] = inspected.local[key];
   writeDocument(src, next);
 
   for (const { key } of inspected.keys) {

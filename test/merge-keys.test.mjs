@@ -181,6 +181,19 @@ test('capture writes a locally-ahead key back to the repo', () => {
   assert.deepEqual(read(src), { theme: 'dark' });
 });
 
+// validateOwnedKeys only runs when the repo file is read — the one direction
+// that never guards it is the one that can plant a credential in a committed
+// file. Reproduces the reviewer's exact repro.
+test('capture refuses a local value that looks like a credential, and writes nothing', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: { theme: 'ghp_abcdefgh12345678' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  const result = captureMerge(src, dest, PREFIX, lock);
+  assert.equal(result.action, 'refused');
+  assert.equal(result.reason, 'invalid-capture');
+  assert.deepEqual(read(src), { theme: 'auto' }, 'the repo file is left exactly as it was');
+});
+
 // The repo file's key set is the allowlist. capture reads the keys it names
 // and never enumerates the local document, so an extra cannot be adopted.
 test('capture never adopts a key the repo does not already name', () => {
