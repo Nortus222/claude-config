@@ -5,7 +5,7 @@ import { readLock } from '../lock.mjs';
 import { inspectCopy } from '../copy.mjs';
 import { inspectMerge } from '../merge-keys.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
-import { formatRow, section } from '../report.mjs';
+import { formatRow, section, labelWidth } from '../report.mjs';
 import { readIntegrations } from '../integrations/manifest.mjs';
 import { integrationPlan } from '../integrations/runner.mjs';
 import { defaultAdapters } from '../integrations/adapters.mjs';
@@ -124,8 +124,13 @@ export async function run(args = [], deps = {}) {
   // A row carrying its own note (a refused repo file's validation message) is
   // literal text from the repo, not a state to look up — noteFor only knows
   // how to phrase the fixed set of states it switches on.
+  //
+  // A per-key label like `settings.json#effortLevel` runs well past the
+  // shared default width, so size the column to this batch of rows — the
+  // same fix update.mjs already applies to its own arbitrary labels.
+  const configWidth = labelWidth(rows.map((r) => r.dest));
   const lines = manageConfig
-    ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r)))
+    ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r), configWidth))
     : [formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE)];
   process.stdout.write('\n' + section('config', lines));
 

@@ -1160,3 +1160,33 @@ test('a refused repo file is surfaced as invalid, not a false missing-repo', asy
   assert.doesNotMatch(output, /absent from the repo/, 'the missing-repo note would be false here');
   assert.equal(code, 1, 'a refused repo file must not read as a clean machine');
 });
+
+// `settings.json#effortLevel` is 25 characters, past the section's shared
+// 16-char default. The fixed width used to leave it unpadded (padEnd is a
+// no-op once the label is already longer) while every shorter label in the
+// same section still padded to 16 — misaligning the state column for every
+// row but this one. labelWidth sizes the whole section to its longest label.
+test('a long per-key label keeps the config section columns aligned', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ effortLevel: 'high', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ effortLevel: 'low', tui: 'fullscreen' }),
+      );
+      seedKeyBaselines(home, { effortLevel: 'high', tui: 'fullscreen' });
+    },
+  });
+
+  // The row itself: its label is exactly as wide as the column, so a single
+  // space separates it from its state either way — this alone would not have
+  // caught the bug.
+  assert.match(output, /settings\.json#effortLevel local-ahead/);
+  // The regression: a short label in the same section padded only to 16
+  // before this fix, giving 8 spaces here instead of the 17 a 25-wide column
+  // requires.
+  assert.match(output, /CLAUDE\.md {17}clean/, 'a short label pads out to the long label\'s width, not the 16-char default');
+});
