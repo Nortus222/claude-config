@@ -20,9 +20,13 @@ process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
 const { run, summarizeSkillsInstall } = await import('../src/commands/apply.mjs');
 const { SYNC } = await import('../src/manifest.mjs');
-const { resolveEntry } = await import('../src/resolve.mjs');
+const { resolveEntry, repoRoot } = await import('../src/resolve.mjs');
 const { readLock } = await import('../src/lock.mjs');
 const { statePath, backupRoot } = await import('../src/resolve.mjs');
+
+// No NORTUSCC_REPO_DIR is set in this file, so this is the real repo — the
+// settings-key tests below read and write its actual claude/settings.keys.json.
+const repo = repoRoot();
 
 test('apply on a bare machine copies every managed file', async () => {
   const code = await run([]);
@@ -103,11 +107,22 @@ test('an invalid --target exits 2 before apply writes anything', async () => {
 // its own and report a clean machine that had never been synced.
 test('apply records a baseline per target, never one shared by dest name', async () => {
   const lock = readLock();
-  for (const entry of SYNC) {
+  for (const entry of SYNC.filter((e) => e.mode === 'copy')) {
     const key = `${entry.target}:${entry.dest}`;
     assert.ok(lock.files[key], `no baseline recorded for ${key}`);
     assert.match(lock.files[key].hash, /^sha256:/);
     assert.equal(lock.files[entry.dest], undefined, `${entry.dest} must not be keyed without its target`);
+  }
+
+  // A merge-keys entry owns named keys inside its destination, so its baselines
+  // are per key. The bare whole-file key must never appear for one: a command
+  // reading it would treat the entire document as managed.
+  for (const entry of SYNC.filter((e) => e.mode === 'merge-keys')) {
+    const bare = `${entry.target}:${entry.dest}`;
+    assert.equal(lock.files[bare], undefined, `${bare} must not be baselined as a whole file`);
+    const perKey = Object.keys(lock.files).filter((k) => k.startsWith(`${bare}#`));
+    assert.ok(perKey.length > 0, `no per-key baselines recorded for ${bare}`);
+    for (const k of perKey) assert.match(lock.files[k].hash, /^sha256:/);
   }
 });
 
@@ -195,9 +210,11 @@ test('apply prints a restart reminder when it actually changed a copied file', a
   }
   assert.equal(code, 0);
   assert.match(output, /Restart the affected agent/, 'a run that changed a file must remind the user to restart');
-  // settings.json is user-owned now, so the reminder must not imply this
-  // command wrote it.
-  assert.doesNotMatch(output, /settings/, 'the reminder must not name a file apply does not write');
+  // settings.json is a managed (merge-keys) entry now, but this run has no
+  // settings-key conflict to resolve, so its row must report 'skipped', never
+  // 'copied' — --take-repo on a CLAUDE.md conflict must not also force a
+  // settings key that was never in dispute.
+  assert.doesNotMatch(output, /settings\.json\s+copied/, 'apply must not report writing settings.json here');
 });
 
 test('a clean apply run prints no restart reminder', async () => {
@@ -381,4 +398,36 @@ test('summarizeSkillsInstall keeps a partial failure visible as partial — not 
 test('summarizeSkillsInstall with nothing missing reports nothing and fails nothing', () => {
   const summary = summarizeSkillsInstall([], []);
   assert.deepEqual(summary, { lines: [], failed: 0 });
+});
+
+test('apply writes the declared settings keys and leaves the rest of the file alone', async () => {
+  const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  writeFileSync(settingsSrc, JSON.stringify({ theme: 'dark' }) + '\n');
+  const settingsDest = join(claude, 'settings.json');
+  writeFileSync(settingsDest, JSON.stringify({ theme: 'auto', permissions: { allow: ['Bash(ls:*)'] } }) + '\n');
+
+  assert.equal(await run([]), 0);
+
+  const after = JSON.parse(readFileSync(settingsDest, 'utf8'));
+  assert.equal(after.theme, 'dark', 'the declared key is applied');
+  assert.deepEqual(after.permissions, { allow: ['Bash(ls:*)'] }, 'an undeclared key is untouched');
+});
+
+// A machine that keeps its own instruction files keeps its own settings too.
+// The entry sits in SYNC, so parseConfigMode already filters it — this pins
+// that, because the failure mode is writing a stranger's preferences into a
+// user's file.
+test('--skills-only leaves the settings file alone', async () => {
+  const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  writeFileSync(settingsSrc, JSON.stringify({ theme: 'dark' }) + '\n');
+  const settingsDest = join(claude, 'settings.json');
+  const before = JSON.stringify({ theme: 'auto' }) + '\n';
+  writeFileSync(settingsDest, before);
+
+  await run(['--skills-only']);
+
+  assert.equal(readFileSync(settingsDest, 'utf8'), before, 'nothing was written');
+
+  // Leave the recorded mode as this file's other tests expect to find it.
+  await run(['--no-skills-only']);
 });

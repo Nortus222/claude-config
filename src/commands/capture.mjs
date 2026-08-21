@@ -4,6 +4,7 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
+import { captureMerge } from '../merge-keys.mjs';
 import { formatRow, section } from '../report.mjs';
 import { installedGroups, emitManifest, readSkillLock, manifestPath, readSkillsManifest, installedSkillNames } from '../skills.mjs';
 import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
@@ -60,6 +61,20 @@ export async function run(allArgs = [], entries = SYNC) {
   if (!manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
 
   for (const entry of selected) {
+    const { src, dest } = resolveEntry(entry);
+
+    if (entry.mode === 'merge-keys') {
+      const res = captureMerge(src, dest, `${entry.target}:${entry.dest}`, lock, {
+        force: takeLocal,
+        relative: entry.dest,
+        agent: entry.target,
+      });
+      if (res.action === 'refused') refused += 1;
+      if (res.action === 'copied') captured.push(entry.src);
+      lines.push(formatRow(entry.dest, res.action, noteFor(res)));
+      continue;
+    }
+
     if (entry.mode !== 'copy') {
       // Unknown mode: capture has no idea how to remediate this entry, so it is
       // reported and left alone rather than guessed at — the same treatment
@@ -68,7 +83,6 @@ export async function run(allArgs = [], entries = SYNC) {
       continue;
     }
 
-    const { src, dest } = resolveEntry(entry);
     const res = captureCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
       force: takeLocal,
       relative: entry.dest,

@@ -3,6 +3,7 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock } from '../lock.mjs';
 import { inspectCopy } from '../copy.mjs';
+import { inspectMerge } from '../merge-keys.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readIntegrations } from '../integrations/manifest.mjs';
@@ -34,6 +35,12 @@ export function configReport(entries = SYNC) {
       // share one baseline; entry.dest stays the display name.
       const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
       return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
+    } else if (mode === 'merge-keys') {
+      // inspectMerge already rolls a document's per-key states up to one of
+      // the same state names inspectCopy uses, so noteFor and the exit-code
+      // logic below need no separate case for this mode.
+      const state = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock).state;
+      return { dest: entry.dest, mode, state };
     } else {
       // Unknown mode: surface as a visible error rather than silently misdispatching
       return { dest: entry.dest, mode, state: 'unknown-mode' };
@@ -285,6 +292,7 @@ function noteFor(row) {
     case 'unmanaged': return 'never synced on this machine';
     case 'missing-repo': return 'listed in the manifest but absent from the repo';
     case 'unknown-mode': return 'manifest entry has an unrecognized mode';
+    case 'unparseable-local': return 'the local file could not be parsed';
     default: return '';
   }
 }

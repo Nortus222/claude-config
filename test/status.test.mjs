@@ -43,13 +43,41 @@ const { configReport, run: rawRun } = await import('../src/commands/status.mjs')
 const emptyCodex = () => ({ plugins: new Set(), marketplaces: new Set(), errors: [] });
 const run = (args = [], deps = {}) => rawRun(args, { codexState: emptyCodex(), ...deps });
 
+// Seeds every managed entry into whichever repo/home the current env vars
+// point at, so a test starts from a genuinely clean, non-actionable machine.
+// A copy entry needs only its baseline hash recorded. A merge-keys entry has
+// no fixture source of its own the way CLAUDE.md/AGENTS.md do here, so this
+// also writes one first — otherwise it reads as missing-repo, which is just
+// as blocked as a genuine manifest gap.
+async function seedManagedEntries(lock) {
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { hashFile, setBaseline } = await import('../src/lock.mjs');
+  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { applyMerge } = await import('../src/merge-keys.mjs');
+
+  for (const entry of SYNC) {
+    const { src, dest, mode } = resolveEntry(entry);
+    if (mode === 'copy') {
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
+      }
+    } else if (mode === 'merge-keys') {
+      writeFileSync(src, JSON.stringify({ theme: 'auto' }) + '\n');
+      applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, { relative: entry.dest, agent: entry.target });
+    }
+  }
+}
+
 test('configReport returns one row per manifest entry', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
   const rows = configReport();
   assert.equal(rows.length, SYNC.length);
+  const modes = new Set(SYNC.map((e) => e.mode));
   for (const row of rows) {
     assert.ok(row.dest, 'each row names its destination');
-    assert.equal(row.mode, 'copy');
+    assert.ok(modes.has(row.mode), `row carries a mode from the manifest: ${row.mode}`);
     assert.ok(typeof row.state === 'string' && row.state.length > 0);
   }
 });
@@ -73,8 +101,10 @@ test('a target narrows the config report to that agent alone', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
   const { entriesForTarget } = await import('../src/targets.mjs');
 
+  // Claude now owns two entries — its instruction file and its settings
+  // keys — so narrowing to 'claude' reports both, never just the first.
   const claudeRows = configReport(entriesForTarget(SYNC, 'claude'));
-  assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md']);
+  assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md', 'settings.json']);
 
   const codexRows = configReport(entriesForTarget(SYNC, 'codex'));
   assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md']);
@@ -144,20 +174,10 @@ test('run() returns 1 on a dirty machine and does not write lockfile', async () 
 
 test('run() returns 0 on a clean machine', async () => {
   // Set up a genuinely clean machine: all entries in non-actionable states
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { readLock, writeLock } = await import('../src/lock.mjs');
 
-  // Copy each managed file to its destination and seed the lockfile with its hash
   const lock = readLock();
-  for (const entry of SYNC) {
-    const { src, dest } = resolveEntry(entry);
-    const hash = hashFile(src);
-    if (hash) {
-      copyFileSync(src, dest);
-      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-    }
-  }
+  await seedManagedEntries(lock);
   writeLock(lock);
 
   // Now run the command on this clean machine
@@ -258,9 +278,7 @@ test('run() does not write any files to claude dir and does not create new direc
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     // Take a pristine snapshot before any setup (kept for parity with the
     // pre-existing claude-dir check below; the agents/skills fixture doesn't
@@ -269,14 +287,7 @@ test('run() does not write any files to claude dir and does not create new direc
 
     // Set up a clean machine: every managed file present and baselined
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     // Snapshot after setup but before run()
@@ -387,21 +398,12 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     // Bring config to a clean state so the missing skill is the only thing
     // that can make this run dirty — isolates the wiring under test.
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     // 'have' is installed, so status would otherwise ask the real installer
@@ -462,19 +464,10 @@ async function onCleanMachine(prefix, fn) {
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     return await fn({
@@ -822,18 +815,9 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   // only thing that can make these runs dirty. Without this every row reads
   // 'unmanaged', status is dirty on its own account, and "everything is in
   // agreement" could never print — which is half of what this asserts.
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { readLock, writeLock } = await import('../src/lock.mjs');
   const lock = readLock();
-  for (const entry of SYNC) {
-    const { src, dest } = resolveEntry(entry);
-    const hash = hashFile(src);
-    if (hash) {
-      copyFileSync(src, dest);
-      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-    }
-  }
+  await seedManagedEntries(lock);
   writeLock(lock);
 
   const originalWrite = process.stdout.write.bind(process.stdout);

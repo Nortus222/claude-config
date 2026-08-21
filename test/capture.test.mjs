@@ -148,7 +148,10 @@ test('capture --take-repo is refused outright — the flag does not fit capture\
 });
 
 test('an unknown mode is reported and left alone, not treated as a conflict', async () => {
-  const bogusEntry = { src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
+  // `target` must be present: capture.mjs resolves an entry's paths before
+  // checking its mode (see the merge-keys dispatch above it), so a target-less
+  // entry now reaches resolveEntry regardless of mode.
+  const bogusEntry = { target: 'claude', src: 'claude/CLAUDE.md', dest: 'some-file', mode: 'bogus' };
   const lockBytesBefore = readFileSync(statePath(), 'utf8');
 
   const code = await captureRun([], [bogusEntry]);
@@ -364,4 +367,19 @@ test('capture does not adopt undeclared items into integrations.json', async () 
   await captureRun([]);
 
   assert.equal(readFileSync(manifestFile, 'utf8'), before, 'integrations.json is byte-identical after capture');
+});
+
+test('capture writes a local settings key back to the repo without adopting extras', async () => {
+  const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  writeFileSync(settingsSrc, JSON.stringify({ theme: 'auto' }) + '\n');
+  writeFileSync(
+    join(claude, 'settings.json'),
+    JSON.stringify({ theme: 'dark', permissions: { allow: [] } }) + '\n',
+  );
+
+  await captureRun([]);
+
+  const captured = JSON.parse(readFileSync(settingsSrc, 'utf8'));
+  assert.equal(captured.theme, 'dark');
+  assert.deepEqual(Object.keys(captured), ['theme'], 'capture never adopts an undeclared key');
 });

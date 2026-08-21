@@ -3,6 +3,7 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { applyCopy } from '../copy.mjs';
+import { applyMerge } from '../merge-keys.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
 import { installGroups, agentIdsFor } from '../skills-cli.mjs';
@@ -88,6 +89,18 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
   for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
+
+    if (mode === 'merge-keys') {
+      const res = applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, {
+        force: takeRepo,
+        relative: entry.dest,
+        agent: entry.target,
+      });
+      if (res.action === 'refused') refused += 1;
+      if (res.action === 'copied') changed = true;
+      lines.push(formatRow(entry.dest, res.action, noteFor(res)));
+      continue;
+    }
 
     if (mode !== 'copy') {
       // Unknown mode: apply has no idea how to remediate this entry, so it is

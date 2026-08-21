@@ -115,10 +115,14 @@ export function applyMerge(src, dest, prefix, lock, { force = false, relative = 
 
   if (writing.length === 0) {
     // Converged: both sides already agree, so only the baseline is stale.
-    // Restamping without writing keeps a clean machine's settings file — and
-    // its mtime — untouched by a no-op run.
+    // Restamp only the keys where it actually is — mirroring applyCopy's own
+    // guard — so a clean second run leaves the lockfile, and its mtime,
+    // byte-identical instead of touching every key's appliedAt.
     for (const { key } of inspected.keys) {
-      setBaseline(lock, `${prefix}#${key}`, hashValue(inspected.repo[key]));
+      const hash = hashValue(inspected.repo[key]);
+      if (lock.files[`${prefix}#${key}`]?.hash !== hash) {
+        setBaseline(lock, `${prefix}#${key}`, hash);
+      }
     }
     prune(lock, prefix, inspected.owned);
     return { action: 'skipped', backedUp: null, keys: [] };
@@ -157,16 +161,27 @@ export function captureMerge(src, dest, prefix, lock, { force = false, relative 
   // A key the machine does not have is not a deletion — see the spec: with one
   // baseline hash there is no way to tell "never had it" from "removed it", so
   // an absent local value is left as the repo has it.
+  //
+  // 'unmanaged' — no baseline recorded yet — is included alongside
+  // NEEDS_CAPTURE: captureCopy captures a never-synced file on first contact
+  // (it falls through the same way as local-ahead), and captureMerge has to
+  // match that or a machine's very first capture of a declared key would
+  // silently do nothing.
   const writing = inspected.keys.filter(
     (k) =>
-      (NEEDS_CAPTURE.has(k.state) || (force && k.state === 'conflict')) &&
+      (NEEDS_CAPTURE.has(k.state) || k.state === 'unmanaged' || (force && k.state === 'conflict')) &&
       inspected.local[k.key] !== undefined,
   );
 
   if (writing.length === 0) {
+    // Same convergence guard as applyMerge: restamp only where the baseline
+    // is actually stale, so a clean second run leaves the lockfile untouched.
     for (const { key } of inspected.keys) {
       if (inspected.local[key] !== undefined) {
-        setBaseline(lock, `${prefix}#${key}`, hashValue(inspected.local[key]));
+        const hash = hashValue(inspected.local[key]);
+        if (lock.files[`${prefix}#${key}`]?.hash !== hash) {
+          setBaseline(lock, `${prefix}#${key}`, hash);
+        }
       }
     }
     prune(lock, prefix, inspected.owned);
