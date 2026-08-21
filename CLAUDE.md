@@ -18,6 +18,7 @@ Feature branches target **`main`**.
 | Path | Purpose |
 | --- | --- |
 | `claude/CLAUDE.md`, `codex/AGENTS.md` | The agents' instruction files. Each agent rewrites its own in place, so both are synced by copy against a recorded baseline |
+| `claude/settings.keys.json` | The keys of `~/.claude/settings.json` this repo owns, and their values. Its key set *is* the allowlist — nothing reads the machine's own keys — so `permissions` and `enabledPlugins` stay user-owned. Synced key by key, never as a whole file |
 | `integrations.json` | Plugins, marketplaces, hooks and MCP servers a machine should have. Public: it may name an environment variable, never its value. May also carry an `allow` list of extras that are present on purpose |
 | `skills-manifest.txt` | Desired skill set, grouped by source repo |
 | `src/`, `bin/`, `test/` | The `nortuscc` CLI that does the reconciling |
