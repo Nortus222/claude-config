@@ -3,25 +3,11 @@ import { join } from 'node:path';
 import { repoRoot } from '../resolve.mjs';
 import { TARGETS } from '../targets.mjs';
 import { OBSERVED_CATEGORIES } from '../inventory.mjs';
+import { looksLikeSecretName, looksLikeSecretValue } from '../secrets.mjs';
 
 export const TYPES = ['hook', 'marketplace', 'plugin', 'mcp'];
 
 const VERSION = 1;
-
-// Fields whose *name* alone means the value would be a credential. A manifest
-// may name the environment variable that holds one; it may never carry the
-// value, because this file is committed and public.
-const SECRET_FIELD = /^(token|secret|password|passphrase|credential|api_?key|access_?key)s?$/i;
-
-// Shapes that are recognisably a credential wherever they appear, so a value
-// smuggled into an innocuously named field is still caught.
-const SECRET_VALUE = [
-  /\bsk-[A-Za-z0-9_-]{4,}/,
-  /\bgh[pousr]_[A-Za-z0-9]{8,}/,
-  /\bAKIA[0-9A-Z]{8,}/,
-  /\bxox[abprs]-[A-Za-z0-9-]{8,}/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-];
 
 // Values that are lists of names rather than data, and so are never scanned as
 // if they held one.
@@ -36,7 +22,7 @@ function secretComplaints(item) {
   for (const [field, value] of Object.entries(item)) {
     if (NAME_LIST_FIELDS.has(field)) continue;
 
-    if (SECRET_FIELD.test(field)) {
+    if (looksLikeSecretName(field)) {
       errors.push(
         `integration '${item.id}': field '${field}' looks like a secret; ` +
           'commit the name of an environment variable in requiresEnv instead',
@@ -47,7 +33,7 @@ function secretComplaints(item) {
     const strings = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
     for (const text of strings) {
       if (typeof text !== 'string') continue;
-      if (SECRET_VALUE.some((pattern) => pattern.test(text))) {
+      if (looksLikeSecretValue(text)) {
         errors.push(
           `integration '${item.id}': field '${field}' contains what looks like a secret value; ` +
             'commit the name of an environment variable in requiresEnv instead',
