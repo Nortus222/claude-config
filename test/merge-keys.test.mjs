@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { readDocument, inspectMerge, applyMerge } from '../src/merge-keys.mjs';
+import { readDocument, inspectMerge, applyMerge, captureMerge } from '../src/merge-keys.mjs';
 import { hashValue, baselineKey } from '../src/settings-keys.mjs';
 
 const PREFIX = 'claude:settings.json';
@@ -165,4 +165,68 @@ test('apply prunes the baseline of a key the repo no longer owns', () => {
   applyMerge(src, dest, PREFIX, lock);
   assert.equal(lock.files[baselineKey('claude', 'settings.json', 'gone')], undefined);
   assert.ok(lock.files[baselineKey('claude', 'settings.json', 'theme')]);
+});
+
+test('capture writes a locally-ahead key back to the repo', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: { theme: 'dark' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  assert.equal(captureMerge(src, dest, PREFIX, lock).action, 'copied');
+  assert.deepEqual(read(src), { theme: 'dark' });
+});
+
+// The repo file's key set is the allowlist. capture reads the keys it names
+// and never enumerates the local document, so an extra cannot be adopted.
+test('capture never adopts a key the repo does not already name', () => {
+  const { src, dest } = fixture({
+    repo: { theme: 'auto' },
+    local: { theme: 'dark', permissions: { allow: [] }, apiKey: 'sk-abcd1234' },
+  });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  captureMerge(src, dest, PREFIX, lock);
+  assert.deepEqual(Object.keys(read(src)), ['theme']);
+});
+
+// capture's direction is machine -> repo; a repo edit is apply's business.
+test('capture leaves a repo-ahead key alone', () => {
+  const { src, dest } = fixture({ repo: { theme: 'dark' }, local: { theme: 'auto' } });
+  const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+
+  assert.equal(captureMerge(src, dest, PREFIX, lock).action, 'skipped');
+  assert.equal(read(src).theme, 'dark');
+});
+
+test('capture refuses a conflicting key, and --take-local resolves it', () => {
+  const conflicted = () => {
+    const paths = fixture({ repo: { theme: 'dark' }, local: { theme: 'light' } });
+    const lock = lockWith({ [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') } });
+    return { ...paths, lock };
+  };
+
+  const refused = conflicted();
+  assert.equal(captureMerge(refused.src, refused.dest, PREFIX, refused.lock).action, 'refused');
+  assert.equal(read(refused.src).theme, 'dark');
+
+  const forced = conflicted();
+  assert.equal(captureMerge(forced.src, forced.dest, PREFIX, forced.lock, { force: true }).action, 'copied');
+  assert.equal(read(forced.src).theme, 'light');
+});
+
+test('capture writes nothing when the local document cannot be parsed', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto' }, local: '{ not json' });
+  assert.equal(captureMerge(src, dest, PREFIX, lockWith()).action, 'refused');
+  assert.deepEqual(read(src), { theme: 'auto' });
+});
+
+// An owned key the machine simply does not have yet is not a deletion.
+test('capture skips an owned key absent from the local document', () => {
+  const { src, dest } = fixture({ repo: { theme: 'auto', tui: 'fullscreen' }, local: { theme: 'auto' } });
+  const lock = lockWith({
+    [baselineKey('claude', 'settings.json', 'theme')]: { hash: hashValue('auto') },
+    [baselineKey('claude', 'settings.json', 'tui')]: { hash: hashValue('fullscreen') },
+  });
+
+  captureMerge(src, dest, PREFIX, lock);
+  assert.equal(read(src).tui, 'fullscreen');
 });

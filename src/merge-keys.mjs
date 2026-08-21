@@ -139,3 +139,54 @@ export function applyMerge(src, dest, prefix, lock, { force = false, relative = 
 
   return { action: 'copied', backedUp, keys: writing };
 }
+
+// machine -> repo. Mirrors applyMerge with the directions swapped, and reads
+// only the keys the repo file already names: capture must not turn a local
+// extra into policy for every other machine.
+export function captureMerge(src, dest, prefix, lock, { force = false, relative = dest, agent = null } = {}) {
+  const inspected = inspectMerge(src, dest, prefix, lock);
+
+  if (inspected.state === 'missing-repo') return { action: 'skipped', backedUp: null, keys: [] };
+  if (inspected.state === 'unparseable-local') return { action: 'refused', backedUp: null, keys: [] };
+
+  const conflicts = inspected.keys.filter((k) => k.state === 'conflict');
+  if (conflicts.length > 0 && !force) {
+    return { action: 'refused', backedUp: preserveCopy(dest, relative, agent), keys: conflicts };
+  }
+
+  // A key the machine does not have is not a deletion — see the spec: with one
+  // baseline hash there is no way to tell "never had it" from "removed it", so
+  // an absent local value is left as the repo has it.
+  const writing = inspected.keys.filter(
+    (k) =>
+      (NEEDS_CAPTURE.has(k.state) || (force && k.state === 'conflict')) &&
+      inspected.local[k.key] !== undefined,
+  );
+
+  if (writing.length === 0) {
+    for (const { key } of inspected.keys) {
+      if (inspected.local[key] !== undefined) {
+        setBaseline(lock, `${prefix}#${key}`, hashValue(inspected.local[key]));
+      }
+    }
+    prune(lock, prefix, inspected.owned);
+    return { action: 'skipped', backedUp: null, keys: [] };
+  }
+
+  // The repo file is a working-tree file: an uncommitted edit to it is not
+  // recoverable from git, so preserve it before it is rewritten.
+  const backedUp = preserveCopy(src, `${relative}.repo`, agent);
+
+  const next = { ...inspected.repo };
+  for (const { key } of writing) next[key] = inspected.local[key];
+  writeDocument(src, next);
+
+  for (const { key } of inspected.keys) {
+    if (inspected.local[key] !== undefined) {
+      setBaseline(lock, `${prefix}#${key}`, hashValue(next[key]));
+    }
+  }
+  prune(lock, prefix, inspected.owned);
+
+  return { action: 'copied', backedUp, keys: writing };
+}
