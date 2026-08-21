@@ -113,9 +113,37 @@ skills; it prints one warning and points at `--install`.
 
 **Not synced, and never written by this tool:** Claude's `settings.json`,
 Codex's `config.toml`, credentials, sessions, history, caches, and any
-machine-specific MCP argument. Those files are yours. The one exception is
+machine-specific MCP argument. Those files are yours. Two exceptions are
 narrow and explicit: a hook you select is registered by adding *only* that
-entry to a backed-up `settings.json`, leaving every other key untouched.
+entry to a backed-up `settings.json`, leaving every other key untouched; and
+the keys named below are kept in sync the same way.
+
+### Key-level settings sync
+
+`claude/settings.keys.json` names the keys the repo owns, and their values;
+every other key in `~/.claude/settings.json` is left exactly as found.
+Today that is `effortLevel`, `tui`, `theme`, and `worktree`.
+
+`permissions` and `enabledPlugins` stay user-owned — the latter because
+`integrations.json` already covers plugins. `hooks` is deliberately not
+owned either: `integrations.json` already registers hooks, a second writer
+here would let `apply` undo what `apply --install` just registered, and
+`status` already reports undeclared hooks on its own.
+
+The repo file's key set *is* the allowlist — nothing anywhere enumerates a
+machine's own keys — and, like `integrations.json`, it is refused outright
+if a key name or value looks like a credential.
+
+Drift is reported and resolved per key exactly as it is for a whole file:
+`nortuscc apply --take-repo` discards the local value, `nortuscc capture
+--take-local` keeps it. Removing a key from the repo file stops it being
+managed — deletions are not synced, and each machine keeps the value it
+last had.
+
+A local `settings.json` that fails to parse is reported apart from a
+conflict, since neither `--take-repo` nor `--take-local` can fix invalid
+JSON: `apply` and `capture` both refuse and leave it for you to fix by
+hand.
 
 Earlier versions copied all of `settings.json` and symlinked `claude/bin` and
 `claude/hooks`. Those are retired. Existing copies on a machine are left alone —
