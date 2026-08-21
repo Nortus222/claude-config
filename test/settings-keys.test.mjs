@@ -7,6 +7,7 @@ import {
   baselineKey,
   keyStates,
   staleBaselineKeys,
+  validateOwnedKeys,
 } from '../src/settings-keys.mjs';
 
 // Key order is how a JSON document gets rewritten without changing meaning.
@@ -96,4 +97,48 @@ test('baselines for keys no longer owned are identified for pruning', () => {
 test('pruning never touches a whole-file baseline that merely shares the prefix', () => {
   const files = { 'claude:settings.json': { hash: 'x' } };
   assert.deepEqual(staleBaselineKeys(files, 'claude:settings.json', []), []);
+});
+
+test('an ordinary settings document validates', () => {
+  const errors = validateOwnedKeys({
+    effortLevel: 'high',
+    tui: 'fullscreen',
+    theme: 'auto',
+    worktree: { symlinkDirectories: ['node_modules', '.cache'] },
+  });
+  assert.deepEqual(errors, []);
+});
+
+test('a document that is not an object is refused', () => {
+  assert.ok(validateOwnedKeys(null).some((e) => /must be a JSON object/.test(e)));
+  assert.ok(validateOwnedKeys(['theme']).some((e) => /must be a JSON object/.test(e)));
+});
+
+test('an empty document is refused rather than silently owning nothing', () => {
+  assert.ok(validateOwnedKeys({}).some((e) => /names no keys/.test(e)));
+});
+
+// This file is committed and public. The allowlist already makes a local
+// secret unreachable; this stops one being written INTO the repo.
+test('a key named like a credential is refused, at any depth', () => {
+  assert.ok(validateOwnedKeys({ apiKey: 'x' }).some((e) => /looks like a secret/.test(e)));
+  assert.ok(
+    validateOwnedKeys({ worktree: { token: 'x' } }).some((e) => /looks like a secret/.test(e)),
+  );
+});
+
+test('a credential-shaped value is refused, at any depth', () => {
+  assert.ok(
+    validateOwnedKeys({ theme: 'sk-abcd1234' }).some((e) => /looks like a secret value/.test(e)),
+  );
+  assert.ok(
+    validateOwnedKeys({ worktree: { dirs: ['ghp_abcdefgh12345678'] } }).some((e) =>
+      /looks like a secret value/.test(e),
+    ),
+  );
+});
+
+test('every complaint names the key it is about', () => {
+  const errors = validateOwnedKeys({ worktree: { token: 'x' } });
+  assert.ok(errors.some((e) => /worktree\.token/.test(e)), errors.join('; '));
 });
