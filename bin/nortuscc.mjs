@@ -16,7 +16,10 @@ Skills-only machines (use this repo's skill set, keep your own instruction files
 
 Commands:
   setup [--repo URL] [--dir PATH]   clone if absent, apply, then install interactively
-  status                            report: cli / config / integrations / skills
+  status [--strict] [--versions]    report: cli / config / integrations / skills
+                                    and what is installed but undeclared
+                                    --strict exits non-zero on undeclared items
+                                    --versions shows each plugin's installed version
                                     offers to update nortuscc when it is behind
   apply [--install] [--take-repo]   repo -> machine
                                     --install also offers missing integrations and skills

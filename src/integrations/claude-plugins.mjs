@@ -33,8 +33,33 @@ function installedPlugins(dir) {
   return 'plugins' in raw ? {} : raw;
 }
 
-function knownMarketplaces(dir) {
+export function knownMarketplaces(dir) {
   return readJson(join(dir, 'plugins', 'known_marketplaces.json'));
+}
+
+// What this machine has installed for the user, with versions.
+//
+// In the v2 shape each plugin maps to an array of install records carrying
+// `scope` and `version`, so a project- or managed-scope install — a
+// repository's or an administrator's, not the user's — is dropped here rather
+// than reported as machine-wide drift. A value that is not an array is the
+// older shape, which records neither field: it counts as a user-scope install
+// whose version is unknown, because dropping it would report an out-of-date
+// machine as having no plugins at all.
+export function userScopeInstalls(dir) {
+  const installs = [];
+
+  for (const [name, value] of Object.entries(installedPlugins(dir))) {
+    if (!Array.isArray(value)) {
+      installs.push({ name, version: null });
+      continue;
+    }
+    const record = value.find((entry) => entry?.scope === 'user');
+    if (!record) continue;
+    installs.push({ name, version: typeof record.version === 'string' ? record.version : null });
+  }
+
+  return installs;
 }
 
 // A plugin is named `<plugin>@<marketplace>`, and the marketplace entry Claude

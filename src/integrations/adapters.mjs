@@ -31,5 +31,8 @@ export async function defaultAdapters(deps = {}) {
     // Surfaced so a caller can report "Codex state could not be read" rather
     // than quietly presenting everything as missing.
     errors: codexState.errors,
+    // The sets themselves, not just their errors: the inventory pass asks what
+    // Codex has installed, and re-reading would spawn the CLI twice per run.
+    state: codexState,
   };
 }

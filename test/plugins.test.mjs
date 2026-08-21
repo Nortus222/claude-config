@@ -8,6 +8,8 @@ import {
   marketplaceCommand,
   pluginCommand,
   claudePluginAdapters,
+  userScopeInstalls,
+  knownMarketplaces,
 } from '../src/integrations/claude-plugins.mjs';
 
 const MARKETPLACE = {
@@ -119,4 +121,53 @@ test('describe reports the exact command a run would make', () => {
   writeState(dir);
   const adapters = adaptersFor(dir, []);
   assert.equal(adapters.marketplace.describe(MARKETPLACE), 'claude plugin marketplace add mksglu/context-mode');
+});
+
+function probeHome(installed, marketplaces = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-probe-'));
+  mkdirSync(join(dir, 'plugins'), { recursive: true });
+  writeFileSync(join(dir, 'plugins', 'installed_plugins.json'), JSON.stringify(installed));
+  writeFileSync(join(dir, 'plugins', 'known_marketplaces.json'), JSON.stringify(marketplaces));
+  return dir;
+}
+
+test('the v2 shape yields user-scope installs with their versions', () => {
+  const dir = probeHome({
+    version: 2,
+    plugins: { 'superpowers@claude-plugins-official': [{ scope: 'user', version: '6.3.0' }] },
+  });
+  assert.deepEqual(userScopeInstalls(dir), [{ name: 'superpowers@claude-plugins-official', version: '6.3.0' }]);
+});
+
+// A project- or managed-scope install belongs to a repository or an
+// administrator; neither is the user's to declare on this machine.
+test('non-user scopes are not machine-wide installs', () => {
+  const dir = probeHome({ version: 2, plugins: { 'a@m': [{ scope: 'project', version: '1' }] } });
+  assert.deepEqual(userScopeInstalls(dir), []);
+});
+
+test('a plugin installed at several scopes keeps the user-scope record', () => {
+  const dir = probeHome({
+    version: 2,
+    plugins: { 'a@m': [{ scope: 'project', version: '1' }, { scope: 'user', version: '2' }] },
+  });
+  assert.deepEqual(userScopeInstalls(dir), [{ name: 'a@m', version: '2' }]);
+});
+
+// The older shape records neither scope nor version. Dropping it would report a
+// machine with old state as having no plugins at all.
+test('the older shape counts as user scope with an unknown version', () => {
+  const dir = probeHome({ 'a@m': true });
+  assert.deepEqual(userScopeInstalls(dir), [{ name: 'a@m', version: null }]);
+});
+
+test('a missing or corrupt plugin file reads as nothing installed', () => {
+  const empty = mkdtempSync(join(tmpdir(), 'nortuscc-probe-'));
+  assert.deepEqual(userScopeInstalls(empty), []);
+  assert.deepEqual(knownMarketplaces(empty), {});
+});
+
+test('marketplaces are readable by name', () => {
+  const dir = probeHome({ version: 2, plugins: {} }, { 'claude-plugins-official': { source: {} } });
+  assert.deepEqual(Object.keys(knownMarketplaces(dir)), ['claude-plugins-official']);
 });

@@ -8,6 +8,8 @@ import { formatRow, section } from '../report.mjs';
 import { readIntegrations } from '../integrations/manifest.mjs';
 import { integrationPlan } from '../integrations/runner.mjs';
 import { defaultAdapters } from '../integrations/adapters.mjs';
+import { declaredIds, undeclared, manifestDefects } from '../inventory.mjs';
+import { probe } from '../inventory-probe.mjs';
 import {
   readSkillsManifest,
   readSkillLock,
@@ -56,7 +58,7 @@ export async function run(args = [], deps = {}) {
   // stray value.
   const { rest: modeArgs, manageConfig } = parseConfigMode(args);
 
-  const { target, error } = parseTarget(modeArgs);
+  const { target, rest: statusArgs, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
@@ -101,19 +103,43 @@ export async function run(args = [], deps = {}) {
 
   // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`
   // and `apply --install` are the only paths that act on this.
-  const { integrations, errors } = readIntegrations();
+  const { integrations, allow, errors } = readIntegrations();
   const adapters = await defaultAdapters({ codexState });
+
+  // Read-only, like everything else here: this walks the machine and compares
+  // it against the manifest. Nothing is installed, removed or written.
+  const selectedIntegrations = errors.length ? [] : entriesForTarget(integrations, target);
+  const inventory = probe({ target, integrations: selectedIntegrations, codexState: adapters.state });
+
   const planned = errors.length ? [] : integrationPlan({ integrations, target, adapters });
   const pending = planned.filter((item) => item.state !== 'installed');
+
+  // Versions are reported, never declared: `claude plugin install` has no
+  // version flag, so a pin in integrations.json could not be honoured and
+  // would manufacture permanent drift against auto-updating marketplaces.
+  // Diffing two machines' output is what this is for.
+  const showVersions = statusArgs.includes('--versions');
+  const versionOf = new Map(inventory.pluginVersions);
+
+  // --versions only swaps the note column for a version; it must never take
+  // the place of the pending list or its repair hint, which is the one line
+  // that tells a machine with a missing plugin how to fix it.
+  const integrationNote = (item) =>
+    showVersions && item.type === 'plugin' ? (versionOf.get(item.plugin) ?? 'unknown') : item.note;
 
   const integrationLines = errors.length
     ? errors.map((message) => formatRow('manifest', 'invalid', message))
     : planned.length === 0
       ? [formatRow('none declared', 'satisfied', '')]
       : pending.length === 0
-        ? [formatRow('all declared', 'installed', '')]
+        ? showVersions
+          ? planned.map((item) => formatRow(item.label, item.state, integrationNote(item)))
+          : [formatRow('all declared', 'installed', '')]
         : [
-            ...pending.map((item) => formatRow(item.label, item.state, item.note)),
+            // --versions lists every planned item (so an installed plugin's
+            // version still prints), never just the pending ones; the hint
+            // stays regardless, since something here still needs `apply`.
+            ...(showVersions ? planned : pending).map((item) => formatRow(item.label, item.state, integrationNote(item))),
             '',
             '  nortuscc apply --install',
           ];
@@ -172,6 +198,38 @@ export async function run(args = [], deps = {}) {
   if (repairs.length) skillLines.push('', ...repairs);
   process.stdout.write(section('skills', skillLines));
 
+  const inventoryRows = [
+    ...undeclared({
+      observed: inventory.observed,
+      declared: declaredIds(selectedIntegrations, inventory.hookCommands),
+      allow,
+    }),
+    ...manifestDefects(selectedIntegrations),
+  ];
+
+  const undeclaredLines = [
+    ...inventoryRows.map((row) => formatRow(row.category, row.label, row.note)),
+    ...inventory.errors.map((err) => formatRow(err.category, 'unknown', err.message)),
+  ];
+  if (inventoryRows.length) {
+    undeclaredLines.push(
+      '',
+      `  ${inventoryRows.length} finding(s). Declare them in integrations.json, or list them`,
+      '  under "allow" to accept them. --strict makes this exit non-zero.',
+    );
+  } else if (!inventory.errors.length) {
+    // Printed rather than omitted, for the reason the skills section already
+    // gives: silence reads as "clean", which is the one thing it is not.
+    undeclaredLines.push(formatRow('all categories', 'declared', ''));
+  }
+  process.stdout.write(section('undeclared', undeclaredLines));
+
+  const inventoryDirty = inventoryRows.length > 0 || inventory.errors.length > 0;
+
+  // For CI or a login hook that wants drift to be actionable. The default is
+  // informational, so an inventory finding alone is reported and forgiven.
+  const strict = statusArgs.includes('--strict');
+
   const actionable = rows.filter(
     (r) => NEEDS_APPLY.has(r.state) || NEEDS_CAPTURE.has(r.state) || BLOCKED.has(r.state),
   );
@@ -184,16 +242,22 @@ export async function run(args = [], deps = {}) {
 
   // A selected integration that is missing or blocked is as actionable as a
   // drifted file: the machine is not in agreement with what the repo declares.
-  if (
-    cliBehind === false &&
-    actionable.length === 0 &&
-    errors.length === 0 &&
-    pending.length === 0 &&
-    skills.missing.length === 0 &&
-    exposure.partial.length === 0 &&
-    exposure.missing.length === 0 &&
-    exposureErrors.length === 0
-  ) {
+  //
+  // An undeclared item is not, on its own, a machine out of agreement with
+  // what it declared — every condition below is. Default stays informational
+  // so a scheduled run does not start failing the day this ships; --strict is
+  // what makes it actionable.
+  const otherDirty =
+    cliBehind ||
+    actionable.length > 0 ||
+    errors.length > 0 ||
+    pending.length > 0 ||
+    skills.missing.length > 0 ||
+    exposure.partial.length > 0 ||
+    exposure.missing.length > 0 ||
+    exposureErrors.length > 0;
+
+  if (!otherDirty && !inventoryDirty) {
     process.stdout.write('\neverything is in agreement\n');
     return 0;
   }
@@ -208,7 +272,9 @@ export async function run(args = [], deps = {}) {
     suggestions(actionable),
   ].filter(Boolean).join('\n');
   if (advice) process.stdout.write('\n' + advice + '\n');
-  return 1;
+
+  if (otherDirty) return 1;
+  return strict ? 1 : 0;
 }
 
 function noteFor(row) {

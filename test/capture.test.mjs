@@ -337,3 +337,31 @@ test('capture names the backup it made of the repo file it overwrote', async () 
     'the printed path must hold the repo content capture displaced',
   );
 });
+
+// Discovering an extra must never write it into the manifest: that would
+// convert drift into policy behind the user's back. capture has never read
+// plugin, hook or MCP state, and this is what keeps it that way.
+test('capture does not adopt undeclared items into integrations.json', async () => {
+  const before = JSON.stringify({
+    version: 1,
+    integrations: [{
+      id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+      type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+    }],
+  });
+  const manifestFile = join(repo, 'integrations.json');
+  writeFileSync(manifestFile, before);
+
+  // An undeclared plugin, marketplace and agent, all present on the machine.
+  mkdirSync(join(claude, 'plugins'), { recursive: true });
+  mkdirSync(join(claude, 'agents', 'stray'), { recursive: true });
+  writeFileSync(
+    join(claude, 'plugins', 'installed_plugins.json'),
+    JSON.stringify({ version: 2, plugins: { 'claude-mem@thedotmack': [{ scope: 'user', version: '13.13.1' }] } }),
+  );
+  writeFileSync(join(claude, 'plugins', 'known_marketplaces.json'), JSON.stringify({ thedotmack: {} }));
+
+  await captureRun([]);
+
+  assert.equal(readFileSync(manifestFile, 'utf8'), before, 'integrations.json is byte-identical after capture');
+});

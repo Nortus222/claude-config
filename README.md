@@ -75,15 +75,18 @@ nortuscc pull                # git pull, then bring this machine up to date
 nortuscc push -m "rules: ..." # share local edits
 ```
 
-`status` exits non-zero when anything needs attention, so it can gate a shell
-prompt or a scheduled check.
+`status` exits non-zero when something declared needs attention. Undeclared
+items — things installed but never named in `integrations.json` — are
+reported but do not affect the exit code unless `--strict` is passed, so it
+can still gate a shell prompt or a scheduled check without failing the day
+this ships.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
 | `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, apply, then install interactively |
-| `status` | Report: cli, config, integrations, skills. Offers to update nortuscc when behind |
+| `status [--strict] [--versions]` | Report: cli, config, integrations, skills, undeclared. `--strict` exits non-zero on undeclared items; `--versions` shows each plugin's installed version. Offers to update nortuscc when behind |
 | `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
 | `capture` | Machine → repo, including regenerating the skills manifest |
@@ -173,6 +176,18 @@ never edits `config.toml` or a plugin cache itself.
 
 `capture` never reads local integrations back into the repo. Adding one is an
 edit to `integrations.json`, deliberately.
+
+`integrations.json` may also carry a top-level `allow` object, keyed by the
+same categories `status`'s undeclared section reports (`agents`, `plugins`,
+`marketplaces`, `hooks`, `skills`). Each value is a list of ids to accept as
+known extras rather than flag as undeclared — ids only, never a value, the
+same convention the rest of this file keeps (for `hooks`, that id is the full
+registered command, e.g. `node /Users/you/.claude/hooks/thing.mjs`, not a
+short name — it's the same string `status` prints in an undeclared hook row's
+note column, so it's copyable from there). An unrecognised category key is
+refused like any other manifest error. **Because this file is committed, an
+`allow` entry accepts that extra on every machine that checks out the repo,
+not just this one.**
 
 ## Skills
 

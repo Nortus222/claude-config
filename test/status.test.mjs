@@ -486,11 +486,20 @@ async function onCleanMachine(prefix, fn) {
       run: isolatedRun,
     });
   } finally {
-    process.env.NORTUSCC_CLAUDE_DIR = saved.claude;
-    process.env.NORTUSCC_CODEX_DIR = saved.codex;
-    process.env.NORTUSCC_REPO_DIR = saved.repo;
-    process.env.NORTUSCC_AGENTS_DIR = saved.agents;
-    process.env.NORTUSCC_STATE_DIR = saved.state;
+    const restore = {
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_REPO_DIR: saved.repo,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_STATE_DIR: saved.state,
+    };
+    for (const [key, value] of Object.entries(restore)) {
+      // Restoring an env var that was unset before the test would otherwise
+      // write the literal string "undefined", leaving it set for every test
+      // that runs after.
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
@@ -650,7 +659,12 @@ test('with no probe injected, status reads the real directories and converges', 
     assert.match(unplaced.output, /claude-code/, 'Claude is the agent that cannot load it');
     assert.doesNotMatch(unplaced.output, /missing from.*codex/, 'Codex loads from the store');
 
-    mkdirSync(join(fx.claude, 'skills', 'wayfinder'), { recursive: true });
+    // A symlink into the shared store, matching what the real installer does
+    // (see skill-links.mjs) rather than a bare directory: the undeclared
+    // section now walks ~/.claude/skills for exactly this distinction, and a
+    // plain directory here would misreport as a stray, undeclared skill.
+    mkdirSync(join(fx.claude, 'skills'), { recursive: true });
+    symlinkSync(join(fx.agents, 'wayfinder'), join(fx.claude, 'skills', 'wayfinder'));
 
     const placed = await runCaptured(() => fx.run());
     assert.equal(placed.code, 0, 'linking it for Claude alone brings the machine into agreement');
@@ -783,3 +797,279 @@ test('the conflict suggestion names, for each direction, the command that accept
   });
 });
 
+// Runs status against an isolated HOME and returns its printed output, so the
+// section can be asserted on without reading the developer's real machine.
+async function statusOutput(args = [], setup = () => {}, deps = {}) {
+  const isolated = mkdtempSync(join(tmpdir(), 'nortuscc-undeclared-'));
+  mkdirSync(join(isolated, '.claude'), { recursive: true });
+  mkdirSync(join(isolated, '.codex'), { recursive: true });
+  mkdirSync(join(isolated, '.agents', 'skills'), { recursive: true });
+  const repoDir = mkdtempSync(join(tmpdir(), 'nortuscc-undeclared-repo-'));
+  mkdirSync(join(repoDir, 'claude'), { recursive: true });
+  mkdirSync(join(repoDir, 'codex'), { recursive: true });
+  writeFileSync(join(repoDir, 'claude', 'CLAUDE.md'), '# Test');
+  writeFileSync(join(repoDir, 'codex', 'AGENTS.md'), '# Test codex');
+  setup(isolated, repoDir);
+
+  const saved = { ...process.env };
+  process.env.NORTUSCC_CLAUDE_DIR = join(isolated, '.claude');
+  process.env.NORTUSCC_CODEX_DIR = join(isolated, '.codex');
+  process.env.NORTUSCC_AGENTS_DIR = join(isolated, '.agents', 'skills');
+  process.env.NORTUSCC_STATE_DIR = join(isolated, 'state');
+  process.env.NORTUSCC_REPO_DIR = repoDir;
+
+  // Bring the config rows to a clean state, so the inventory section is the
+  // only thing that can make these runs dirty. Without this every row reads
+  // 'unmanaged', status is dirty on its own account, and "everything is in
+  // agreement" could never print — which is half of what this asserts.
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
+  const { resolveEntry } = await import('../src/resolve.mjs');
+  const lock = readLock();
+  for (const entry of SYNC) {
+    const { src, dest } = resolveEntry(entry);
+    const hash = hashFile(src);
+    if (hash) {
+      copyFileSync(src, dest);
+      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
+    }
+  }
+  writeLock(lock);
+
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  const chunks = [];
+  process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
+  try {
+    const { run: isolatedRun } = await import('../src/commands/status.mjs');
+    const code = await isolatedRun(args, {
+      codexState: emptyCodex(),
+      inspectExposure: () => ({ list: {}, errors: [] }),
+      cliState: () => ({ state: 'unmanaged' }),
+      ...deps,
+    });
+    return { code, output: chunks.join('') };
+  } finally {
+    process.stdout.write = originalWrite;
+    for (const key of ['NORTUSCC_CLAUDE_DIR', 'NORTUSCC_CODEX_DIR', 'NORTUSCC_AGENTS_DIR', 'NORTUSCC_STATE_DIR', 'NORTUSCC_REPO_DIR']) {
+      // Restoring an env var that was unset before the test would otherwise
+      // write the literal string "undefined", leaving it set for every test
+      // that runs after.
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+test('a clean machine says every category is declared rather than staying silent', async () => {
+  const { output } = await statusOutput();
+  assert.match(output, /undeclared/);
+  assert.match(output, /all categories\s+declared/);
+});
+
+test('an undeclared agent is named in the section', async () => {
+  const { output } = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'awesome-claude-agents'), { recursive: true });
+  });
+  assert.match(output, /agents\s+awesome-claude-agents/);
+});
+
+// The false-green this whole section exists to close.
+test('undeclared items suppress "everything is in agreement"', async () => {
+  const clean = await statusOutput();
+  assert.match(clean.output, /everything is in agreement/);
+
+  const dirty = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  });
+  assert.doesNotMatch(dirty.output, /everything is in agreement/);
+});
+
+// Informational by default, so a scheduled run does not start failing the day
+// this ships.
+test('undeclared items alone do not change the exit code', async () => {
+  const { code } = await statusOutput([], (home) => {
+    mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  });
+  assert.equal(code, 0);
+});
+
+test('an unreadable category reports unknown rather than nothing', async () => {
+  const { output } = await statusOutput([], (home) => {
+    writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+  });
+  assert.match(output, /hooks\s+unknown/);
+});
+
+test('--strict makes an undeclared item exit non-zero', async () => {
+  const stray = (home) => mkdirSync(join(home, '.claude', 'agents', 'stray'), { recursive: true });
+  assert.equal((await statusOutput([], stray)).code, 0);
+  assert.equal((await statusOutput(['--strict'], stray)).code, 1);
+});
+
+test('--strict makes an unreadable category exit non-zero', async () => {
+  const broken = (home) => writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+  assert.equal((await statusOutput(['--strict'], broken)).code, 1);
+});
+
+test('--strict on a clean machine still exits zero and agrees', async () => {
+  const { code, output } = await statusOutput(['--strict']);
+  assert.equal(code, 0);
+  assert.match(output, /everything is in agreement/);
+});
+
+function withPlugin(home) {
+  mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+  writeFileSync(
+    join(home, '.claude', 'plugins', 'installed_plugins.json'),
+    JSON.stringify({ version: 2, plugins: { 'superpowers@claude-plugins-official': [{ scope: 'user', version: '6.3.0' }] } }),
+  );
+  writeFileSync(
+    join(home, '.claude', 'plugins', 'known_marketplaces.json'),
+    JSON.stringify({ 'claude-plugins-official': {} }),
+  );
+}
+
+test('--versions prints the installed version of a declared plugin', async () => {
+  const setup = (home, repoDir) => {
+    withPlugin(home);
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{
+          id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+          type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+        }],
+      }),
+    );
+  };
+
+  const plain = await statusOutput([], setup);
+  assert.doesNotMatch(plain.output, /6\.3\.0/);
+
+  const detailed = await statusOutput(['--versions'], setup);
+  assert.match(detailed.output, /superpowers\s+installed\s+6\.3\.0/);
+});
+
+// An absent version must never be mistaken for a matching one.
+test('--versions reports an unreadable version as unknown', async () => {
+  const setup = (home, repoDir) => {
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ 'a@claude-plugins-official': true }));
+    writeFileSync(join(home, '.claude', 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'claude-plugins-official': {} }));
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{ id: 'a', label: 'a', target: 'claude', type: 'plugin', default: true, plugin: 'a@claude-plugins-official' }],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /a\s+installed\s+unknown/);
+});
+
+// --versions only adds a column; it must not swallow the pending list or the
+// hint that repairs it. A machine missing a declared plugin has to keep
+// naming `apply --install` whether or not --versions is passed.
+test('--versions keeps the pending list and its repair hint for a missing plugin', async () => {
+  const setup = (_home, repoDir) => {
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [{
+          id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+          type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+        }],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /superpowers/, 'the missing plugin is still named');
+  assert.match(output, /apply --install/, 'the repair hint must survive --versions');
+});
+
+// The regression the fix above traded one loss for another: making
+// pending.length === 0 the outer branch meant --versions only ever listed
+// versions when NOTHING was pending, hiding an installed plugin's version
+// the moment any other plugin was missing — precisely when diffing two
+// machines' output is most wanted.
+test('--versions shows an installed version alongside a pending plugin and its hint', async () => {
+  const setup = (home, repoDir) => {
+    withPlugin(home);
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          {
+            id: 'superpowers-claude', label: 'superpowers', target: 'claude',
+            type: 'plugin', default: true, plugin: 'superpowers@claude-plugins-official',
+          },
+          {
+            id: 'gone-claude', label: 'gone', target: 'claude',
+            type: 'plugin', default: true, plugin: 'gone@claude-plugins-official',
+          },
+        ],
+      }),
+    );
+  };
+
+  const { output } = await statusOutput(['--versions'], setup);
+  assert.match(output, /superpowers\s+installed\s+6\.3\.0/, 'the installed plugin still shows its version');
+  assert.match(output, /apply --install/, 'the repair hint must still name the missing plugin\'s fix');
+});
+
+// The join point of three seams that are each unit-tested on both sides and
+// never together: the allow list undeclared() reads, the declared hook set
+// declaredIds() is given, and the manifestDefects() spread. A mutation
+// dropping any one of them passed the whole suite before this test existed.
+test('undeclared honours allow, declared hooks, and manifest defects together', async () => {
+  const setup = (home, repoDir) => {
+    mkdirSync(join(repoDir, 'claude', 'hooks'), { recursive: true });
+    writeFileSync(join(repoDir, 'claude', 'hooks', 'session.mjs'), '// test hook\n');
+    writeFileSync(
+      join(repoDir, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        allow: { agents: ['stray-agent'] },
+        integrations: [
+          {
+            id: 'session-hook', label: 'session hook', target: 'claude',
+            type: 'hook', default: true, event: 'SessionStart', file: 'claude/hooks/session.mjs',
+          },
+          {
+            id: 'bad-plugin', label: 'bad plugin', target: 'claude',
+            type: 'plugin', default: true, plugin: 'foo@undeclared-market',
+          },
+        ],
+      }),
+    );
+
+    // An undeclared agent that only the allow entry above should silence.
+    mkdirSync(join(home, '.claude', 'agents', 'stray-agent'), { recursive: true });
+
+    // The declared hook, registered under the path nortuscc installs hooks to
+    // (node <claudeDir>/hooks/<basename of file>), so it must read as
+    // declared rather than undeclared.
+    writeFileSync(
+      join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [{
+            hooks: [{ type: 'command', command: `node ${join(home, '.claude', 'hooks', 'session.mjs')}` }],
+          }],
+        },
+      }),
+    );
+  };
+
+  const { output } = await statusOutput([], setup);
+
+  assert.doesNotMatch(output, /stray-agent/, 'the allow list must silence the item it names');
+  assert.doesNotMatch(output, /hooks\s+SessionStart/, 'a declared hook must not be reported as undeclared');
+  assert.match(output, /manifest\s+foo@undeclared-market/, 'an undeclared marketplace is still reported');
+});

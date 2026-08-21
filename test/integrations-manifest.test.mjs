@@ -180,3 +180,38 @@ test('every committed integration has a unique id', async () => {
   const ids = integrations.map((i) => i.id);
   assert.equal(new Set(ids).size, ids.length);
 });
+
+test('a manifest with no allow list yields an empty one', () => {
+  const result = validateIntegrations(manifest(PLUGIN), { repo });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.allow, {});
+});
+
+test('allow accepts known categories with string ids', () => {
+  const value = { ...manifest(PLUGIN), allow: { agents: ['awesome-claude-agents'], plugins: [] } };
+  const result = validateIntegrations(value, { repo });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.allow.agents, ['awesome-claude-agents']);
+});
+
+// Fail-closed, like every other check here: a typo that silently allows nothing
+// is worse than one that says so.
+test('allow rejects an unknown category', () => {
+  const value = { ...manifest(PLUGIN), allow: { plugin: ['x'] } };
+  const result = validateIntegrations(value, { repo });
+  assert.ok(result.errors.some((e) => /unknown category 'plugin'/.test(e)));
+  assert.deepEqual(result.integrations, []);
+});
+
+test('allow rejects a non-array value and a non-string id', () => {
+  const bad = validateIntegrations({ ...manifest(PLUGIN), allow: { agents: 'x' } }, { repo });
+  assert.ok(bad.errors.some((e) => /must be a list of ids/.test(e)));
+
+  const worse = validateIntegrations({ ...manifest(PLUGIN), allow: { agents: [5] } }, { repo });
+  assert.ok(worse.errors.some((e) => /must be a list of ids/.test(e)));
+});
+
+test('allow must be an object', () => {
+  const result = validateIntegrations({ ...manifest(PLUGIN), allow: ['agents'] }, { repo });
+  assert.ok(result.errors.some((e) => /'allow' must be an object/.test(e)));
+});
