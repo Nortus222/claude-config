@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { hashValue } from '../src/settings-keys.mjs';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
@@ -825,6 +826,11 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   await seedManagedEntries(lock);
   writeLock(lock);
 
+  // Seeding rewrites the fixture's settings.keys.json, so a test that needs a
+  // specific settings state has to set it up after that, not in `setup`.
+  const { postSeed, ...runDeps } = deps;
+  if (postSeed) postSeed(isolated, repoDir);
+
   const originalWrite = process.stdout.write.bind(process.stdout);
   const chunks = [];
   process.stdout.write = (chunk) => { chunks.push(chunk.toString()); return true; };
@@ -834,7 +840,7 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
       codexState: emptyCodex(),
       inspectExposure: () => ({ list: {}, errors: [] }),
       cliState: () => ({ state: 'unmanaged' }),
-      ...deps,
+      ...runDeps,
     });
     return { code, output: chunks.join('') };
   } finally {
@@ -1061,4 +1067,79 @@ test('undeclared honours allow, declared hooks, and manifest defects together', 
   assert.doesNotMatch(output, /stray-agent/, 'the allow list must silence the item it names');
   assert.doesNotMatch(output, /hooks\s+SessionStart/, 'a declared hook must not be reported as undeclared');
   assert.match(output, /manifest\s+foo@undeclared-market/, 'an undeclared marketplace is still reported');
+});
+
+// A per-key baseline has to exist for a key to read as anything but
+// 'unmanaged', so these tests seed the state file directly rather than running
+// a second apply.
+function seedKeyBaselines(home, values) {
+  mkdirSync(join(home, 'state'), { recursive: true });
+  const statePath = join(home, 'state', 'state.json');
+  const existing = JSON.parse(readFileSync(statePath, 'utf8'));
+  for (const [key, value] of Object.entries(values)) {
+    existing.files[`claude:settings.json#${key}`] = { hash: hashValue(value), appliedAt: '2026-01-01T00:00:00.000Z' };
+  }
+  writeFileSync(statePath, JSON.stringify(existing));
+}
+
+test('a settings file whose owned keys all agree reports one row, not one per key', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen', permissions: {} }),
+      );
+      seedKeyBaselines(home, { theme: 'auto', tui: 'fullscreen' });
+    },
+  });
+
+  assert.match(output, /settings\.json\s+clean/);
+  assert.doesNotMatch(output, /settings\.json#/, 'no per-key rows while every key agrees');
+});
+
+test('a drifted key gets its own row and a matching key does not', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'dark', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ theme: 'dark', tui: 'compact' }),
+      );
+      seedKeyBaselines(home, { theme: 'dark', tui: 'fullscreen' });
+    },
+  });
+
+  assert.match(output, /settings\.json#tui/, 'the drifted key is named');
+  assert.doesNotMatch(output, /settings\.json#theme/, 'the agreeing key is not');
+});
+
+// A fresh machine has no baseline for any key, so all four read 'unmanaged'.
+// Four identical rows would be as useless as one hidden conflict.
+test('a machine that has never synced reports one unmanaged row, not one per key', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen' }),
+      );
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ theme: 'auto' }));
+      mkdirSync(join(home, 'state'), { recursive: true });
+      const statePath = join(home, 'state', 'state.json');
+      const existing = JSON.parse(readFileSync(statePath, 'utf8'));
+      for (const key of Object.keys(existing.files)) {
+        if (key.startsWith('claude:settings.json#')) delete existing.files[key];
+      }
+      writeFileSync(statePath, JSON.stringify(existing));
+    },
+  });
+
+  assert.match(output, /settings\.json\s+unmanaged/);
+  assert.doesNotMatch(output, /settings\.json#/);
 });

@@ -28,22 +28,33 @@ import { run as realPull } from './pull.mjs';
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
   const lock = readLock();
-  return entries.map((entry) => {
+  return entries.flatMap((entry) => {
     const { src, dest, mode } = resolveEntry(entry);
     if (mode === 'copy') {
       // Keyed by target so Claude's CLAUDE.md and Codex's AGENTS.md can never
       // share one baseline; entry.dest stays the display name.
       const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
-      return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
+      return [{ dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state }];
     } else if (mode === 'merge-keys') {
-      // inspectMerge already rolls a document's per-key states up to one of
-      // the same state names inspectCopy uses, so noteFor and the exit-code
-      // logic below need no separate case for this mode.
-      const state = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock).state;
-      return { dest: entry.dest, mode, state };
+      const inspected = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock);
+      // A document that could not be read, or a repo file that was refused,
+      // has nothing to say key by key.
+      if (inspected.keys.length === 0) return [{ dest: entry.dest, mode, state: inspected.state }];
+
+      // Collapse when every owned key says the same thing — four identical
+      // rows on every run would bury the ones that matter, and that is as true
+      // of 'unmanaged' on a fresh machine as of 'clean' on a synced one.
+      // Expand the moment they disagree: one summary row hiding three drifted
+      // keys is the false green this mode was built to close.
+      const distinct = new Set(inspected.keys.map((k) => k.state));
+      if (distinct.size === 1) return [{ dest: entry.dest, mode, state: [...distinct][0] }];
+
+      return inspected.keys
+        .filter((k) => k.state !== 'clean')
+        .map((k) => ({ dest: `${entry.dest}#${k.key}`, mode, state: k.state }));
     } else {
       // Unknown mode: surface as a visible error rather than silently misdispatching
-      return { dest: entry.dest, mode, state: 'unknown-mode' };
+      return [{ dest: entry.dest, mode, state: 'unknown-mode' }];
     }
   });
 }
