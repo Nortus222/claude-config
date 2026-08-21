@@ -4,8 +4,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { readDocument, inspectMerge, applyMerge, captureMerge } from '../src/merge-keys.mjs';
-import { hashValue, baselineKey } from '../src/settings-keys.mjs';
+// applyMerge/captureMerge back up displaced files through preserveCopy, which
+// resolves backupRoot() from this env var. Set before the dynamic import below
+// — same precedent as test/copy.test.mjs — so the real ~/.config/nortuscc/backups
+// is never touched by this suite.
+process.env.NORTUSCC_STATE_DIR = mkdtempSync(join(tmpdir(), 'nortuscc-merge-state-'));
+
+const { readDocument, inspectMerge, applyMerge, captureMerge } = await import('../src/merge-keys.mjs');
+const { hashValue, baselineKey } = await import('../src/settings-keys.mjs');
 
 const PREFIX = 'claude:settings.json';
 const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
