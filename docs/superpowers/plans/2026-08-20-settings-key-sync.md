@@ -1059,12 +1059,66 @@ git commit -m "feat: capture owned settings keys back to the repo"
 - Create: `claude/settings.keys.json`
 - Modify: `src/manifest.mjs`, `src/commands/apply.mjs`, `src/commands/capture.mjs`
 - Test: `test/apply.test.mjs`, `test/capture.test.mjs`
+- Test (existing, must be updated — see Step 0): `test/manifest.test.mjs`, `test/cli-version.test.mjs`
 
 **Interfaces:**
 - Consumes: `applyMerge`, `captureMerge`.
 - Produces: a `SYNC` entry with `mode: 'merge-keys'`.
 
 The repo file is **hand-written here with this machine's current values**, not captured. Seeding it by running `capture` would silently make one machine the source of truth for every other.
+
+- [ ] **Step 0: Update the three existing tests that assume every entry is `mode: 'copy'`**
+
+Adding the manifest entry breaks three tests written when `copy` was the only mode. Do this first, so the failures you see in Step 2 are the ones you intended.
+
+**`test/manifest.test.mjs`** — `every manifest entry declares a valid mode` asserts `entry.mode === 'copy'`. Widen it rather than delete it; its purpose is catching a typo'd mode, and a set does that just as well. Replace that test's body with:
+
+```js
+// Widened from an equality when merge-keys arrived. The point is unchanged:
+// a typo'd mode must not reach a command that would then misdispatch it.
+const MODES = new Set(['copy', 'merge-keys']);
+
+test('every manifest entry declares a valid mode', () => {
+  for (const entry of SYNC) {
+    assert.ok(MODES.has(entry.mode), `bad mode on ${entry.src}: ${entry.mode}`);
+  }
+});
+```
+
+**`test/cli-version.test.mjs`** — around line 164 a loop does a bare `copyFileSync(src, dest)` for every SYNC entry, and its fixture repo holds only `claude/CLAUDE.md` and `codex/AGENTS.md`, so the new entry's source does not exist there and the copy throws ENOENT. Change `for (const entry of SYNC) {` to:
+
+```js
+  // Only copied entries have a whole-file baseline to seed. A merge-keys entry
+  // owns named keys inside its destination; copying its source over that
+  // destination would replace the document it is meant to merge into.
+  for (const entry of SYNC.filter((e) => e.mode === 'copy')) {
+```
+
+**`test/apply.test.mjs`** — `apply records a baseline per target, never one shared by dest name` asserts `lock.files['claude:settings.json']` exists for every entry. A merge-keys entry records `claude:settings.json#effortLevel` and siblings instead, never the bare key. Scope the existing loop and add the per-key case, so narrowing does not drop coverage where the new mode actually writes:
+
+```js
+  for (const entry of SYNC.filter((e) => e.mode === 'copy')) {
+    const key = `${entry.target}:${entry.dest}`;
+    assert.ok(lock.files[key], `no baseline recorded for ${key}`);
+    assert.match(lock.files[key].hash, /^sha256:/);
+    assert.equal(lock.files[entry.dest], undefined, `${entry.dest} must not be keyed without its target`);
+  }
+
+  // A merge-keys entry owns named keys inside its destination, so its baselines
+  // are per key. The bare whole-file key must never appear for one: a command
+  // reading it would treat the entire document as managed.
+  for (const entry of SYNC.filter((e) => e.mode === 'merge-keys')) {
+    const bare = `${entry.target}:${entry.dest}`;
+    assert.equal(lock.files[bare], undefined, `${bare} must not be baselined as a whole file`);
+    const perKey = Object.keys(lock.files).filter((k) => k.startsWith(`${bare}#`));
+    assert.ok(perKey.length > 0, `no per-key baselines recorded for ${bare}`);
+    for (const k of perKey) assert.match(lock.files[k].hash, /^sha256:/);
+  }
+```
+
+Note `test/apply.test.mjs` sets no `NORTUSCC_REPO_DIR`, so it runs against the real repo — once you create `claude/settings.keys.json` in Step 3, apply genuinely reads it and writes into that test's fixture home. That is intended, and it is what makes the per-key assertion meaningful.
+
+Run `npm test` after this step. Expected: still 605 pass / 0 fail — the manifest entry does not exist yet, so the merge-keys loops iterate nothing and the widened mode set still accepts `copy`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1216,7 +1270,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add claude/settings.keys.json src/manifest.mjs src/commands/apply.mjs src/commands/capture.mjs test/apply.test.mjs test/capture.test.mjs
+git add claude/settings.keys.json src/manifest.mjs src/commands/apply.mjs src/commands/capture.mjs \
+        test/apply.test.mjs test/capture.test.mjs test/manifest.test.mjs test/cli-version.test.mjs
 git commit -m "feat: sync the declared settings keys"
 ```
 
