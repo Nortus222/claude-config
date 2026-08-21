@@ -14,7 +14,10 @@ import { installGroups, agentIdsFor } from './skills-cli.mjs';
 // the workflow itself so the workflow stays testable without a filesystem, a
 // child process, or a terminal.
 
-function configSection(target, { force = false, manageConfig = true } = {}) {
+// Exported so tests can pin real id generation (config:<target>:<dest>) —
+// a hand-written fixture cannot catch a regression that reintroduces a
+// target-only id and lets the picker select two entries together.
+export function configSection(target, { force = false, manageConfig = true } = {}) {
   // A skills-only machine offers no instruction files to install, so the
   // section is empty rather than absent — runInstall counts items, and an
   // empty section is already the "nothing to do here" it understands.

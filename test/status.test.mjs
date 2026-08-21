@@ -74,12 +74,17 @@ test('configReport returns one row per manifest entry', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
   const rows = configReport();
   assert.equal(rows.length, SYNC.length);
-  const modes = new Set(SYNC.map((e) => e.mode));
-  for (const row of rows) {
+  // Paired positionally against SYNC — configReport preserves entry order —
+  // rather than checked against the set of modes present anywhere in the
+  // manifest: a set membership check can't catch a row reporting the wrong
+  // mode for ITS entry as long as that mode exists somewhere else in SYNC
+  // (e.g. configReport hardcoding 'copy' for the merge-keys entry would still
+  // pass, since 'copy' is a mode SYNC does contain).
+  rows.forEach((row, i) => {
     assert.ok(row.dest, 'each row names its destination');
-    assert.ok(modes.has(row.mode), `row carries a mode from the manifest: ${row.mode}`);
+    assert.equal(row.mode, SYNC[i].mode, `row ${i} carries its own entry's mode`);
     assert.ok(typeof row.state === 'string' && row.state.length > 0);
-  }
+  });
 });
 
 test('an empty agent dir reports nothing as clean', () => {

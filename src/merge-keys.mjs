@@ -98,8 +98,10 @@ export function applyMerge(src, dest, prefix, lock, { force = false, relative = 
   if (inspected.state === 'missing-repo') return { action: 'skipped', backedUp: null, keys: [] };
   if (inspected.state === 'unparseable-local') {
     // Nothing is preserved because nothing is being overwritten — the file is
-    // exactly as the user left it.
-    return { action: 'refused', backedUp: null, keys: [] };
+    // exactly as the user left it. `reason` distinguishes this from a
+    // conflict refusal: neither --take-repo nor --take-local can fix invalid
+    // JSON, so the caller must not offer them as a remedy for this one.
+    return { action: 'refused', backedUp: null, keys: [], reason: 'unparseable-local' };
   }
 
   const conflicts = inspected.keys.filter((k) => k.state === 'conflict');
@@ -151,7 +153,9 @@ export function captureMerge(src, dest, prefix, lock, { force = false, relative 
   const inspected = inspectMerge(src, dest, prefix, lock);
 
   if (inspected.state === 'missing-repo') return { action: 'skipped', backedUp: null, keys: [] };
-  if (inspected.state === 'unparseable-local') return { action: 'refused', backedUp: null, keys: [] };
+  // Same distinguishing reason as applyMerge — see there for why the caller
+  // needs it.
+  if (inspected.state === 'unparseable-local') return { action: 'refused', backedUp: null, keys: [], reason: 'unparseable-local' };
 
   const conflicts = inspected.keys.filter((k) => k.state === 'conflict');
   if (conflicts.length > 0 && !force) {

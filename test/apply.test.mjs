@@ -400,8 +400,15 @@ test('summarizeSkillsInstall with nothing missing reports nothing and fails noth
   assert.deepEqual(summary, { lines: [], failed: 0 });
 });
 
-test('apply writes the declared settings keys and leaves the rest of the file alone', async () => {
+test('apply writes the declared settings keys and leaves the rest of the file alone', async (t) => {
+  // `repo` is the real checkout (this file sets no NORTUSCC_REPO_DIR), so
+  // settingsSrc is the tracked claude/settings.keys.json. Snapshot it and
+  // restore unconditionally: a run that throws mid-test must not leave the
+  // tracked file holding this test's fixture value.
   const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  const originalSettingsSrc = readFileSync(settingsSrc, 'utf8');
+  t.after(() => writeFileSync(settingsSrc, originalSettingsSrc));
+
   writeFileSync(settingsSrc, JSON.stringify({ theme: 'dark' }) + '\n');
   const settingsDest = join(claude, 'settings.json');
   writeFileSync(settingsDest, JSON.stringify({ theme: 'auto', permissions: { allow: ['Bash(ls:*)'] } }) + '\n');
@@ -417,8 +424,13 @@ test('apply writes the declared settings keys and leaves the rest of the file al
 // The entry sits in SYNC, so parseConfigMode already filters it — this pins
 // that, because the failure mode is writing a stranger's preferences into a
 // user's file.
-test('--skills-only leaves the settings file alone', async () => {
+test('--skills-only leaves the settings file alone', async (t) => {
+  // Same real-checkout caveat as the test above: snapshot and restore
+  // unconditionally.
   const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  const originalSettingsSrc = readFileSync(settingsSrc, 'utf8');
+  t.after(() => writeFileSync(settingsSrc, originalSettingsSrc));
+
   writeFileSync(settingsSrc, JSON.stringify({ theme: 'dark' }) + '\n');
   const settingsDest = join(claude, 'settings.json');
   const before = JSON.stringify({ theme: 'auto' }) + '\n';
@@ -430,4 +442,39 @@ test('--skills-only leaves the settings file alone', async () => {
 
   // Leave the recorded mode as this file's other tests expect to find it.
   await run(['--no-skills-only']);
+});
+
+// An unparseable local settings.json is a dead end neither --take-repo nor
+// --take-local can resolve — applyMerge/captureMerge refuse it before the
+// force check ever runs — so it must be reported and counted apart from a
+// genuine conflict, with a note that points at the only real fix: editing
+// the file by hand.
+test('apply reports an unparseable local settings file distinctly from a conflict', async (t) => {
+  const settingsSrc = join(repo, 'claude', 'settings.keys.json');
+  const originalSettingsSrc = readFileSync(settingsSrc, 'utf8');
+  t.after(() => writeFileSync(settingsSrc, originalSettingsSrc));
+
+  writeFileSync(settingsSrc, JSON.stringify({ theme: 'dark' }) + '\n');
+  const settingsDest = join(claude, 'settings.json');
+  const before = '{ not json';
+  writeFileSync(settingsDest, before);
+
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = function (chunk) { output += chunk.toString(); return true; };
+  let code;
+  try {
+    code = await run([]);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  assert.equal(code, 1, 'an unresolved settings file still fails the run');
+  assert.equal(readFileSync(settingsDest, 'utf8'), before, 'the unparseable file is left untouched');
+  assert.match(output, /settings\.json\s+refused/, 'reported as refused, not silently skipped');
+  assert.match(output, /could not be parsed/, 'the note names the real problem');
+  // Neither flag can fix invalid JSON, so neither belongs in the trailer for
+  // this — offering them here is exactly what a user would try and fail at.
+  assert.doesNotMatch(output, /--take-repo/);
+  assert.doesNotMatch(output, /--take-local/);
 });
