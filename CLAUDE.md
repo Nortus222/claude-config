@@ -17,10 +17,16 @@ Feature branches target **`main`**.
 
 | Path | Purpose |
 | --- | --- |
-| `claude/settings.json`, `claude/CLAUDE.md` | Rewritten in place by Claude Code — synced by copy |
-| `claude/bin/`, `claude/hooks/` | Never written by an agent — synced by symlink |
+| `claude/CLAUDE.md`, `codex/AGENTS.md` | The agents' instruction files. Each agent rewrites its own in place, so both are synced by copy against a recorded baseline |
+| `integrations.json` | Plugins, marketplaces, hooks and MCP servers a machine should have. Public: it may name an environment variable, never its value. May also carry an `allow` list of extras that are present on purpose |
 | `skills-manifest.txt` | Desired skill set, grouped by source repo |
+| `src/`, `bin/`, `test/` | The `nortuscc` CLI that does the reconciling |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Designs and implementation plans |
+| `docs/runbooks/` | One-off procedures, recorded with the commands that undo them |
+
+Nothing is synced by symlink. Directory links were retired once native installers
+took over their own layouts — `~/.claude/skills` is populated by the skills
+installer, and plugins live wherever Claude Code puts them.
 
 ## Conventions
 
