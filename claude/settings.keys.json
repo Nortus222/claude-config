@@ -3,6 +3,9 @@
   "tui": "fullscreen",
   "theme": "auto",
   "worktree": {
-    "symlinkDirectories": ["node_modules", ".cache"]
+    "symlinkDirectories": [
+      "node_modules",
+      ".cache"
+    ]
   }
 }
