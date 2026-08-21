@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { hashValue } from '../src/settings-keys.mjs';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
 process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
@@ -43,15 +44,48 @@ const { configReport, run: rawRun } = await import('../src/commands/status.mjs')
 const emptyCodex = () => ({ plugins: new Set(), marketplaces: new Set(), errors: [] });
 const run = (args = [], deps = {}) => rawRun(args, { codexState: emptyCodex(), ...deps });
 
+// Seeds every managed entry into whichever repo/home the current env vars
+// point at, so a test starts from a genuinely clean, non-actionable machine.
+// A copy entry needs only its baseline hash recorded. A merge-keys entry has
+// no fixture source of its own the way CLAUDE.md/AGENTS.md do here, so this
+// also writes one first — otherwise it reads as missing-repo, which is just
+// as blocked as a genuine manifest gap.
+async function seedManagedEntries(lock) {
+  const { SYNC } = await import('../src/manifest.mjs');
+  const { hashFile, setBaseline } = await import('../src/lock.mjs');
+  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { applyMerge } = await import('../src/merge-keys.mjs');
+
+  for (const entry of SYNC) {
+    const { src, dest, mode } = resolveEntry(entry);
+    if (mode === 'copy') {
+      const hash = hashFile(src);
+      if (hash) {
+        copyFileSync(src, dest);
+        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
+      }
+    } else if (mode === 'merge-keys') {
+      writeFileSync(src, JSON.stringify({ theme: 'auto' }) + '\n');
+      applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, { relative: entry.dest, agent: entry.target });
+    }
+  }
+}
+
 test('configReport returns one row per manifest entry', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
   const rows = configReport();
   assert.equal(rows.length, SYNC.length);
-  for (const row of rows) {
+  // Paired positionally against SYNC — configReport preserves entry order —
+  // rather than checked against the set of modes present anywhere in the
+  // manifest: a set membership check can't catch a row reporting the wrong
+  // mode for ITS entry as long as that mode exists somewhere else in SYNC
+  // (e.g. configReport hardcoding 'copy' for the merge-keys entry would still
+  // pass, since 'copy' is a mode SYNC does contain).
+  rows.forEach((row, i) => {
     assert.ok(row.dest, 'each row names its destination');
-    assert.equal(row.mode, 'copy');
+    assert.equal(row.mode, SYNC[i].mode, `row ${i} carries its own entry's mode`);
     assert.ok(typeof row.state === 'string' && row.state.length > 0);
-  }
+  });
 });
 
 test('an empty agent dir reports nothing as clean', () => {
@@ -73,8 +107,10 @@ test('a target narrows the config report to that agent alone', async () => {
   const { SYNC } = await import('../src/manifest.mjs');
   const { entriesForTarget } = await import('../src/targets.mjs');
 
+  // Claude now owns two entries — its instruction file and its settings
+  // keys — so narrowing to 'claude' reports both, never just the first.
   const claudeRows = configReport(entriesForTarget(SYNC, 'claude'));
-  assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md']);
+  assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md', 'settings.json']);
 
   const codexRows = configReport(entriesForTarget(SYNC, 'codex'));
   assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md']);
@@ -144,20 +180,10 @@ test('run() returns 1 on a dirty machine and does not write lockfile', async () 
 
 test('run() returns 0 on a clean machine', async () => {
   // Set up a genuinely clean machine: all entries in non-actionable states
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { readLock, writeLock } = await import('../src/lock.mjs');
 
-  // Copy each managed file to its destination and seed the lockfile with its hash
   const lock = readLock();
-  for (const entry of SYNC) {
-    const { src, dest } = resolveEntry(entry);
-    const hash = hashFile(src);
-    if (hash) {
-      copyFileSync(src, dest);
-      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-    }
-  }
+  await seedManagedEntries(lock);
   writeLock(lock);
 
   // Now run the command on this clean machine
@@ -258,9 +284,7 @@ test('run() does not write any files to claude dir and does not create new direc
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     // Take a pristine snapshot before any setup (kept for parity with the
     // pre-existing claude-dir check below; the agents/skills fixture doesn't
@@ -269,14 +293,7 @@ test('run() does not write any files to claude dir and does not create new direc
 
     // Set up a clean machine: every managed file present and baselined
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     // Snapshot after setup but before run()
@@ -387,21 +404,12 @@ test('run() returns 1 when a manifest skill is missing, and names it in the outp
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     // Bring config to a clean state so the missing skill is the only thing
     // that can make this run dirty — isolates the wiring under test.
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     // 'have' is installed, so status would otherwise ask the real installer
@@ -462,19 +470,10 @@ async function onCleanMachine(prefix, fn) {
     const { run: rawIsolatedRun } = await import('../src/commands/status.mjs');
     const isolatedRun = (args = [], runDeps = {}) =>
       rawIsolatedRun(args, { codexState: emptyCodex(), ...runDeps });
-    const { SYNC } = await import('../src/manifest.mjs');
-    const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-    const { resolveEntry } = await import('../src/resolve.mjs');
+    const { readLock, writeLock } = await import('../src/lock.mjs');
 
     const lock = readLock();
-    for (const entry of SYNC) {
-      const { src, dest } = resolveEntry(entry);
-      const hash = hashFile(src);
-      if (hash) {
-        copyFileSync(src, dest);
-        setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-      }
-    }
+    await seedManagedEntries(lock);
     writeLock(lock);
 
     return await fn({
@@ -822,19 +821,15 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   // only thing that can make these runs dirty. Without this every row reads
   // 'unmanaged', status is dirty on its own account, and "everything is in
   // agreement" could never print — which is half of what this asserts.
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { resolveEntry } = await import('../src/resolve.mjs');
+  const { readLock, writeLock } = await import('../src/lock.mjs');
   const lock = readLock();
-  for (const entry of SYNC) {
-    const { src, dest } = resolveEntry(entry);
-    const hash = hashFile(src);
-    if (hash) {
-      copyFileSync(src, dest);
-      setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
-    }
-  }
+  await seedManagedEntries(lock);
   writeLock(lock);
+
+  // Seeding rewrites the fixture's settings.keys.json, so a test that needs a
+  // specific settings state has to set it up after that, not in `setup`.
+  const { postSeed, ...runDeps } = deps;
+  if (postSeed) postSeed(isolated, repoDir);
 
   const originalWrite = process.stdout.write.bind(process.stdout);
   const chunks = [];
@@ -845,7 +840,7 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
       codexState: emptyCodex(),
       inspectExposure: () => ({ list: {}, errors: [] }),
       cliState: () => ({ state: 'unmanaged' }),
-      ...deps,
+      ...runDeps,
     });
     return { code, output: chunks.join('') };
   } finally {
@@ -1072,4 +1067,145 @@ test('undeclared honours allow, declared hooks, and manifest defects together', 
   assert.doesNotMatch(output, /stray-agent/, 'the allow list must silence the item it names');
   assert.doesNotMatch(output, /hooks\s+SessionStart/, 'a declared hook must not be reported as undeclared');
   assert.match(output, /manifest\s+foo@undeclared-market/, 'an undeclared marketplace is still reported');
+});
+
+// A per-key baseline has to exist for a key to read as anything but
+// 'unmanaged', so these tests seed the state file directly rather than running
+// a second apply.
+function seedKeyBaselines(home, values) {
+  mkdirSync(join(home, 'state'), { recursive: true });
+  const statePath = join(home, 'state', 'state.json');
+  const existing = JSON.parse(readFileSync(statePath, 'utf8'));
+  for (const [key, value] of Object.entries(values)) {
+    existing.files[`claude:settings.json#${key}`] = { hash: hashValue(value), appliedAt: '2026-01-01T00:00:00.000Z' };
+  }
+  writeFileSync(statePath, JSON.stringify(existing));
+}
+
+test('a settings file whose owned keys all agree reports one row, not one per key', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen', permissions: {} }),
+      );
+      seedKeyBaselines(home, { theme: 'auto', tui: 'fullscreen' });
+    },
+  });
+
+  assert.match(output, /settings\.json\s+clean/);
+  assert.doesNotMatch(output, /settings\.json#/, 'no per-key rows while every key agrees');
+});
+
+test('a drifted key gets its own row and a matching key does not', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'dark', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ theme: 'dark', tui: 'compact' }),
+      );
+      seedKeyBaselines(home, { theme: 'dark', tui: 'fullscreen' });
+    },
+  });
+
+  assert.match(output, /settings\.json#tui/, 'the drifted key is named');
+  assert.doesNotMatch(output, /settings\.json#theme/, 'the agreeing key is not');
+});
+
+// A fresh machine has no baseline for any key, so all four read 'unmanaged'.
+// Four identical rows would be as useless as one hidden conflict.
+test('a machine that has never synced reports one unmanaged row, not one per key', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ theme: 'auto', tui: 'fullscreen' }),
+      );
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ theme: 'auto' }));
+      mkdirSync(join(home, 'state'), { recursive: true });
+      const statePath = join(home, 'state', 'state.json');
+      const existing = JSON.parse(readFileSync(statePath, 'utf8'));
+      for (const key of Object.keys(existing.files)) {
+        if (key.startsWith('claude:settings.json#')) delete existing.files[key];
+      }
+      writeFileSync(statePath, JSON.stringify(existing));
+    },
+  });
+
+  assert.match(output, /settings\.json\s+unmanaged/);
+  assert.doesNotMatch(output, /settings\.json#/);
+});
+
+// A repo file validateOwnedKeys refuses is present and readable, not absent —
+// reporting 'missing-repo' would send the user chasing a file that is right
+// there. This is the whole-branch reviewer's exact repro: a credential-shaped
+// key in settings.keys.json.
+test('a refused repo file is surfaced as invalid, not a false missing-repo', async () => {
+  const { code, output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(join(repoDir, 'claude', 'settings.keys.json'), JSON.stringify({ apiKey: 'x' }));
+    },
+  });
+
+  assert.match(output, /manifest\s+invalid\s+.*looks like a secret/, 'the actual complaint is printed');
+  assert.doesNotMatch(output, /missing-repo/, 'must not read as absent when it is present and refused');
+  assert.doesNotMatch(output, /absent from the repo/, 'the missing-repo note would be false here');
+  assert.equal(code, 1, 'a refused repo file must not read as a clean machine');
+});
+
+// `settings.json#effortLevel` is 25 characters, past the section's shared
+// 16-char default. The fixed width used to leave it unpadded (padEnd is a
+// no-op once the label is already longer) while every shorter label in the
+// same section still padded to 16 — misaligning the state column for every
+// row but this one. labelWidth sizes the whole section to its longest label.
+test('a long per-key label keeps the config section columns aligned', async () => {
+  const { output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(
+        join(repoDir, 'claude', 'settings.keys.json'),
+        JSON.stringify({ effortLevel: 'high', tui: 'fullscreen' }),
+      );
+      writeFileSync(
+        join(home, '.claude', 'settings.json'),
+        JSON.stringify({ effortLevel: 'low', tui: 'fullscreen' }),
+      );
+      seedKeyBaselines(home, { effortLevel: 'high', tui: 'fullscreen' });
+    },
+  });
+
+  // The row itself: its label is exactly as wide as the column, so a single
+  // space separates it from its state either way — this alone would not have
+  // caught the bug.
+  assert.match(output, /settings\.json#effortLevel local-ahead/);
+  // The regression: a short label in the same section padded only to 16
+  // before this fix, giving 8 spaces here instead of the 17 a 25-wide column
+  // requires.
+  assert.match(output, /CLAUDE\.md {17}clean/, 'a short label pads out to the long label\'s width, not the 16-char default');
+});
+
+// The spec's own verification list names the blocked case alongside the
+// per-key row and the clean case; this is the one that was never added. An
+// unparseable local settings.json is neither a conflict --take-repo/--take-local
+// can resolve nor a missing repo file — it is BLOCKED on its own account, and
+// must read that way rather than as clean.
+test('an unparseable local settings file is blocked, not clean', async () => {
+  const { code, output } = await statusOutput([], () => {}, {
+    // Seeding writes a valid settings.json, so the invalid one has to be
+    // written after seeding, exactly like the postSeed cases above.
+    postSeed: (home) => {
+      writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+    },
+  });
+
+  assert.match(output, /settings\.json\s+unparseable-local/);
+  assert.match(output, /could not be parsed/);
+  assert.equal(code, 1, 'a blocked settings file must not read as a clean machine');
 });

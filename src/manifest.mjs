@@ -8,10 +8,18 @@
 //                silently replace a symlink with a regular file. Copy it and
 //                track a hash.
 //
-// Only portable instruction files are managed. Claude's settings.json and
-// Codex's config.toml stay user-owned: they mix portable rules with
-// permissions, UI preferences and machine-specific state.
+// mode: 'merge-keys' — a settings file mixes portable rules with permissions,
+//                UI preferences and machine-specific state. Sync the keys the
+//                repo names and leave every other key exactly as found. The
+//                key set in the repo's file IS the allowlist: nothing here
+//                enumerates the machine's own keys, so a local secret can
+//                never be picked up.
+//
+// `hooks` is deliberately not owned. src/integrations/claude-hooks.mjs already
+// writes settings.hooks, and a second writer would let `apply` undo what
+// `apply --install` registered; `status` already reports undeclared hooks.
 export const SYNC = [
   { target: 'claude', src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
   { target: 'codex', src: 'codex/AGENTS.md', dest: 'AGENTS.md', mode: 'copy' },
+  { target: 'claude', src: 'claude/settings.keys.json', dest: 'settings.json', mode: 'merge-keys' },
 ];

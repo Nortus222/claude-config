@@ -4,6 +4,7 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
+import { captureMerge } from '../merge-keys.mjs';
 import { formatRow, section } from '../report.mjs';
 import { installedGroups, emitManifest, readSkillLock, manifestPath, readSkillsManifest, installedSkillNames } from '../skills.mjs';
 import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
@@ -56,10 +57,38 @@ export async function run(allArgs = [], entries = SYNC) {
   const lines = [];
   const captured = [];
   let refused = 0;
+  // A settings file that fails to parse as JSON — separate from a conflict,
+  // since neither --take-repo nor --take-local can fix invalid JSON.
+  let unreadable = 0;
+  // A local value validateOwnedKeys refused to write into the repo — separate
+  // from both, since the fix is editing the local value, not a flag.
+  let invalidValue = 0;
 
   if (!manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
 
   for (const entry of selected) {
+    const { src, dest } = resolveEntry(entry);
+
+    if (entry.mode === 'merge-keys') {
+      const res = captureMerge(src, dest, `${entry.target}:${entry.dest}`, lock, {
+        force: takeLocal,
+        relative: entry.dest,
+        agent: entry.target,
+      });
+      // An unparseable local file is not a conflict --take-local can
+      // resolve — it is counted apart, so the trailer below never offers a
+      // flag that cannot fix invalid JSON. Same for a value validateOwnedKeys
+      // refused: no flag on this command can force a credential into the repo.
+      if (res.action === 'refused') {
+        if (res.reason === 'unparseable-local') unreadable += 1;
+        else if (res.reason === 'invalid-capture') invalidValue += 1;
+        else refused += 1;
+      }
+      if (res.action === 'copied') captured.push(entry.src);
+      lines.push(formatRow(entry.dest, res.action, noteFor(res)));
+      continue;
+    }
+
     if (entry.mode !== 'copy') {
       // Unknown mode: capture has no idea how to remediate this entry, so it is
       // reported and left alone rather than guessed at — the same treatment
@@ -68,7 +97,6 @@ export async function run(allArgs = [], entries = SYNC) {
       continue;
     }
 
-    const { src, dest } = resolveEntry(entry);
     const res = captureCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
       force: takeLocal,
       relative: entry.dest,
@@ -115,14 +143,34 @@ export async function run(allArgs = [], entries = SYNC) {
   lastCaptured = captured;
   process.stdout.write('\n' + section('capture', lines));
 
+  // An unparseable local file gets its own message: --take-local is a
+  // conflict remedy, and it cannot fix invalid JSON.
+  if (unreadable > 0) {
+    process.stdout.write(
+      `\n${unreadable} settings file(s) could not be parsed and were left untouched.\n` +
+        '  fix the JSON by hand, then re-run capture\n',
+    );
+  }
+  if (invalidValue > 0) {
+    process.stdout.write(
+      `\n${invalidValue} key(s) held a value that looks like a credential and were left uncaptured.\n` +
+        '  this file is committed; fix the local value, then re-run capture\n',
+    );
+  }
   if (refused > 0) {
     process.stdout.write(`\n${refused} conflict(s) refused. Use --take-local to keep the local version.\n`);
-    return 1;
   }
+  if (refused > 0 || unreadable > 0 || invalidValue > 0) return 1;
   return 0;
 }
 
 function noteFor(res) {
+  if (res.action === 'refused' && res.reason === 'unparseable-local') {
+    return 'could not be parsed as JSON — fix it by hand, then re-run';
+  }
+  if (res.action === 'refused' && res.reason === 'invalid-capture') {
+    return 'looks like a credential — nothing captured';
+  }
   if (res.action === 'refused') return 'conflict — nothing changed';
   if (res.backedUp) return `backed up -> ${res.backedUp}`;
   return '';

@@ -15,6 +15,10 @@ function createTestRepo(prefix = 'nortuscc-setup-repo-') {
   mkdirSync(join(repo, 'codex'), { recursive: true });
   writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# test\n');
   writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# test codex\n');
+  // The merge-keys entry needs a source too, or it reads as missing-repo —
+  // actionable, same as a genuine manifest gap — and setup would then refuse
+  // to proceed without --yes on what these tests expect to be a clean repo.
+  writeFileSync(join(repo, 'claude', 'settings.keys.json'), JSON.stringify({ theme: 'auto' }) + '\n');
   execSync('git add .', { cwd: repo, stdio: 'ignore' });
   execSync('git commit -m "initial"', { cwd: repo, stdio: 'ignore' });
   return repo;

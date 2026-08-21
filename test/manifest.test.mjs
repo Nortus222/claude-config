@@ -34,9 +34,13 @@ test('every manifest entry resolves to a path that exists in the repo', () => {
   }
 });
 
+// Widened from an equality when merge-keys arrived. The point is unchanged:
+// a typo'd mode must not reach a command that would then misdispatch it.
+const MODES = new Set(['copy', 'merge-keys']);
+
 test('every manifest entry declares a valid mode', () => {
   for (const entry of SYNC) {
-    assert.equal(entry.mode, 'copy', `bad mode on ${entry.src}: ${entry.mode}`);
+    assert.ok(MODES.has(entry.mode), `bad mode on ${entry.src}: ${entry.mode}`);
   }
 });
 
@@ -72,8 +76,11 @@ test('the two agents never resolve into each other\'s directory', () => {
   }
 });
 
+// A target can now own more than one entry (Claude's instruction file plus
+// its settings keys), so this checks coverage — every agent appears — rather
+// than a one-to-one count that a second Claude entry would break.
 test('both supported agents have a managed instruction file', () => {
-  assert.deepEqual(SYNC.map((e) => e.target).sort(), [...TARGETS].sort());
+  assert.deepEqual([...new Set(SYNC.map((e) => e.target))].sort(), [...TARGETS].sort());
 });
 
 test('repoRoot points at the repo containing package.json', () => {
@@ -82,13 +89,20 @@ test('repoRoot points at the repo containing package.json', () => {
 
 // --- retirement --------------------------------------------------------------
 
-// settings.json mixed portable rules with permissions, UI preferences and
-// machine-specific state; bin/ and hooks/ were Claude-only wrappers that native
-// skill installation replaces. None of them are managed any more, and a link
-// mode with no remaining entry is machinery with nothing to drive.
-test('the sync manifest contains no settings, helper, hook, or link entry', () => {
+// bin/ and hooks/ were Claude-only wrappers that native skill installation
+// replaces, and a link mode with no remaining entry is machinery with nothing
+// to drive — neither comes back. settings.json returned narrowly under
+// mode: 'merge-keys' (see manifest.mjs), which owns named keys and leaves
+// every other key alone; a whole-file copy or link over it would still
+// silently replace the machine's permissions and UI preferences, so that
+// shape stays forbidden.
+test('the sync manifest contains no whole-file settings, helper, hook, or link entry', () => {
   assert.equal(SYNC.some((entry) => entry.mode === 'link'), false);
-  assert.equal(SYNC.some((entry) => /settings|bin|hooks/.test(entry.src)), false);
+  assert.equal(SYNC.some((entry) => /bin|hooks/.test(entry.src)), false);
+  assert.equal(
+    SYNC.some((entry) => /settings/.test(entry.src) && entry.mode !== 'merge-keys'),
+    false,
+  );
 });
 
 test('the retired assets are gone from the repository', () => {

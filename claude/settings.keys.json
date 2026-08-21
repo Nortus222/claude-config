@@ -1,0 +1,11 @@
+{
+  "effortLevel": "high",
+  "tui": "fullscreen",
+  "theme": "auto",
+  "worktree": {
+    "symlinkDirectories": [
+      "node_modules",
+      ".cache"
+    ]
+  }
+}

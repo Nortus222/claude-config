@@ -3,6 +3,7 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { applyCopy } from '../copy.mjs';
+import { applyMerge } from '../merge-keys.mjs';
 import { formatRow, section } from '../report.mjs';
 import { readSkillsManifest, readSkillLock, installedSkillNames, reconcile, installArgs } from '../skills.mjs';
 import { installGroups, agentIdsFor } from '../skills-cli.mjs';
@@ -78,6 +79,9 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   if (persist !== null) lock.skillsOnly = persist;
   const lines = [];
   let refused = 0;
+  // A settings file that fails to parse as JSON — separate from a conflict,
+  // since neither --take-repo nor --take-local can fix invalid JSON.
+  let unreadable = 0;
   let skillsFailed = 0;
   // Tracks whether this run actually wrote anything to an agent directory, so
   // the restart reminder below only fires when it is true and stays silent on
@@ -88,6 +92,24 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
   for (const entry of selected) {
     const { src, dest, mode } = resolveEntry(entry);
+
+    if (mode === 'merge-keys') {
+      const res = applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, {
+        force: takeRepo,
+        relative: entry.dest,
+        agent: entry.target,
+      });
+      // An unparseable local file is not a conflict --take-repo can resolve —
+      // it is counted apart, so the trailer below never offers a flag that
+      // cannot fix invalid JSON.
+      if (res.action === 'refused') {
+        if (res.reason === 'unparseable-local') unreadable += 1;
+        else refused += 1;
+      }
+      if (res.action === 'copied') changed = true;
+      lines.push(formatRow(entry.dest, res.action, noteFor(res)));
+      continue;
+    }
 
     if (mode !== 'copy') {
       // Unknown mode: apply has no idea how to remediate this entry, so it is
@@ -156,15 +178,23 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
   // A configuration conflict stops the run before installation. Installing on
   // top of an unresolved conflict would bury the one thing the user has to
-  // decide under a wall of installer output.
+  // decide under a wall of installer output. An unparseable local file stops
+  // it the same way, but gets its own message: --take-repo/--take-local are
+  // conflict remedies, and neither one can fix invalid JSON.
+  if (unreadable > 0) {
+    process.stdout.write(
+      `\n${unreadable} settings file(s) could not be parsed and were left untouched.\n` +
+        '  fix the JSON by hand, then re-run apply\n',
+    );
+  }
   if (refused > 0) {
     process.stdout.write(
       `\n${refused} conflict(s) refused. Resolve with:\n` +
         '  nortuscc apply --take-repo    discard the local version\n' +
         '  nortuscc capture --take-local keep the local version\n',
     );
-    return 1;
   }
+  if (refused > 0 || unreadable > 0) return 1;
 
   if (skillsFailed > 0) {
     process.stdout.write(`\n${skillsFailed} skill(s) failed to install. See output above for details.\n`);
@@ -203,6 +233,9 @@ export async function installFor(target, args, { takeRepo = false, deps = {}, ma
 }
 
 function noteFor(res) {
+  if (res.action === 'refused' && res.reason === 'unparseable-local') {
+    return 'could not be parsed as JSON — fix it by hand, then re-run';
+  }
   if (res.action === 'refused') return 'conflict — nothing changed';
   if (res.backedUp) return `backed up -> ${res.backedUp}`;
   return '';

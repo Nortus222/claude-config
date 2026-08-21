@@ -212,9 +212,12 @@ test('fresh machine setup installs selected defaults for both agents', async () 
   const nativeCalls = log.filter((entry) => entry.cmd !== 'npx');
   assert.deepEqual(nativeCalls, expectedDefaultInstallCalls());
 
-  // Claude's settings.json is user-owned. A fresh machine that never had one
-  // must not end up with a file this tool invented.
-  assert.equal(existsSync(join(env.claude, 'settings.json')), false);
+  // Claude's settings.json is user-owned, but the declared keys are a
+  // managed (merge-keys) entry now: a fresh machine with no file of its own
+  // gets one created, carrying exactly the repo's declared keys.
+  const settings = JSON.parse(readFileSync(join(env.claude, 'settings.json'), 'utf8'));
+  const declared = JSON.parse(readFileSync(join(REPO, 'claude', 'settings.keys.json'), 'utf8'));
+  assert.deepEqual(settings, declared);
 });
 
 test('every shared skill is installed for both agents, in one call per source', async () => {
@@ -341,5 +344,12 @@ test('state lands in the neutral location, never inside an agent directory', asy
   assert.equal(existsSync(join(env.claude, '.nortuscc-lock.json')), false);
 
   const state = JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8'));
-  assert.deepEqual(Object.keys(state.files).sort(), ['claude:CLAUDE.md', 'codex:AGENTS.md']);
+  // settings.json is a merge-keys entry: it is baselined per declared key,
+  // never under the bare 'claude:settings.json' — that would mean the whole
+  // file was treated as managed, which it is not.
+  const declaredKeys = Object.keys(JSON.parse(readFileSync(join(REPO, 'claude', 'settings.keys.json'), 'utf8')));
+  assert.deepEqual(
+    Object.keys(state.files).sort(),
+    ['claude:CLAUDE.md', 'codex:AGENTS.md', ...declaredKeys.map((k) => `claude:settings.json#${k}`)].sort(),
+  );
 });

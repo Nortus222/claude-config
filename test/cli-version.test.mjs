@@ -159,12 +159,22 @@ async function statusWith(deps) {
   const { SYNC } = await import('../src/manifest.mjs');
   const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
   const { resolveEntry } = await import('../src/resolve.mjs');
+  const { applyMerge } = await import('../src/merge-keys.mjs');
   const { copyFileSync } = await import('node:fs');
   const lock = readLock();
   for (const entry of SYNC) {
-    const { src, dest } = resolveEntry(entry);
-    copyFileSync(src, dest);
-    setBaseline(lock, `${entry.target}:${entry.dest}`, hashFile(src));
+    const { src, dest, mode } = resolveEntry(entry);
+    if (mode === 'copy') {
+      copyFileSync(src, dest);
+      setBaseline(lock, `${entry.target}:${entry.dest}`, hashFile(src));
+    } else if (mode === 'merge-keys') {
+      // A merge-keys entry owns named keys inside its destination rather than
+      // the whole file, and this fixture repo has no settings.keys.json of
+      // its own the way it does claude/CLAUDE.md — write one first so applyMerge
+      // has something to converge the machine from.
+      writeFileSync(src, JSON.stringify({ theme: 'auto' }) + '\n');
+      applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, { relative: entry.dest, agent: entry.target });
+    }
   }
   writeLock(lock);
 

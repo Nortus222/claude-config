@@ -3,8 +3,9 @@ import { parseTarget, entriesForTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock } from '../lock.mjs';
 import { inspectCopy } from '../copy.mjs';
+import { inspectMerge } from '../merge-keys.mjs';
 import { NEEDS_APPLY, NEEDS_CAPTURE, BLOCKED } from '../state.mjs';
-import { formatRow, section } from '../report.mjs';
+import { formatRow, section, labelWidth } from '../report.mjs';
 import { readIntegrations } from '../integrations/manifest.mjs';
 import { integrationPlan } from '../integrations/runner.mjs';
 import { defaultAdapters } from '../integrations/adapters.mjs';
@@ -27,16 +28,40 @@ import { run as realPull } from './pull.mjs';
 // Read-only by construction: nothing here writes, including the lockfile.
 export function configReport(entries = SYNC) {
   const lock = readLock();
-  return entries.map((entry) => {
+  return entries.flatMap((entry) => {
     const { src, dest, mode } = resolveEntry(entry);
     if (mode === 'copy') {
       // Keyed by target so Claude's CLAUDE.md and Codex's AGENTS.md can never
       // share one baseline; entry.dest stays the display name.
       const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
-      return { dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state };
+      return [{ dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state }];
+    } else if (mode === 'merge-keys') {
+      const inspected = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock);
+      // A repo file validateOwnedKeys refused is present and readable, not
+      // absent — reporting it as plain missing-repo would tell the user to
+      // fix something that was never the problem. Same row shape as an
+      // invalid integrations.json, for the same reason: a committed file
+      // this tool cannot vouch for.
+      if (inspected.errors.length) {
+        return inspected.errors.map((message) => ({ dest: 'manifest', mode, state: 'invalid', note: message }));
+      }
+      // A document that could not be read has nothing to say key by key.
+      if (inspected.keys.length === 0) return [{ dest: entry.dest, mode, state: inspected.state }];
+
+      // Collapse when every owned key says the same thing — four identical
+      // rows on every run would bury the ones that matter, and that is as true
+      // of 'unmanaged' on a fresh machine as of 'clean' on a synced one.
+      // Expand the moment they disagree: one summary row hiding three drifted
+      // keys is the false green this mode was built to close.
+      const distinct = new Set(inspected.keys.map((k) => k.state));
+      if (distinct.size === 1) return [{ dest: entry.dest, mode, state: [...distinct][0] }];
+
+      return inspected.keys
+        .filter((k) => k.state !== 'clean')
+        .map((k) => ({ dest: `${entry.dest}#${k.key}`, mode, state: k.state }));
     } else {
       // Unknown mode: surface as a visible error rather than silently misdispatching
-      return { dest: entry.dest, mode, state: 'unknown-mode' };
+      return [{ dest: entry.dest, mode, state: 'unknown-mode' }];
     }
   });
 }
@@ -96,8 +121,16 @@ export async function run(args = [], deps = {}) {
   // omitting it: silence would read as "clean", which is the one thing it is
   // not — nothing here has looked at those files at all.
   const rows = manageConfig ? configReport(entriesForTarget(SYNC, target)) : [];
+  // A row carrying its own note (a refused repo file's validation message) is
+  // literal text from the repo, not a state to look up — noteFor only knows
+  // how to phrase the fixed set of states it switches on.
+  //
+  // A per-key label like `settings.json#effortLevel` runs well past the
+  // shared default width, so size the column to this batch of rows — the
+  // same fix update.mjs already applies to its own arbitrary labels.
+  const configWidth = labelWidth(rows.map((r) => r.dest));
   const lines = manageConfig
-    ? rows.map((r) => formatRow(r.dest, r.state, noteFor(r)))
+    ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r), configWidth))
     : [formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE)];
   process.stdout.write('\n' + section('config', lines));
 
@@ -285,6 +318,7 @@ function noteFor(row) {
     case 'unmanaged': return 'never synced on this machine';
     case 'missing-repo': return 'listed in the manifest but absent from the repo';
     case 'unknown-mode': return 'manifest entry has an unrecognized mode';
+    case 'unparseable-local': return 'the local file could not be parsed';
     default: return '';
   }
 }
