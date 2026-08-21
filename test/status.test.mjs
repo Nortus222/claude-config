@@ -1190,3 +1190,22 @@ test('a long per-key label keeps the config section columns aligned', async () =
   // requires.
   assert.match(output, /CLAUDE\.md {17}clean/, 'a short label pads out to the long label\'s width, not the 16-char default');
 });
+
+// The spec's own verification list names the blocked case alongside the
+// per-key row and the clean case; this is the one that was never added. An
+// unparseable local settings.json is neither a conflict --take-repo/--take-local
+// can resolve nor a missing repo file — it is BLOCKED on its own account, and
+// must read that way rather than as clean.
+test('an unparseable local settings file is blocked, not clean', async () => {
+  const { code, output } = await statusOutput([], () => {}, {
+    // Seeding writes a valid settings.json, so the invalid one has to be
+    // written after seeding, exactly like the postSeed cases above.
+    postSeed: (home) => {
+      writeFileSync(join(home, '.claude', 'settings.json'), '{ not json');
+    },
+  });
+
+  assert.match(output, /settings\.json\s+unparseable-local/);
+  assert.match(output, /could not be parsed/);
+  assert.equal(code, 1, 'a blocked settings file must not read as a clean machine');
+});
