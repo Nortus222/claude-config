@@ -1143,3 +1143,20 @@ test('a machine that has never synced reports one unmanaged row, not one per key
   assert.match(output, /settings\.json\s+unmanaged/);
   assert.doesNotMatch(output, /settings\.json#/);
 });
+
+// A repo file validateOwnedKeys refuses is present and readable, not absent —
+// reporting 'missing-repo' would send the user chasing a file that is right
+// there. This is the whole-branch reviewer's exact repro: a credential-shaped
+// key in settings.keys.json.
+test('a refused repo file is surfaced as invalid, not a false missing-repo', async () => {
+  const { code, output } = await statusOutput([], () => {}, {
+    postSeed: (home, repoDir) => {
+      writeFileSync(join(repoDir, 'claude', 'settings.keys.json'), JSON.stringify({ apiKey: 'x' }));
+    },
+  });
+
+  assert.match(output, /manifest\s+invalid\s+.*looks like a secret/, 'the actual complaint is printed');
+  assert.doesNotMatch(output, /missing-repo/, 'must not read as absent when it is present and refused');
+  assert.doesNotMatch(output, /absent from the repo/, 'the missing-repo note would be false here');
+  assert.equal(code, 1, 'a refused repo file must not read as a clean machine');
+});

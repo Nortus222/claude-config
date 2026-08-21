@@ -37,8 +37,15 @@ export function configReport(entries = SYNC) {
       return [{ dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state }];
     } else if (mode === 'merge-keys') {
       const inspected = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock);
-      // A document that could not be read, or a repo file that was refused,
-      // has nothing to say key by key.
+      // A repo file validateOwnedKeys refused is present and readable, not
+      // absent — reporting it as plain missing-repo would tell the user to
+      // fix something that was never the problem. Same row shape as an
+      // invalid integrations.json, for the same reason: a committed file
+      // this tool cannot vouch for.
+      if (inspected.errors.length) {
+        return inspected.errors.map((message) => ({ dest: 'manifest', mode, state: 'invalid', note: message }));
+      }
+      // A document that could not be read has nothing to say key by key.
       if (inspected.keys.length === 0) return [{ dest: entry.dest, mode, state: inspected.state }];
 
       // Collapse when every owned key says the same thing — four identical
@@ -114,8 +121,11 @@ export async function run(args = [], deps = {}) {
   // omitting it: silence would read as "clean", which is the one thing it is
   // not — nothing here has looked at those files at all.
   const rows = manageConfig ? configReport(entriesForTarget(SYNC, target)) : [];
+  // A row carrying its own note (a refused repo file's validation message) is
+  // literal text from the repo, not a state to look up — noteFor only knows
+  // how to phrase the fixed set of states it switches on.
   const lines = manageConfig
-    ? rows.map((r) => formatRow(r.dest, r.state, noteFor(r)))
+    ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r)))
     : [formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE)];
   process.stdout.write('\n' + section('config', lines));
 
