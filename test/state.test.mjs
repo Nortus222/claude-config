@@ -70,11 +70,12 @@ test('state groupings partition the actionable states', () => {
   assert.ok(NEEDS_CAPTURE.has('local-ahead'));
   assert.equal(NEEDS_CAPTURE.size, 1, 'NEEDS_CAPTURE must contain exactly 1 state');
 
-  // BLOCKED: 3 states that block all operations
+  // BLOCKED: 4 states that block all operations
   assert.ok(BLOCKED.has('conflict'), 'conflict must be BLOCKED (divergent changes)');
   assert.ok(BLOCKED.has('missing-repo'), 'missing-repo must be BLOCKED (data-loss case)');
   assert.ok(BLOCKED.has('unknown-mode'), 'unknown-mode must be BLOCKED (configuration error)');
-  assert.equal(BLOCKED.size, 3, 'BLOCKED must contain exactly 3 states');
+  assert.ok(BLOCKED.has('unparseable-local'), 'unparseable-local must be BLOCKED (unreadable local file)');
+  assert.equal(BLOCKED.size, 4, 'BLOCKED must contain exactly 4 states');
 
   // No state is in multiple sets
   assert.ok(!NEEDS_APPLY.has('local-ahead'), 'local-ahead not in NEEDS_APPLY');

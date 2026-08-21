@@ -31,4 +31,7 @@ export function fileState({ baseline, repo, local }) {
 // links used to stand in for.
 export const NEEDS_APPLY = new Set(['repo-ahead', 'unmanaged', 'missing']);
 export const NEEDS_CAPTURE = new Set(['local-ahead']);
-export const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode']);
+// 'unparseable-local' is the merge-keys equivalent of a conflict the tool must
+// not resolve: the user's settings.json could not be read, so no part of it is
+// ours to rewrite.
+export const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode', 'unparseable-local']);
