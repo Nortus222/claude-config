@@ -19,6 +19,25 @@
       "default": true,
       "plugin": "superpowers@claude-plugins-official",
       "note": "Ships from the official marketplace Claude Code already knows."
+    },
+    {
+      "id": "devexpress-agent-skills-claude",
+      "label": "DevExpress agent skills",
+      "target": "claude",
+      "type": "marketplace",
+      "default": false,
+      "marketplace": "DevExpress/agent-skills",
+      "name": "DevExpress-agent-skills",
+      "note": "Registers under a name that does not match its source, so it is stated."
+    },
+    {
+      "id": "dx-devextreme-claude",
+      "label": "dx-devextreme",
+      "target": "claude",
+      "type": "plugin",
+      "default": false,
+      "plugin": "dx-devextreme@DevExpress-agent-skills",
+      "note": "DevExtreme guidance for Pocket Manage work. Off by default: it is installed but disabled on the owner's machine, so a new machine is offered it rather than given it."
     }
   ]
 }

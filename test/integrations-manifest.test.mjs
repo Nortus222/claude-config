@@ -148,20 +148,50 @@ test('the committed integrations.json is valid and declares the agreed defaults'
   assert.equal(byId.get('superpowers-claude').plugin, 'superpowers@claude-plugins-official');
 
   const plugins = integrations.filter((i) => i.type === 'plugin').map((i) => i.plugin);
-  assert.deepEqual(plugins, ['superpowers@claude-plugins-official'], 'superpowers is the only declared plugin');
+  assert.deepEqual(
+    plugins,
+    ['superpowers@claude-plugins-official', 'dx-devextreme@DevExpress-agent-skills'],
+    'superpowers and dx-devextreme are the declared plugins',
+  );
 });
 
 // context-mode and claude-mem were dropped on 2026-08-20 after a cost audit:
 // between them they accounted for 762s of the 773s of hook latency measured
 // over a 13-day window. superpowers ships from the official marketplace Claude
-// Code already knows, so no extra marketplace needs declaring at all.
-test('the committed manifest declares no marketplace and nothing for codex', async () => {
+// Code already knows, so it needs no marketplace entry; DevExpress's does not
+// ship with Claude Code, so dx-devextreme has to bring its own.
+test('the committed manifest declares only the DevExpress marketplace, and nothing for codex', async () => {
   const realRepo = fileURLToPath(new URL('..', import.meta.url));
   const { readIntegrations } = await import('../src/integrations/manifest.mjs');
   const { integrations } = readIntegrations({ repo: realRepo });
 
-  assert.deepEqual(integrations.filter((i) => i.type === 'marketplace'), []);
+  const marketplaces = integrations.filter((i) => i.type === 'marketplace');
+  assert.deepEqual(marketplaces.map((i) => i.marketplace), ['DevExpress/agent-skills']);
+  // The registered name is not derivable from the source, and inspection
+  // matches on it: a wrong value here re-adds the marketplace every run.
+  assert.deepEqual(marketplaces.map((i) => i.name), ['DevExpress-agent-skills']);
+
   assert.deepEqual(integrations.filter((i) => i.target === 'codex'), []);
+});
+
+// dx-devextreme is installed but disabled on the owner's machine. Declaring it
+// stops `status` reporting it as undeclared drift; `default: false` keeps it
+// off the pre-ticked set, so a new machine is offered it rather than given it.
+test('dx-devextreme is declared, and declared off by default', async () => {
+  const realRepo = fileURLToPath(new URL('..', import.meta.url));
+  const { readIntegrations } = await import('../src/integrations/manifest.mjs');
+  const { integrations } = readIntegrations({ repo: realRepo });
+
+  const byId = new Map(integrations.map((i) => [i.id, i]));
+  const plugin = byId.get('dx-devextreme-claude');
+  const market = byId.get('devexpress-agent-skills-claude');
+
+  assert.ok(plugin, 'the plugin is declared');
+  assert.ok(market, 'the marketplace it comes from is declared too');
+  assert.equal(plugin.default, false);
+  assert.equal(market.default, false);
+  assert.equal(plugin.target, 'claude');
+  assert.equal(market.target, 'claude');
 });
 
 // The design retires the private cache-repair hook rather than relocating it:
