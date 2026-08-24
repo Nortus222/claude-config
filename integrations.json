@@ -26,6 +26,15 @@
       "default": true,
       "plugin": "superpowers@claude-plugins-official",
       "note": "Ships from the official marketplace Claude Code already knows."
+    },
+    {
+      "id": "superpowers-codex",
+      "label": "superpowers",
+      "target": "codex",
+      "type": "plugin",
+      "default": true,
+      "plugin": "superpowers@openai-curated",
+      "note": "Ships from Codex's configured openai-curated marketplace."
     }
   ]
 }

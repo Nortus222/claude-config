@@ -182,12 +182,13 @@ async function runCli(args, { env, fixtureBinDir }) {
 // CLI doing its own installing. Derived from the committed manifest's order,
 // so this breaks loudly if a declaration is added without a decision about
 // where it belongs.
-// Since 2026-08-20 the manifest declares one plugin and no marketplace:
-// context-mode and claude-mem were dropped after a cost audit, and superpowers
-// ships from the official marketplace Claude Code already knows.
+// Since 2026-08-20 the manifest declares Superpowers for both agents and no
+// marketplace: context-mode and claude-mem were dropped after a cost audit,
+// and each agent uses its configured official marketplace.
 function expectedDefaultInstallCalls() {
   return [
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
+    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated'] },
   ];
 }
 
