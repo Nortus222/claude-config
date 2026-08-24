@@ -146,22 +146,27 @@ test('the committed integrations.json is valid and declares the agreed defaults'
   const byId = new Map(integrations.map((i) => [i.id, i]));
   assert.ok(byId.has('superpowers-claude'));
   assert.equal(byId.get('superpowers-claude').plugin, 'superpowers@claude-plugins-official');
+  assert.ok(byId.has('superpowers-codex'));
+  assert.equal(byId.get('superpowers-codex').plugin, 'superpowers@openai-curated');
 
   const plugins = integrations.filter((i) => i.type === 'plugin').map((i) => i.plugin);
-  assert.deepEqual(plugins, ['superpowers@claude-plugins-official'], 'superpowers is the only declared plugin');
+  assert.deepEqual(plugins, ['superpowers@claude-plugins-official', 'superpowers@openai-curated'], 'superpowers is the only declared plugin');
 });
 
 // context-mode and claude-mem were dropped on 2026-08-20 after a cost audit:
 // between them they accounted for 762s of the 773s of hook latency measured
-// over a 13-day window. superpowers ships from the official marketplace Claude
-// Code already knows, so no extra marketplace needs declaring at all.
-test('the committed manifest declares no marketplace and nothing for codex', async () => {
+// over a 13-day window. Superpowers ships from configured official marketplaces
+// for both agents, so no extra marketplace needs declaring here.
+test('the committed manifest declares no marketplace and includes Codex superpowers', async () => {
   const realRepo = fileURLToPath(new URL('..', import.meta.url));
   const { readIntegrations } = await import('../src/integrations/manifest.mjs');
   const { integrations } = readIntegrations({ repo: realRepo });
 
   assert.deepEqual(integrations.filter((i) => i.type === 'marketplace'), []);
-  assert.deepEqual(integrations.filter((i) => i.target === 'codex'), []);
+  assert.deepEqual(
+    integrations.filter((i) => i.target === 'codex').map((i) => i.plugin),
+    ['superpowers@openai-curated'],
+  );
 });
 
 // The design retires the private cache-repair hook rather than relocating it:
