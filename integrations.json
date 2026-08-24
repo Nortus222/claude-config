@@ -8,8 +8,15 @@
     "context-mode and claude-mem were removed on 2026-08-20 after a cost audit; see",
     "docs/runbooks/2026-08-20-claude-settings-hardening.md. Removing them here stops",
     "new machines being offered them — it does not uninstall them from a machine that",
-    "already has them. That runbook carries the uninstall commands."
+    "already has them. That runbook carries the uninstall commands.",
+    "`allow` is the other half: extras that are present on purpose on some machine.",
+    "Nothing in it is ever installed or offered — it only stops `status` reporting a",
+    "known-good extra as drift, and says nothing on a machine that does not have it."
   ],
+  "allow": {
+    "plugins": ["dx-devextreme@DevExpress-agent-skills"],
+    "marketplaces": ["DevExpress-agent-skills"]
+  },
   "integrations": [
     {
       "id": "superpowers-claude",

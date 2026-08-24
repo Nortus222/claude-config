@@ -164,6 +164,30 @@ test('the committed manifest declares no marketplace and nothing for codex', asy
   assert.deepEqual(integrations.filter((i) => i.target === 'codex'), []);
 });
 
+// dx-devextreme is wanted on one machine only. `allow` is the mechanism for
+// exactly that: it silences the undeclared report where the plugin is present
+// and does nothing at all where it is not. Declaring it as an integration
+// instead would offer it in every machine's installer, which is the one
+// outcome this must not have.
+test('dx-devextreme is allowed as a machine-local extra, never declared', async () => {
+  const realRepo = fileURLToPath(new URL('..', import.meta.url));
+  const { readIntegrations } = await import('../src/integrations/manifest.mjs');
+  const { integrations, allow, errors } = readIntegrations({ repo: realRepo });
+
+  assert.deepEqual(errors, []);
+
+  // Matched on the same key the undeclared report prints, so a mismatch here
+  // shows up as drift that never clears.
+  assert.ok(allow.plugins.includes('dx-devextreme@DevExpress-agent-skills'));
+  assert.ok(allow.marketplaces.includes('DevExpress-agent-skills'));
+
+  // The load-bearing half: nothing about it is installable.
+  const named = integrations.filter(
+    (i) => i.plugin?.startsWith('dx-devextreme') || i.marketplace?.includes('DevExpress'),
+  );
+  assert.deepEqual(named, [], 'an allowed extra must not also be a declared integration');
+});
+
 // The design retires the private cache-repair hook rather than relocating it:
 // context-mode's native installation owns its own hooks.
 test('the committed manifest declares no hook at all', async () => {
