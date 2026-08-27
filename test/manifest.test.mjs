@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // This file asserts things about *this* checkout's manifest, so the repo side
@@ -53,13 +53,14 @@ test('every manifest entry declares a supported target', () => {
   }
 });
 
-test('manifest dest paths are relative and land under their own agent dir', () => {
+test('manifest dest paths are relative and land under their declared machine dir', () => {
   for (const entry of SYNC) {
     assert.ok(!entry.dest.startsWith('/'), `dest must be relative: ${entry.dest}`);
     const { dest } = resolveEntry(entry);
+    const root = agentDir(entry.machine ?? entry.target);
     assert.ok(
-      dest.startsWith(agentDir(entry.target)),
-      `dest escaped the ${entry.target} dir: ${dest}`,
+      !relative(root, dest).startsWith('..'),
+      `dest escaped the ${entry.machine ?? entry.target} dir: ${dest}`,
     );
   }
 });

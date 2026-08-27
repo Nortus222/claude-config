@@ -1,12 +1,11 @@
 import { readLock } from './lock.mjs';
 
-// Whether this machine lets nortuscc manage the agents' instruction files at
-// all. A machine that installed this CLI for its skill set alone has its own
-// CLAUDE.md and AGENTS.md, written by hand and none of the repo's business —
-// syncing them would overwrite the user's own rules from a stranger's repo.
+// Whether this machine lets nortuscc manage agent configuration at all. A
+// machine that installed this CLI for its skill set alone keeps its own rules
+// and provider files; syncing them would overwrite user-owned configuration.
 //
-// Integrations stay managed either way. The line is drawn at the instruction
-// files because those are the ones a user writes themselves; `--no-hooks`,
+// Integrations stay managed either way. The line is drawn at configuration
+// files; `--no-hooks`,
 // `--no-mcp` and `--no-plugins` already decline the rest per install.
 //
 // This reverses install.mjs's original "configuration is never filtered, and
@@ -37,7 +36,7 @@ export function parseConfigMode(allArgs, { recorded } = {}) {
   }
 
   // A flag that sets the mode also takes effect on the run that sets it, so
-  // `setup --skills-only` never writes an instruction file on its way to
+  // `setup --skills-only` never writes a configuration file on its way to
   // recording that it should not.
   const skillsOnly = persist ?? recorded ?? readLock().skillsOnly === true;
 
@@ -46,6 +45,6 @@ export function parseConfigMode(allArgs, { recorded } = {}) {
 
 // The row every command prints in place of its config section, so "not managed
 // here" can never be mistaken for "managed and clean".
-export const SKIPPED_LABEL = 'instruction files';
+export const SKIPPED_LABEL = 'configuration';
 export const SKIPPED_STATE = 'skills-only';
 export const SKIPPED_NOTE = 'not managed on this machine';

@@ -80,7 +80,7 @@ export async function run(allArgs = [], deps = {}) {
   // Record where the repo lives so later runs work from any directory, and
   // what this machine wants managed. Written before apply runs, so the very
   // first apply already honours a `setup --skills-only` rather than syncing
-  // the instruction files once and respecting the choice only from the next
+  // the configuration files once and respecting the choice only from the next
   // command onward.
   const lock = readLock();
   lock.repo = root;
@@ -88,7 +88,7 @@ export async function run(allArgs = [], deps = {}) {
   writeLock(lock);
 
   if (!manageConfig) {
-    console.log('skills-only: this machine keeps its own CLAUDE.md and AGENTS.md');
+    console.log('skills-only: this machine keeps its own agent configuration');
   }
 
   // Configuration first, so a conflict is decided before any installer runs.
@@ -98,6 +98,16 @@ export async function run(allArgs = [], deps = {}) {
   const forwarded = ['--target', target, ...args.filter((a) => a.startsWith('--take-'))];
   const applied = await applyRun(forwarded);
   if (applied !== 0) return applied;
+
+  if (manageConfig && target !== 'claude') {
+    process.stdout.write(
+      '\nT3 Code provider handoff:\n' +
+        '  Display name: Codex · GLM Flash\n' +
+        '  CODEX_HOME path: ~/.codex-openrouter\n' +
+        '  Environment: OPENROUTER_API_KEY (enter it as a sensitive value)\n' +
+        '  Restart T3 Code, refresh providers, then select z-ai/glm-5.3-flash.\n',
+    );
+  }
 
   // setup always offers the full workflow: a bare machine is exactly when
   // integrations and skills are wanted. Re-running it is idempotent, because

@@ -13,8 +13,10 @@ function createTestRepo(prefix = 'nortuscc-setup-repo-') {
   execSync('git config user.name "Test"', { cwd: repo, stdio: 'ignore' });
   mkdirSync(join(repo, 'claude'), { recursive: true });
   mkdirSync(join(repo, 'codex'), { recursive: true });
+  mkdirSync(join(repo, 'codex', 'openrouter-glm'), { recursive: true });
   writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# test\n');
   writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# test codex\n');
+  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'config.toml'), '# test OpenRouter\n');
   // The merge-keys entry needs a source too, or it reads as missing-repo —
   // actionable, same as a genuine manifest gap — and setup would then refuse
   // to proceed without --yes on what these tests expect to be a clean repo.
@@ -523,4 +525,46 @@ test('setup --dir naming an existing non-git directory is refused and lock.repo 
     process.env.NORTUSCC_AGENTS_DIR = savedAgents;
     process.env.NORTUSCC_REPO_DIR = savedRepo;
   }
+});
+
+test('managed setup prints the one-time T3 Code handoff without asking for a secret', async () => {
+  const testRepo = createTestRepo('nortuscc-t3-handoff-');
+  const { claude, codex, agents, state } = createTestHome();
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+    repo: process.env.NORTUSCC_REPO_DIR,
+  };
+  process.env.NORTUSCC_CLAUDE_DIR = claude;
+  process.env.NORTUSCC_CODEX_DIR = codex;
+  process.env.NORTUSCC_STATE_DIR = state;
+  process.env.NORTUSCC_AGENTS_DIR = agents;
+  process.env.NORTUSCC_REPO_DIR = testRepo;
+
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => { output += String(chunk); return true; };
+  try {
+    const { run } = await import('../src/commands/setup.mjs');
+    await run(['--target', 'codex', '--yes']);
+  } finally {
+    process.stdout.write = originalWrite;
+    for (const [name, value] of Object.entries({
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_STATE_DIR: saved.state,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_REPO_DIR: saved.repo,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  assert.match(output, /Codex · GLM Flash/);
+  assert.match(output, /\.codex-openrouter/);
+  assert.match(output, /OPENROUTER_API_KEY/);
+  assert.doesNotMatch(output, /sk-or-/);
 });

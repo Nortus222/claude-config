@@ -141,7 +141,7 @@ test('apply writes no instruction file on a skills-only machine', async () => {
       'the machine keeps its own instruction file',
     );
     assert.equal(existsSync(join(fx.codex, 'AGENTS.md')), false, 'and is given no new one');
-    assert.match(code.output, /skills-only/, 'the report says the section was not managed');
+    assert.match(code.output, /configuration\s+skills-only/, 'the report says configuration was not managed');
   });
 });
 
@@ -218,7 +218,7 @@ test('status reports the section as unmanaged rather than clean', async () => {
 
     const emptyCodex = { plugins: new Set(), marketplaces: new Set(), errors: [] };
     const { output } = await captureOut(() => run([], { codexState: emptyCodex }));
-    assert.match(output, /instruction files\s+skills-only/, 'the skipped row is printed');
+    assert.match(output, /configuration\s+skills-only/, 'the skipped row is printed');
     assert.doesNotMatch(output, /CLAUDE\.md\s+clean/, 'never reported as managed and clean');
   });
 });

@@ -57,12 +57,12 @@ nortuscc apply  --target claude  # write ~/.claude/CLAUDE.md and nothing else
 
 An invalid or repeated `--target` exits 2 before anything is read or written.
 
-`--target` picks *which* agent, never *whether*. To manage no instruction files
+`--target` picks *which* agent, never *whether*. To manage no agent configuration
 at all — this repo's skills, your own rules — see
 [Using it for skills alone](#using-it-for-skills-alone):
 
 ```bash
-nortuscc apply --skills-only     # record it; CLAUDE.md and AGENTS.md are left alone
+nortuscc apply --skills-only     # record it; instruction and provider files are left alone
 nortuscc apply --with-config     # sync them for this run only
 nortuscc apply --no-skills-only  # record it off again
 ```
@@ -108,15 +108,23 @@ skills; it prints one warning and points at `--install`.
 | --- | --- | --- |
 | `claude/CLAUDE.md` | Claude | copy |
 | `codex/AGENTS.md` | Codex | copy |
+| `codex/openrouter-glm/config.toml` | Codex via OpenRouter | copy to `~/.codex-openrouter/config.toml` |
 | `skills-manifest.txt` | both | one shared skill set |
 | `integrations.json` | both | declarations only, never machine state |
 
-**Not synced, and never written by this tool:** Claude's `settings.json`,
-Codex's `config.toml`, credentials, sessions, history, caches, and any
+**Not synced, and never written by this tool:** credentials, Codex sessions,
+history, caches, machine-local provider state, and any
 machine-specific MCP argument. Those files are yours. Two exceptions are
 narrow and explicit: a hook you select is registered by adding *only* that
 entry to a backed-up `settings.json`, leaving every other key untouched; and
 the keys named below are kept in sync the same way.
+
+The committed OpenRouter config is the narrow exception for Codex configuration:
+`nortuscc` copies it to a separate `~/.codex-openrouter` home when configuration
+management is enabled. It contains the GLM model slug and the name of
+`OPENROUTER_API_KEY`, never its value. On each machine, add that variable as a
+sensitive value to a T3 Code Codex provider named `Codex · GLM Flash` whose
+`CODEX_HOME path` is `~/.codex-openrouter`, then restart T3 Code.
 
 ### Key-level settings sync
 

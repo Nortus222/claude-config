@@ -21,5 +21,13 @@
 export const SYNC = [
   { target: 'claude', src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
   { target: 'codex', src: 'codex/AGENTS.md', dest: 'AGENTS.md', mode: 'copy' },
+  {
+    target: 'codex',
+    machine: 'codex-openrouter',
+    src: 'codex/openrouter-glm/config.toml',
+    dest: 'config.toml',
+    mode: 'copy',
+    capture: false,
+  },
   { target: 'claude', src: 'claude/settings.keys.json', dest: 'settings.json', mode: 'merge-keys' },
 ];

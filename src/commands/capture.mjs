@@ -25,9 +25,8 @@ export async function run(allArgs = [], entries = SYNC) {
     console.error(`nortuscc: ${error}`);
     return 2;
   }
-  // Skills-only cuts both directions. A machine whose instruction files are its
-  // own must not push them into the repo either, or the first `push` would
-  // publish the user's private rules to someone else's config repo.
+  // Skills-only cuts both directions. A machine whose configuration is its own
+  // must not push it into the repo either.
   const selected = manageConfig ? entriesForTarget(entries, target) : [];
 
   const takeLocal = args.includes('--take-local');
@@ -68,6 +67,11 @@ export async function run(allArgs = [], entries = SYNC) {
 
   for (const entry of selected) {
     const { src, dest } = resolveEntry(entry);
+
+    if (entry.capture === false) {
+      lines.push(formatRow(entry.dest, 'repo-owned', 'local changes are never captured'));
+      continue;
+    }
 
     if (entry.mode === 'merge-keys') {
       const res = captureMerge(src, dest, `${entry.target}:${entry.dest}`, lock, {

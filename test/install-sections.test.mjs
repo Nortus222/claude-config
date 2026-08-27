@@ -42,7 +42,10 @@ test('configSection items carry one id per entry, not one per target', () => {
   assert.equal(new Set(ids).size, ids.length, 'every item has its own id');
 });
 
-test('a target with a single entry still gets a stable, unique id', () => {
+test('Codex configuration entries each get a stable, unique id', () => {
   const items = configSection('codex').items();
-  assert.deepEqual(items.map((i) => i.id), ['config:codex:AGENTS.md']);
+  assert.deepEqual(items.map((i) => i.id), [
+    'config:codex:AGENTS.md',
+    'config:codex:config.toml',
+  ]);
 });
