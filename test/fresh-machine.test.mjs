@@ -351,6 +351,11 @@ test('state lands in the neutral location, never inside an agent directory', asy
   const declaredKeys = Object.keys(JSON.parse(readFileSync(join(REPO, 'claude', 'settings.keys.json'), 'utf8')));
   assert.deepEqual(
     Object.keys(state.files).sort(),
-    ['claude:CLAUDE.md', 'codex:AGENTS.md', ...declaredKeys.map((k) => `claude:settings.json#${k}`)].sort(),
+    [
+      'claude:CLAUDE.md',
+      'codex:AGENTS.md',
+      'codex:config.toml',
+      ...declaredKeys.map((k) => `claude:settings.json#${k}`),
+    ].sort(),
   );
 });

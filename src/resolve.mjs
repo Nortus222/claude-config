@@ -76,14 +76,20 @@ export function codexDir() {
   return process.env.NORTUSCC_CODEX_DIR || join(homedir(), '.codex');
 }
 
-const AGENT_DIRS = { claude: claudeDir, codex: codexDir };
+export function openRouterCodexDir() {
+  if (process.env.NORTUSCC_OPENROUTER_CODEX_DIR) return process.env.NORTUSCC_OPENROUTER_CODEX_DIR;
+  if (process.env.NORTUSCC_CODEX_DIR) return join(dirname(process.env.NORTUSCC_CODEX_DIR), '.codex-openrouter');
+  return join(homedir(), '.codex-openrouter');
+}
+
+const MACHINE_DIRS = { claude: claudeDir, codex: codexDir, 'codex-openrouter': openRouterCodexDir };
 
 // The one place a target becomes a filesystem path. It throws rather than
 // defaulting, because every other outcome of an unrecognised target — writing
 // under ~/.claude, or under the home directory itself — is a write to
 // somewhere the user never named.
 export function agentDir(target) {
-  const dir = AGENT_DIRS[target];
+  const dir = MACHINE_DIRS[target];
   if (!dir) throw new Error(`nortuscc: unknown target '${target}'`);
   return dir();
 }
@@ -123,6 +129,6 @@ export function resolveEntry(entry) {
   return {
     ...entry,
     src: join(repoRoot(), entry.src),
-    dest: join(agentDir(entry.target), entry.dest),
+    dest: join(agentDir(entry.machine ?? entry.target), entry.dest),
   };
 }

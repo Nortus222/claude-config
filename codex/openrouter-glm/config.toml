@@ -1,0 +1,11 @@
+model = "z-ai/glm-5.3-flash"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+
+[model_providers.openrouter.auth]
+command = "node"
+args = ["-e", "process.stdout.write(process.env.OPENROUTER_API_KEY || '')"]

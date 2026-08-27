@@ -173,7 +173,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // stays silent. It no longer names settings.json: that file is user-owned
   // and this command does not write it.
   if (changed) {
-    process.stdout.write('\nRestart the affected agent to load the synced instructions.\n');
+    process.stdout.write('\nRestart the affected agent or T3 Code to load the synced configuration.\n');
   }
 
   // A configuration conflict stops the run before installation. Installing on

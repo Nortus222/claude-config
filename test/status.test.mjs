@@ -12,7 +12,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { hashValue } from '../src/settings-keys.mjs';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-status-'));
@@ -33,8 +33,10 @@ const fixtureRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-'));
 process.env.NORTUSCC_REPO_DIR = fixtureRepo;
 mkdirSync(join(fixtureRepo, 'claude'), { recursive: true });
 mkdirSync(join(fixtureRepo, 'codex'), { recursive: true });
+mkdirSync(join(fixtureRepo, 'codex', 'openrouter-glm'), { recursive: true });
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
 writeFileSync(join(fixtureRepo, 'codex', 'AGENTS.md'), '# Test codex');
+writeFileSync(join(fixtureRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
 
 const { configReport, run: rawRun } = await import('../src/commands/status.mjs');
 
@@ -61,6 +63,7 @@ async function seedManagedEntries(lock) {
     if (mode === 'copy') {
       const hash = hashFile(src);
       if (hash) {
+        mkdirSync(dirname(dest), { recursive: true });
         copyFileSync(src, dest);
         setBaseline(lock, `${entry.target}:${entry.dest}`, hash);
       }
@@ -113,7 +116,7 @@ test('a target narrows the config report to that agent alone', async () => {
   assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md', 'settings.json']);
 
   const codexRows = configReport(entriesForTarget(SYNC, 'codex'));
-  assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md']);
+  assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md', 'config.toml']);
 });
 
 test('an invalid --target makes status exit 2 without reporting', async () => {
@@ -253,8 +256,10 @@ test('run() does not write any files to claude dir and does not create new direc
   const isolatedRepo = mkdtempSync(join(tmpdir(), 'nortuscc-repo-readonly-'));
   mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
   mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'codex', 'openrouter-glm'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
+  writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
 
   // Set up an isolated agents/skills fixture too (fix round 1, finding 3: the
   // original snapshot only covered the claude dir, so a write in the new
@@ -450,8 +455,10 @@ async function onCleanMachine(prefix, fn) {
   const isolatedRepo = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-repo-`));
   mkdirSync(join(isolatedRepo, 'claude'), { recursive: true });
   mkdirSync(join(isolatedRepo, 'codex'), { recursive: true });
+  mkdirSync(join(isolatedRepo, 'codex', 'openrouter-glm'), { recursive: true });
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
+  writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
 
   const saved = {
     claude: process.env.NORTUSCC_CLAUDE_DIR,
@@ -806,8 +813,10 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   const repoDir = mkdtempSync(join(tmpdir(), 'nortuscc-undeclared-repo-'));
   mkdirSync(join(repoDir, 'claude'), { recursive: true });
   mkdirSync(join(repoDir, 'codex'), { recursive: true });
+  mkdirSync(join(repoDir, 'codex', 'openrouter-glm'), { recursive: true });
   writeFileSync(join(repoDir, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(repoDir, 'codex', 'AGENTS.md'), '# Test codex');
+  writeFileSync(join(repoDir, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
   setup(isolated, repoDir);
 
   const saved = { ...process.env };
