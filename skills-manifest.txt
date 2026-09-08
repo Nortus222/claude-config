@@ -10,6 +10,9 @@ explain
 [cursor/plugins] exact
 unslop
 
+[humanlayer/skills]
+show-me
+
 [mattpocock/skills]
 ask-matt
 code-review
