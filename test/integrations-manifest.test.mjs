@@ -193,6 +193,49 @@ test('dx-devextreme is allowed as a machine-local extra, never declared', async 
   assert.deepEqual(named, [], 'an allowed extra must not also be a declared integration');
 });
 
+// Codex CLI ships these itself: openai-primary-runtime comes from its runtime
+// cache and openai-bundled from a temp dir it unpacks at startup, so every one
+// of them reports `source: local` against a path this repo does not own.
+// Uninstalling them does not stick — the next runtime update restores them.
+// `allow` is therefore the only honest description: present on purpose, never
+// installed by us, and silent on a machine that has no Codex at all.
+test('the OpenAI plugins Codex bundles are allowed, never declared', async () => {
+  const realRepo = fileURLToPath(new URL('..', import.meta.url));
+  const { readIntegrations } = await import('../src/integrations/manifest.mjs');
+  const { integrations, allow, errors } = readIntegrations({ repo: realRepo });
+
+  assert.deepEqual(errors, []);
+
+  for (const plugin of [
+    'documents@openai-primary-runtime',
+    'pdf@openai-primary-runtime',
+    'spreadsheets@openai-primary-runtime',
+    'presentations@openai-primary-runtime',
+    'template-creator@openai-primary-runtime',
+    'codex-app-tools@openai-bundled',
+    'sites@openai-bundled',
+    'browser@openai-bundled',
+    'unified-computer-use@openai-bundled',
+    'chrome@openai-bundled',
+    'computer-use@openai-bundled',
+    'visualize@openai-bundled',
+  ]) {
+    assert.ok(allow.plugins.includes(plugin), `${plugin} must be allowed`);
+  }
+  assert.ok(allow.marketplaces.includes('openai-primary-runtime'));
+  assert.ok(allow.marketplaces.includes('openai-bundled'));
+
+  // openai-curated is the opposite case and must stay that way: superpowers is
+  // declared from it, so the marketplace is implied and allowing it too would
+  // hide a real failure to install.
+  assert.ok(!allow.marketplaces.includes('openai-curated'), 'openai-curated is declared, not allowed');
+
+  const named = integrations.filter(
+    (i) => i.plugin?.endsWith('@openai-bundled') || i.plugin?.endsWith('@openai-primary-runtime'),
+  );
+  assert.deepEqual(named, [], 'a bundled extra must not also be a declared integration');
+});
+
 // The design retires the private cache-repair hook rather than relocating it:
 // context-mode's native installation owns its own hooks.
 test('the committed manifest declares no hook at all', async () => {
