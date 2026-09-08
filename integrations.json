@@ -11,11 +11,29 @@
     "already has them. That runbook carries the uninstall commands.",
     "`allow` is the other half: extras that are present on purpose on some machine.",
     "Nothing in it is ever installed or offered — it only stops `status` reporting a",
-    "known-good extra as drift, and says nothing on a machine that does not have it."
+    "known-good extra as drift, and says nothing on a machine that does not have it.",
+    "The openai-bundled and openai-primary-runtime plugins are there because Codex",
+    "CLI ships and registers them itself, from its own runtime cache and a temp dir",
+    "it unpacks at startup. Uninstalling them does not stick, and no machine needs",
+    "them from us — allowing them only stops status calling Codex's own bundle drift."
   ],
   "allow": {
-    "plugins": ["dx-devextreme@DevExpress-agent-skills"],
-    "marketplaces": ["DevExpress-agent-skills"]
+    "plugins": [
+      "dx-devextreme@DevExpress-agent-skills",
+      "documents@openai-primary-runtime",
+      "pdf@openai-primary-runtime",
+      "spreadsheets@openai-primary-runtime",
+      "presentations@openai-primary-runtime",
+      "template-creator@openai-primary-runtime",
+      "codex-app-tools@openai-bundled",
+      "sites@openai-bundled",
+      "browser@openai-bundled",
+      "unified-computer-use@openai-bundled",
+      "chrome@openai-bundled",
+      "computer-use@openai-bundled",
+      "visualize@openai-bundled"
+    ],
+    "marketplaces": ["DevExpress-agent-skills", "openai-primary-runtime", "openai-bundled"]
   },
   "integrations": [
     {
