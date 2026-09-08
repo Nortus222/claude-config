@@ -9,6 +9,7 @@ import { capturedPaths, run as capture } from '../src/commands/capture.mjs';
 
 const EXPECTED = `model = "z-ai/glm-5.3-flash"
 model_provider = "openrouter"
+model_catalog_json = "models-static.json"
 
 [model_providers.openrouter]
 name = "OpenRouter"
@@ -33,7 +34,10 @@ async function onMachine(fn) {
   mkdirSync(process.env.NORTUSCC_CODEX_DIR, { recursive: true });
 
   try {
-    await fn({ config: join(process.env.NORTUSCC_OPENROUTER_CODEX_DIR, 'config.toml') });
+    await fn({
+      config: join(process.env.NORTUSCC_OPENROUTER_CODEX_DIR, 'config.toml'),
+      catalog: join(process.env.NORTUSCC_OPENROUTER_CODEX_DIR, 'models-static.json'),
+    });
   } finally {
     for (const [name, value] of Object.entries({
       NORTUSCC_CODEX_DIR: saved.codex,
@@ -47,26 +51,35 @@ async function onMachine(fn) {
   }
 }
 
-test('apply --target codex installs the GLM OpenRouter Codex home without a secret', async () => {
-  await onMachine(async ({ config }) => {
+test('apply --target codex installs the restricted OpenRouter Codex home without a secret', async () => {
+  await onMachine(async ({ config, catalog }) => {
     assert.equal(await apply(['--target', 'codex']), 0);
     assert.equal(readFileSync(config, 'utf8'), EXPECTED);
     assert.doesNotMatch(readFileSync(config, 'utf8'), /sk-or-/);
+    const models = JSON.parse(readFileSync(catalog, 'utf8')).models;
+    assert.deepEqual(
+      models.map(({ slug }) => slug).sort(),
+      ['meta/muse-spark-1.3-contributor', 'z-ai/glm-5.3-flash'].sort(),
+    );
+    assert.ok(models.every(({ base_instructions: instructions }) => instructions.length > 0));
+    assert.ok(models.every(({ supports_parallel_tool_calls: supported }) => supported === true));
   });
 });
 
-test('skills-only skips the GLM OpenRouter configuration', async () => {
-  await onMachine(async ({ config }) => {
+test('skills-only skips the OpenRouter configuration', async () => {
+  await onMachine(async ({ config, catalog }) => {
     assert.equal(await apply(['--target', 'codex', '--skills-only']), 0);
     assert.equal(existsSync(config), false);
+    assert.equal(existsSync(catalog), false);
   });
 });
 
-test('--with-config installs GLM configuration for a skills-only machine without changing its mode', async () => {
-  await onMachine(async ({ config }) => {
+test('--with-config installs OpenRouter configuration for a skills-only machine without changing its mode', async () => {
+  await onMachine(async ({ config, catalog }) => {
     assert.equal(await apply(['--target', 'codex', '--skills-only']), 0);
     assert.equal(await apply(['--target', 'codex', '--with-config']), 0);
     assert.equal(readFileSync(config, 'utf8'), EXPECTED);
+    assert.equal(existsSync(catalog), true);
   });
 });
 
@@ -91,6 +104,7 @@ test('capture never publishes local OpenRouter configuration edits', async () =>
       assert.equal(readFileSync(source, 'utf8'), EXPECTED);
       assert.ok(!capturedPaths().includes(source));
       assert.ok(!capturedPaths().includes('codex/openrouter-glm/config.toml'));
+      assert.ok(!capturedPaths().includes('codex/openrouter-glm/models-static.json'));
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

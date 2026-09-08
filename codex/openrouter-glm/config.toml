@@ -1,5 +1,6 @@
 model = "z-ai/glm-5.3-flash"
 model_provider = "openrouter"
+model_catalog_json = "models-static.json"
 
 [model_providers.openrouter]
 name = "OpenRouter"
