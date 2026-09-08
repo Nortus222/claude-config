@@ -355,6 +355,7 @@ test('state lands in the neutral location, never inside an agent directory', asy
       'claude:CLAUDE.md',
       'codex:AGENTS.md',
       'codex:config.toml',
+      'codex:models-static.json',
       ...declaredKeys.map((k) => `claude:settings.json#${k}`),
     ].sort(),
   );

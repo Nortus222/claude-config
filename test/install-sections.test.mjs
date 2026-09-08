@@ -46,6 +46,7 @@ test('Codex configuration entries each get a stable, unique id', () => {
   const items = configSection('codex').items();
   assert.deepEqual(items.map((i) => i.id), [
     'config:codex:AGENTS.md',
+    'config:codex:models-static.json',
     'config:codex:config.toml',
   ]);
 });

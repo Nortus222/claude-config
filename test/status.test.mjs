@@ -37,6 +37,7 @@ mkdirSync(join(fixtureRepo, 'codex', 'openrouter-glm'), { recursive: true });
 writeFileSync(join(fixtureRepo, 'claude', 'CLAUDE.md'), '# Test');
 writeFileSync(join(fixtureRepo, 'codex', 'AGENTS.md'), '# Test codex');
 writeFileSync(join(fixtureRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
+writeFileSync(join(fixtureRepo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}');
 
 const { configReport, run: rawRun } = await import('../src/commands/status.mjs');
 
@@ -116,7 +117,7 @@ test('a target narrows the config report to that agent alone', async () => {
   assert.deepEqual(claudeRows.map((r) => r.dest), ['CLAUDE.md', 'settings.json']);
 
   const codexRows = configReport(entriesForTarget(SYNC, 'codex'));
-  assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md', 'config.toml']);
+  assert.deepEqual(codexRows.map((r) => r.dest), ['AGENTS.md', 'models-static.json', 'config.toml']);
 });
 
 test('an invalid --target makes status exit 2 without reporting', async () => {
@@ -260,6 +261,7 @@ test('run() does not write any files to claude dir and does not create new direc
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
   writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
+  writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}');
 
   // Set up an isolated agents/skills fixture too (fix round 1, finding 3: the
   // original snapshot only covered the claude dir, so a write in the new
@@ -459,6 +461,7 @@ async function onCleanMachine(prefix, fn) {
   writeFileSync(join(isolatedRepo, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(isolatedRepo, 'codex', 'AGENTS.md'), '# Test codex');
   writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
+  writeFileSync(join(isolatedRepo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}');
 
   const saved = {
     claude: process.env.NORTUSCC_CLAUDE_DIR,
@@ -817,6 +820,7 @@ async function statusOutput(args = [], setup = () => {}, deps = {}) {
   writeFileSync(join(repoDir, 'claude', 'CLAUDE.md'), '# Test');
   writeFileSync(join(repoDir, 'codex', 'AGENTS.md'), '# Test codex');
   writeFileSync(join(repoDir, 'codex', 'openrouter-glm', 'config.toml'), '# Test OpenRouter');
+  writeFileSync(join(repoDir, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}');
   setup(isolated, repoDir);
 
   const saved = { ...process.env };

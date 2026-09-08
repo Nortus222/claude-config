@@ -109,6 +109,7 @@ skills; it prints one warning and points at `--install`.
 | `claude/CLAUDE.md` | Claude | copy |
 | `codex/AGENTS.md` | Codex | copy |
 | `codex/openrouter-glm/config.toml` | Codex via OpenRouter | copy to `~/.codex-openrouter/config.toml` |
+| `codex/openrouter-glm/models-static.json` | OpenRouter model allowlist | copy to `~/.codex-openrouter/models-static.json` |
 | `skills-manifest.txt` | both | one shared skill set |
 | `integrations.json` | both | declarations only, never machine state |
 
@@ -125,6 +126,11 @@ management is enabled. It contains the GLM model slug and the name of
 `OPENROUTER_API_KEY`, never its value. On each machine, add that variable as a
 sensitive value to a T3 Code Codex provider named `Codex · GLM Flash` whose
 `CODEX_HOME path` is `~/.codex-openrouter`, then restart T3 Code.
+
+The accompanying static catalog limits the picker to the two OpenRouter models
+used here and avoids Codex replacing a failed remote catalog refresh with its
+built-in OpenAI model list. Update `codex/openrouter-glm/models-static.json` to
+change that shared allowlist.
 
 ### Key-level settings sync
 

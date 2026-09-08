@@ -24,6 +24,14 @@ export const SYNC = [
   {
     target: 'codex',
     machine: 'codex-openrouter',
+    src: 'codex/openrouter-glm/models-static.json',
+    dest: 'models-static.json',
+    mode: 'copy',
+    capture: false,
+  },
+  {
+    target: 'codex',
+    machine: 'codex-openrouter',
     src: 'codex/openrouter-glm/config.toml',
     dest: 'config.toml',
     mode: 'copy',

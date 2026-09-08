@@ -141,10 +141,14 @@ async function statusWith(deps) {
   const repo = join(home, 'repo');
   mkdirSync(join(repo, 'claude'), { recursive: true });
   mkdirSync(join(repo, 'codex'), { recursive: true });
+  mkdirSync(join(repo, 'codex', 'openrouter-glm'), { recursive: true });
   writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# r\n');
   writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# r\n');
+  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'config.toml'), '# OpenRouter\n');
+  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}\n');
   mkdirSync(join(home, '.claude'), { recursive: true });
   mkdirSync(join(home, '.codex'), { recursive: true });
+  mkdirSync(join(home, '.codex-openrouter'), { recursive: true });
 
   const saved = { ...process.env };
   process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');

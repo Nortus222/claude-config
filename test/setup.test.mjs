@@ -17,6 +17,7 @@ function createTestRepo(prefix = 'nortuscc-setup-repo-') {
   writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# test\n');
   writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# test codex\n');
   writeFileSync(join(repo, 'codex', 'openrouter-glm', 'config.toml'), '# test OpenRouter\n');
+  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}\n');
   // The merge-keys entry needs a source too, or it reads as missing-repo —
   // actionable, same as a genuine manifest gap — and setup would then refuse
   // to proceed without --yes on what these tests expect to be a clean repo.
