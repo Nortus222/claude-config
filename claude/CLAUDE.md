@@ -85,4 +85,5 @@ running as, never a generic "AI assistant".
 ## Completion
 
 From the feature worktree, commit, push, and open the PR against the repository-declared target. Report the
-branch, verification, and PR URL, then stop. Do not merge it.
+branch, verification, and PR URL. After completing the task and creating the PR, use the `show-me` skill
+to explain the changes to the user, then stop. Do not merge it.
