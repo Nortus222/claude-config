@@ -7,6 +7,8 @@
 // mode: 'copy' — an agent rewrites its instruction file in place, which would
 //                silently replace a symlink with a regular file. Copy it and
 //                track a hash.
+//                preserveProjects keeps Codex project tables machine-local,
+//                excluding them from hashes and retaining them during apply.
 //
 // mode: 'merge-keys' — a settings file mixes portable rules with permissions,
 //                UI preferences and machine-specific state. Sync the keys the
@@ -35,6 +37,7 @@ export const SYNC = [
     src: 'codex/openrouter-glm/config.toml',
     dest: 'config.toml',
     mode: 'copy',
+    preserveProjects: true,
     capture: false,
   },
   { target: 'claude', src: 'claude/settings.keys.json', dest: 'settings.json', mode: 'merge-keys' },

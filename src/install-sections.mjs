@@ -32,7 +32,7 @@ export function configSection(target, { force = false, manageConfig = true } = {
         const state =
           mode === 'merge-keys'
             ? inspectMerge(src, dest, key, lock).state
-            : inspectCopy(src, dest, lock.files[key]?.hash).state;
+            : inspectCopy(src, dest, lock.files[key]?.hash, entry).state;
         return {
           // Keyed by target AND dest: Claude now owns two entries (its
           // instruction file and its settings keys), and a target-only id
@@ -55,7 +55,7 @@ export function configSection(target, { force = false, manageConfig = true } = {
       const results = items.map((item) => {
         const { src, dest, mode } = resolveEntry(item.entry);
         const key = `${item.entry.target}:${item.entry.dest}`;
-        const opts = { force, relative: item.entry.dest, agent: item.entry.target };
+        const opts = { force, relative: item.entry.dest, agent: item.entry.target, preserveProjects: item.entry.preserveProjects };
         const res = mode === 'merge-keys' ? applyMerge(src, dest, key, lock, opts) : applyCopy(src, dest, key, lock, opts);
         return {
           id: item.id,

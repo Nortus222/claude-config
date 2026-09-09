@@ -127,6 +127,12 @@ management is enabled. It contains the GLM model slug and the name of
 sensitive value to a T3 Code Codex provider named `Codex · GLM Flash` whose
 `CODEX_HOME path` is `~/.codex-openrouter`, then restart T3 Code.
 
+The local `[projects]` tables, including `[projects."/path"]` trust entries, stay
+machine-local. Status and the install picker ignore them when comparing the
+OpenRouter config. Apply preserves them, including with `--take-repo`; changes to
+the remaining settings still use the usual conflict checks. This exception applies
+only to `~/.codex-openrouter/config.toml`.
+
 The accompanying static catalog limits the picker to the two OpenRouter models
 used here and avoids Codex replacing a failed remote catalog refresh with its
 built-in OpenAI model list. Update `codex/openrouter-glm/models-static.json` to

@@ -34,7 +34,7 @@ export function configReport(entries = SYNC) {
       // Keyed by target so Claude's CLAUDE.md and Codex's AGENTS.md can never
       // share one baseline; entry.dest stays the display name.
       const baseline = lock.files[`${entry.target}:${entry.dest}`]?.hash;
-      return [{ dest: entry.dest, mode, state: inspectCopy(src, dest, baseline).state }];
+      return [{ dest: entry.dest, mode, state: inspectCopy(src, dest, baseline, entry).state }];
     } else if (mode === 'merge-keys') {
       const inspected = inspectMerge(src, dest, `${entry.target}:${entry.dest}`, lock);
       // A repo file validateOwnedKeys refused is present and readable, not
