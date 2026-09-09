@@ -6,6 +6,7 @@
 [Nortus222/agent-skills]
 deploy-mobile-apps
 explain
+share-artifacts
 
 [cursor/plugins] exact
 unslop
