@@ -123,6 +123,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
     // force this command ever applies is --take-repo, discarding the local
     // side of a conflict.
     const res = applyCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
+      preserveProjects: entry.preserveProjects,
       force: takeRepo,
       relative: entry.dest,
       agent: entry.target,

@@ -1,6 +1,7 @@
-import { copyFileSync, mkdirSync, existsSync } from 'node:fs';
+import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { hashFile, setBaseline } from './lock.mjs';
+import { hashFile, hashText, setBaseline } from './lock.mjs';
+import { splitProjectTrust } from './project-trust.mjs';
 import { fileState } from './state.mjs';
 import { backupOnce, backupPath } from './backup.mjs';
 
@@ -14,9 +15,14 @@ function preserve(absPath, relative, agent) {
   return target;
 }
 
-export function inspectCopy(src, dest, baseline) {
-  const repo = hashFile(src);
-  const local = hashFile(dest);
+function contentHash(path, preserveProjects) {
+  if (!preserveProjects) return hashFile(path);
+  return existsSync(path) ? hashText(splitProjectTrust(readFileSync(path, 'utf8')).managed) : null;
+}
+
+export function inspectCopy(src, dest, baseline, { preserveProjects = false } = {}) {
+  const repo = contentHash(src, preserveProjects);
+  const local = contentHash(dest, preserveProjects);
   return { state: fileState({ baseline, repo, local }), repo, local };
 }
 
@@ -31,10 +37,11 @@ function write(from, to) {
 // machine's own tests) unchanged; `agent` groups backups by target.
 //
 // repo -> machine. Refuses a conflict unless force is set, and never touches a
-// file whose only change is local.
-export function applyCopy(src, dest, key, lock, { force = false, relative = key, agent = null } = {}) {
+// file whose only change is local. preserveProjects excludes Codex project tables
+// from comparison and carries them through writes, including forced writes.
+export function applyCopy(src, dest, key, lock, { force = false, relative = key, agent = null, preserveProjects = false } = {}) {
   const baseline = lock.files[key]?.hash;
-  const { state, repo } = inspectCopy(src, dest, baseline);
+  const { state, repo } = inspectCopy(src, dest, baseline, { preserveProjects });
 
   if (state === 'missing-repo') return { action: 'skipped', backedUp: null };
   if (state === 'clean') {
@@ -59,9 +66,17 @@ export function applyCopy(src, dest, key, lock, { force = false, relative = key,
 
   // unmanaged, repo-ahead, a forced local-ahead, or a forced conflict: the
   // local file is about to be replaced, so keep whatever was there.
+  const projects = preserveProjects && existsSync(dest)
+    ? splitProjectTrust(readFileSync(dest, 'utf8')).projects : '';
   const backedUp = existsSync(dest) ? backupOnce(dest, relative, agent) : null;
-  write(src, dest);
-  setBaseline(lock, key, hashFile(dest));
+  if (preserveProjects) {
+    const { managed } = splitProjectTrust(readFileSync(src, 'utf8'));
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, managed + (projects ? '\n' + projects : ''));
+  } else {
+    write(src, dest);
+  }
+  setBaseline(lock, key, contentHash(dest, preserveProjects));
   return { action: 'copied', backedUp };
 }
 
