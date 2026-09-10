@@ -57,6 +57,7 @@ running as, never a generic "AI assistant".
 
 - Every pull request you open ends with the model and harness as the last line of its body:
   `Model: <model> · Harness: <harness>`. Keep it last when you revise a PR body.
+  Use this as the only attribution footer. Omit the "Generated with Claude Code" footer and its URL.
 - Every comment you post — PR review, review reply, issue comment — opens with a GitHub note alert, so
   nobody reads it as me writing by hand:
 
