@@ -64,8 +64,10 @@ running as, never a generic "AI assistant".
       > [!NOTE]
       > <model> via <harness>, on behalf of Ihor.
 
-- Do not add a `Co-Authored-By` trailer for the model to commit messages. The PR body carries the
-  attribution; commits stay mine.
+- Keep model attribution only in the PR footer above. Do not add a `Co-Authored-By` trailer to
+  commit messages or PR bodies; commits stay mine.
+- Before publishing or revising a PR, check that its final line uses the exact model/harness format
+  above and that its body contains no generated footer or coauthor trailer.
 
 ## Review and verification
 
