@@ -15,7 +15,7 @@ function usage() {
 test('--help prints the usage text and exits 0', () => {
   const out = usage();
   assert.match(out, /Usage: nortuscc <command> \[--target claude\|codex\|all\] \[options\]/);
-  for (const verb of ['setup', 'status', 'apply', 'capture', 'pull', 'push']) {
+  for (const verb of ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'uninstall']) {
     assert.match(out, new RegExp(`\\b${verb}\\b`), `usage should list ${verb}`);
   }
 });

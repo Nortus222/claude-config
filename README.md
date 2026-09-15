@@ -92,6 +92,7 @@ this ships.
 | `capture` | Machine → repo, including regenerating the skills manifest |
 | `pull` | `git pull --ff-only`, then apply. Reports new integrations; installs them only with `--install` |
 | `push -m MSG` | Capture, then commit and push only what changed |
+| `uninstall --yes [--force]` | Restore or remove managed configuration, then switch the machine to skills-only mode |
 
 Conflict resolution: `apply --take-repo` discards the local version;
 `capture --take-local` keeps it. Each command only understands the flag that
@@ -101,6 +102,30 @@ pointing at the command that actually supports them.
 
 `apply --skills` still works as a deprecated alias for installing missing
 skills; it prints one warning and points at `--install`.
+
+## Undoing configuration setup
+
+```bash
+npx github:Nortus222/claude-config uninstall --yes
+```
+
+`uninstall` reverses the configuration part of setup. A file that existed
+before nortuscc was first applied is restored from its original backup. A file
+that nortuscc created is removed. The command restores only nortuscc-owned keys
+in `~/.claude/settings.json`, and it preserves Codex project trust tables in
+`~/.codex-openrouter/config.toml`.
+
+Before changing a current file, uninstall backs it up under
+`<state>/backups/nortuscc-<stamp>/<agent>/uninstall/`. If a managed value changed
+after the last apply, the whole command refuses before changing anything. Pass
+`--force` to preserve those current files in the uninstall backup and continue.
+
+The machine is recorded as skills-only after a successful run, so a later
+`apply` does not reinstall the configuration. Integrations and skills stay
+installed because nortuscc does not record whether setup installed them or
+they were already present. The repository checkout also stays in place; remove
+it separately if it was created only for nortuscc. Configuration management is
+machine-wide, so `uninstall` accepts only the default `--target all`.
 
 ## What is synced, and what is not
 
