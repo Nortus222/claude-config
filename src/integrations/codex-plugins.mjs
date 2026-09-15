@@ -35,16 +35,22 @@ export function marketplaceNameOf(item) {
 }
 
 // Read once, up front, rather than per item: inspection would otherwise spawn
-// the CLI once for every declaration. A machine with no `codex` on PATH, or a
-// CLI whose output cannot be parsed, is a machine with no Codex plugins — not
-// a crashed status run — so failures degrade to empty sets while still being
-// recorded for the caller to report.
+// the CLI once for every declaration. A missing CLI or unreadable output
+// leaves plugin state unknown rather than crashing the command. The errors
+// travel with the empty sets so adapters do not mistake unknown for empty.
 export async function readCodexState({ capture = captureCommand } = {}) {
-  const state = { plugins: new Set(), marketplaces: new Set(), errors: [] };
+  const state = {
+    plugins: new Set(),
+    marketplaces: new Set(),
+    pluginError: null,
+    marketplaceError: null,
+    errors: [],
+  };
 
   const plugins = await capture(codexPluginListCommand());
   if (!plugins?.ok) {
-    state.errors.push(`could not list Codex plugins${plugins?.note ? `: ${plugins.note}` : ''}`);
+    state.pluginError = `could not list Codex plugins${plugins?.note ? `: ${plugins.note}` : ''}`;
+    state.errors.push(state.pluginError);
   } else {
     try {
       const parsed = JSON.parse(plugins.stdout);
@@ -52,13 +58,15 @@ export async function readCodexState({ capture = captureCommand } = {}) {
         if (entry?.pluginId) state.plugins.add(entry.pluginId);
       }
     } catch (err) {
-      state.errors.push(`could not read the Codex plugin list: ${err.message}`);
+      state.pluginError = `could not read the Codex plugin list: ${err.message}`;
+      state.errors.push(state.pluginError);
     }
   }
 
   const marketplaces = await capture(codexMarketplaceListCommand());
   if (!marketplaces?.ok) {
-    state.errors.push(`could not list Codex marketplaces${marketplaces?.note ? `: ${marketplaces.note}` : ''}`);
+    state.marketplaceError = `could not list Codex marketplaces${marketplaces?.note ? `: ${marketplaces.note}` : ''}`;
+    state.errors.push(state.marketplaceError);
   } else {
     try {
       const parsed = JSON.parse(marketplaces.stdout);
@@ -66,7 +74,8 @@ export async function readCodexState({ capture = captureCommand } = {}) {
         if (entry?.name) state.marketplaces.add(entry.name);
       }
     } catch (err) {
-      state.errors.push(`could not read the Codex marketplace list: ${err.message}`);
+      state.marketplaceError = `could not read the Codex marketplace list: ${err.message}`;
+      state.errors.push(state.marketplaceError);
     }
   }
 
@@ -76,9 +85,14 @@ export async function readCodexState({ capture = captureCommand } = {}) {
 const EMPTY = { plugins: new Set(), marketplaces: new Set(), errors: [] };
 
 export function codexPluginAdapters({ state = EMPTY, spawn = spawnCommand } = {}) {
+  const fallbackError = state.errors.length ? state.errors.join('; ') : null;
+  const pluginError = Object.hasOwn(state, 'pluginError') ? state.pluginError : fallbackError;
+  const marketplaceError = Object.hasOwn(state, 'marketplaceError') ? state.marketplaceError : fallbackError;
   const marketplace = {
     inspect: (item) =>
-      state.marketplaces.has(marketplaceNameOf(item))
+      marketplaceError
+        ? { state: 'unknown', note: marketplaceError }
+        : state.marketplaces.has(marketplaceNameOf(item))
         ? { state: 'installed', note: 'already added' }
         : { state: 'missing', note: '' },
     describe: (item) => {
@@ -90,7 +104,9 @@ export function codexPluginAdapters({ state = EMPTY, spawn = spawnCommand } = {}
 
   const plugin = {
     inspect: (item) =>
-      state.plugins.has(item.plugin)
+      pluginError
+        ? { state: 'unknown', note: pluginError }
+        : state.plugins.has(item.plugin)
         ? { state: 'installed', note: 'already installed' }
         : { state: 'missing', note: '' },
     describe: (item) => {

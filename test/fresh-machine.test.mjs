@@ -37,7 +37,7 @@ function emptyHomeFixture() {
 //
 // Only mutating commands are logged, so the log means "what was installed".
 // Everything written stays inside the test home: no network, no real installer.
-function fakeNativeInstallers(env) {
+function fakeNativeInstallers(env, { codexUnavailable = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
 
   const script = (name) => `#!/usr/bin/env node
@@ -145,7 +145,12 @@ if (agent === 'claude') {
 
   for (const name of ['claude', 'codex', 'npx']) {
     const path = join(dir, name);
-    writeFileSync(path, script(name));
+    writeFileSync(
+      path,
+      name === 'codex' && codexUnavailable
+        ? '#!/usr/bin/env node\nprocess.stderr.write("codex unavailable\\n"); process.exit(127);\n'
+        : script(name),
+    );
     chmodSync(path, 0o755);
   }
   return dir;
@@ -219,6 +224,19 @@ test('fresh machine setup installs selected defaults for both agents', async () 
   const settings = JSON.parse(readFileSync(join(env.claude, 'settings.json'), 'utf8'));
   const declared = JSON.parse(readFileSync(join(REPO, 'claude', 'settings.keys.json'), 'utf8'));
   assert.deepEqual(settings, declared);
+});
+
+test('fresh setup still installs shared skills when the Codex CLI is unavailable', async () => {
+  const env = emptyHomeFixture();
+  const result = await runCli(['setup', '--target', 'all', '--yes'], {
+    env,
+    fixtureBinDir: fakeNativeInstallers(env, { codexUnavailable: true }),
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /integrations\.json is invalid/);
+  const skillCalls = readInstallerLog(env).filter((entry) => entry.cmd === 'npx' && entry.args[2] === 'add');
+  assert.ok(skillCalls.length > 0, 'Codex plugin inspection must not block shared skill installation');
 });
 
 test('every shared skill is installed for both agents, in one call per source', async () => {

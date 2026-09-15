@@ -20,7 +20,11 @@ function byTarget(claude, codex) {
 // inspection stays synchronous and does not spawn a process per declaration.
 export async function defaultAdapters(deps = {}) {
   const claude = claudePluginAdapters(deps.claudePlugins);
-  const codexState = deps.codexState ?? (await readCodexState(deps.codexProbe));
+  const codexState = deps.codexState ?? (
+    deps.probeCodex === false
+      ? { plugins: new Set(), marketplaces: new Set(), errors: [] }
+      : await readCodexState(deps.codexProbe)
+  );
   const codex = codexPluginAdapters({ ...deps.codexPlugins, state: codexState });
 
   return {

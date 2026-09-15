@@ -134,23 +134,37 @@ test('a marketplace whose name is the owner rather than the repo still matches',
   assert.equal(adapters.marketplace.inspect(guessed).state, 'missing');
 });
 
-// A machine without codex on PATH is a machine with no Codex plugins, not a
-// crashed status run.
-test('an unavailable codex CLI degrades to "nothing installed" rather than throwing', async () => {
+// A failed inspection cannot tell "not installed" apart from "installed but
+// unreadable". Setup must leave the item unselected instead of attempting an
+// install through the same unavailable executable and blocking skill setup.
+test('an unavailable codex CLI reports unknown state rather than a missing plugin', async () => {
   const state = await readCodexState({
     capture: async () => ({ ok: false, stdout: '', note: 'could not launch `codex`: ENOENT' }),
   });
   const adapters = codexPluginAdapters({ state });
 
-  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'missing');
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'unknown');
+  assert.match(adapters.plugin.inspect(PLUGIN).note, /could not list Codex plugins/);
   assert.deepEqual(state.errors.length > 0, true, 'the failure is still recorded, not swallowed silently');
 });
 
 test('unparseable output degrades the same way', async () => {
   const state = await readCodexState({ capture: async () => ({ ok: true, stdout: 'not json' }) });
   const adapters = codexPluginAdapters({ state });
-  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'missing');
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'unknown');
   assert.ok(state.errors.length > 0);
+});
+
+test('a marketplace probe failure does not erase a successful plugin result', async () => {
+  const state = await readCodexState({
+    capture: async (command) => command.args[1] === 'marketplace'
+      ? { ok: false, stdout: '', note: 'marketplace unavailable' }
+      : { ok: true, stdout: PLUGIN_JSON },
+  });
+  const adapters = codexPluginAdapters({ state });
+
+  assert.equal(adapters.plugin.inspect(PLUGIN).state, 'installed');
+  assert.equal(adapters.marketplace.inspect(MARKETPLACE).state, 'unknown');
 });
 
 test('installing spawns the codex CLI, never claude', async () => {

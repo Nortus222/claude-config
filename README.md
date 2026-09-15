@@ -6,13 +6,34 @@ go silent.
 
 ## New machine
 
-```bash
-npx github:Nortus222/claude-config setup --dir ~/dev/claude-config
+PowerShell:
+
+```powershell
+npx.cmd --yes github:Nortus222/claude-config setup
 ```
 
-Clones the repo, migrates any older machine state, writes the instruction file
-for each selected agent, then opens a selector for the integrations and skills
-to install. Restart the affected agent afterwards to load the rules.
+macOS or Linux:
+
+```bash
+npx --yes github:Nortus222/claude-config setup
+```
+
+The command clones the repo to `~/claude-config`, installs `nortuscc` from that
+checkout, migrates any older machine state, and opens a selector for the files,
+integrations, and skills to install. Pass `--dir PATH` to choose a different
+checkout location. Restart the affected agent afterwards to load the rules.
+
+Use `npx.cmd` in PowerShell so Windows runs npm's command wrapper directly.
+This works when PowerShell's execution policy blocks `npx.ps1`; no policy
+change or nested PowerShell session is needed.
+
+If the standalone `codex` executable is not on `PATH`, setup reports its native
+plugin state as unknown and continues with configuration and shared skills. It
+does not mislabel that runtime problem as an invalid `integrations.json`.
+
+The installed command is `nortuscc` in Command Prompt, macOS, and Linux. In
+PowerShell, use `nortuscc.cmd` so the execution policy does not select npm's
+PowerShell shim.
 
 Without a terminal to choose on, `setup` refuses rather than picking for you:
 pass `--yes` to accept the defaults, or `--no-hooks` / `--no-mcp` /
@@ -30,8 +51,10 @@ you are here for the skill set and have instruction files of your own, say so
 once:
 
 ```bash
-npx github:Nortus222/claude-config setup --dir ~/dev/claude-config --skills-only
+npx --yes github:Nortus222/claude-config setup --skills-only
 ```
+
+In PowerShell, use the same command with `npx.cmd` in place of `npx`.
 
 The choice is recorded in machine state, so every later command honours it with
 no flag to remember — `apply` never writes your `CLAUDE.md`, and `capture` never
@@ -42,6 +65,9 @@ has looked at those files at all.
 Integrations and skills stay managed. Decline those per install with
 `--no-hooks` / `--no-mcp` / `--no-plugins` / `--no-skills`, or point the repo at
 your own fork and edit `skills-manifest.txt`.
+
+For a literal skills-only first run, with no native plugin or MCP setup, add
+`--no-hooks --no-mcp --no-plugins`.
 
 `--with-config` syncs config for a single run without changing the setting;
 `--no-skills-only` records it off for good.
@@ -75,6 +101,8 @@ nortuscc pull                # git pull, then bring this machine up to date
 nortuscc push -m "rules: ..." # share local edits
 ```
 
+Use `nortuscc.cmd` instead of `nortuscc` for these commands in PowerShell.
+
 `status` exits non-zero when something declared needs attention. Undeclared
 items — things installed but never named in `integrations.json` — are
 reported but do not affect the exit code unless `--strict` is passed, so it
@@ -85,7 +113,7 @@ this ships.
 
 | Command | Effect |
 | --- | --- |
-| `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, apply, then install interactively |
+| `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, install the command, apply, then install interactively |
 | `status [--strict] [--versions]` | Report: cli, config, integrations, skills, undeclared. `--strict` exits non-zero on undeclared items; `--versions` shows each plugin's installed version. Offers to update nortuscc when behind |
 | `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |

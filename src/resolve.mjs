@@ -5,6 +5,10 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+export function moduleRoot() {
+  return resolve(here, '..');
+}
+
 // The single test for "is this path a usable clone?", shared by repoRoot's
 // stale-lock guard and by setup's --dir validation so the two can never
 // disagree about which paths are acceptable. `.git` is a directory in a normal
@@ -41,7 +45,7 @@ function recordedRepo() {
 // src/ lives directly under the repo root. The override lets tests that WRITE
 // to the repo side (capture) point at a throwaway fixture instead of mutating
 // tracked files.
-export function repoRoot() {
+export function repoRoot({ warnStale = true } = {}) {
   // Priority 1: explicit env var override (used by tests and npx scenarios)
   if (process.env.NORTUSCC_REPO_DIR) {
     return process.env.NORTUSCC_REPO_DIR;
@@ -55,17 +59,17 @@ export function repoRoot() {
     // Falling through silently is what made a poisoned repo record invisible
     // — every command would quietly sync against a different repo than the
     // one the user believes is recorded.
-    if (!warnedStaleRepo) {
+    if (warnStale && !warnedStaleRepo) {
       warnedStaleRepo = true;
       console.error(
         `nortuscc: recorded repo '${recorded}' is not a git checkout; ` +
-          `using ${resolve(here, '..')} instead. Re-run 'nortuscc setup --dir <path>' to fix the record.`,
+          `using ${moduleRoot()} instead. Re-run 'nortuscc setup --dir <path>' to fix the record.`,
       );
     }
   }
 
   // Priority 3: module's own location (original behavior)
-  return resolve(here, '..');
+  return moduleRoot();
 }
 
 export function claudeDir() {

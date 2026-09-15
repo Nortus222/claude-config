@@ -1,13 +1,56 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { readLock, writeLock, migrateLegacyState } from '../lock.mjs';
-import { repoRoot, isGitCheckout, statePath } from '../resolve.mjs';
+import { repoRoot, moduleRoot, isGitCheckout, statePath } from '../resolve.mjs';
 import { parseTarget } from '../targets.mjs';
 import { run as applyRun, installFor } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
 import { parseConfigMode } from '../config-mode.mjs';
 
 const DEFAULT_REPO = 'https://github.com/Nortus222/claude-config.git';
+
+export function defaultSetupDir(home = homedir()) {
+  return join(home, 'claude-config');
+}
+
+export function isNortusccCheckout(root) {
+  if (!isGitCheckout(root)) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    return pkg.name === 'nortuscc'
+      && pkg.bin?.nortuscc === './bin/nortuscc.mjs'
+      && existsSync(join(root, 'bin', 'nortuscc.mjs'));
+  } catch {
+    return false;
+  }
+}
+
+function cloneRepo(url, dir) {
+  execFileSync('git', ['clone', url, dir], { stdio: 'inherit' });
+}
+
+export function installGlobalCommand(
+  root,
+  {
+    run = execFileSync,
+    platform = process.platform,
+    node = process.execPath,
+    npmExecPath = process.env.npm_execpath,
+  } = {},
+) {
+  const bundledNpm = join(dirname(node), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const npmCli = npmExecPath || (existsSync(bundledNpm) ? bundledNpm : null);
+  const args = ['install', '--global', '--no-audit', '--no-fund', root];
+
+  // PowerShell may block npm.ps1, and Windows cannot reliably execute npm.cmd
+  // through execFile. npx provides npm_execpath, so run npm's JS entry point
+  // with the current Node executable and keep paths with spaces as argv.
+  if (npmCli) return run(node, [npmCli, ...args], { stdio: 'inherit' });
+  if (platform === 'win32') throw new Error('could not locate npm-cli.js');
+  return run('npm', args, { stdio: 'inherit' });
+}
 
 function flag(args, name) {
   const i = args.indexOf(name);
@@ -27,7 +70,21 @@ export async function run(allArgs = [], deps = {}) {
     return 2;
   }
 
-  const dir = flag(args, '--dir');
+  // setup repairs stale state itself by choosing a durable checkout below, so
+  // repoRoot's generic "re-run setup" warning would prescribe work this same
+  // invocation is already doing.
+  const runtimeRoot = deps.currentRoot ?? moduleRoot();
+  const resolvedRoot = deps.resolvedRoot ?? repoRoot({ warnStale: false });
+  const packageLaunch = !isGitCheckout(runtimeRoot);
+  const requestedDir = flag(args, '--dir');
+  // GitHub-backed npx runs from npm's disposable package cache. Put the
+  // managed files in a real checkout by default, then link the command to that
+  // checkout so later `nortuscc` invocations do not depend on the cache.
+  const dir = requestedDir ?? (
+    packageLaunch
+      ? (isGitCheckout(resolvedRoot) ? resolvedRoot : (deps.defaultDir ?? defaultSetupDir()))
+      : null
+  );
   const url = flag(args, '--repo') ?? DEFAULT_REPO;
 
   // Import the pre-Codex lock before anything reads or writes state, so a
@@ -39,12 +96,12 @@ export async function run(allArgs = [], deps = {}) {
     console.log(`migrated existing nortuscc state -> ${statePath()}`);
   }
 
-  // When --dir is given and empty, clone into it. Otherwise this CLI is already
-  // running from a clone, which is the npx-from-GitHub case.
+  // A package launch always chooses a durable directory above. A checkout
+  // launch uses --dir only when the caller explicitly supplied one.
   if (dir && !existsSync(dir)) {
     console.log(`cloning ${url} -> ${dir}`);
     try {
-      execFileSync('git', ['clone', url, dir], { stdio: 'inherit' });
+      (deps.cloneRepo ?? cloneRepo)(url, dir);
     } catch (e) {
       console.error(`failed to clone ${url}: ${e.message}`);
       return 1;
@@ -65,7 +122,14 @@ export async function run(allArgs = [], deps = {}) {
     return 2;
   }
 
-  const root = dir ?? repoRoot();
+  const root = dir ?? resolvedRoot;
+  if (packageLaunch && !isNortusccCheckout(root)) {
+    console.error(
+      `nortuscc: ${root} is a git checkout but not a nortuscc checkout.\n` +
+        'Move it or pass --dir with a nortuscc checkout.',
+    );
+    return 2;
+  }
   console.log(`repo: ${root}`);
 
   try {
@@ -75,6 +139,21 @@ export async function run(allArgs = [], deps = {}) {
     console.log(`commit: ${commit}`);
   } catch {
     console.log('commit: unknown (not a git checkout)');
+  }
+
+  if (packageLaunch) {
+    console.log(`installing nortuscc command from ${root}`);
+    try {
+      (deps.installCli ?? installGlobalCommand)(root);
+    } catch (e) {
+      console.error(`nortuscc: could not install the global command: ${e.message}`);
+      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      console.error(`Run '${npm} install --global "${root}"', then re-run setup.`);
+      return 1;
+    }
+    if (process.platform === 'win32') {
+      console.log('PowerShell: use nortuscc.cmd (the nortuscc.ps1 shim may be blocked by execution policy).');
+    }
   }
 
   // Record where the repo lives so later runs work from any directory, and

@@ -751,6 +751,30 @@ test('status reports a missing integration as actionable without installing it',
   });
 });
 
+test('an unavailable Codex CLI reports unknown without prescribing a failed reinstall', async () => {
+  await onCleanMachine('codex-integration-unknown', async (fx) => {
+    writeFileSync(
+      join(fx.repo, 'integrations.json'),
+      JSON.stringify({
+        version: 1,
+        integrations: [
+          { id: 'sp-codex', label: 'superpowers', target: 'codex', type: 'plugin', default: true, plugin: 'superpowers@openai-curated' },
+        ],
+      }),
+    );
+    const unavailable = {
+      plugins: new Set(),
+      marketplaces: new Set(),
+      errors: ['could not list Codex plugins: could not launch `codex`: ENOENT'],
+    };
+
+    const { code, output } = await runCaptured(() => fx.run(['--target', 'codex'], { codexState: unavailable }));
+    assert.equal(code, 0, 'an unavailable optional CLI is informational unless --strict is used');
+    assert.match(output, /superpowers\s+unknown/);
+    assert.doesNotMatch(output, /apply --install/, 'the suggested command would use the same unavailable CLI');
+  });
+});
+
 // An invalid manifest is reported, not acted on, and never silently ignored.
 test('an invalid integrations.json is reported and makes status exit non-zero', async () => {
   await onCleanMachine('integration-invalid', async (fx) => {

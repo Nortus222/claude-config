@@ -83,9 +83,13 @@ function integrationSection(target, adapters) {
             type: item.type,
             group: item.group,
             label: item.label,
-            state: item.state,
+            state: item.state === 'unknown' ? 'blocked' : item.state,
             note: item.note,
-            default: item.default,
+            // A failed inspection cannot establish whether installing is
+            // needed, and the executable that would install it is often the
+            // same one that could not be launched. Keep it visible but do not
+            // select it during unattended setup.
+            default: item.state === 'unknown' ? false : item.default,
             describe: adapters[item.type]?.describe(item) ?? '',
             item,
           })),
@@ -131,13 +135,24 @@ function skillSection(target) {
   };
 }
 
-export async function defaultInstallDeps(target, { force = false, adapters, codexState, manageConfig = true } = {}) {
-  const resolved = adapters ?? (await defaultAdapters({ codexState }));
+export async function defaultInstallDeps(
+  target,
+  {
+    force = false,
+    adapters,
+    codexState,
+    codexProbe,
+    manageConfig = true,
+    probeCodex = target !== 'claude',
+  } = {},
+) {
+  const resolved = adapters ?? (await defaultAdapters({ codexState, codexProbe, probeCodex }));
   const integrations = integrationSection(target, resolved);
   return {
-    // A manifest that will not validate and Codex state that could not be read
-    // are both reasons to stop before installing anything.
-    integrationErrors: [...integrations.errors, ...(resolved.errors ?? [])],
+    // Invalid declarations are fatal. A missing agent CLI is not: setup can
+    // still install skills and integrations owned by the other agent.
+    integrationErrors: integrations.errors,
+    warnings: resolved.errors ?? [],
     sections: {
       config: configSection(target, { force, manageConfig }),
       integrations,

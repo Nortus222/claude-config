@@ -15,7 +15,9 @@ Skills-only machines (use this repo's skill set, keep your own agent configurati
   --with-config                     manage config for this one run
 
 Commands:
-  setup [--repo URL] [--dir PATH]   clone if absent, apply, then install interactively
+  setup [--repo URL] [--dir PATH]   clone if absent, install this command, apply,
+                                    then install interactively; npx defaults to
+                                    ~/claude-config when --dir is omitted
   status [--strict] [--versions]    report: cli / config / integrations / skills
                                     and what is installed but undeclared
                                     --strict exits non-zero on undeclared items
@@ -40,6 +42,8 @@ Installation (setup and apply --install):
 Examples:
   nortuscc status --target codex    report only what Codex owns
   nortuscc apply --target claude    write ~/.claude/CLAUDE.md and nothing else
+
+PowerShell: use nortuscc.cmd when script execution is disabled.
 
 Run 'nortuscc status' first. It writes nothing on its own; the one thing it
 can change is nortuscc itself, and only after you say yes.`;

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { configSection } from '../src/install-sections.mjs';
+import { configSection, defaultInstallDeps } from '../src/install-sections.mjs';
 
 // A fixture repo/home, isolated from the real machine — configSection calls
 // resolveEntry() and readLock() under the hood, both of which read these env
@@ -19,6 +19,17 @@ mkdirSync(join(repo, 'codex'), { recursive: true });
 writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# test\n');
 writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# test codex\n');
 writeFileSync(join(repo, 'claude', 'settings.keys.json'), JSON.stringify({ theme: 'auto' }) + '\n');
+writeFileSync(join(repo, 'integrations.json'), JSON.stringify({
+  version: 1,
+  integrations: [{
+    id: 'superpowers-codex',
+    label: 'superpowers',
+    target: 'codex',
+    type: 'plugin',
+    default: true,
+    plugin: 'superpowers@openai-curated',
+  }],
+}) + '\n');
 mkdirSync(claude, { recursive: true });
 mkdirSync(codex, { recursive: true });
 
@@ -49,4 +60,37 @@ test('Codex configuration entries each get a stable, unique id', () => {
     'config:codex:models-static.json',
     'config:codex:config.toml',
   ]);
+});
+
+test('an unavailable Codex CLI warns without invalidating the integrations manifest', async () => {
+  const codexState = {
+    plugins: new Set(),
+    marketplaces: new Set(),
+    errors: ['could not list Codex plugins: could not launch `codex`: ENOENT'],
+  };
+
+  const deps = await defaultInstallDeps('all', { codexState });
+  assert.deepEqual(deps.integrationErrors, []);
+  assert.deepEqual(deps.warnings, codexState.errors);
+
+  const codexPlugin = deps.sections.integrations.items().find((item) => item.id === 'plugin:superpowers-codex');
+  assert.equal(codexPlugin.state, 'blocked');
+  assert.equal(codexPlugin.default, false, 'a command that cannot run must not be selected by --yes');
+});
+
+test('a Claude-only install does not probe the Codex CLI', async () => {
+  let calls = 0;
+  await defaultInstallDeps('claude', {
+    codexProbe: { capture: async () => { calls += 1; return { ok: false, stdout: '', note: 'ENOENT' }; } },
+  });
+  assert.equal(calls, 0);
+});
+
+test('disabled Codex plugins do not require a Codex CLI probe', async () => {
+  let calls = 0;
+  await defaultInstallDeps('all', {
+    probeCodex: false,
+    codexProbe: { capture: async () => { calls += 1; return { ok: false, stdout: '', note: 'ENOENT' }; } },
+  });
+  assert.equal(calls, 0);
 });

@@ -22,6 +22,12 @@ function createTestRepo(prefix = 'nortuscc-setup-repo-') {
   // actionable, same as a genuine manifest gap — and setup would then refuse
   // to proceed without --yes on what these tests expect to be a clean repo.
   writeFileSync(join(repo, 'claude', 'settings.keys.json'), JSON.stringify({ theme: 'auto' }) + '\n');
+  mkdirSync(join(repo, 'bin'), { recursive: true });
+  writeFileSync(join(repo, 'bin', 'nortuscc.mjs'), '#!/usr/bin/env node\n');
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({
+    name: 'nortuscc',
+    bin: { nortuscc: './bin/nortuscc.mjs' },
+  }) + '\n');
   execSync('git add .', { cwd: repo, stdio: 'ignore' });
   execSync('git commit -m "initial"', { cwd: repo, stdio: 'ignore' });
   return repo;
@@ -568,4 +574,171 @@ test('managed setup prints the one-time T3 Code handoff without asking for a sec
   assert.match(output, /\.codex-openrouter/);
   assert.match(output, /OPENROUTER_API_KEY/);
   assert.doesNotMatch(output, /sk-or-/);
+});
+
+test('an npx package launch clones a durable default checkout and installs the command', async () => {
+  const sourceRepo = createTestRepo('nortuscc-bootstrap-source-');
+  const packageDir = mkdtempSync(join(tmpdir(), 'nortuscc-npx-package-'));
+  const { home, claude, codex, agents, state } = createTestHome();
+  const destination = join(home, 'claude-config');
+  const installed = [];
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+    repo: process.env.NORTUSCC_REPO_DIR,
+  };
+  process.env.NORTUSCC_CLAUDE_DIR = claude;
+  process.env.NORTUSCC_CODEX_DIR = codex;
+  process.env.NORTUSCC_STATE_DIR = state;
+  process.env.NORTUSCC_AGENTS_DIR = agents;
+  delete process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    const { run } = await import('../src/commands/setup.mjs');
+    const { readLock } = await import('../src/lock.mjs');
+    const code = await run(
+      [
+        '--repo', sourceRepo,
+        '--target', 'claude',
+        '--yes', '--no-hooks', '--no-mcp', '--no-plugins', '--no-skills',
+      ],
+      {
+        currentRoot: packageDir,
+        resolvedRoot: packageDir,
+        defaultDir: destination,
+        installCli: (root) => installed.push(root),
+        codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
+      },
+    );
+
+    assert.equal(code, 0);
+    assert.ok(existsSync(join(destination, '.git')), 'setup should create a real checkout outside the npm cache');
+    assert.equal(readLock().repo, destination);
+    assert.deepEqual(installed, [destination], 'the persistent checkout should provide the later nortuscc command');
+  } finally {
+    for (const [name, value] of Object.entries({
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_STATE_DIR: saved.state,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_REPO_DIR: saved.repo,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('an npx launch installs the command from an already recorded checkout', async () => {
+  const checkout = createTestRepo('nortuscc-bootstrap-existing-');
+  const packageDir = mkdtempSync(join(tmpdir(), 'nortuscc-npx-package-'));
+  const { claude, codex, agents, state } = createTestHome();
+  const installed = [];
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+    repo: process.env.NORTUSCC_REPO_DIR,
+  };
+  process.env.NORTUSCC_CLAUDE_DIR = claude;
+  process.env.NORTUSCC_CODEX_DIR = codex;
+  process.env.NORTUSCC_STATE_DIR = state;
+  process.env.NORTUSCC_AGENTS_DIR = agents;
+  delete process.env.NORTUSCC_REPO_DIR;
+
+  try {
+    const { writeLock } = await import('../src/lock.mjs');
+    const { run } = await import('../src/commands/setup.mjs');
+    writeLock({ version: 1, repo: checkout, files: {} });
+
+    const code = await run(
+      ['--target', 'claude', '--yes', '--no-hooks', '--no-mcp', '--no-plugins', '--no-skills'],
+      {
+        currentRoot: packageDir,
+        resolvedRoot: checkout,
+        cloneRepo: () => { throw new Error('an existing checkout must not be cloned again'); },
+        installCli: (root) => installed.push(root),
+        codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
+      },
+    );
+
+    assert.equal(code, 0);
+    assert.deepEqual(installed, [checkout]);
+  } finally {
+    for (const [name, value] of Object.entries({
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_STATE_DIR: saved.state,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_REPO_DIR: saved.repo,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('an npx launch refuses to globally install an unrelated checkout', async () => {
+  const unrelated = createTestRepo('nortuscc-bootstrap-unrelated-');
+  writeFileSync(join(unrelated, 'package.json'), JSON.stringify({ name: 'different-package' }) + '\n');
+  const packageDir = mkdtempSync(join(tmpdir(), 'nortuscc-npx-package-'));
+  const { claude, codex, agents, state } = createTestHome();
+  const saved = {
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    codex: process.env.NORTUSCC_CODEX_DIR,
+    state: process.env.NORTUSCC_STATE_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
+    repo: process.env.NORTUSCC_REPO_DIR,
+  };
+  process.env.NORTUSCC_CLAUDE_DIR = claude;
+  process.env.NORTUSCC_CODEX_DIR = codex;
+  process.env.NORTUSCC_STATE_DIR = state;
+  process.env.NORTUSCC_AGENTS_DIR = agents;
+  delete process.env.NORTUSCC_REPO_DIR;
+  let installed = false;
+
+  try {
+    const { run } = await import('../src/commands/setup.mjs');
+    const code = await run([], {
+      currentRoot: packageDir,
+      resolvedRoot: unrelated,
+      installCli: () => { installed = true; },
+    });
+
+    assert.equal(code, 2);
+    assert.equal(installed, false);
+  } finally {
+    for (const [name, value] of Object.entries({
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_CODEX_DIR: saved.codex,
+      NORTUSCC_STATE_DIR: saved.state,
+      NORTUSCC_AGENTS_DIR: saved.agents,
+      NORTUSCC_REPO_DIR: saved.repo,
+    })) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('the Windows bootstrap runs npm through Node instead of a blocked PowerShell script', async () => {
+  const { installGlobalCommand } = await import('../src/commands/setup.mjs');
+  const calls = [];
+  const npmCli = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+  const root = 'C:\\Users\\Ravi Cheema\\claude-config';
+
+  installGlobalCommand(root, {
+    platform: 'win32',
+    node: 'C:\\Program Files\\nodejs\\node.exe',
+    npmExecPath: npmCli,
+    run: (cmd, args) => calls.push({ cmd, args }),
+  });
+
+  assert.deepEqual(calls, [{
+    cmd: 'C:\\Program Files\\nodejs\\node.exe',
+    args: [npmCli, 'install', '--global', '--no-audit', '--no-fund', root],
+  }]);
 });

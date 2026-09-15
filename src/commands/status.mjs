@@ -137,7 +137,7 @@ export async function run(args = [], deps = {}) {
   // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`
   // and `apply --install` are the only paths that act on this.
   const { integrations, allow, errors } = readIntegrations();
-  const adapters = await defaultAdapters({ codexState });
+  const adapters = await defaultAdapters({ codexState, probeCodex: target !== 'claude' });
 
   // Read-only, like everything else here: this walks the machine and compares
   // it against the manifest. Nothing is installed, removed or written.
@@ -145,7 +145,10 @@ export async function run(args = [], deps = {}) {
   const inventory = probe({ target, integrations: selectedIntegrations, codexState: adapters.state });
 
   const planned = errors.length ? [] : integrationPlan({ integrations, target, adapters });
-  const pending = planned.filter((item) => item.state !== 'installed');
+  // Unknown means the native CLI could not answer. Re-running apply cannot
+  // repair that, so report it without calling it a missing installation.
+  const unresolved = planned.filter((item) => item.state !== 'installed');
+  const pending = unresolved.filter((item) => item.state !== 'unknown');
 
   // Versions are reported, never declared: `claude plugin install` has no
   // version flag, so a pin in integrations.json could not be honoured and
@@ -158,13 +161,17 @@ export async function run(args = [], deps = {}) {
   // the place of the pending list or its repair hint, which is the one line
   // that tells a machine with a missing plugin how to fix it.
   const integrationNote = (item) =>
-    showVersions && item.type === 'plugin' ? (versionOf.get(item.plugin) ?? 'unknown') : item.note;
+    item.state === 'unknown'
+      ? item.note
+      : showVersions && item.type === 'plugin'
+        ? (versionOf.get(item.plugin) ?? 'unknown')
+        : item.note;
 
   const integrationLines = errors.length
     ? errors.map((message) => formatRow('manifest', 'invalid', message))
     : planned.length === 0
       ? [formatRow('none declared', 'satisfied', '')]
-      : pending.length === 0
+      : unresolved.length === 0
         ? showVersions
           ? planned.map((item) => formatRow(item.label, item.state, integrationNote(item)))
           : [formatRow('all declared', 'installed', '')]
@@ -172,9 +179,10 @@ export async function run(args = [], deps = {}) {
             // --versions lists every planned item (so an installed plugin's
             // version still prints), never just the pending ones; the hint
             // stays regardless, since something here still needs `apply`.
-            ...(showVersions ? planned : pending).map((item) => formatRow(item.label, item.state, integrationNote(item))),
-            '',
-            '  nortuscc apply --install',
+            ...(showVersions ? planned : unresolved).map(
+              (item) => formatRow(item.label, item.state, integrationNote(item)),
+            ),
+            ...(pending.length ? ['', '  nortuscc apply --install'] : []),
           ];
   process.stdout.write(section('integrations', integrationLines));
 
