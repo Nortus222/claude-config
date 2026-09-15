@@ -218,7 +218,15 @@ export async function installFor(target, args, { takeRepo = false, deps = {}, ma
   const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
   const wiring = deps.sections
     ? deps
-    : await defaultInstallDeps(target, { force: takeRepo, codexState: deps.codexState, manageConfig });
+    : await defaultInstallDeps(target, {
+        force: takeRepo,
+        codexState: deps.codexState,
+        codexProbe: deps.codexProbe,
+        manageConfig,
+        probeCodex: target !== 'claude' && !flags.disabled?.has('plugins'),
+      });
+
+  for (const message of wiring.warnings ?? []) console.error(`nortuscc: ${message}`);
 
   if (wiring.integrationErrors?.length) {
     for (const message of wiring.integrationErrors) console.error(`nortuscc: ${message}`);
