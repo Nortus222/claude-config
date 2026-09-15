@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'update'];
+const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'update', 'uninstall'];
 
 const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
 Usage: nortuscc <command> [--target claude|codex|all] [options]
 
-Every command accepts --target. It selects which agent's configuration is read
-or written; the default is 'all', meaning both Claude and Codex.
+Most commands accept --target. It selects which agent's configuration is read
+or written; the default is 'all', meaning both Claude and Codex. Uninstall is
+machine-wide and accepts only --target all.
 
 Skills-only machines (use this repo's skill set, keep your own agent configuration):
   --skills-only                     record it; configuration files are then
@@ -36,6 +37,10 @@ Installation (setup and apply --install):
                                     --take-local resolves a conflict by keeping the local version
   pull                              git pull --ff-only, then apply
   push -m MSG                       capture, then commit and push
+  uninstall --yes [--force]         restore or remove managed configuration,
+                                    then switch this machine to skills-only mode
+                                    integrations, skills and the repo stay installed;
+                                    --target must be all
 
 Examples:
   nortuscc status --target codex    report only what Codex owns
