@@ -186,7 +186,7 @@ OpenRouter config. Apply preserves them, including with `--take-repo`; changes t
 the remaining settings still use the usual conflict checks. This exception applies
 only to `~/.codex-openrouter/config.toml`.
 
-The accompanying static catalog limits the picker to the two OpenRouter models
+The accompanying static catalog limits the picker to the configured OpenRouter models
 used here and avoids Codex replacing a failed remote catalog refresh with its
 built-in OpenAI model list. Update `codex/openrouter-glm/models-static.json` to
 change that shared allowlist.

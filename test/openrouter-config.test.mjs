@@ -66,7 +66,7 @@ test('apply --target codex installs the restricted OpenRouter Codex home without
     const models = JSON.parse(readFileSync(catalog, 'utf8')).models;
     assert.deepEqual(
       models.map(({ slug }) => slug).sort(),
-      ['meta/muse-spark-1.3-contributor', 'z-ai/glm-5.3-flash'].sort(),
+      ['meta/muse-spark-1.3-contributor', 'stealth/union-alpha', 'z-ai/glm-5.3-flash'].sort(),
     );
     assert.ok(models.every(({ base_instructions: instructions }) => instructions.length > 0));
     assert.ok(models.every(({ supports_parallel_tool_calls: supported }) => supported === true));
