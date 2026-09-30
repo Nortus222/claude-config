@@ -353,6 +353,8 @@ test('a non-TTY setup without --yes refuses and installs nothing', async () => {
   assert.equal(result.code, 2);
   assert.match(result.stderr, /--yes/);
   assert.deepEqual(readInstallerLog(env), []);
+  assert.equal(existsSync(join(env.claude, 'CLAUDE.md')), false);
+  assert.equal(existsSync(join(env.codex, 'AGENTS.md')), false);
 });
 
 test('state lands in the neutral location, never inside an agent directory', async () => {

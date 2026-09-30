@@ -1,5 +1,5 @@
 import { SYNC } from './manifest.mjs';
-import { entriesForTarget } from './targets.mjs';
+import { configEntries, parseConfigMode } from './config-mode.mjs';
 import { resolveEntry } from './resolve.mjs';
 import { readLock, writeLock } from './lock.mjs';
 import { inspectCopy, applyCopy } from './copy.mjs';
@@ -17,11 +17,11 @@ import { installGroups, agentIdsFor } from './skills-cli.mjs';
 // Exported so tests can pin real id generation (config:<target>:<dest>) —
 // a hand-written fixture cannot catch a regression that reintroduces a
 // target-only id and lets the picker select two entries together.
-export function configSection(target, { force = false, manageConfig = true } = {}) {
+export function configSection(target, { force = false, manageConfig = true, configTargets = parseConfigMode([]).configTargets } = {}) {
   // A skills-only machine offers no instruction files to install, so the
   // section is empty rather than absent — runInstall counts items, and an
   // empty section is already the "nothing to do here" it understands.
-  const entries = manageConfig ? entriesForTarget(SYNC, target) : [];
+  const entries = manageConfig ? configEntries(SYNC, target, configTargets) : [];
 
   return {
     items: () =>
@@ -116,7 +116,8 @@ function skillSection(target) {
         category: 'skills',
         label: skill.name,
         state: 'missing',
-        default: true,
+        default: !skill.optional,
+        note: skill.optional ? 'optional skill, select to install' : '',
         source: skill.source,
         describe: `npx skills add ${skill.source} --skill ${skill.name} --agent ${agents.join(' ')}`,
       })),
@@ -143,6 +144,7 @@ export async function defaultInstallDeps(
     codexState,
     codexProbe,
     manageConfig = true,
+    configTargets = parseConfigMode([]).configTargets,
     probeCodex = target !== 'claude',
   } = {},
 ) {
@@ -154,7 +156,7 @@ export async function defaultInstallDeps(
     integrationErrors: integrations.errors,
     warnings: resolved.errors ?? [],
     sections: {
-      config: configSection(target, { force, manageConfig }),
+      config: configSection(target, { force, manageConfig, configTargets }),
       integrations,
       skills: skillSection(target),
     },

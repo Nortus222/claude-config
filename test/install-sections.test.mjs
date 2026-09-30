@@ -94,3 +94,17 @@ test('disabled Codex plugins do not require a Codex CLI probe', async () => {
   });
   assert.equal(calls, 0);
 });
+
+test('private optional skills are offered unchecked while public skills remain defaults', async () => {
+  writeFileSync(join(repo, 'skills-manifest.txt'), '[public/skills]\npublic\n[private/skills] optional\nprivate\n');
+  try {
+    const deps = await defaultInstallDeps('claude');
+    const items = deps.sections.skills.items();
+    assert.equal(items.find((item) => item.label === 'public').default, true);
+    const optional = items.find((item) => item.label === 'private');
+    assert.equal(optional.default, false);
+    assert.match(optional.note, /optional/);
+  } finally {
+    writeFileSync(join(repo, 'skills-manifest.txt'), '');
+  }
+});

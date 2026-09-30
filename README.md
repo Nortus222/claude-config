@@ -18,59 +18,85 @@ macOS or Linux:
 npx --yes github:Nortus222/claude-config setup
 ```
 
+The command opens an interactive setup. No extra arguments are needed:
+
+1. Choose skills alone, or skills with Claude configuration, Codex configuration,
+   or both. Select neither row for skills alone. Claude includes `CLAUDE.md` and
+   owned settings; Codex includes `AGENTS.md` and the OpenRouter provider files.
+2. Review prerequisites. Missing Git, Node.js/npm/npx, GitHub CLI, Claude Code CLI,
+   and Codex CLI each get a separate installation prompt. Installed tools are
+   not reinstalled. GitHub CLI, Claude Code and Codex each get an optional
+   account setup prompt. Authentication stays with the tool that owns it.
+3. Review the integrations and skills, then confirm installation. The three
+   Nortus skills, `deploy-mobile-apps`, `explain`, and `share-artifacts`, are
+   unchecked by default. Select them explicitly to install them.
+
+Setup saves the configuration choice before copying any agent files. Later
+`apply`, `capture`, `pull`, and `status` respect it, including when only one
+agent's configuration is selected. Skills alone also declines integrations for
+that setup run. The integration and skill picker still lets you review individual
+items when configuration is selected.
+
 The command clones the repo to `~/claude-config`, installs `nortuscc` from that
-checkout, migrates any older machine state, and opens a selector for the files,
-integrations, and skills to install. Pass `--dir PATH` to choose a different
-checkout location. Restart the affected agent afterwards to load the rules.
+checkout, and migrates any older machine state. Pass `--dir PATH` to choose a
+different checkout location. Restart the affected agent afterwards to load the
+rules. Cancelling the initial configuration picker writes no configuration.
+
+Prerequisite installation uses Homebrew on macOS and WinGet on Windows. If the
+package manager is missing, setup prints its installation link. Declining an
+optional tool continues setup; a selected installation or account setup that
+fails reports the failure and stops before copying configuration. Linux keeps
+interactive selection and provides manual prerequisite installation links.
 
 Use `npx.cmd` in PowerShell so Windows runs npm's command wrapper directly.
-This works when PowerShell's execution policy blocks `npx.ps1`; no policy
-change or nested PowerShell session is needed.
+This works when PowerShell's execution policy blocks `npx.ps1`. The installed
+command is `nortuscc` on macOS, Linux, and Command Prompt; in PowerShell use
+`nortuscc.cmd`.
 
-If the standalone `codex` executable is not on `PATH`, setup reports its native
-plugin state as unknown and continues with configuration and shared skills. It
-does not mislabel that runtime problem as an invalid `integrations.json`.
+### Without Node.js or Git
 
-The installed command is `nortuscc` in Command Prompt, macOS, and Linux. In
-PowerShell, use `nortuscc.cmd` so the execution policy does not select npm's
-PowerShell shim.
+Download the bootstrap script, then run it from a terminal. It asks before
+installing Node.js with npm and npx, and before installing Git. Each has its
+own prompt. The script then opens the same interactive setup.
 
-Without a terminal to choose on, `setup` refuses rather than picking for you:
-pass `--yes` to accept the defaults, or `--no-hooks` / `--no-mcp` /
-`--no-plugins` / `--no-skills` to decline categories.
-
-If `--dir` already exists it must be a git checkout — an interrupted clone
-leaves the directory behind, and syncing from a half-made one would record a
-repo path that every later command silently resolves away from. `setup` refuses
-it instead: remove the directory and re-run.
-
-### Using it for skills alone
-
-This repo's `claude/CLAUDE.md` and `codex/AGENTS.md` are one person's rules. If
-you are here for the skill set and have instruction files of your own, say so
-once:
+macOS:
 
 ```bash
-npx --yes github:Nortus222/claude-config setup --skills-only
+curl -fsSL https://raw.githubusercontent.com/Nortus222/claude-config/main/setup.sh -o /tmp/nortuscc-setup.sh
+bash /tmp/nortuscc-setup.sh
 ```
 
-In PowerShell, use the same command with `npx.cmd` in place of `npx`.
+Windows PowerShell:
 
-The choice is recorded in machine state, so every later command honours it with
-no flag to remember — `apply` never writes your `CLAUDE.md`, and `capture` never
-publishes it into the repo. `status` reports the section as `skills-only`
-rather than staying silent, because silence would read as "clean" when nothing
-has looked at those files at all.
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/Nortus222/claude-config/main/setup.ps1 -OutFile "$env:TEMP\nortuscc-setup.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\nortuscc-setup.ps1"
+```
 
-Integrations and skills stay managed. Decline those per install with
-`--no-hooks` / `--no-mcp` / `--no-plugins` / `--no-skills`, or point the repo at
-your own fork and edit `skills-manifest.txt`.
+The PowerShell execution-policy override applies only to this bootstrap process.
+The Node-based setup uses command wrappers or application executables directly.
+If Homebrew or WinGet is missing, the script prints official installation links.
 
-For a literal skills-only first run, with no native plugin or MCP setup, add
-`--no-hooks --no-mcp --no-plugins`.
+### Scripted setup
 
-`--with-config` syncs config for a single run without changing the setting;
-`--no-skills-only` records it off for good.
+Without a terminal, `setup` exits 2 before copying configuration. Pass `--yes`
+to use the saved configuration choice, or both agents on a new machine. It
+accepts default-selected integrations and skills but never installs prerequisites,
+starts authentication, or selects optional Nortus skills.
+
+Existing automation flags remain supported:
+
+```bash
+npx --yes github:Nortus222/claude-config setup --yes --skills-only --no-hooks --no-mcp --no-plugins
+```
+
+`--skills-only` records that configuration is unmanaged. `--with-config` syncs
+all requested agent configuration for one run without changing the saved choice;
+`--no-skills-only` restores configuration management for both agents.
+`--no-hooks`, `--no-mcp`, `--no-plugins`, and `--no-skills` decline categories.
+
+If `--dir` already exists, it must be a nortuscc git checkout. Setup refuses an
+interrupted clone or unrelated checkout rather than saving an unusable path.
 
 ## Targets
 
@@ -85,7 +111,7 @@ An invalid or repeated `--target` exits 2 before anything is read or written.
 
 `--target` picks *which* agent, never *whether*. To manage no agent configuration
 at all — this repo's skills, your own rules — see
-[Using it for skills alone](#using-it-for-skills-alone):
+[Scripted setup](#scripted-setup):
 
 ```bash
 nortuscc apply --skills-only     # record it; instruction and provider files are left alone
@@ -113,7 +139,7 @@ this ships.
 
 | Command | Effect |
 | --- | --- |
-| `setup [--repo URL] [--dir PATH] [--skills-only]` | Clone if absent, install the command, apply, then install interactively |
+| `setup [--repo URL] [--dir PATH]` | Choose configuration, review prerequisites, clone if absent, then install selected items |
 | `status [--strict] [--versions]` | Report: cli, config, integrations, skills, undeclared. `--strict` exits non-zero on undeclared items; `--versions` shows each plugin's installed version. Offers to update nortuscc when behind |
 | `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
@@ -242,8 +268,8 @@ It is written atomically (temp file plus rename), so an interrupted write can
 never leave a half-parsed file that makes every managed file look unsynced.
 
 It records where the repo lives, a baseline hash per synced file, and
-`skillsOnly` — the [skills-only](#using-it-for-skills-alone) setting. That last
-one is read strictly: anything but a literal `true` means this machine manages
+`skillsOnly`, plus `configTargets` when an interactive choice has been recorded.
+`skillsOnly` is read strictly: anything but a literal `true` means this machine manages
 its instruction files, which is what every state record written before the flag
 existed was describing.
 
@@ -297,6 +323,23 @@ belong on every machine and which repo each installs from; `nortuscc` drives
 `npx skills` to fetch them into the shared store at `~/.agents/skills`, which is
 where Codex looks natively and where Claude's installation points.
 
+### Optional skills
+
+The `optional` source marker keeps the Nortus group unchecked in setup and
+`apply --install`. `--yes` skips it. Missing optional skills appear as
+informational rows in `status` and do not make the command fail. Once installed,
+these skills still participate in updates and exposure checks. Capture retains
+optional declarations even when the skills are absent locally.
+
+```text
+[Nortus222/agent-skills] optional
+deploy-mobile-apps
+explain
+share-artifacts
+```
+
+A source may combine `exact optional` to limit discovery and require opt-in.
+
 ### Exact sources
 
 By default `update` lists a source repo and offers everything in it that is not
@@ -311,9 +354,9 @@ unslop
 
 An exact source is still checked for updates — the tree SHA of each named skill
 is still compared — but the repo is never listed, so the other 81 are neither
-offered nor paid for. `exact` is the only marker; a source without it keeps
-being scanned, and an unrecognised marker leaves the source unpinned rather than
-failing the read. `capture` carries the marker across when it rewrites the file.
+offered nor paid for. A source without `exact` keeps being scanned. The
+`optional` marker independently controls default selection; unknown markers
+are ignored. `capture` carries the marker across when it rewrites the file.
 
 There is **one** shared store, and installs name their agents explicitly:
 

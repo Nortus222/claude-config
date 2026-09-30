@@ -921,6 +921,34 @@ test('the manifest is left alone when nothing was adopted or pruned', async () =
   assert.equal(written, null, 'a plain refresh changes no manifest entry');
 });
 
+test('pruning an optional skill removes its declaration while preserving unselected optional skills', async () => {
+  const manifest = join(fixtureRepo, 'skills-manifest.txt');
+  writeFileSync(manifest, '[o/r] optional\nfresh\nstale\nunselected\n');
+  let pruned = false;
+  let written = null;
+  try {
+    await run(['--yes', '--prune'], AVAILABLE_DEPS({
+      inspectSource: async () => ({
+        trees: new Map([['s/stale', null], ['s/fresh', 'same']]),
+        skillPaths: ['s/fresh/SKILL.md'],
+      }),
+      readLock: () => ({ skills: {
+        fresh: entry('s/fresh', 'same'),
+        ...(!pruned ? { stale: entry('s/stale', 'old') } : {}),
+      } }),
+      installed: () => pruned ? ['fresh'] : ['fresh', 'stale'],
+      runRemove: async () => { pruned = true; return true; },
+      writeManifest: (text) => { written = text; },
+    }));
+    assert.ok(written);
+    assert.doesNotMatch(written, /^stale$/m);
+    assert.match(written, /^unselected$/m);
+    assert.match(written, /^\[o\/r\] optional$/m);
+  } finally {
+    rmSync(manifest, { force: true });
+  }
+});
+
 // The refusal branch of manifestOutcome is the thing protecting every other
 // machine's manifest from one machine's incomplete skill set — and nothing
 // exercised it through `run` before this: `fixtureRepo` is an empty temp dir

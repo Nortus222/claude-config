@@ -4,10 +4,12 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { readLock, writeLock, migrateLegacyState } from '../lock.mjs';
 import { repoRoot, moduleRoot, isGitCheckout, statePath } from '../resolve.mjs';
-import { parseTarget } from '../targets.mjs';
+import { parseTarget, selectedTargets } from '../targets.mjs';
 import { run as applyRun, installFor } from './apply.mjs';
 import { run as statusRun } from './status.mjs';
 import { parseConfigMode } from '../config-mode.mjs';
+import { select as realSelect } from '../select.mjs';
+import { parseInstallFlags } from '../install-plan.mjs';
 
 const DEFAULT_REPO = 'https://github.com/Nortus222/claude-config.git';
 
@@ -62,12 +64,50 @@ function flag(args, name) {
 export async function run(allArgs = [], deps = {}) {
   // setup is where a machine says what it wants managed, so it is the one
   // command that records the choice rather than merely honouring it.
-  const { rest: modeArgs, persist, manageConfig } = parseConfigMode(allArgs);
+  let { rest: modeArgs, persist, manageConfig, configTargets } = parseConfigMode(allArgs);
 
   const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
     console.error(`nortuscc: ${error}`);
     return 2;
+  }
+
+  const isTTY = deps.isTTY ?? process.stdin.isTTY;
+  const flags = parseInstallFlags(args.filter((arg) => arg === '--yes' || arg.startsWith('--no-')));
+  if (flags.error || args.includes('--take-local')) {
+    console.error(`nortuscc: ${flags.error ?? 'Use capture --take-local to keep local configuration.'}`);
+    return 2;
+  }
+  if (!isTTY && !flags.yes) {
+    console.error('nortuscc: no terminal to choose on. Re-run with --yes to accept the defaults.');
+    return 2;
+  }
+
+  let choseConfig = false;
+  if (isTTY && !flags.yes && persist === null && !allArgs.includes('--with-config')) {
+    const choices = selectedTargets(target).map((agent) => ({
+      key: agent,
+      group: 'agent configuration',
+      label: agent === 'claude' ? 'Claude: CLAUDE.md and settings' : 'Codex: AGENTS.md and provider files',
+      note: '',
+      checked: manageConfig && configTargets.includes(agent),
+    }));
+    console.log('Skills are offered next. Select neither configuration for skills alone, one agent, or both.');
+    const keys = await (deps.selectConfig ?? realSelect)(choices, { title: 'choose which agent configuration to manage', isTTY });
+    if (keys === null) {
+      console.log('cancelled; no configuration was changed');
+      return 0;
+    }
+    configTargets = choices.filter((row) => keys.includes(row.key)).map((row) => row.key);
+    manageConfig = configTargets.length > 0;
+    persist = !manageConfig;
+    choseConfig = true;
+  }
+
+  if (isTTY && !flags.yes) {
+    const { setupPrerequisites } = await import('../prerequisites.mjs');
+    const prerequisites = await setupPrerequisites({ ...deps.prerequisites, isTTY, confirm: deps.prerequisites?.confirm ?? deps.confirm });
+    if (prerequisites !== 0) return prerequisites;
   }
 
   // setup repairs stale state itself by choosing a durable checkout below, so
@@ -164,6 +204,8 @@ export async function run(allArgs = [], deps = {}) {
   const lock = readLock();
   lock.repo = root;
   if (persist !== null) lock.skillsOnly = persist;
+  if (choseConfig) lock.configTargets = configTargets;
+  else if (persist === false) delete lock.configTargets;
   writeLock(lock);
 
   if (!manageConfig) {
@@ -175,10 +217,11 @@ export async function run(allArgs = [], deps = {}) {
   // of apply, and would otherwise drop it and reconcile both agents on a
   // `setup --target codex`.
   const forwarded = ['--target', target, ...args.filter((a) => a.startsWith('--take-'))];
-  const applied = await applyRun(forwarded);
+  const runMode = allArgs.includes('--with-config') ? ['--with-config'] : [];
+  const applied = await applyRun([...forwarded, ...runMode]);
   if (applied !== 0) return applied;
 
-  if (manageConfig && target !== 'claude') {
+  if (manageConfig && configTargets.includes('codex') && target !== 'claude') {
     process.stdout.write(
       '\nT3 Code provider handoff:\n' +
         '  Display name: Codex · GLM Flash\n' +
@@ -191,13 +234,15 @@ export async function run(allArgs = [], deps = {}) {
   // setup always offers the full workflow: a bare machine is exactly when
   // integrations and skills are wanted. Re-running it is idempotent, because
   // everything already in place is offered as satisfied and never reinstalled.
-  const installed = await installFor(target, args, {
+  const installArgs = choseConfig && !manageConfig ? [...args, '--no-hooks', '--no-mcp', '--no-plugins'] : args;
+  const installed = await installFor(target, installArgs, {
     takeRepo: args.includes('--take-repo'),
     deps,
     manageConfig,
+    configTargets,
   });
   if (installed !== 0) return installed;
 
   console.log('\n--- status ---');
-  return await statusRun(['--target', target], deps);
+  return await statusRun(['--target', target, ...runMode], deps);
 }

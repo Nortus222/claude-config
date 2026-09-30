@@ -47,6 +47,9 @@ function parseState(text) {
     version: parsed.version ?? LOCK_VERSION,
     repo: parsed.repo ?? null,
     skillsOnly: parsed.skillsOnly === true,
+    ...(Array.isArray(parsed.configTargets)
+      && parsed.configTargets.every((target) => ['claude', 'codex'].includes(target))
+      ? { configTargets: [...new Set(parsed.configTargets)] } : {}),
     files: parsed.files,
   };
 }

@@ -20,7 +20,7 @@ import {
 } from '../skills.mjs';
 import { agentIdsFor } from '../skills-cli.mjs';
 import { readLinkExposure } from '../skill-links.mjs';
-import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
+import { parseConfigMode, configEntries, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 import { cliVersion } from '../cli-version.mjs';
 import { confirm as realConfirm } from '../prompt.mjs';
 import { run as realPull } from './pull.mjs';
@@ -81,7 +81,7 @@ export async function run(args = [], deps = {}) {
 
   // Before --target, so a global flag never reaches the target parser as a
   // stray value.
-  const { rest: modeArgs, manageConfig } = parseConfigMode(args);
+  const { rest: modeArgs, manageConfig, configTargets } = parseConfigMode(args);
 
   const { target, rest: statusArgs, error } = parseTarget(modeArgs);
   if (error) {
@@ -120,7 +120,7 @@ export async function run(args = [], deps = {}) {
   // A skills-only machine reports the section as unmanaged rather than
   // omitting it: silence would read as "clean", which is the one thing it is
   // not — nothing here has looked at those files at all.
-  const rows = manageConfig ? configReport(entriesForTarget(SYNC, target)) : [];
+  const rows = manageConfig ? configReport(configEntries(SYNC, target, configTargets)) : [];
   // A row carrying its own note (a refused repo file's validation message) is
   // literal text from the repo, not a state to look up — noteFor only knows
   // how to phrase the fixed set of states it switches on.
@@ -132,6 +132,11 @@ export async function run(args = [], deps = {}) {
   const lines = manageConfig
     ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r), configWidth))
     : [formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE)];
+  if (manageConfig) {
+    for (const agent of target === 'all' ? ['claude', 'codex'] : [target]) {
+      if (!configTargets.includes(agent)) lines.push(formatRow(`${agent} configuration`, 'unmanaged', 'not selected on this machine'));
+    }
+  }
   process.stdout.write('\n' + section('config', lines));
 
   // Read-only: integrationPlan inspects, it never installs. `nortuscc setup`
@@ -192,8 +197,13 @@ export async function run(args = [], deps = {}) {
     installedNames: installedSkillNames(),
   });
   const skillLines = [];
-  if (skills.missing.length) {
-    skillLines.push(formatRow('missing', String(skills.missing.length), skills.missing.map((m) => m.name).join(', ')));
+  const requiredMissing = skills.missing.filter((skill) => !skill.optional);
+  const optionalMissing = skills.missing.filter((skill) => skill.optional);
+  if (requiredMissing.length) {
+    skillLines.push(formatRow('missing', String(requiredMissing.length), requiredMissing.map((m) => m.name).join(', ')));
+  }
+  if (optionalMissing.length) {
+    skillLines.push(formatRow('optional', String(optionalMissing.length), optionalMissing.map((m) => m.name).join(', ')));
   }
   if (skills.extra.length) {
     skillLines.push(formatRow('extra', String(skills.extra.length), skills.extra.join(', ')));
@@ -234,7 +244,7 @@ export async function run(args = [], deps = {}) {
   // what the store lacks and would find nothing to do for a skill already in
   // it; re-placing that skill into an agent's directory is `update`'s job.
   const repairs = [];
-  if (skills.missing.length) repairs.push('  nortuscc apply --install');
+  if (requiredMissing.length) repairs.push('  nortuscc apply --install');
   if (exposure.partial.length || exposure.missing.length) repairs.push('  nortuscc update');
   if (repairs.length) skillLines.push('', ...repairs);
   process.stdout.write(section('skills', skillLines));
@@ -293,7 +303,7 @@ export async function run(args = [], deps = {}) {
     actionable.length > 0 ||
     errors.length > 0 ||
     pending.length > 0 ||
-    skills.missing.length > 0 ||
+    requiredMissing.length > 0 ||
     exposure.partial.length > 0 ||
     exposure.missing.length > 0 ||
     exposureErrors.length > 0;
