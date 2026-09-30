@@ -6,6 +6,8 @@
   "description": "Keep a machine's Claude and Codex configuration, integrations and skill set in agreement with claude-config",
   "files": [
     "bin/",
+    "setup.sh",
+    "setup.ps1",
     "src/",
     "claude/",
     "codex/",

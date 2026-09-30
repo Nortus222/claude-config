@@ -16,8 +16,9 @@ Skills-only machines (use this repo's skill set, keep your own agent configurati
   --with-config                     manage config for this one run
 
 Commands:
-  setup [--repo URL] [--dir PATH]   clone if absent, install this command, apply,
-                                    then install interactively; npx defaults to
+  setup [--repo URL] [--dir PATH]   choose skills alone or either/both agent configs,
+                                    offer missing tools and account setup one by one,
+                                    then install selected items; npx defaults to
                                     ~/claude-config when --dir is omitted
   status [--strict] [--versions]    report: cli / config / integrations / skills
                                     and what is installed but undeclared
@@ -29,7 +30,8 @@ Commands:
                                     --take-repo resolves a conflict by discarding the local version
 
 Installation (setup and apply --install):
-  --yes                             accept the defaults without opening the selector
+  --yes                             accept the saved config choice and default items
+                                    skips prerequisite installation and authentication
                                     (required when there is no terminal to choose on)
   --no-hooks --no-mcp               decline a whole category
   --no-plugins --no-skills

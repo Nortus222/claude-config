@@ -1,13 +1,13 @@
 import { writeFileSync } from 'node:fs';
 import { SYNC } from '../manifest.mjs';
-import { parseTarget, entriesForTarget } from '../targets.mjs';
+import { parseTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { captureCopy } from '../copy.mjs';
 import { captureMerge } from '../merge-keys.mjs';
 import { formatRow, section } from '../report.mjs';
 import { installedGroups, emitManifest, readSkillLock, manifestPath, readSkillsManifest, installedSkillNames } from '../skills.mjs';
-import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
+import { parseConfigMode, configEntries, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 
 let lastCaptured = [];
 
@@ -18,7 +18,7 @@ export function capturedPaths() {
 }
 
 export async function run(allArgs = [], entries = SYNC) {
-  const { rest: modeArgs, manageConfig } = parseConfigMode(allArgs);
+  const { rest: modeArgs, manageConfig, configTargets } = parseConfigMode(allArgs);
 
   const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
@@ -27,7 +27,7 @@ export async function run(allArgs = [], entries = SYNC) {
   }
   // Skills-only cuts both directions. A machine whose configuration is its own
   // must not push it into the repo either.
-  const selected = manageConfig ? entriesForTarget(entries, target) : [];
+  const selected = manageConfig ? configEntries(entries, target, configTargets) : [];
 
   const takeLocal = args.includes('--take-local');
   const takeRepo = args.includes('--take-repo');

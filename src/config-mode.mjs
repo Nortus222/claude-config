@@ -1,4 +1,5 @@
 import { readLock } from './lock.mjs';
+import { TARGETS, entriesForTarget } from './targets.mjs';
 
 // Whether this machine lets nortuscc manage agent configuration at all. A
 // machine that installed this CLI for its skill set alone keeps its own rules
@@ -38,9 +39,11 @@ export function parseConfigMode(allArgs, { recorded } = {}) {
   // A flag that sets the mode also takes effect on the run that sets it, so
   // `setup --skills-only` never writes a configuration file on its way to
   // recording that it should not.
-  const skillsOnly = persist ?? recorded ?? readLock().skillsOnly === true;
+  const lock = recorded === undefined && persist === null ? readLock() : {};
+  const skillsOnly = persist ?? recorded ?? lock.skillsOnly === true;
+  const configTargets = once || persist === false ? [...TARGETS] : (lock.configTargets ?? [...TARGETS]);
 
-  return { rest, persist, skillsOnly, manageConfig: once || !skillsOnly };
+  return { rest, persist, skillsOnly, manageConfig: once || !skillsOnly, configTargets };
 }
 
 // The row every command prints in place of its config section, so "not managed
@@ -48,3 +51,8 @@ export function parseConfigMode(allArgs, { recorded } = {}) {
 export const SKIPPED_LABEL = 'configuration';
 export const SKIPPED_STATE = 'skills-only';
 export const SKIPPED_NOTE = 'not managed on this machine';
+
+// Configuration selection does not narrow shared skills or native integrations.
+export function configEntries(entries, target, configTargets) {
+  return entriesForTarget(entries, target).filter((entry) => configTargets.includes(entry.target));
+}

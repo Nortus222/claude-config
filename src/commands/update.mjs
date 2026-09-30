@@ -360,8 +360,13 @@ export async function run(allArgs = [], deps = {}) {
   // ran, rather than diffing what we intended to do.
   if (actions.add.length || actions.remove.length) {
     const before = readSkillsManifest();
-    const groups = installedGroups(readLock(), installed(), before);
-    const outcome = manifestOutcome({ before, groups, prunedNames: removeOk ? actions.remove : [] });
+    const prunedNames = removeOk ? actions.remove : [];
+    // Preserve unselected optional choices, but retire explicitly pruned ones.
+    const declared = before.map((group) => group.optional
+      ? { ...group, skills: group.skills.filter((name) => !prunedNames.includes(name)) }
+      : group).filter((group) => group.skills.length > 0);
+    const groups = installedGroups(readLock(), installed(), declared);
+    const outcome = manifestOutcome({ before, groups, prunedNames });
     if (outcome.write) {
       writeManifest(emitManifest(groups));
       process.stdout.write(`\nskills-manifest.txt written — ${outcome.reason}\n`);

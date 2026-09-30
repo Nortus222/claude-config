@@ -70,7 +70,7 @@ test('setup updates lock.repo with the repo root', async () => {
     const { run } = await import('../src/commands/setup.mjs');
     const { readLock } = await import('../src/lock.mjs');
 
-    const code = await run([]);
+    const code = await run(['--yes']);
     assert.equal(code, 0);
     const lock = readLock();
     assert.equal(lock.repo, testRepo);
@@ -104,7 +104,7 @@ test('when apply returns non-zero, setup short-circuits before status (no banner
     const { run } = await import('../src/commands/setup.mjs');
 
     // First run: establish baseline
-    let code = await run([]);
+    let code = await run(['--yes']);
     assert.equal(code, 0);
 
     // Create conflict
@@ -122,7 +122,7 @@ test('when apply returns non-zero, setup short-circuits before status (no banner
     };
 
     try {
-      code = await run([]);
+      code = await run(['--yes']);
       process.stdout.write = originalWrite;
 
       // Probe B: verify apply exit code is propagated
@@ -165,7 +165,7 @@ test('lock.repo is used as fallback', async () => {
     const { run } = await import('../src/commands/setup.mjs');
     const { repoRoot } = await import('../src/resolve.mjs');
 
-    let code = await run([]);
+    let code = await run(['--yes']);
     assert.equal(code, 0);
 
     // Now delete the env var and verify lock.repo is used
@@ -318,7 +318,7 @@ test('setup runs the shared install workflow, which is a no-op when nothing is m
     try {
       // The closing status run would otherwise ask the real installer which
       // agents can see `known-skill` — a network call this suite must not make.
-      code = await run([], {
+      code = await run(['--yes'], {
         inspectExposure: async () => ({
           list: { 'claude-code': ['known-skill'], codex: ['known-skill'] },
           errors: [],
@@ -376,7 +376,7 @@ test('setup forwards --take-repo to apply, resolving a conflict', async () => {
     const { run } = await import('../src/commands/setup.mjs');
 
     // Baseline run establishes the lockfile's recorded hash for CLAUDE.md.
-    let code = await run([]);
+    let code = await run(['--yes']);
     assert.equal(code, 0);
 
     // Genuine conflict: both sides change CLAUDE.md after the baseline.
@@ -388,7 +388,7 @@ test('setup forwards --take-repo to apply, resolving a conflict', async () => {
     // Forward --take-repo through setup. Only true when the flag reaches
     // apply: the conflict resolves in the repo's favor instead of being
     // refused.
-    code = await run(['--take-repo']);
+    code = await run(['--take-repo', '--yes']);
     assert.equal(code, 0, '--take-repo should resolve the conflict once forwarded to apply');
 
     const resolved = readFileSync(join(claude, 'CLAUDE.md'), 'utf8');
@@ -444,7 +444,7 @@ test('setup --dir pointing at an existing directory does not attempt to clone', 
 
     let code;
     try {
-      code = await run(['--dir', existingRepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
+      code = await run(['--yes', '--dir', existingRepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
     } finally {
       process.stdout.write = originalWrite;
     }
@@ -509,7 +509,7 @@ test('setup --dir naming an existing non-git directory is refused and lock.repo 
 
     let code;
     try {
-      code = await run(['--dir', notARepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
+      code = await run(['--yes', '--dir', notARepo, '--repo', 'file:///nortuscc-test-should-never-be-cloned']);
     } finally {
       process.stdout.write = originalWrite;
     }
@@ -702,7 +702,7 @@ test('an npx launch refuses to globally install an unrelated checkout', async ()
 
   try {
     const { run } = await import('../src/commands/setup.mjs');
-    const code = await run([], {
+    const code = await run(['--yes'], {
       currentRoot: packageDir,
       resolvedRoot: unrelated,
       installCli: () => { installed = true; },
@@ -742,3 +742,43 @@ test('the Windows bootstrap runs npm through Node instead of a blocked PowerShel
     args: [npmCli, 'install', '--global', '--no-audit', '--no-fund', root],
   }]);
 });
+
+for (const selected of [[], ['claude'], ['codex'], ['claude', 'codex'], null]) {
+  test(`interactive setup protects files before selection: ${JSON.stringify(selected)}`, async () => {
+    const repo = createTestRepo('nortuscc-interactive-config-');
+    const { claude, codex, agents, state } = createTestHome();
+    const overrides = { NORTUSCC_CLAUDE_DIR: claude, NORTUSCC_CODEX_DIR: codex,
+      NORTUSCC_AGENTS_DIR: agents, NORTUSCC_STATE_DIR: state, NORTUSCC_REPO_DIR: repo };
+    const saved = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, overrides);
+    try {
+      const { run } = await import('../src/commands/setup.mjs');
+      const { readLock } = await import('../src/lock.mjs');
+      const code = await run([], {
+        isTTY: true,
+        selectConfig: async (choices) => {
+          assert.equal(existsSync(join(claude, 'CLAUDE.md')), false);
+          assert.equal(existsSync(join(codex, 'AGENTS.md')), false);
+          assert.deepEqual(choices.map((row) => row.key), ['claude', 'codex']);
+          return selected;
+        },
+        prerequisites: { tools: [] },
+        codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
+        cliState: () => ({ state: 'current' }),
+      });
+      assert.equal(code, 0);
+      if (selected === null) {
+        assert.equal(existsSync(join(state, 'state.json')), false);
+      } else {
+        assert.deepEqual(readLock().configTargets, selected);
+        assert.equal(readLock().skillsOnly, selected.length === 0);
+      }
+      assert.equal(existsSync(join(claude, 'CLAUDE.md')), selected?.includes('claude') ?? false);
+      assert.equal(existsSync(join(codex, 'AGENTS.md')), selected?.includes('codex') ?? false);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+}

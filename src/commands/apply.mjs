@@ -1,5 +1,5 @@
 import { SYNC } from '../manifest.mjs';
-import { parseTarget, entriesForTarget } from '../targets.mjs';
+import { parseTarget } from '../targets.mjs';
 import { resolveEntry } from '../resolve.mjs';
 import { readLock, writeLock } from '../lock.mjs';
 import { applyCopy } from '../copy.mjs';
@@ -10,7 +10,7 @@ import { installGroups, agentIdsFor } from '../skills-cli.mjs';
 import { parseInstallFlags } from '../install-plan.mjs';
 import { defaultInstallDeps } from '../install-sections.mjs';
 import { runInstall } from './install.mjs';
-import { parseConfigMode, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
+import { parseConfigMode, configEntries, SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE } from '../config-mode.mjs';
 
 // Turns installGroups' per-source {source, ok} results into report lines and
 // a failure count, kept separate from installGroups itself so the mapping
@@ -37,7 +37,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // Target first, before any other flag parsing: --target and its value must
   // never reach a parser that would read them as something else, and an
   // invalid target has to exit 2 before a single file is written.
-  const { rest: modeArgs, manageConfig, persist } = parseConfigMode(allArgs);
+  const { rest: modeArgs, manageConfig, persist, configTargets } = parseConfigMode(allArgs);
 
   const { target, rest: args, error } = parseTarget(modeArgs);
   if (error) {
@@ -47,7 +47,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // The whole point of the mode: on a skills-only machine no instruction file
   // is read, written or backed up, so the user's own CLAUDE.md is never
   // overwritten from a repo that is not theirs.
-  const selected = manageConfig ? entriesForTarget(entries, target) : [];
+  const selected = manageConfig ? configEntries(entries, target, configTargets) : [];
 
   const takeRepo = args.includes('--take-repo');
   const takeLocal = args.includes('--take-local');
@@ -77,6 +77,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
   // honoured by all of them. status stays read-only, so `status --skills-only`
   // narrows that one report without deciding anything for the next command.
   if (persist !== null) lock.skillsOnly = persist;
+  if (persist === false) delete lock.configTargets;
   const lines = [];
   let refused = 0;
   // A settings file that fails to parse as JSON — separate from a conflict,
@@ -146,13 +147,14 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
       lock: readSkillLock(),
       installedNames: installedSkillNames(),
     });
-    if (skills.missing.length === 0) {
+    const missing = skills.missing.filter((skill) => !skill.optional);
+    if (missing.length === 0) {
       lines.push(formatRow('skills', 'satisfied', ''));
     } else {
       // The selected agents are named explicitly, so a --target codex run
       // installs for Codex and nothing else.
-      const results = await installGroups(installArgs(skills.missing), { agents: agentIdsFor(target) });
-      const summary = summarizeSkillsInstall(skills.missing, results);
+      const results = await installGroups(installArgs(missing), { agents: agentIdsFor(target) });
+      const summary = summarizeSkillsInstall(missing, results);
       lines.push(...summary.lines);
       skillsFailed = summary.failed;
     }
@@ -206,7 +208,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
     // --skills alongside --install narrows the workflow to skills alone,
     // which is what --skills has always meant.
     const aliasOptOuts = skillsAlias ? ['--no-hooks', '--no-mcp', '--no-plugins'] : [];
-    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps, manageConfig });
+    return await installFor(target, [...args, ...aliasOptOuts], { takeRepo, deps, manageConfig, configTargets });
   }
 
   return 0;
@@ -214,7 +216,7 @@ export async function run(allArgs = [], entries = SYNC, deps = {}) {
 
 // Shared by apply --install and by setup, so both offer exactly the same rows
 // in the same order.
-export async function installFor(target, args, { takeRepo = false, deps = {}, manageConfig = true } = {}) {
+export async function installFor(target, args, { takeRepo = false, deps = {}, manageConfig = true, configTargets = parseConfigMode([]).configTargets } = {}) {
   const flags = parseInstallFlags(args.filter((a) => a === '--yes' || a.startsWith('--no-')));
   const wiring = deps.sections
     ? deps
@@ -223,6 +225,7 @@ export async function installFor(target, args, { takeRepo = false, deps = {}, ma
         codexState: deps.codexState,
         codexProbe: deps.codexProbe,
         manageConfig,
+        configTargets,
         probeCodex: target !== 'claude' && !flags.disabled?.has('plugins'),
       });
 

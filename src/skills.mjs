@@ -17,9 +17,8 @@ function sourceOf(meta) {
   return isPlainObject(meta) && typeof meta.source === 'string' && meta.source ? meta.source : null;
 }
 
-// A header is the source in brackets, optionally followed by one marker.
-// `exact` is the only marker there is; see EXACT.
-const HEADER = /^\[([^\]]+)\]\s*(\S*)\s*$/;
+// Source headers accept independent exact and optional markers.
+const HEADER = /^\[([^\]]+)\]\s*(.*?)\s*$/;
 
 // A source repo can hold far more skills than a machine wants from it:
 // cursor/plugins is a monorepo of 82, of which this manifest names one. An
@@ -41,11 +40,10 @@ export function parseManifest(text) {
 
     const header = line.match(HEADER);
     if (header) {
-      // An unrecognised marker leaves the group unpinned rather than failing
-      // the read: every command that reports anything has to parse this file
-      // first, and a typo here should not take `status` down with it. It stays
-      // visible as the pin plainly not taking effect.
-      current = { source: header[1].trim(), skills: [], exact: header[2] === EXACT };
+      // Ignore unknown markers so a typo cannot prevent status from reporting.
+      const markers = header[2].split(/\s+/);
+      current = { source: header[1].trim(), skills: [], exact: markers.includes(EXACT) };
+      if (markers.includes('optional')) current.optional = true;
       groups.push(current);
       continue;
     }
@@ -57,15 +55,16 @@ export function parseManifest(text) {
 
 export function emitManifest(groups) {
   const head =
-    '# Skills expected on every machine, grouped by the repo they install from.\n' +
+    '# Shared and optional skills, grouped by the repo they install from.\n' +
     '# Regenerate with: nortuscc capture\n' +
     '# Install with:    nortuscc apply --install\n' +
-    `# A source marked '${EXACT}' is limited to the skills listed under it.\n\n`;
+    `# A source marked '${EXACT}' is limited to the skills listed under it.\n` +
+    '# A source marked optional is offered unchecked and only installed when selected.\n\n';
 
   return (
     head +
     groups
-      .map((g) => `[${g.source}]${g.exact ? ` ${EXACT}` : ''}\n${g.skills.join('\n')}\n`)
+      .map((g) => `[${g.source}]${g.exact ? ` ${EXACT}` : ''}${g.optional ? ' optional' : ''}\n${g.skills.join('\n')}\n`)
       .join('\n')
   );
 }
@@ -97,15 +96,15 @@ export function groupsFromLock(lock) {
 export function reconcile({ groups, lock, installedNames }) {
   const installed = new Set(installedNames);
   const wanted = new Map();
-  for (const g of groups) for (const name of g.skills) wanted.set(name, g.source);
+  for (const g of groups) for (const name of g.skills) wanted.set(name, { source: g.source, optional: g.optional });
 
   const lockSkills = isPlainObject(lock) && isPlainObject(lock.skills) ? lock.skills : {};
 
   const ok = [];
   const missing = [];
-  for (const [name, source] of wanted) {
+  for (const [name, { source, optional }] of wanted) {
     if (installed.has(name)) ok.push(name);
-    else missing.push({ name, source });
+    else missing.push({ name, source, ...(optional ? { optional: true } : {}) });
   }
 
   const extra = [];
@@ -174,13 +173,26 @@ export function installedSkillNames() {
 export function installedGroups(lock, installedNames, declared = []) {
   const present = new Set(installedNames);
   const exact = exactSources(declared);
-  return groupsFromLock(lock)
+  const optional = new Map(declared.filter((g) => g.optional).map((g) => [g.source, g]));
+  const groups = groupsFromLock(lock)
     .map((group) => ({
       source: group.source,
       skills: group.skills.filter((n) => present.has(n)),
       exact: exact.has(group.source),
     }))
     .filter((group) => group.skills.length > 0);
+  // Optional declarations describe what users can opt into, including on a
+  // machine that has never installed them. Capture must retain that choice.
+  for (const [source, declaration] of optional) {
+    const group = groups.find((g) => g.source === source);
+    if (group) {
+      group.optional = true;
+      group.skills = [...new Set([...group.skills, ...declaration.skills])].sort();
+    } else {
+      groups.push({ ...declaration, skills: [...declaration.skills] });
+    }
+  }
+  return groups.sort((a, b) => a.source < b.source ? -1 : a.source > b.source ? 1 : 0);
 }
 
 export function manifestPath() {

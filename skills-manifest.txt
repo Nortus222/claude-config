@@ -1,9 +1,10 @@
-# Skills expected on every machine, grouped by the repo they install from.
+# Shared and optional skills, grouped by the repo they install from.
 # Regenerate with: nortuscc capture
 # Install with:    nortuscc apply --install
 # A source marked 'exact' is limited to the skills listed under it.
+# A source marked optional is offered unchecked and only installed when selected.
 
-[Nortus222/agent-skills]
+[Nortus222/agent-skills] optional
 deploy-mobile-apps
 explain
 share-artifacts

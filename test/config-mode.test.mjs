@@ -234,3 +234,29 @@ async function captureOut(fn) {
     process.stdout.write = original;
   }
 }
+
+test('a saved Claude selection protects Codex across apply, capture and status', async () => {
+  await onIsolatedMachine('mode-agent-selection', async (fx) => {
+    const { readLock, writeLock } = await import('../src/lock.mjs');
+    writeLock({ ...readLock(), configTargets: ['claude'] });
+    assert.deepEqual(readLock().configTargets, ['claude']);
+    writeFileSync(join(fx.codex, 'AGENTS.md'), '# private Codex rules\n');
+    const { run: apply } = await import('../src/commands/apply.mjs');
+    await captureOut(() => apply([]));
+    assert.equal(readFileSync(join(fx.codex, 'AGENTS.md'), 'utf8'), '# private Codex rules\n');
+    assert.equal(readFileSync(join(fx.claude, 'CLAUDE.md'), 'utf8'), '# from the repo\n');
+    const { run: capture } = await import('../src/commands/capture.mjs');
+    await captureOut(() => capture([]));
+    assert.equal(readFileSync(join(fx.repo, 'codex', 'AGENTS.md'), 'utf8'), '# from the repo\n');
+    const { run: status } = await import('../src/commands/status.mjs');
+    const { output } = await captureOut(() => status([], {
+      cliState: () => ({ state: 'current' }),
+      codexState: { plugins: new Set(), marketplaces: new Set(), errors: [] },
+    }));
+    assert.match(output, /codex configuration\s+unmanaged/);
+    assert.doesNotMatch(output, /AGENTS\.md/);
+    await captureOut(() => apply(['--with-config']));
+    assert.equal(readFileSync(join(fx.codex, 'AGENTS.md'), 'utf8'), '# from the repo\n');
+    assert.deepEqual(readLock().configTargets, ['claude'], 'one-time override keeps the saved selection');
+  });
+});

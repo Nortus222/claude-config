@@ -59,6 +59,32 @@ test('the exact marker survives a rewrite', () => {
   assert.match(emitManifest(groups), /^\[cursor\/plugins\] exact$/m);
 });
 
+test('optional sources round-trip with exact in either marker order', () => {
+  for (const markers of ['optional', 'exact optional', 'optional exact']) {
+    const groups = parseManifest(`[private/skills] ${markers}\nprivate-skill\n`);
+    assert.equal(groups[0].optional, true);
+    assert.equal(groups[0].exact, markers.includes('exact'));
+    assert.deepEqual(parseManifest(emitManifest(groups)), groups);
+  }
+});
+
+test('missing optional skills remain available without becoming required', () => {
+  const groups = parseManifest('[public/skills]\npublic\n[private/skills] optional\nprivate\n');
+  assert.deepEqual(reconcile({ groups, lock: {}, installedNames: [] }).missing, [
+    { name: 'public', source: 'public/skills' },
+    { name: 'private', source: 'private/skills', optional: true },
+  ]);
+});
+
+test('capture preserves optional declarations when the machine has not opted in', () => {
+  const declared = parseManifest('[private/skills] exact optional\nprivate\n');
+  const groups = installedGroups({ skills: { public: { source: 'public/skills' } } }, ['public'], declared);
+  assert.deepEqual(groups, [
+    { source: 'private/skills', skills: ['private'], exact: true, optional: true },
+    { source: 'public/skills', skills: ['public'], exact: false },
+  ]);
+});
+
 // Every command parses this file before it can report anything, so a typo must
 // not take `status` down with it. The pin plainly not applying is the signal.
 test('an unrecognised marker leaves the source unpinned rather than failing', () => {

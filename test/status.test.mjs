@@ -594,6 +594,17 @@ test('status reports a skill one selected agent cannot see, and exits non-zero',
   });
 });
 
+test('unselected optional skills are informational and need no repair', async () => {
+  await onCleanMachine('optional-skills', async (fx) => {
+    writeFileSync(join(fx.repo, 'skills-manifest.txt'), '[private/skills] optional\nprivate\n');
+    const { code, output } = await runCaptured(fx.run);
+    assert.equal(code, 0);
+    assert.match(output, /optional\s+1\s+private/);
+    assert.doesNotMatch(output, /nortuscc apply --install/);
+    assert.match(output, /everything is in agreement/);
+  });
+});
+
 // The regression that made this whole check worthless. skillExposure has always
 // separated "no selected agent can load this" from "some can", but status
 // rendered only the partial row and gated agreement on it alone, so a skill
