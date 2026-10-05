@@ -103,11 +103,12 @@ type Observed = {
 
 `state` keeps each domain's existing values. Files use `clean`, `repo-ahead`, `local-ahead`,
 `conflict`, `unmanaged`, `missing-repo`, `unparseable-local` and `invalid`. Integrations use
-`installed`, `missing` and `blocked`. Skills use `ok`, `missing`, `extra` and `local`, plus
-`unlinked` for a per-agent exposure item (an installed skill one agent cannot load). The
-upstream check behind `update` uses `current`, `outdated`, `gone`, `unknown` and `available`.
+`installed`, `missing`, `blocked` and `unknown` (an agent's CLI could not say). Skills use `ok`, `missing`,
+`extra` and `local`, plus `unlinked` for a per-agent exposure item (an installed skill one agent cannot
+load). The upstream check behind `update` uses `current`, `outdated`, `gone`, `unknown` and `available`.
 `disposition` is the one cross-domain verdict. Status, the picker and the app read it, and
-exit codes derive from it.
+exit codes derive from it. An `unknown` integration is `blocked`, so it never becomes a step, but a dirty
+count for an exit code leaves it out, as `status` does today: re-running apply cannot repair it.
 
 ### Plan
 
@@ -170,7 +171,7 @@ Each domain implements:
 type Domain<R> = {
   name: 'config' | 'integrations' | 'skills'
   inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }, never, R>
-  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture' | 'update') =>
+  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture' | 'update', desired: DesiredConfig) =>
     { steps: Step[]; skipped: { key: string; reason: string }[] }
   run: (step: Step, report: MachineReport) => Effect<StepResult, unknown, R>
 }
@@ -179,6 +180,9 @@ type Domain<R> = {
 `inspect`, `plan` and `execute` take the domain array generically, so domains needing different
 services mix and the run requires their union. A failed step's note is its error's message (each
 package error states one), else its tag.
+
+`plan` passes each domain's `steps` the report's `desired`, because an observed item does not carry its
+declaration (the integrations domain needs a declaration's type and installer command).
 
 The three domains and the undeclared-items probe are the units the parallel issues build.
 

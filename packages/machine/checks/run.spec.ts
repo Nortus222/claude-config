@@ -20,7 +20,7 @@ const step = (key: string, interruptible = false): Step =>
 const fake = <R = never>(run: Domain<R>['run'], items: Observed[] = [], name: Domain['name'] = 'config'): Domain<R> => ({
   name,
   inspect: () => Effect.succeed({ items, probeErrors: ['codex unreadable'] }),
-  steps: (selected) => ({
+  steps: (selected, _selection, _kind, _desired) => ({
     steps: selected.filter((o) => o.disposition === 'apply').map((o) => step(o.key, o.key.startsWith('proc'))),
     skipped: selected.filter((o) => o.disposition === 'blocked').map((o) => ({ key: o.key, reason: 'conflict' })),
   }),
@@ -206,4 +206,15 @@ test('samePlan compares step targets', () => {
   assert.equal(samePlan(a, { ...a, steps: [{ ...step('a'), targets: ['claude'] }] }), true);
   assert.equal(samePlan(a, { ...a, steps: [{ ...step('a'), targets: ['claude', 'codex'] }] }), false);
   assert.equal(samePlan(a, { ...a, steps: [step('a')] }), false);
+});
+
+test('plan hands each domain the desired config the report came from', () => {
+  const report: MachineReport = { desired, items: [item('a')], probeErrors: [] };
+  let seen: DesiredConfig | undefined;
+  const domain: Domain = {
+    ...fake(() => Effect.succeed({ ok: true })),
+    steps: (_items, _selection, _kind, given) => { seen = given; return { steps: [], skipped: [] }; },
+  };
+  plan('apply', report, selectAll, [domain]);
+  assert.equal(seen, desired);
 });

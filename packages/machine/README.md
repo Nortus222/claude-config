@@ -6,9 +6,13 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
 
 - `pathsFromEnvironment` is the only reader of the environment; everything else takes
   `MachinePaths`.
-- A domain (`config`, `integrations`, `skills`) implements `Domain<R>`: `inspect`, `steps`, and
-  `run(step, report)`, which receives the report the plan was made from. `inspect`, `plan` and
+- A domain (`config`, `integrations`, `skills`) implements `Domain<R>`: `inspect`, `steps(items, selection, kind, desired)`,
+  and `run(step, report)`, which receives the report the plan was made from. `inspect`, `plan` and
   `execute` accept domains needing different services; the requirement is their union.
+- `integrationsDomain({ paths, env, installerOutput })` installs hooks, marketplaces, plugins and MCP for Claude and
+  Codex from `DesiredConfig.integrations`. Installers run through `Processes` as interruptible steps;
+  pass `installerOutput: 'capture'` where stdout is a protocol channel (the desktop backend).
+  Build its `paths` from the same `pathsFromEnvironment` value as the `MachinePaths` layer, and pass the environment MCP prerequisites are checked against (the desktop backend: the login shell's, not its own).
 - `Observed.target` is absent for agent-neutral items (shared skills); `Step.targets` names the agents
   an installer step acts for. `update` is a plan kind of its own (adopt, refresh, prune skills).
 - `skillsDomain` inspects the shared skill store and each agent's exposure as items, and plans apply
