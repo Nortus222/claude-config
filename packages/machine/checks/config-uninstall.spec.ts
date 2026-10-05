@@ -88,3 +88,39 @@ test('malformed settings are moved aside under force, and an empty original come
   await empty.sync('uninstall');
   assert.deepEqual(JSON.parse(empty.read(join(empty.paths.claude, 'settings.json'))!), {});
 });
+
+test('a symlinked settings file gets its original values back through the link', async () => {
+  const m = configMachine();
+  const target = join(m.root, 'dotfiles', 'settings.json');
+  m.write(target, JSON.stringify({ theme: 'light', mine: 'x' }));
+  mkdirSync(m.paths.claude, { recursive: true });
+  const link = join(m.paths.claude, 'settings.json');
+  symlinkSync(target, link);
+  await m.sync();
+  await m.sync('uninstall');
+  assert.ok(lstatSync(link).isSymbolicLink());
+  assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), { theme: 'light', mine: 'x' });
+});
+
+test('the repo copy that capture displaces is never read as the original', async () => {
+  const m = configMachine();
+  m.write(join(m.paths.claude, 'CLAUDE.md'), '# mine\n');
+  await m.sync('capture');
+  const { notes } = await m.sync('uninstall');
+  assert.equal(existsSync(join(m.paths.claude, 'CLAUDE.md')), false);
+  const backup = notes['config:claude:CLAUDE.md']!.match(/^ok: removed; backed up -> (.+)$/)?.[1];
+  assert.equal(m.read(backup!), '# mine\n');
+});
+
+test('the earliest run holds the original when a later run backed the file up again', async () => {
+  const m = configMachine();
+  m.write(join(m.paths.claude, 'CLAUDE.md'), '# first\n');
+  await m.sync();
+  m.write(join(m.paths.repo, 'claude/CLAUDE.md'), '# repo v2\n');
+  m.write(join(m.paths.claude, 'CLAUDE.md'), '# second\n');
+  m.baselines({});
+  await m.sync();
+  assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# repo v2\n');
+  await m.sync('uninstall', { force: true });
+  assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# first\n');
+});

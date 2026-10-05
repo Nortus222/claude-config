@@ -91,8 +91,11 @@ test('a symlinked settings file stays a link, and its target gains the keys', as
   m.write(target, '{"mine":1}');
   mkdirSync(m.paths.claude, { recursive: true });
   symlinkSync(target, join(m.paths.claude, 'settings.json'));
-  await m.sync();
+  const { notes } = await m.sync();
   assert.ok(lstatSync(join(m.paths.claude, 'settings.json')).isSymbolicLink());
+  const backup = backupIn(notes['config:claude:settings.json#theme'])!;
+  assert.equal(lstatSync(backup).isSymbolicLink(), false);
+  assert.equal(readFileSync(backup, 'utf8'), '{"mine":1}');
   assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), { mine: 1, theme: 'dark', model: 'opus' });
 });
 
@@ -113,7 +116,9 @@ test('capture takes a local edit into the repo after backing up the repo file', 
   m.write(join(m.paths.claude, 'CLAUDE.md'), '# from machine\n');
   const { notes } = await m.sync('capture');
   assert.equal(m.read(join(m.paths.repo, 'claude/CLAUDE.md')), '# from machine\n');
-  assert.equal(m.read(backupIn(notes['config:claude:CLAUDE.md'])!), REPO_FILES['claude/CLAUDE.md']);
+  const backup = backupIn(notes['config:claude:CLAUDE.md'])!;
+  assert.ok(backup.endsWith(join('claude', 'CLAUDE.md.repo')), backup);
+  assert.equal(m.read(backup), REPO_FILES['claude/CLAUDE.md']);
   assert.equal(m.state().files['claude:CLAUDE.md']!.hash, hashText('# from machine\n'));
   assert.deepEqual((await m.sync('capture')).plan.steps, []);
 });
@@ -151,4 +156,16 @@ test('a capture conflict is skipped, and --take-local resolves it', async () => 
   assert.match((await m.sync('capture')).plan.skipped.find((s) => s.key === 'config:claude:CLAUDE.md')!.reason, /--take-local/);
   await m.sync('capture', { force: true });
   assert.equal(m.read(join(m.paths.repo, 'claude/CLAUDE.md')), '# local moved\n');
+});
+
+test('a conflicting key is skipped while its repo-ahead sibling is written', async () => {
+  const m = configMachine();
+  await m.sync();
+  const settings = join(m.paths.claude, 'settings.json');
+  m.write(settings, JSON.stringify({ theme: 'local', model: 'opus' }));
+  m.write(join(m.paths.repo, 'claude/settings.keys.json'), JSON.stringify({ theme: 'light', model: 'sonnet' }));
+  const { plan } = await m.sync();
+  assert.deepEqual(JSON.parse(m.read(settings)!), { theme: 'local', model: 'sonnet' });
+  assert.deepEqual(plan.steps.map((s) => s.key), ['config:claude:settings.json#model']);
+  assert.deepEqual(plan.skipped.map((s) => s.key), ['config:claude:settings.json#theme']);
 });
