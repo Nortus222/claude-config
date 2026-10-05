@@ -68,7 +68,8 @@ unchanged on Node 24 and on the app's bundled Bun, and avoids `effect`'s unstabl
 
 A global install of a folder links it without installing its dependencies, so the launcher
 installs the runtime dependencies itself when a checkout has none, and `pull` re-installs them
-when `package-lock.json` changed.
+when `package-lock.json` changed. npm's output goes to stderr. If that install fails, an unported
+command still runs its legacy module, which needs no runtime dependency; a ported one exits 1.
 
 During the migration only TypeScript commands need the handoff: an unported command is plain
 JavaScript and still runs from an `npx` copy, as today. The launcher re-execs the recorded
@@ -123,7 +124,8 @@ shows exactly what will and will not happen.
 
 ### Execute
 
-`execute(plan)` returns `Stream<Progress>`. It is the only executor, for every plan kind.
+`execute(plan, report, domains, { signal })` returns `Stream<Progress>`. It is the only
+executor, for every plan kind, and passes each domain's `run` the report the plan came from.
 
 - It holds `<stateRoot>/apply.lock` for the whole run, so the CLI and the app never change a
   machine concurrently. A held lock fails the run before any step.
@@ -136,7 +138,10 @@ shows exactly what will and will not happen.
   group, and the step finishes `cancelled`.
 - Cancellation is Effect interruption. It lands between steps or inside an interruptible step,
   and the stream ends with `cancelled`. The CLI maps SIGINT to it; the app maps its `cancel`
-  request to it.
+  request to it, through the `signal`. Interrupting the stream itself also stops a run and
+  releases the lock, but emits no further events.
+- `samePlan(a, b)` compares two plans structurally, so a preview can tell it is stale; a
+  domain's `steps` must therefore be deterministic (no timestamps in summaries).
 
 ### Services
 
@@ -147,24 +152,30 @@ All are injected. Tests use temporary directories and fake executables.
   `MachinePaths.fromEnvironment`, which keeps today's `NORTUSCC_*`, HOME and `state.json`
   `repo` rules. No module below them reads the environment, so a test can no longer write into
   the checkout by forgetting a variable, as the `skills-manifest.txt` leak did.
-- `Fs`: reads, atomic writes, rename, links and stat over `node:fs`.
+- `Fs`: reads, atomic writes (a symlink stays a link and a file keeps its mode), copy, move,
+  remove, `list`, `stat` (lstat), `readLink` and `symlink` over `node:fs`.
 - `Processes`: argv only, never a shell; inherit or capture output; abortable.
 - `StateStore` (`state.json`), `OverridesStore` (`overrides.json`) and `Backups`: one
-  `nortuscc-<stamp>` folder per run, in today's layout.
+  `nortuscc-<stamp>` folder per run, in today's layout. The first backup of a path in a run
+  wins; a repeat never overwrites it.
 
 ### Domains
 
 Each domain implements:
 
 ```ts
-type Domain = {
+type Domain<R> = {
   name: 'config' | 'integrations' | 'skills'
-  inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }>
+  inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }, never, R>
   steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture') =>
     { steps: Step[]; skipped: { key: string; reason: string }[] }
-  run: (step: Step) => Effect<StepResult>
+  run: (step: Step, report: MachineReport) => Effect<StepResult, unknown, R>
 }
 ```
+
+`inspect`, `plan` and `execute` take the domain array generically, so domains needing different
+services mix and the run requires their union. A failed step's note is its error's message (each
+package error states one), else its tag.
 
 The three domains and the undeclared-items probe are the units the parallel issues build.
 
