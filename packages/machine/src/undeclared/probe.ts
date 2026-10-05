@@ -47,16 +47,16 @@ export function declaredIds(declarations: ReadonlyArray<Integration>, hookComman
 }
 
 // A declared plugin whose marketplace is neither declared nor built-in can never be installed:
-// the repo is wrong, not the machine.
-export function manifestDefects(declarations: ReadonlyArray<Integration>): Found[] {
+// the repo is wrong, not the machine. Each defect carries its declaration's target.
+export function manifestDefects(declarations: ReadonlyArray<Integration>): Array<Found & { target: Target }> {
   const { marketplaces } = declaredIds(declarations, []);
-  const rows: Found[] = [];
+  const rows: Array<Found & { target: Target }> = [];
   for (const item of declarations) {
     const plugin = text(item.plugin);
     if (item.type !== 'plugin' || !plugin) continue;
     const source = marketplaceOf(plugin);
     if (source && !marketplaces.has(source)) {
-      rows.push({ key: plugin, label: plugin, note: `marketplace '${source}' is not declared` });
+      rows.push({ key: plugin, label: plugin, note: `marketplace '${source}' is not declared`, target: item.target as Target });
     }
   }
   return rows;
@@ -148,9 +148,10 @@ export const observedHooks: Effect.Effect<Observation, never, Fs | MachinePaths>
 
 const named = (key: string): Found => ({ key, label: key, note: '' });
 
-// Present on the machine, named by neither a declaration nor the allow list, as `undeclared` items.
-// Claude-side categories are walked only when `claude` is a target; plugins and marketplaces come
-// from `input.installed`. Items are ordered by category, then by observation.
+// Present on the machine, named by neither a declaration nor the allow list, as `undeclared` items
+// keyed `undeclared:<target>:<category>:<key>`. Claude-side categories are walked only when `claude`
+// is a target; plugins and marketplaces come from `input.installed`. Items are ordered by category,
+// then by observation.
 export const probeUndeclared = (desired: DesiredConfig, input: ProbeInput): Effect.Effect<
   { items: Observed[]; probeErrors: string[] },
   never,
@@ -190,18 +191,16 @@ export const probeUndeclared = (desired: DesiredConfig, input: ProbeInput): Effe
     for (const { found, target } of observed[category]) {
       if (isDeclared[category].has(found.key) || allowed.has(found.key)) continue;
       items.push({
-        key: `undeclared:${category}:${found.key}`, domain: domains[category], target, label: found.label, group: category,
+        key: `undeclared:${target}:${category}:${found.key}`, domain: domains[category], target, label: found.label, group: category,
         state: 'undeclared', disposition: 'undeclared', note: found.note,
       });
     }
   }
-  for (const declaration of declarations) {
-    for (const found of manifestDefects([declaration])) {
-      items.push({
-        key: `undeclared:manifest:${found.key}`, domain: 'integrations', target: declaration.target as Target,
-        label: found.label, group: 'manifest', state: 'defect', disposition: 'undeclared', note: found.note,
-      });
-    }
+  for (const found of manifestDefects(declarations)) {
+    items.push({
+      key: `undeclared:${found.target}:manifest:${found.key}`, domain: 'integrations', target: found.target,
+      label: found.label, group: 'manifest', state: 'defect', disposition: 'undeclared', note: found.note,
+    });
   }
   return { items, probeErrors };
 });

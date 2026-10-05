@@ -50,7 +50,7 @@ test('both agents built-in marketplaces count as declared', () => {
 
 test('a declared plugin whose marketplace is undeclared is a manifest defect', () => {
   assert.deepEqual(manifestDefects([plugin('a', 'foo@bar')]), [
-    { key: 'foo@bar', label: 'foo@bar', note: "marketplace 'bar' is not declared" },
+    { key: 'foo@bar', label: 'foo@bar', note: "marketplace 'bar' is not declared", target: 'claude' },
   ]);
   assert.deepEqual(manifestDefects([plugin('a', 'foo@bar'), market('b', 'bar')]), []);
   assert.deepEqual(manifestDefects([plugin('a', 'superpowers@claude-plugins-official')]), []);
@@ -191,15 +191,15 @@ test('probeUndeclared reports what no declaration or allow entry names, in categ
   assert.deepEqual(result.probeErrors, []);
   const item = (o: object) => ({ state: 'undeclared', disposition: 'undeclared', ...o });
   assert.deepEqual(result.items, [
-    item({ key: 'undeclared:agents:stray.md', domain: 'config', target: 'claude', group: 'agents', label: 'stray.md', note: '' }),
-    item({ key: 'undeclared:plugins:p@m', domain: 'integrations', target: 'codex', group: 'plugins', label: 'p@m', note: '' }),
-    item({ key: 'undeclared:marketplaces:dm', domain: 'integrations', target: 'claude', group: 'marketplaces', label: 'dm', note: '' }),
-    item({ key: 'undeclared:hooks:node /h/other.mjs', domain: 'integrations', target: 'claude', group: 'hooks', label: 'Stop', note: 'node /h/other.mjs' }),
+    item({ key: 'undeclared:claude:agents:stray.md', domain: 'config', target: 'claude', group: 'agents', label: 'stray.md', note: '' }),
+    item({ key: 'undeclared:codex:plugins:p@m', domain: 'integrations', target: 'codex', group: 'plugins', label: 'p@m', note: '' }),
+    item({ key: 'undeclared:claude:marketplaces:dm', domain: 'integrations', target: 'claude', group: 'marketplaces', label: 'dm', note: '' }),
+    item({ key: 'undeclared:claude:hooks:node /h/other.mjs', domain: 'integrations', target: 'claude', group: 'hooks', label: 'Stop', note: 'node /h/other.mjs' }),
     item({
-      key: 'undeclared:skills:hand-made', domain: 'skills', target: 'claude', group: 'skills', label: 'hand-made',
+      key: 'undeclared:claude:skills:hand-made', domain: 'skills', target: 'claude', group: 'skills', label: 'hand-made',
       note: `not from the shared store (-> ${realpathSync(join(paths.claude, 'skills', 'hand-made'))})`,
     }),
-    { key: 'undeclared:manifest:declared@dm', domain: 'integrations', target: 'claude', group: 'manifest', label: 'declared@dm',
+    { key: 'undeclared:claude:manifest:declared@dm', domain: 'integrations', target: 'claude', group: 'manifest', label: 'declared@dm',
       state: 'defect', disposition: 'undeclared', note: "marketplace 'dm' is not declared" },
   ]);
 });
@@ -210,9 +210,40 @@ test('claude-side categories are not walked for a codex-only probe, and errors n
   const codexOnly = await run(probeUndeclared(desired([]), {
     targets: ['codex'], installed: [{ target: 'codex', plugins: ['c@cm'], marketplaces: [] }], hookCommands: [],
   }));
-  assert.deepEqual(codexOnly.items.map((i) => i.key), ['undeclared:plugins:c@cm']);
+  assert.deepEqual(codexOnly.items.map((i) => i.key), ['undeclared:codex:plugins:c@cm']);
 
   writeFileSync(join(paths.claude, 'settings.json'), '{ not json');
   const broken = await run(probeUndeclared(desired([]), { targets: ['claude'], installed: [], hookCommands: [] }));
   assert.deepEqual(broken.probeErrors, [`hooks: could not parse ${join(paths.claude, 'settings.json')}`]);
+});
+
+test('a plugin whose custom marketplace is declared is no defect; an undeclared one is', async () => {
+  const { run } = machine();
+  const input = { targets: ['claude'] as const, installed: [], hookCommands: [] };
+  const declaredMarket = await run(probeUndeclared(desired([market('m', 'dm'), plugin('x', 'x@dm')]), input));
+  assert.deepEqual(declaredMarket.items.filter((i) => i.state === 'defect'), []);
+  const undeclaredMarket = await run(probeUndeclared(desired([plugin('x', 'x@dm')]), input));
+  assert.deepEqual(undeclaredMarket.items.filter((i) => i.state === 'defect').map((i) => [i.key, i.target, i.note]),
+    [['undeclared:claude:manifest:x@dm', 'claude', "marketplace 'dm' is not declared"]]);
+});
+
+test('the same plugin or marketplace on both agents gives two distinct items', async () => {
+  const { run } = machine();
+  const both = await run(probeUndeclared(desired([]), {
+    targets: ['claude', 'codex'],
+    installed: [
+      { target: 'claude', plugins: ['p@m'], marketplaces: ['m'] },
+      { target: 'codex', plugins: ['p@m'], marketplaces: ['m'] },
+    ],
+    hookCommands: [],
+  }));
+  assert.deepEqual(both.items.map((i) => i.key), [
+    'undeclared:claude:plugins:p@m', 'undeclared:codex:plugins:p@m',
+    'undeclared:claude:marketplaces:m', 'undeclared:codex:marketplaces:m',
+  ]);
+  const twice = await run(probeUndeclared(desired([plugin('a', 'x@dm'), { ...plugin('b', 'x@dm'), target: 'codex' }]), {
+    targets: ['claude', 'codex'], installed: [], hookCommands: [],
+  }));
+  assert.deepEqual(twice.items.filter((i) => i.state === 'defect').map((i) => [i.key, i.target]),
+    [['undeclared:claude:manifest:x@dm', 'claude'], ['undeclared:codex:manifest:x@dm', 'codex']]);
 });
