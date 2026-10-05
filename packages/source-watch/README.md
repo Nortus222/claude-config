@@ -24,6 +24,21 @@ the loser reports `unreachable`. git runs without a timeout and `GIT_TERMINAL_PR
 ssh prompting on a tty, so a stalled transport stalls that source. Local checkouts are only read,
 never fetched.
 
+## Changelog draft
+
+`draftChangelog(reports, accepted)` turns reports into the Markdown changelog Publish starts
+from. `accepted` names each source the author brought into Contents, the full sha they reviewed
+(it must equal the report's `latest`), the skills to name without detail (`ignored`) and the
+upstream-new skills they added (`added`). Up-to-date sources are left out. Sources the draft
+cannot describe come back in `skipped` as `not-watched`, `stale` or `no-data`. It is pure and
+writes no author names. Design: `docs/superpowers/specs/2026-10-05-source-changelog-design.md`.
+
+```ts
+const { markdown, skipped } = draftChangelog(reports, [
+  { source: 'obra/superpowers', revision: reports[0].latest!.sha, ignored: ['writing-plans'] },
+]);
+```
+
 Sources are TypeScript run directly by Node 22.18+, so there is no build step. Tests build git
 fixtures in a temporary directory and allow only `file://` transport, so they never reach the
 network. Type-checking follows the profile engine's imports, so install both packages first.

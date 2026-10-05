@@ -1,5 +1,5 @@
 // Drafts the changelog Publish shows, from the watcher's reports. Pure: no git, network or LLM.
-import type { Revision, SourceReport } from './model.ts';
+import type { Revision, SkillChange, SourceReport } from './model.ts';
 import { redact } from './redact.ts';
 
 // A source the author brought into Contents, at the revision they reviewed.
@@ -16,6 +16,8 @@ export type ChangelogDraft = {
   readonly markdown: string; // '' when there is nothing to say
   readonly skipped: ReadonlyArray<SkippedSource>; // in accepted order; never part of the Markdown
 };
+
+const MERGE_NOISE = /^Merge (?:pull request|branch|remote-tracking branch)\b/;
 
 // One editable Markdown section per accepted source that moved, in report order.
 export function draftChangelog(
@@ -66,6 +68,30 @@ function label(revision: Revision): string {
   return revision.tags[0] ?? revision.sha.slice(0, 7);
 }
 
-function items(_report: SourceReport, _choice: AcceptedSource): string[] {
-  return ["- No changes to this setup's skills."];
+// The source's list: updated skills with their subjects, then added, removed and ignored ones.
+function items(report: SourceReport, choice: AcceptedSource): string[] {
+  const ignored = new Set(choice.ignored ?? []);
+  const kept = new Set(choice.added ?? []);
+  const subjects = new Map(report.commits.map((commit) => [commit.sha, commit.subject]));
+  const shown = (status: SkillChange['status']) =>
+    report.skills.filter((skill) => skill.status === status && !ignored.has(skill.name));
+
+  const lines: string[] = [];
+  for (const skill of shown('changed')) {
+    lines.push(`- Updated \`${skill.name}\``);
+    const seen = new Set<string>();
+    for (const sha of skill.commits) {
+      const subject = redact(subjects.get(sha) ?? '').trim();
+      if (subject === '' || MERGE_NOISE.test(subject) || seen.has(subject)) continue;
+      seen.add(subject);
+      lines.push(`  - ${subject}`);
+    }
+  }
+  for (const name of report.added) if (kept.has(name)) lines.push(`- Added \`${name}\``);
+  for (const skill of shown('removed')) lines.push(`- Removed \`${skill.name}\``);
+  const quiet = report.skills.filter(
+    (skill) => ignored.has(skill.name) && (skill.status === 'changed' || skill.status === 'removed'),
+  );
+  if (quiet.length > 0) lines.push(`- Also updated: ${quiet.map((skill) => `\`${skill.name}\``).join(', ')}`);
+  return lines.length > 0 ? lines : ["- No changes to this setup's skills."];
 }
