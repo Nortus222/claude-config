@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Exit } from 'effect';
@@ -122,4 +122,15 @@ test('symlink creates parents and the link', async () => {
   const dir = scratch();
   await run(Fs.use((fs) => fs.symlink(join(dir, 'target'), join(dir, 'a', 'b', 'link'))));
   assert.equal(readlinkSync(join(dir, 'a', 'b', 'link')), join(dir, 'target'));
+});
+
+test('realPath follows links and reads a dangling or absent path as undefined', async () => {
+  const dir = scratch();
+  mkdirSync(join(dir, 'target'));
+  symlinkSync(join(dir, 'target'), join(dir, 'link'));
+  symlinkSync(join(dir, 'gone'), join(dir, 'dangling'));
+  const real = (p: string) => run(Fs.use((fs) => fs.realPath(p)));
+  assert.equal(await real(join(dir, 'link')), realpathSync(join(dir, 'target')));
+  assert.equal(await real(join(dir, 'dangling')), undefined);
+  assert.equal(await real(join(dir, 'absent')), undefined);
 });

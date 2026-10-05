@@ -69,7 +69,9 @@ const settle = (exit: Exit.Exit<StepResult, unknown>): Outcome => {
 const sameStep = (a: Step, b: Step) =>
   a.key === b.key && a.domain === b.domain && a.action === b.action && a.summary === b.summary
   && a.interruptible === b.interruptible
-  && a.touches.length === b.touches.length && a.touches.every((t, i) => t === b.touches[i]);
+  && a.touches.length === b.touches.length && a.touches.every((t, i) => t === b.touches[i])
+  && (a.targets === undefined ? b.targets === undefined
+    : b.targets !== undefined && a.targets.length === b.targets.length && a.targets.every((t, i) => t === b.targets![i]));
 
 // Structural, order-sensitive equality: the app's check that a previewed plan is not stale.
 export const samePlan = (a: Plan, b: Plan): boolean =>

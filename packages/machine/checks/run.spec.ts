@@ -200,3 +200,10 @@ test('samePlan compares kind, steps and skipped in order', () => {
   assert.equal(samePlan(a, { ...a, skipped: [{ key: 'c', reason: 'other' }] }), false);
   assert.equal(samePlan(a, { ...a, skipped: [] }), false);
 });
+
+test('samePlan compares step targets', () => {
+  const a: Plan = { kind: 'update', steps: [{ ...step('a'), targets: ['claude'] }], skipped: [] };
+  assert.equal(samePlan(a, { ...a, steps: [{ ...step('a'), targets: ['claude'] }] }), true);
+  assert.equal(samePlan(a, { ...a, steps: [{ ...step('a'), targets: ['claude', 'codex'] }] }), false);
+  assert.equal(samePlan(a, { ...a, steps: [step('a')] }), false);
+});

@@ -9,6 +9,8 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
 - A domain (`config`, `integrations`, `skills`) implements `Domain<R>`: `inspect`, `steps`, and
   `run(step, report)`, which receives the report the plan was made from. `inspect`, `plan` and
   `execute` accept domains needing different services; the requirement is their union.
+- `Observed.target` is absent for agent-neutral items (shared skills); `Step.targets` names the agents
+  an installer step acts for. `update` is a plan kind of its own (adopt, refresh, prune skills).
 - `inspect` → `plan` → `execute(plan, report, domains, { signal })`. `execute` holds
   `<stateRoot>/apply.lock`, emits `Progress`, never interrupts a step marked
   `interruptible: false`, and ends with `done` or `cancelled`. Provide a fresh `backupsForRun()`

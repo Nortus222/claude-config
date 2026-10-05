@@ -91,7 +91,7 @@ type Observed = {
   key: string          // stable, as today: config:claude:CLAUDE.md,
                        // config:claude:settings.json#model, integration:<id>, skill:<name>
   domain: 'config' | 'integrations' | 'skills'
-  target: Target
+  target?: Target      // absent for an item no single agent owns (a shared skill)
   label: string
   group: string
   state: string        // the domain's existing vocabulary, unchanged
@@ -109,15 +109,16 @@ exit codes derive from it.
 
 ### Plan
 
-`plan(kind, report, selection, domains)` is pure, for `kind` `apply`, `uninstall` or `capture`. It takes a report and a `Selection`,
+`plan(kind, report, selection, domains)` is pure, for `kind` `apply`, `uninstall`, `capture` or `update`. It takes a report and a `Selection`,
 and returns a `Plan`:
 
 - `Selection` holds the run-time choices the engine deliberately does not resolve: targets,
   the `--no-*` categories, picked or excluded keys, and `force` (`--take-repo`).
 - `Plan` is `{ kind, steps, skipped: { key, reason }[] }`.
-- A `Step` is `{ key, domain, action, summary, touches: string[], interruptible: boolean }`. Its
+- A `Step` is `{ key, domain, action, summary, touches: string[], interruptible: boolean, targets? }`;
+  `targets` names the agents an installer step acts for. Its
   `action` is one of `write-file`, `merge-keys`, `restore`, `remove`, `capture-file`,
-  `write-manifest`, `install-integration` or `install-skills`.
+  `write-manifest`, `install-integration`, `install-skills` or `update-skills`.
 
 A blocked item never becomes a step. It is listed in `skipped` with its reason, so a preview
 shows exactly what will and will not happen.
@@ -153,7 +154,7 @@ All are injected. Tests use temporary directories and fake executables.
   `repo` rules. No module below them reads the environment, so a test can no longer write into
   the checkout by forgetting a variable, as the `skills-manifest.txt` leak did.
 - `Fs`: reads, atomic writes (a symlink stays a link and a file keeps its mode), copy, move,
-  remove, `list`, `stat` (lstat), `readLink` and `symlink` over `node:fs`.
+  remove, `list`, `stat` (lstat), `realPath`, `readLink` and `symlink` over `node:fs`.
 - `Processes`: argv only, never a shell; inherit or capture output; abortable.
 - `StateStore` (`state.json`), `OverridesStore` (`overrides.json`) and `Backups`: one
   `nortuscc-<stamp>` folder per run, in today's layout. The first backup of a path in a run
@@ -167,7 +168,7 @@ Each domain implements:
 type Domain<R> = {
   name: 'config' | 'integrations' | 'skills'
   inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }, never, R>
-  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture') =>
+  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture' | 'update') =>
     { steps: Step[]; skipped: { key: string; reason: string }[] }
   run: (step: Step, report: MachineReport) => Effect<StepResult, unknown, R>
 }
