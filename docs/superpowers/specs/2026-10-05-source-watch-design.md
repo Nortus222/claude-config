@@ -118,7 +118,8 @@ credential helpers in place, because private sources need them, and sets none of
 1. **Sync.** The source's cache lives at `<cacheDir>/<sha256(url) first 16 hex>`, never named
    after the URL. When that folder is absent, it is created with
    `git clone --bare --filter=blob:none --quiet <url> <dir>`. When it exists,
-   `git fetch --prune --tags --quiet origin '+refs/heads/*:refs/heads/*'` refreshes it.
+   `git fetch --prune --quiet origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'`
+   refreshes it, so moved tags follow upstream and deleted tags and branches disappear.
    History arrives in full, and git fetches only the blobs a diff needs. If sync fails, the status
    is `unreachable`.
 2. **Latest** is `HEAD`, the default branch at clone time, with its sha, committer date and the
