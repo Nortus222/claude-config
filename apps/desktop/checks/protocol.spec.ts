@@ -53,3 +53,16 @@ test('inspect and apply payloads decode strictly', () => {
   assert.equal(decodeApplyResult({ status: 'stale', planId: 'p', plan: { kind: 'apply', steps: [step], skipped: [] } }).status, 'stale');
   assert.throws(() => decodeApplyResult({ status: 'started' }));
 });
+
+test('a shared skill has no target, and update plans carry update-skills steps for chosen agents', () => {
+  const inspected = decodeInspectResult({
+    profile: { repo: '/r', revision: null, overrides: '/s/overrides.json', issues: [] },
+    items: [{ key: 'skill:brainstorming', domain: 'skills', label: 'brainstorming', group: 'obra/superpowers', state: 'ok', disposition: 'in-sync' }],
+    probeErrors: [],
+  });
+  assert.equal(inspected.items[0]!.target, undefined);
+  const update = { key: 'skills:update', domain: 'skills', action: 'update-skills', summary: 'update 2 skills', touches: [], interruptible: true, targets: ['claude', 'codex'] };
+  const stale = decodeApplyResult({ status: 'stale', planId: 'p', plan: { kind: 'update', steps: [update], skipped: [] } });
+  assert.equal(stale.status === 'stale' && stale.plan.steps[0]!.targets?.length, 2);
+  assert.throws(() => decodeInspectResult({ ...inspected, items: [{ ...inspected.items[0], target: 'cursor' }] }));
+});
