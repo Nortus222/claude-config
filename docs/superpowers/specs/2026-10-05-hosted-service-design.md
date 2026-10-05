@@ -148,7 +148,8 @@ transactional batch, and makes deletion a single-partition sweep.
 ### `accounts` container
 
 - **account**: `accountId` (random ULID), `githubId`, `login`, `seq` (a counter bumped by every
-  change other machines must see), `defaultPolicy` (`notify`), `createdAt`.
+  change other machines must see), `defaultPolicy` (`notify`; the policy a newly registered
+  machine starts with), `createdAt`.
 - **machine**: `machineId`, `name`, `os`, `agents`, `policy` (`auto-apply` | `notify` |
   `manual`), `reportStatus` (default `true`), `tokenHash`, `createdAt`, `lastSeenAt`.
   `lastSeenAt` is written at most once every 5 minutes so polling stays cheap.
@@ -178,14 +179,19 @@ Ids are logical engine ids, never machine paths:
 - `integration:superpowers-codex`
 - `file:claude:CLAUDE.md`
 
-Ids must match `^(setting|skill|integration|file):[A-Za-z0-9._:/#@-]{1,200}$`.
+Ids must match `^(setting|skill|integration|file):[A-Za-z0-9._:/#@-]{1,200}$`. Only setup
+contents are items. Keys that exist only in a machine's plan, such as skill links or undeclared
+entries, never appear in a revision or a status summary.
 
 Items carry no values and no digests. A hash of a low-entropy value such as `"medium"`
 reveals the value, so a digest would break the rule that the service never holds values.
-Integrity comes from Git instead. The agent fetches the revision's commit with its own
-credentials, recomputes the items from the engine, and refuses to apply anything from a
-revision whose items differ from the record (`RevisionMismatch`, shown in What's new). The
-service cannot check that a commit exists, so a missing commit surfaces on the agent as
+Integrity comes from Git instead. The agent fetches the revision's tag from the setup's
+`repoUrl` with its own credentials and requires it to resolve to the recorded `commitSha`.
+Checking the tag, not just the SHA, matters: GitHub serves a fork's commits from the parent
+repository by SHA, so a SHA alone does not prove the commit belongs to the setup. The agent
+then recomputes the items from the engine and refuses to apply anything from a revision whose
+items differ from the record (`RevisionMismatch`, shown in What's new). The service cannot
+check that a tag or commit exists, so a missing one surfaces on the agent as
 `RevisionUnavailable`.
 
 ### Decision rules
@@ -196,15 +202,19 @@ service cannot check that a commit exists, so a missing commit surfaces on the a
   - If a later revision leaves the item unchanged, the earlier decision stands.
   - The agent computes the effective state; the service stores decisions as sent.
 - Skipping is reversible: a later `accept` replaces a `skip`, and the reverse also holds.
-- A decision for a revision older than the stored decision's revision is rejected with
-  `409 stale_decision`, and the agent re-syncs.
+- A decision for a revision older than the stored decision's revision is not stored. Each
+  decision in a request is judged on its own, so one stale decision never rejects the others:
+  the response lists each decision's outcome, `stored` or `stale`, and the agent re-syncs to
+  learn the newer decision.
 - Otherwise the decision that reaches the service last wins. Two machines deciding offline
   resolve in arrival order, and both decisions appear in History on the machines that made
   them.
 - Every write that other machines must see increments the account's `seq` in the same
   transactional batch. That covers decisions, machine settings changes, forgotten machines and
-  revisions of owned setups. Concurrent writers retry when the account document's ETag has
-  changed.
+  revisions of owned setups. A Cosmos transactional batch holds at most 100 operations, so a
+  request's decisions are written in chunks of up to 99 plus the account document. Each chunk
+  is atomic; a failure part-way reports the remaining decisions as unprocessed, and the agent
+  resends them. Concurrent writers retry when the account document's ETag has changed.
 
 ## API
 
@@ -217,7 +227,7 @@ requires `Authorization: Bearer nmt_…`. Request and response bodies are the
 | `POST /v1/auth/device/start`, `POST /v1/auth/device/poll` | Sign in and register this machine (see Sign-in) |
 | `POST /v1/auth/sign-out` | Revoke this machine's token and delete its status |
 | `GET /v1/sync?since=<seq>` | The polling call (below) |
-| `PUT /v1/decisions` | Upsert 1 to 500 decisions. Returns the new `seq`. Every item must exist in the named revision of a setup the account owns |
+| `PUT /v1/decisions` | Upsert 1 to 500 decisions, each `{ setupId, itemId, revision, decision }`. Returns `{ seq, results: [{ setupId, itemId, outcome: 'stored' \| 'stale' \| 'unprocessed' }] }`. Every item must exist in the named revision of a setup the account owns, otherwise the whole request is `invalid` |
 | `POST /v1/setups`, `GET /v1/setups` | Register a setup (`name`, `repoUrl`), list the account's setups |
 | `POST /v1/setups/:id/revisions` | Owner only. `number` must equal `latestRevision + 1`, otherwise `409 revision_conflict`. This is the endpoint #52's Publish calls |
 | `GET /v1/setups/:id/revisions?after=<n>` | Revision records after `n`, oldest first, at most 50 per page |
@@ -247,8 +257,9 @@ requires `Authorization: Bearer nmt_…`. Request and response bodies are the
 - **Contents:** decisions written after `since`; revisions newer than the client's for every
   setup the account owns; this machine's settings; and the account's setups, so a new one can
   be offered.
-- **Conditional requests:** the response carries an ETag derived from `seq`. A request with a
-  matching `If-None-Match` returns `304` after one point read of the account document.
+- **Conditional requests:** the response carries an ETag derived from `seq` and the `setups`
+  parameter, so a client that already holds every revision gets the same ETag. A request with
+  a matching `If-None-Match` returns `304` after one point read of the account document.
 - **Cadence:** the agent polls every `pollAfter` seconds (default 900) with ±20% jitter. It also
   polls immediately after making a local decision and whenever the desktop app gains focus.
   `pollAfter` lets the service slow polling without an agent release.
@@ -259,7 +270,9 @@ The service is never on the apply path. When it is unreachable:
 
 - the agent keeps the last synced state and keeps applying already-decided items according to
   its policy;
-- decisions made locally go into an outbox and are sent in order when the service returns;
+- decisions and machine settings changes (policy, name, `reportStatus`) made locally go into
+  one outbox and are sent in order when the service returns. As with decisions, the change
+  that reaches the service last wins, and the next sync tells every machine the result;
 - the app shows the age of the synced data, as the feature map's offline state requires.
 
 Signing out returns the machine to local-only mode with its local data intact.
@@ -276,7 +289,6 @@ Errors are `{ "error": "<code>", "message": "<text>" }` with these codes:
 | `not_found` | 404 |
 | `invalid` | 400 |
 | `payload_too_large` | 413 |
-| `stale_decision` | 409 |
 | `revision_conflict` | 409 |
 | `status_disabled` | 409 |
 | `limit_reached` | 409 |
@@ -303,13 +315,18 @@ it never widens what one summary contains.
     "revisionApplied": 12,
     "adopted": ["skill:…"],
     "skipped": ["setting:…"],
-    "pending": ["integration:…"],
+    "pending": ["setting:…"],
     "waitingForPerson": ["integration:…"]
   }],
   "drift": { "setting": 1, "skill": 2, "integration": 0, "file": 0 }
 }
 ```
 
+- Accepted items that are not applied yet fall in one of two lists. `pending` items will be
+  applied without a person: the machine is on auto-apply and the item is inert. Items in
+  `waitingForPerson` need a person on that machine, whether because of the machine's policy
+  (notify or manual) or the safety rule for code-running and removing items. An agent's finer
+  local states map onto these two.
 - Drift is reported as **counts only**. Naming drifted entries would reveal skills or settings
   installed by hand, which are not part of any setup.
 - Every item id must belong to a known revision of the named setup, or the request is rejected
@@ -323,12 +340,15 @@ The feature map's safety rules hold unchanged. The service adds these:
 - **The service changes which items are accepted, never which setups a machine trusts.** The
   set of setups a machine applies is stored locally on that machine. A setup that appears
   through sync is offered as a prompt and is never applied until a person on that machine
-  adds it.
+  adds it. This happens once per machine and setup, including for the user's own setup: after
+  sign-in, the agent offers the account's setups, and the done-when scenario's second machine
+  trusts the setup this way before anything syncs to it.
 - **The agent decides what runs code.** It classifies items from the fetched commit, never from
   service data, so auto-apply still holds back new or changed hooks, MCP servers, plugins and
   removals until a person on that machine approves them.
-- **The service never chooses content.** It names a commit; the agent fetches that commit from
-  the setup's fixed `repoUrl` and checks it against the record before applying anything.
+- **The service never chooses content.** It names a tag and a commit; the agent fetches the
+  tag from the setup's fixed `repoUrl`, requires it to resolve to that commit, and checks the
+  items against the record before applying anything.
 - **Remote policy changes stay within one account.** `PATCH /v1/machines/:id` lets a user set
   the policy of their own machines from another of their machines. No API acts on another
   account's machine.
@@ -430,7 +450,8 @@ Tests are written first and use `node:test` with `node:assert/strict`.
   - token checks and revocation;
   - one account never reading or writing another's data (`not_found`);
   - every limit;
-  - stale decisions, and revision numbering conflicts;
+  - per-decision outcomes, including a stale decision beside stored ones, chunking past 99
+    decisions, and revision numbering conflicts;
   - `seq` ordering under concurrent writers;
   - ETag and `304` responses;
   - status validation and `status_disabled`;
@@ -441,7 +462,9 @@ Tests are written first and use `node:test` with `node:assert/strict`.
 - **Deploy smoke**: `GET /v1/health`, and an unauthenticated `GET /v1/sync` returning `401`.
 - **End to end**: the done-when scenario. It uses two local agent instances (#50) with
   temporary homes and a local service, and covers:
-  - a revision is registered;
+  - a revision is registered through `POST /v1/setups/:id/revisions` by a test helper, since
+    #52's Publish is its eventual caller;
+  - machine B trusts the setup once, as a person would after sign-in;
   - an item is accepted on machine A;
   - machine B (auto-apply) applies that item and holds back a hook item for a person;
   - machine C (notify) queues both;
@@ -461,4 +484,6 @@ still passes.
   follower's `seq`, so #53 extends the sync ETag with the latest revision of each followed
   setup.
 - Public setups and the Discover index (P5).
+- "Request review on that machine" from the Machine detail screen. It needs a notification to
+  one machine, which this API does not carry yet.
 - Additional identity providers.
