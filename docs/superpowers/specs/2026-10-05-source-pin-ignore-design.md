@@ -87,7 +87,8 @@ and is never rewritten, when any of these hold:
 - `version` is not `1`
 - `<field>`, when present, is not an object whose keys and values are all non-empty strings
 
-The reason names the file and the problem, and passes through `redact`.
+An empty `source` or an empty `value` is refused the same way, because the result would be
+an invalid document. The reason names the file and the problem, and passes through `redact`.
 
 ## Writing
 
