@@ -7,3 +7,5 @@ export * from './state.ts';
 export * from './overrides.ts';
 export * from './backups.ts';
 export * from './apply-lock.ts';
+export * from './model.ts';
+export * from './run.ts';
