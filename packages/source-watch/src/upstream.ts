@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { skillFolders } from './discover.ts';
-import { Git, GitFailed, LOG_FORMAT, parseLog } from './git.ts';
+import { DIFF_FLAGS, Git, GitFailed, LOG_FORMAT, parseLog } from './git.ts';
 import type { Revision, SkillChange, SourceReport, SourceStatus, WatchedSource } from './model.ts';
 import { redact } from './redact.ts';
 
@@ -78,8 +78,12 @@ const inspect = (source: WatchedSource, cacheDir: string): Effect.Effect<SourceR
     const skills = yield* Effect.forEach(source.skills, (name) =>
       compareSkill(run, name, sha, latest.sha, atBaseline.get(name), atLatest.get(name)),
     );
+    const declared = new Set(source.skills);
+    const added = source.exact
+      ? []
+      : [...atLatest.keys()].filter((name) => !atBaseline.has(name) && !declared.has(name)).sort();
     const baseline = { ref: source.baseline, ...(yield* revision(run, sha)) };
-    return { ...report, status, baseline, commits, skills } satisfies SourceReport;
+    return { ...report, status, baseline, commits, skills, added } satisfies SourceReport;
   });
 
 // A commit's sha, strict ISO committer date and the tags pointing at it.
@@ -115,6 +119,8 @@ const treeSha = (run: Run, sha: string, path: string) =>
   run(['rev-parse', `${sha}:${path}`]).pipe(Effect.map((out) => out.trim()));
 
 // One declared skill between two revisions, given its folder at each (undefined when absent).
+// A skill only at `to` is changed, and its SKILL.md diffs against nothing; a moved folder
+// diffs its old SKILL.md against its new one.
 const compareSkill = (
   run: Run,
   name: string,
@@ -133,5 +139,25 @@ const compareSkill = (
     if (before !== undefined && (yield* treeSha(run, from, before)) === (yield* treeSha(run, to, after))) {
       return { ...none, path: after, status: 'unchanged' } satisfies SkillChange;
     }
-    return { ...none, path: after, status: 'changed' } satisfies SkillChange;
+
+    const folders = before === undefined || before === after ? [after] : [before, after];
+    const skillFiles = new Set(folders.map((folder) => `${folder}/SKILL.md`));
+    const commits = (yield* run(['log', '--format=%H', `${from}..${to}`, '--', ...folders]))
+      .split('\n')
+      .filter((sha) => sha !== '');
+    const files = (yield* run(['diff', '--name-only', '-z', from, to, '--', ...folders]))
+      .split('\0')
+      .filter((path) => path !== '' && !skillFiles.has(path));
+    const skillMd =
+      before === undefined
+        ? yield* run(['diff', ...DIFF_FLAGS, from, to, '--', `${after}/SKILL.md`])
+        : yield* run(['diff', ...DIFF_FLAGS, `${from}:${before}/SKILL.md`, `${to}:${after}/SKILL.md`]);
+    return {
+      name,
+      path: after,
+      status: 'changed',
+      commits,
+      files,
+      ...(skillMd === '' ? {} : { skillMd }),
+    } satisfies SkillChange;
   });
