@@ -62,6 +62,10 @@ test('exitCode does not count a gone skill named in prunedNames toward exit 1', 
   assert.equal(exitCode({ items: items({ gone: ['a'] }), failed: false, prunedNames: ['a'] }), 0);
 });
 
+test('exitCode is 1 when the machine could not be read', () => {
+  assert.equal(exitCode({ items: [], failed: false, probeErrors: ['skills: list /s: not a directory'] }), 1);
+});
+
 test('exitCode ignores available skills', () => {
   assert.equal(exitCode({ items: items({ available: ['wizard'] }), failed: false }), 0);
 });
@@ -207,6 +211,8 @@ type Behaviour = {
   readonly fail?: 'add' | 'update' | 'remove';
   // add blocks until interrupted.
   readonly block?: 'add';
+  // `git clone` of a source blocks until interrupted.
+  readonly blockClone?: boolean;
   // The hash `update` records: absent means the upstream tree, null leaves the lock alone.
   readonly updateTo?: string | null;
 };
@@ -259,7 +265,13 @@ function machine(options: Options = {}) {
     const real = Effect.runSync(Effect.gen(function* () { return yield* Processes; }).pipe(Effect.provide(nodeProcesses())));
     return Layer.succeed(Processes, {
       run: (command: Command) => {
-        if (command.cmd === 'git') return real.run(command);
+        if (command.cmd === 'git') {
+          if (behaviour.blockClone && command.args[0] === 'clone') {
+            commands.push(command);
+            return Effect.never;
+          }
+          return real.run(command);
+        }
         commands.push(command);
         const [, , verb, ...rest] = command.args;
         if (verb === behaviour.block) return Effect.never;
@@ -306,7 +318,7 @@ function machine(options: Options = {}) {
     ...over,
   });
 
-  const npx = () => commands.map((c) => c.args.slice(2));
+  const npx = () => commands.filter((c) => c.cmd === 'npx').map((c) => c.args.slice(2));
   const manifest = () => (existsSync(manifestFile) ? readFileSync(manifestFile, 'utf8') : null);
   return { home, paths, src, deps, npx, commands, manifest, backedUpAtRemove, backupOf, readLock };
 }
@@ -638,4 +650,32 @@ test('--target claude adopts for Claude only', async () => {
   assert.equal(result.code, 0, result.err);
   const add = m.npx().find((a) => a[0] === 'add')!;
   assert.deepEqual(add.slice(add.indexOf('--agent') + 1, add.indexOf('--global')), ['claude-code']);
+});
+
+test('an unreadable store exits 1 and says why', async () => {
+  const m = machine();
+  rmSync(m.paths.agentsSkills, { recursive: true, force: true });
+  writeFileSync(m.paths.agentsSkills, 'not a directory');
+  const result = await go(['--yes'], m.deps());
+  assert.equal(result.code, 1);
+  assert.match(result.err, /^skills: /m);
+  assert.deepEqual(m.npx(), []);
+  assert.equal((await go(['--check'], m.deps())).code, 1);
+});
+
+test('Ctrl-C while sources are being checked cancels before the picker and exits 1', async () => {
+  const m = machine({ upstream: WITH_WIZARD });
+  const controller = new AbortController();
+  let picked = false;
+  const timer = setTimeout(() => controller.abort(), 50);
+  const result = await go([], m.deps({
+    behaviour: { blockClone: true }, signal: controller.signal,
+    select: async () => { picked = true; return []; },
+  }));
+  clearTimeout(timer);
+  assert.equal(result.code, 1);
+  assert.match(result.out, /\ncancelled\n/);
+  assert.equal(picked, false, 'the picker must not open after a cancel');
+  assert.deepEqual(m.npx(), []);
+  assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args[0] === 'clone'), 'the clone had started');
 });

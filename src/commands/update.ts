@@ -57,9 +57,12 @@ export function parseFlags(args: string[]): UpdateFlags {
 const inState = (items: ReadonlyArray<Observed>, state: string) => items.filter((i) => i.state === state);
 const labels = (items: ReadonlyArray<Observed>) => items.map((i) => i.label).join(', ');
 
-// 1 when the run failed, a gone skill was left in place, or a source could not be checked.
-export function exitCode(input: { items: ReadonlyArray<Observed>; failed: boolean; prunedNames?: ReadonlyArray<string> }): 0 | 1 {
-  if (input.failed) return 1;
+// 1 when the run failed, the machine could not be read, a gone skill was left in place, or a source
+// could not be checked.
+export function exitCode(input: {
+  items: ReadonlyArray<Observed>; failed: boolean; prunedNames?: ReadonlyArray<string>; probeErrors?: ReadonlyArray<string>;
+}): 0 | 1 {
+  if (input.failed || (input.probeErrors?.length ?? 0) > 0) return 1;
   const pruned = new Set(input.prunedNames ?? []);
   const goneLeft = inState(input.items, 'gone').filter((i) => !pruned.has(i.label));
   if (goneLeft.length > 0 || inState(input.items, 'unknown').length > 0) return 1;
@@ -146,6 +149,15 @@ export type UpdateDeps = {
 
 const write = (text: string) => { process.stdout.write(text); };
 
+// Resumes once the signal fires (at once if it already has).
+const whenAborted = (signal: AbortSignal) =>
+  Effect.callback<void>((resume) => {
+    if (signal.aborted) return resume(Effect.void);
+    const onAbort = () => resume(Effect.void);
+    signal.addEventListener('abort', onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener('abort', onAbort));
+  });
+
 const hashOf = (lock: SkillLock, name: string): string | null => {
   const meta = lock.skills[name];
   if (typeof meta !== 'object' || meta === null) return null;
@@ -177,9 +189,21 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
   const program = Effect.gen(function* () {
     const paths = yield* MachinePaths;
-    // No requireValid: an integrations.json issue must not block `update`.
-    const desired = yield* loadProfile(paths.repo).pipe(Effect.provide(nodeFiles));
-    const { items, probeErrors } = yield* inspectUpdates(desired);
+    const inspection = Effect.gen(function* () {
+      // No requireValid: an integrations.json issue must not block `update`.
+      const desired = yield* loadProfile(paths.repo).pipe(Effect.provide(nodeFiles));
+      return { desired, ...(yield* inspectUpdates(desired)) };
+    });
+    // Git children run in their own process group, so the terminal's Ctrl-C never reaches them:
+    // the signal interrupts the check, which kills them.
+    const inspected = deps.signal
+      ? yield* Effect.raceFirst(inspection, Effect.as(whenAborted(deps.signal), undefined))
+      : yield* inspection;
+    if (inspected === undefined || deps.signal?.aborted) {
+      write('\ncancelled\n');
+      return 1;
+    }
+    const { desired, items, probeErrors } = inspected;
     for (const message of probeErrors) console.error(message);
     write('\n' + section('update', reportLines(items)));
 
@@ -206,11 +230,11 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
     if (flags.check) {
       if (inState(items, 'outdated').length) write('\nRun: nortuscc update\n');
-      return exitCode({ items, failed: false });
+      return exitCode({ items, failed: false, probeErrors });
     }
 
     const rows = choices(items, seedKeys(items, flags));
-    if (rows.length === 0) return exitCode({ items, failed: addFailed });
+    if (rows.length === 0) return exitCode({ items, failed: addFailed, probeErrors });
 
     let keys: string[];
     if (flags.yes) {
