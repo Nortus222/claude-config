@@ -24,12 +24,12 @@ the loser reports `unreachable`. git runs without a timeout and `GIT_TERMINAL_PR
 ssh prompting on a tty, so a stalled transport stalls that source. Local checkouts are only read,
 never fetched.
 
-Sources are TypeScript run directly by Node 22.18+, so there is no build step. Tests build git
+Sources are TypeScript run directly by Node 24+, so there is no build step. Tests build git
 fixtures in a temporary directory and allow only `file://` transport, so they never reach the
-network. Type-checking follows the profile engine's imports, so install both packages first.
+network. Install from the repository root, which links the profile engine as a workspace.
 
 ```sh
-npm ci && (cd ../profile-engine && npm ci)
+npm ci
 npm test
 npm run typecheck
 ```
