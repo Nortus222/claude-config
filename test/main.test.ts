@@ -1,10 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const bin = fileURLToPath(new URL('../bin/nortuscc.mjs', import.meta.url));
-const run = (...args: string[]) => spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8' });
+const stateDir = mkdtempSync(join(tmpdir(), 'nortuscc-main-'));
+const run = (...args: string[]) =>
+  spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8', env: { ...process.env, NORTUSCC_STATE_DIR: stateDir } });
 
 test('--help prints usage without loading any command', () => {
   const result = run('--help');
@@ -22,4 +27,26 @@ test('an unported command reaches its legacy module through main.ts', () => {
   const result = run('uninstall', '--target', 'all');
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Re-run with --yes to confirm/);
+});
+
+test('a legacy state writer is refused while another live run holds apply.lock', () => {
+  mkdirSync(stateDir, { recursive: true });
+  const lock = join(stateDir, 'apply.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  try {
+    const result = run('push');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`another nortuscc run \\(pid ${process.pid}\\) holds`));
+    assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid);
+  } finally {
+    rmSync(lock, { force: true });
+  }
+});
+
+test('a legacy state writer takes over a dead holder and releases the lock', () => {
+  const lock = join(stateDir, 'apply.lock');
+  writeFileSync(lock, JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: '2026-01-01T00:00:00.000Z' }));
+  const result = run('push');
+  assert.equal(result.status, 2); // push without -m is a usage error, reached only once the lock is held
+  assert.equal(existsSync(lock), false);
 });

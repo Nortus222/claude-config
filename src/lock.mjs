@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync, linkSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { statePath, stateRoot, legacyLockPath } from './resolve.mjs';
 
@@ -121,4 +121,55 @@ export function writeLock(lock) {
 
 export function setBaseline(lock, dest, hash) {
   lock.files[dest] = { hash, appliedAt: new Date().toISOString() };
+}
+
+function lockHolder(path) {
+  try {
+    const pid = JSON.parse(readFileSync(path, 'utf8')).pid;
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+// Runs `fn` holding <stateRoot>/apply.lock, the lock @nortuscc/machine's executor takes, so a
+// legacy command that reads state.json and rewrites it whole never overlaps a desktop or
+// TypeScript run. Same file format; a lock whose holder died is taken over. Returns fn's exit
+// code, or 1 after naming a live holder.
+export async function withApplyLock(fn) {
+  const root = stateRoot();
+  const path = join(root, 'apply.lock');
+  mkdirSync(root, { recursive: true });
+  for (let attempt = 0; ; attempt++) {
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      linkSync(temp, path);
+      break;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const pid = lockHolder(path);
+      if ((pid !== null && isAlive(pid)) || attempt > 0) {
+        console.error(`nortuscc: another nortuscc run (pid ${pid ?? 'unknown'}) holds ${path}`);
+        return 1;
+      }
+      rmSync(path, { force: true });
+    } finally {
+      rmSync(temp, { force: true });
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (lockHolder(path) === process.pid) rmSync(path, { force: true });
+  }
 }

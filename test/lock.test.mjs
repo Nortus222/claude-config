@@ -13,7 +13,7 @@ process.env.NORTUSCC_CLAUDE_DIR = dir;
 // synced, and a test that rewrites it corrupts the developer's own machine.
 process.env.NORTUSCC_STATE_DIR = join(home, 'state');
 
-const { hashFile, hashText, readLock, writeLock, setBaseline, migrateLegacyState } =
+const { hashFile, hashText, readLock, writeLock, setBaseline, migrateLegacyState, withApplyLock } =
   await import('../src/lock.mjs');
 const { statePath, stateRoot, legacyLockPath } = await import('../src/resolve.mjs');
 
@@ -238,4 +238,43 @@ test('migration drops every legacy key that is not the Claude instruction file',
 
   const result = migrateLegacyState();
   assert.deepEqual(Object.keys(result.state.files), ['claude:CLAUDE.md']);
+});
+
+test('withApplyLock holds apply.lock while fn runs and releases it after', async () => {
+  const lockPath = join(stateRoot(), 'apply.lock');
+  let seen;
+  const code = await withApplyLock(async () => {
+    seen = JSON.parse(readFileSync(lockPath, 'utf8'));
+    return 0;
+  });
+  assert.equal(code, 0);
+  assert.equal(seen.pid, process.pid);
+  assert.equal(existsSync(lockPath), false);
+});
+
+test('withApplyLock refuses while another live process holds the lock', async () => {
+  const lockPath = join(stateRoot(), 'apply.lock');
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
+  const errors = [];
+  const original = console.error;
+  console.error = (line) => errors.push(String(line));
+  let ran = false;
+  try {
+    const code = await withApplyLock(async () => { ran = true; return 0; });
+    assert.equal(code, 1);
+  } finally {
+    console.error = original;
+    rmSync(lockPath, { force: true });
+  }
+  assert.equal(ran, false);
+  assert.match(errors.join('\n'), new RegExp(`another nortuscc run \\(pid ${process.ppid}\\) holds .*apply\\.lock`));
+});
+
+test('withApplyLock takes over a lock whose holder died, and releases on throw', async () => {
+  const lockPath = join(stateRoot(), 'apply.lock');
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(lockPath, JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: '2026-01-01T00:00:00.000Z' }));
+  await assert.rejects(withApplyLock(async () => { throw new Error('boom'); }), /boom/);
+  assert.equal(existsSync(lockPath), false);
 });
