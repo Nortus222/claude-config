@@ -33,6 +33,14 @@ TanStack Query supports all four and accepts promise-returning query functions, 
 
 Component options include React Aria or Radix for React, Kobalte for Solid, Bits UI for Svelte, and Reka UI for Vue. Their documented focus handling, keyboard interactions, and ARIA behavior apply directly to setup dialogs, selectors, tabs, and override controls. Application labels, composition, and assistive-technology testing remain our responsibility. [React Aria](https://react-aria.adobe.com/), [Radix](https://www.radix-ui.com/primitives/docs/overview/accessibility), [Kobalte](https://kobalte.dev/docs/core/overview/introduction/), [Bits UI](https://www.bits-ui.com/docs), [Reka](https://reka-ui.com/docs/overview/accessibility).
 
+## Expo and React Native
+
+Expo is worth considering if iOS/Android clients become a concrete requirement. Its documented main targets are Android, iOS, and web. React Native macOS and Windows are separate partner-maintained platforms, while Linux has community approaches. Expo can export a web UI, which could be hosted inside Electron or Tauri with a separate backend bridge; that is an integration proposal, not a packaged workflow verified here. [Expo](https://docs.expo.dev/), [React Native platform projects](https://reactnative.dev/docs/out-of-tree-platforms), [Expo web export](https://docs.expo.dev/workflow/web/).
+
+Expo supports custom native modules in development builds, so local native functionality is possible. Its native app runtime is normally Hermes, not Node, and its filesystem APIs do not supply our existing Git and installer subprocess engine unchanged. Keep the Effect desktop engine separately hosted. A mobile companion could browse or edit profiles through repository APIs or a service; operating a remote machine still requires that machine's agent and a communication path. Share contracts and portable logic first, and validate any proposed UI sharing. [Custom native code](https://docs.expo.dev/workflow/customizing/), [Hermes](https://docs.expo.dev/guides/using-hermes/), [FileSystem](https://docs.expo.dev/versions/latest/sdk/filesystem/).
+
+For the current desktop-first scope, a web UI in Electron remains the smaller integration task. For a mobile-and-desktop product, evaluate Expo plus a desktop host. See the focused [Expo fit assessment](./2026-10-05-expo-fit.md).
+
 ## Effect integration
 
 Start with a shared contract such as `inspectProfile(): Promise<Snapshot>`, `applyPlan(): Promise<OperationId>`, and `subscribeOperation(id, callback): Unsubscribe`. Every framework can consume this interface. Keep inheritance, validation, resource ownership, retries, and installer coordination in the backend. UI drafts and presentation remain framework state.

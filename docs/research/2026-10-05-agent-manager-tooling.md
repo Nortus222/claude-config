@@ -33,6 +33,8 @@ Electrobun is a further candidate for a TypeScript desktop shell. Its current de
 
 React, Svelte, Solid, and Vue can all use the same typed asynchronous interface to the Effect backend. Electron does not imply React. Svelte uses compiled components and reactive bindings; Solid uses TSX and signals; Vue offers typed components and composables. React remains the default proposal, with Svelte the strongest template/form-oriented alternative. Solid is a serious alternative for a signals-based TSX approach, and it also supports TanStack Router. Typed routing alone does not distinguish React. All four have accessible component options and Query adapters. The project has no existing UI to migrate or preserve, so authoring preference and a representative screen should decide close choices. No benchmark was run. [UI comparison and sources](./2026-10-05-ui-framework-options.md).
 
+Expo is a candidate if mobile/web screen sharing becomes a near-term requirement. Its main targets are Android, iOS, and web; an exported web UI could be hosted in Electron or Tauri, but the desktop engine still needs its own runtime and bridge. This integration has not been tested. See the [Expo fit assessment](./2026-10-05-expo-fit.md) and the [Tauri 2 validation proposal](./2026-10-05-desktop-shell-options.md#tauri-2-validation-proposal).
+
 A desktop renderer has no current need for server rendering, server components, or a local HTTP listener. A public profile website can be designed separately when it is needed. Effect RPC can be reconsidered if the operation interface grows enough to justify a MessagePort transport adapter. Start with a small Schema-validated command/event protocol.
 
 ## Version traps found during research
