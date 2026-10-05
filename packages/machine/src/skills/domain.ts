@@ -82,7 +82,10 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
 const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const sortedUnique = (names: Iterable<string>) => [...new Set(names)].sort(byCodePoint);
 const touchesOf = (names: Iterable<string>) => sortedUnique(names).map((n) => `skills/${n}`);
-const INSTALL_PREFIX = 'skills:install:';
+// Skills step keys; an install step's key is `install` followed by its source.
+export const SKILL_STEP = {
+  remove: 'skills:remove', update: 'skills:update', install: 'skills:install:', expose: 'skills:expose', manifest: 'skills:manifest',
+} as const;
 
 // The skill names a skills step acts on, read back from its `skills/<name>` touches.
 export const skillNamesOf = (step: Step): string[] =>
@@ -95,7 +98,7 @@ const installSteps = (items: ReadonlyArray<Observed>, targets: ReadonlyArray<Tar
   return [...bySource.keys()].sort(byCodePoint).map((source) => {
     const touches = touchesOf(bySource.get(source)!);
     return {
-      key: `${INSTALL_PREFIX}${source}`, domain: 'skills', action: 'install-skills',
+      key: `${SKILL_STEP.install}${source}`, domain: 'skills', action: 'install-skills',
       summary: `installing ${touches.length} skill(s) from ${source}`, touches, interruptible: true, targets,
     };
   });
@@ -122,24 +125,24 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
   const steps: Step[] = [];
   if (gone.length) {
     const touches = touchesOf(gone);
-    steps.push({ key: 'skills:remove', domain: 'skills', action: 'remove', summary: `removing ${touches.length} skill(s)`, touches, interruptible: true });
+    steps.push({ key: SKILL_STEP.remove, domain: 'skills', action: 'remove', summary: `removing ${touches.length} skill(s)`, touches, interruptible: true });
   }
   if (outdated.length) {
     const touches = touchesOf(outdated);
-    steps.push({ key: 'skills:update', domain: 'skills', action: 'update-skills', summary: `updating ${touches.length} skill(s)`, touches, interruptible: true });
+    steps.push({ key: SKILL_STEP.update, domain: 'skills', action: 'update-skills', summary: `updating ${touches.length} skill(s)`, touches, interruptible: true });
   }
   const installs = installSteps(items.filter((i) => i.state === 'available'), selection.targets);
   steps.push(...installs);
   if (steps.length) {
     steps.push({
-      key: 'skills:expose', domain: 'skills', action: 'install-skills',
+      key: SKILL_STEP.expose, domain: 'skills', action: 'install-skills',
       summary: `re-exposing skills to ${selection.targets.map((t) => SKILL_AGENTS[t]).join(', ')}`,
       touches: touchesOf(outdated), interruptible: true, targets: selection.targets,
     });
   }
   if (gone.length || installs.length) {
     steps.push({
-      key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: `write ${MANIFEST_FILE}`,
+      key: SKILL_STEP.manifest, domain: 'skills', action: 'write-manifest', summary: `write ${MANIFEST_FILE}`,
       touches: [MANIFEST_FILE], interruptible: false,
     });
   }
@@ -222,9 +225,9 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
         yield* preserveAll(names);
         return yield* runInstaller(updateCommand(names));
       case 'install-skills':
-        if (step.key === 'skills:expose') return yield* reExpose(step, report);
-        if (step.key.startsWith(INSTALL_PREFIX)) {
-          return yield* runInstaller(addCommand({ source: step.key.slice(INSTALL_PREFIX.length), skills: names, targets: step.targets ?? TARGETS }));
+        if (step.key === SKILL_STEP.expose) return yield* reExpose(step, report);
+        if (step.key.startsWith(SKILL_STEP.install)) {
+          return yield* runInstaller(addCommand({ source: step.key.slice(SKILL_STEP.install.length), skills: names, targets: step.targets ?? TARGETS }));
         }
         break;
       case 'write-manifest':

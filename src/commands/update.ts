@@ -4,7 +4,7 @@ import { Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles, type Target } from '@nortuscc/profile-engine';
 import {
   backupsForRun, execute, inspectUpdates, MachinePaths, nodeFs, nodeProcesses, pathsFromEnvironment, plan, readSkillLock,
-  selectAll, short, skillNamesOf, skillsDomain,
+  selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
   type Fs, type Observed, type Processes, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
 import { formatRow, labelWidth, section } from '../report.mjs';
@@ -12,7 +12,6 @@ import { select } from '../select.mjs';
 import { parseTarget, selectedTargets } from '../targets.mjs';
 
 const NEEDS_NAMES = '--add needs a comma-separated list of skill names';
-const INSTALL_PREFIX = 'skills:install:';
 
 export type UpdateFlags = { check: boolean; yes: boolean; prune: boolean; add: string[]; error: string | null };
 
@@ -274,7 +273,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
       switch (event.type) {
         case 'started': {
           const key = event.step.key;
-          if (key === 'skills:remove' || key === 'skills:update' || key.startsWith(INSTALL_PREFIX)) write(`\n${event.step.summary}\n`);
+          if (key === SKILL_STEP.remove || key === SKILL_STEP.update || key.startsWith(SKILL_STEP.install)) write(`\n${event.step.summary}\n`);
           return;
         }
         case 'finished':
@@ -282,9 +281,9 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
           if (event.outcome === 'failed') anyFailed = true;
           if (event.outcome !== 'ok') {
             if (event.note) write(`\n${event.key}: ${event.note}\n`);
-          } else if (event.key === 'skills:expose' && event.note) {
+          } else if (event.key === SKILL_STEP.expose && event.note) {
             write(`\n${event.note}\n`);
-          } else if (event.key === 'skills:manifest') {
+          } else if (event.key === SKILL_STEP.manifest) {
             write(`\nskills-manifest.txt ${event.note}\n`);
             if (event.note.startsWith('written')) write('Run: nortuscc push -m "..."   to share it\n');
           }
@@ -305,7 +304,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // rather than trusting that a requested update moved anything.
     const after = yield* readSkillLock;
     const ran = (key: string) => outcomes.get(key) === 'ok' || outcomes.get(key) === 'failed';
-    const updateStep = p.steps.find((s) => s.key === 'skills:update');
+    const updateStep = p.steps.find((s) => s.key === SKILL_STEP.update);
     const updated = updateStep && ran(updateStep.key) ? skillNamesOf(updateStep) : [];
     const moved = updated
       .map((name) => ({ name, from: hashOf(before, name), to: hashOf(after, name) }))
@@ -316,12 +315,12 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // update never happened.
     const unmoved = updated.length > 0 && moved.length === 0;
 
-    const removeStep = p.steps.find((s) => s.key === 'skills:remove');
+    const removeStep = p.steps.find((s) => s.key === SKILL_STEP.remove);
     const removed = removeStep && ran(removeStep.key) ? skillNamesOf(removeStep) : [];
     const removeOk = removeStep !== undefined && outcomes.get(removeStep.key) === 'ok';
     // Each source is its own installer call, so an add fails only for the source that failed.
-    const addRows = p.steps.filter((s) => s.key.startsWith(INSTALL_PREFIX) && ran(s.key)).flatMap((s) => {
-      const source = s.key.slice(INSTALL_PREFIX.length);
+    const addRows = p.steps.filter((s) => s.key.startsWith(SKILL_STEP.install) && ran(s.key)).flatMap((s) => {
+      const source = s.key.slice(SKILL_STEP.install.length);
       const ok = outcomes.get(s.key) === 'ok';
       return skillNamesOf(s).map((name) =>
         (ok ? formatRow(name, 'added', source) : formatRow(name, 'failed', `${source} — install failed, see output above`)));
