@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
@@ -69,4 +69,38 @@ test('a repeat moveAside vacates the live path without overwriting the first bac
   assert.equal(second, first);
   assert.equal(readFileSync(first!, 'utf8'), 'original');
   assert.equal(existsSync(live), false);
+});
+
+test('a path absent at its first call is never backed up later in the run', async () => {
+  const { home, paths, run } = setup();
+  const live = join(home, 'CLAUDE.md');
+  const results = await run((b) => Effect.gen(function* () {
+    const first = yield* b.moveAside(live, 'CLAUDE.md', 'claude');
+    writeFileSync(live, 'written by this run');
+    const moved = yield* b.moveAside(live, 'CLAUDE.md', 'claude');
+    writeFileSync(live, 'written again');
+    const kept = yield* b.preserve(live, 'CLAUDE.md', 'claude');
+    return [first, moved, kept, yield* b.dir];
+  }));
+  assert.deepEqual(results, [undefined, undefined, undefined, undefined]);
+  assert.equal(readFileSync(live, 'utf8'), 'written again');
+  assert.equal(existsSync(paths.backups), false);
+});
+
+test('preserve of a symlinked file keeps what it points at, not the link', async () => {
+  const { home, run } = setup();
+  const target = join(home, 'dotfiles.json');
+  writeFileSync(target, 'at that time');
+  symlinkSync('dotfiles.json', join(home, 'settings.json'));
+  const kept = await run((b) => b.preserve(join(home, 'settings.json'), 'settings.json', 'claude'));
+  writeFileSync(target, 'changed later');
+  assert.equal(lstatSync(kept!).isSymbolicLink(), false);
+  assert.equal(readFileSync(kept!, 'utf8'), 'at that time');
+});
+
+test('preserve of a dangling link copies the link', async () => {
+  const { home, run } = setup();
+  symlinkSync(join(home, 'nowhere'), join(home, 'settings.json'));
+  const kept = await run((b) => b.preserve(join(home, 'settings.json'), 'settings.json', 'claude'));
+  assert.equal(lstatSync(kept!).isSymbolicLink(), true);
 });

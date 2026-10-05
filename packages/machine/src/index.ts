@@ -20,3 +20,6 @@ export {
   hookCommand,
   type PluginState,
 } from './integrations/index.ts';
+export { CHANGED_SINCE_APPLY, configDomain } from './config/domain.ts';
+export { splitOutcome } from './config/outcome.ts';
+export { configFileId } from './config/observe.ts';

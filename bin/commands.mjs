@@ -56,4 +56,4 @@ can change is nortuscc itself, and only after you say yes.`;
 
 // Commands whose implementation is TypeScript (src/commands/<verb>.ts). An npx copy cannot
 // run TypeScript from node_modules, so it hands these to the recorded checkout.
-export const PORTED = [];
+export const PORTED = ['uninstall'];

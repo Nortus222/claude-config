@@ -1,4 +1,6 @@
-// The single source of truth for what syncs and how.
+import FILES from '../packages/profile-engine/src/files.json' with { type: 'json' };
+
+// What syncs and how, in the shape the legacy commands read. The table itself is the engine's packages/profile-engine/src/files.json; this only renames its fields.
 //
 // Every entry carries the agent it belongs to, so one manifest serves both
 // targets and `--target` is a filter over this table rather than a second
@@ -20,25 +22,12 @@
 // `hooks` is deliberately not owned. src/integrations/claude-hooks.mjs already
 // writes settings.hooks, and a second writer would let `apply` undo what
 // `apply --install` registered; `status` already reports undeclared hooks.
-export const SYNC = [
-  { target: 'claude', src: 'claude/CLAUDE.md', dest: 'CLAUDE.md', mode: 'copy' },
-  { target: 'codex', src: 'codex/AGENTS.md', dest: 'AGENTS.md', mode: 'copy' },
-  {
-    target: 'codex',
-    machine: 'codex-openrouter',
-    src: 'codex/openrouter-glm/models-static.json',
-    dest: 'models-static.json',
-    mode: 'copy',
-    capture: false,
-  },
-  {
-    target: 'codex',
-    machine: 'codex-openrouter',
-    src: 'codex/openrouter-glm/config.toml',
-    dest: 'config.toml',
-    mode: 'copy',
-    preserveProjects: true,
-    capture: false,
-  },
-  { target: 'claude', src: 'claude/settings.keys.json', dest: 'settings.json', mode: 'merge-keys' },
-];
+export const SYNC = FILES.map((file) => ({
+  target: file.target,
+  ...(file.home !== file.target ? { machine: file.home } : {}),
+  src: file.src,
+  dest: file.dest,
+  mode: file.mode,
+  ...(file.preserveProjects ? { preserveProjects: true } : {}),
+  ...(file.capture ? {} : { capture: false }),
+}));
