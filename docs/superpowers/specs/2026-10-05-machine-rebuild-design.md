@@ -34,8 +34,11 @@ The engine spec left three decisions to #42.
    later, which strips types without flags. There is no build step. The zero-dependency rule is
    retired; `effect` (pinned, shared) is the one runtime dependency. Tests stay on `node:test`.
    Node will not strip types under `node_modules`, which the bootstrap below handles.
-3. **`SYNC`.** Deleted. The engine's `FILES`, resolved into `DesiredConfig.files`, is the only
-   table of managed files. It is kept as JSON (`packages/profile-engine/src/files.json`) so the legacy commands read the same table from an `npx` copy until cutover. The CLI's other duplicate parsers (`integrations.json`,
+3. **`SYNC`.** The duplicate table is deleted. The engine's `FILES`, resolved into
+   `DesiredConfig.files`, is the only table of managed files. It is kept as JSON
+   (`packages/profile-engine/src/files.json`) so the legacy commands read the same table from an
+   `npx` copy until cutover (#59), and `src/manifest.mjs` keeps a field-renaming adapter over
+   `files.json` until then. The CLI's other duplicate parsers (`integrations.json`,
    `skills-manifest.txt`, `settings.keys.json`) go too; the engine is their only reader.
 
 ## Layout
