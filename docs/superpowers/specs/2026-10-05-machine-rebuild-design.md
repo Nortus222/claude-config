@@ -211,13 +211,14 @@ Still JSON lines, strict, with an allow-list on both the Rust and backend sides.
 | --- | --- |
 | `inspect` | the `MachineReport` |
 | `preview { exclude: key[] }` | `{ planId, plan }` |
-| `apply { planId }` | progress events, then a final result |
+| `apply { planId }` | `{ status: 'started', runId }` at once, then progress events ending in `done`, `cancelled` or `failed`; or `{ status: 'stale', planId, plan }` |
 | `cancel`, `shutdown` | as today |
 
 The renderer sends only opaque item keys taken from the report, and the backend checks them
 against it. The renderer never sends a path or a command. `apply` re-inspects and re-plans
-first. If the plan differs from the previewed one, it refuses with `STALE` and returns the new
-preview, so the app only applies what the user saw. The record cap rises from 16 KB to 1 MiB,
+first. If the plan differs from the previewed one, nothing runs and the result is
+`{ status: 'stale', planId, plan }`: the new preview, returned as a result rather than an error
+code, so the app only applies what the user saw. The record cap rises from 16 KB to 1 MiB,
 and timeouts become per-command, because inspect can take seconds.
 
 ### Renderer

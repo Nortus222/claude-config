@@ -80,7 +80,7 @@ macOS has no Tauri WebDriver, so check the GUI by hand: open the `.app`, inspect
 
 ## Backend runtime size
 
-Measured on macOS arm64 (October 2026) for issue #40. Each option passed the packaged smoke test. App size is the complete `.app`. Startup is the median time from spawn to the first `inspect` reply, and idle memory is backend RSS after 2 seconds. Both use 10 runs of `node scripts/measure.mjs <runtime> [backend.mjs]`.
+Measured on macOS arm64 (October 2026) for issue #40. Each option passed the packaged smoke test. App size is the complete `.app`. Startup is the median time from spawn to the first `inspect` reply, and idle memory is backend RSS after 2 seconds. Both use 10 runs of `node scripts/measure.mjs <runtime> [backend.mjs]`. These figures were measured with the fixture backend, before the real machine backend replaced it, and have not been re-measured.
 
 | Backend runtime | App size | Runtime file | Startup | Idle memory |
 | --- | --- | --- | --- | --- |
