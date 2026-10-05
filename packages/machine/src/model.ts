@@ -15,6 +15,8 @@ export type Observed = {
   readonly state: string;
   readonly disposition: Disposition;
   readonly note?: string;
+  // Facts only the owning domain's `steps` reads (for config: "recorded", "local-absent"). Deterministic, like `state`.
+  readonly facts?: ReadonlyArray<string>;
   readonly from?: Origin;
 };
 

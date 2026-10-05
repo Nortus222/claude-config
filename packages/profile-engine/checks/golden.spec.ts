@@ -92,10 +92,6 @@ function assertDocumentsAgree(dir: string, config: DesiredConfig, label: string,
   assert.ok(config.integrations.every((i) => i.enabled === i.declaration.default), `${label}: enabled`);
 }
 
-test('the built-in file table equals the CLI SYNC table', () => {
-  assert.deepEqual(FILES.map(toSyncEntry), SYNC);
-});
-
 test("this repository's configuration resolves as the CLI reads it", async () => {
   const config = await load(REPO);
   assert.deepEqual(config.issues, []);

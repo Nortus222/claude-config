@@ -10,6 +10,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "allowJs": true,
+    "resolveJsonModule": true,
     "checkJs": false,
     "skipLibCheck": true,
     "types": ["node"]

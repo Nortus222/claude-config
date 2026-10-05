@@ -5,6 +5,9 @@ import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
+// Migration rule until cutover (#59): anything that writes overrides.json must also write
+// state.json's skillsOnly/configTargets, and the legacy writeLock mirrors state.json into an
+// existing overrides.json.
 export class OverridesStore extends Context.Service<
   OverridesStore,
   {
