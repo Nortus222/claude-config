@@ -109,6 +109,39 @@ fn bounded_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
         }
     }
 }
+// Own the directory before a backend can create any operation resources.
+struct SessionDirectory(PathBuf);
+impl SessionDirectory {
+    fn create() -> Result<Self, String> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        for attempt in 0..16 {
+            let path = std::env::temp_dir().join(format!(
+                "nortuscc-fixture-session-{}-{timestamp}-{attempt}",
+                std::process::id()
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Err("Unable to create a fresh fixture session".into())
+    }
+}
+impl Drop for SessionDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 struct Inner {
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Child>,
@@ -117,7 +150,9 @@ struct Inner {
     stopped: AtomicBool,
     next_id: AtomicU64,
     emit: Emit,
-    directories: Mutex<Vec<PathBuf>>,
+    session: SessionDirectory,
+    // Shutdown waits for any monitor cleanup already in flight.
+    cleanup: Mutex<()>,
 }
 impl Inner {
     fn disconnect(&self, reason: &str) {
@@ -129,6 +164,7 @@ impl Inner {
         }
     }
     fn force_stop(&self) {
+        let _cleanup = self.cleanup.lock().unwrap();
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -140,9 +176,7 @@ impl Inner {
         let _ = child.kill();
         let _ = child.wait();
         drop(child);
-        for directory in self.directories.lock().unwrap().drain(..) {
-            let _ = std::fs::remove_dir_all(directory);
-        }
+        let _ = std::fs::remove_dir_all(&self.session.0);
     }
 }
 pub struct Backend {
@@ -158,12 +192,14 @@ impl Backend {
                 resources.display()
             ));
         }
+        let session = SessionDirectory::create()?;
         let mut command = Command::new(node);
         command
             .arg(script)
             .current_dir(resources)
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
+            .env("NORTUSCC_FIXTURE_SESSION", &session.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -184,8 +220,13 @@ impl Backend {
             stopped: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             emit,
-            directories: Mutex::new(Vec::new()),
+            session,
+            cleanup: Mutex::new(()),
         });
+        eprintln!(
+            "host: {}",
+            json!({"event":"session", "directory":inner.session.0})
+        );
         let read = inner.clone();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -219,28 +260,10 @@ impl Backend {
             read.stdin.lock().unwrap().take();
             // Closing the pipe gives the backend its cleanup window, even for invalid output.
         });
-        let diagnostics = inner.clone();
         thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
             while let Ok(Some(line)) = bounded_line(&mut reader) {
                 eprintln!("backend: {}", String::from_utf8_lossy(&line));
-                if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                    if value["event"] == "resource" {
-                        if let Some(directory) = value["directory"].as_str() {
-                            let path = PathBuf::from(directory);
-                            if path.parent() == Some(std::env::temp_dir().as_path())
-                                && path
-                                    .file_name()
-                                    .and_then(|v| v.to_str())
-                                    .is_some_and(|name| name.starts_with("nortuscc-fixture-"))
-                            {
-                                let mut directories = diagnostics.directories.lock().unwrap();
-                                directories.retain(|directory| directory.exists());
-                                directories.push(path);
-                            }
-                        }
-                    }
-                }
             }
         });
         let monitor = inner.clone();
@@ -398,6 +421,7 @@ mod tests {
             Arc::new(move |event| captured.lock().unwrap().push(event)),
         )
         .unwrap();
+        let session = owner.inner.session.0.clone();
         assert_eq!(
             owner.request("inspect").unwrap()["diff"]
                 .as_array()
@@ -417,6 +441,7 @@ mod tests {
         thread::sleep(Duration::from_millis(80));
         assert!(owner.request("inspect").is_err());
         drop(owner);
+        assert!(!session.exists());
         let fresh = Backend::spawn(&runtime(), Arc::new(|_| {})).unwrap();
         assert_eq!(
             fresh.request("inspect").unwrap()["diff"]
@@ -432,18 +457,15 @@ mod tests {
 mod lifecycle_tests {
     use super::*;
     fn fake_backend(source: &str) -> (Backend, PathBuf) {
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
         let directory = std::env::temp_dir().join(format!(
-            "fixture-host-test-{}-{}",
+            "fixture-host-test-{}-{}-{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        // Unique files allow lifecycle tests to run concurrently without sharing sidecars.
-        let directory = directory.with_extension(format!(
-            "{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir(&directory).unwrap();
         let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/node");
@@ -454,6 +476,60 @@ mod lifecycle_tests {
             Backend::spawn(&directory, Arc::new(|_| {})).unwrap(),
             directory,
         )
+    }
+    #[test]
+    fn abrupt_death_before_child_spawn_removes_operation_directory() {
+        let bundle =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/backend.mjs");
+        let source = format!(
+            r#"
+            import fs from 'node:fs';
+            import promises from 'node:fs/promises';
+            import {{ syncBuiltinESMExports }} from 'node:module';
+            const original = promises.mkdtemp;
+            promises.mkdtemp = async prefix => {{
+                const directory = await original(prefix);
+                fs.writeFileSync(new URL('./created.txt', import.meta.url), directory);
+                process.kill(process.pid, 'SIGSTOP');
+                return directory;
+            }};
+            syncBuiltinESMExports();
+            await import({});
+        "#,
+            serde_json::to_string(bundle.to_str().unwrap()).unwrap()
+        );
+        let (backend, resources) = fake_backend(&source);
+        backend.request("start").unwrap();
+        let marker = resources.join("created.txt");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let operation = PathBuf::from(std::fs::read_to_string(&marker).unwrap());
+        assert!(operation.is_dir());
+        let session = backend.inner.session.0.clone();
+        assert_eq!(operation.parent(), Some(session.as_path()));
+        let pid = backend.inner.child.lock().unwrap().id();
+        backend.inner.child.lock().unwrap().kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (operation.exists() || session.exists()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cleaned = !operation.exists() && !session.exists();
+        if operation.exists() {
+            std::fs::remove_dir_all(&operation).unwrap();
+        }
+        drop(backend);
+        std::fs::remove_dir_all(resources).unwrap();
+        assert!(
+            cleaned,
+            "Pre-child crash leaked an operation directory without a resource diagnostic"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(unsafe { libc::kill(-(pid as i32), 0) }, -1);
+        }
     }
     #[test]
     fn timeout_disconnects_owner_and_no_request_is_retried() {
@@ -505,29 +581,47 @@ mod lifecycle_tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
-    fn unexpected_child_death_removes_tracked_temporary_directory() {
-        let fixture = std::env::temp_dir().join(format!(
-            "nortuscc-fixture-host-probe-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&fixture).unwrap();
-        let source = format!("process.stderr.write(JSON.stringify({{event:'resource', directory:{}}})+'\\n'); process.stdin.resume(); setInterval(() => {{}},1000)", serde_json::to_string(fixture.to_str().unwrap()).unwrap());
-        let (backend, directory) = fake_backend(&source);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while backend.inner.directories.lock().unwrap().is_empty() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(backend.inner.directories.lock().unwrap().len(), 1);
+    fn unexpected_child_death_removes_the_entire_owned_session() {
+        let (backend, resources) =
+            fake_backend("process.stdin.resume(); setInterval(() => {}, 1000)");
+        let session = backend.inner.session.0.clone();
+        std::fs::create_dir(session.join("unregistered-operation")).unwrap();
         backend.inner.child.lock().unwrap().kill().unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
-        while fixture.exists() && Instant::now() < deadline {
+        while session.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            !fixture.exists(),
-            "Unexpected backend death leaked a tracked fixture directory"
+            !session.exists(),
+            "Unexpected backend death leaked its session"
         );
         drop(backend);
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(resources).unwrap();
+    }
+    #[test]
+    fn forced_shutdown_removes_session_before_returning() {
+        let (backend, resources) =
+            fake_backend("process.stdin.resume(); setInterval(() => {}, 1000)");
+        let session = backend.inner.session.0.clone();
+        std::fs::create_dir(session.join("unregistered-operation")).unwrap();
+        backend.shutdown();
+        assert!(!session.exists());
+        drop(backend);
+        std::fs::remove_dir_all(resources).unwrap();
+    }
+    #[test]
+    fn session_directory_is_private_and_removed_when_spawn_setup_is_abandoned() {
+        let session = SessionDirectory::create().unwrap();
+        let path = session.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        drop(session);
+        assert!(!path.exists());
     }
 }

@@ -15,15 +15,19 @@ const directory = await mkdtemp(join(tmpdir(), 'nortuscc-packaged-smoke-'));
 const diagnostics = [];
 function captureResources(line) {
   try {
-    const record = JSON.parse(line.replace(/^backend: /, ''));
-    if (record.event === 'resource') diagnostics.push(record);
+    const record = JSON.parse(line.replace(/^(backend|host): /, ''));
+    if (record.event === 'resource' || record.event === 'session') diagnostics.push(record);
   } catch {}
 }
 async function assertClean() {
   assert.ok(diagnostics.length, 'Smoke did not observe fixture resources');
   for (const resource of diagnostics) {
     await assert.rejects(access(resource.directory), `Directory remains: ${resource.directory}`);
-    assert.throws(() => process.kill(resource.childPid, 0), `Child remains: ${resource.childPid}`);
+    if (resource.childPid)
+      assert.throws(
+        () => process.kill(resource.childPid, 0),
+        `Child remains: ${resource.childPid}`,
+      );
   }
 }
 let child;
@@ -47,7 +51,7 @@ try {
   } else {
     child = spawn(join(resources, 'node'), [join(resources, 'backend.mjs')], {
       cwd: directory,
-      env: { PATH: '' },
+      env: { PATH: '', NORTUSCC_FIXTURE_SESSION: directory },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const messages = [];

@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { access, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { MAX_RECORD_BYTES } from '../backend/protocol.ts';
@@ -14,7 +15,15 @@ export function client(
   cwd = resolve('.'),
   env = process.env,
 ) {
-  const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const ownedSession = env.NORTUSCC_FIXTURE_SESSION
+    ? null
+    : mkdtempSync(resolve(tmpdir(), 'nortuscc-fixture-session-check-'));
+  const sessionDirectory = env.NORTUSCC_FIXTURE_SESSION || ownedSession!;
+  const child = spawn(command, args, {
+    cwd,
+    env: { ...env, NORTUSCC_FIXTURE_SESSION: sessionDirectory },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
   const messages: any[] = [],
     diagnostics: any[] = [];
   createInterface({ input: child.stdout }).on('line', (line) => messages.push(JSON.parse(line)));
@@ -46,6 +55,7 @@ export function client(
       child.stdin.end();
       await exited;
     }
+    if (ownedSession) await rm(ownedSession, { recursive: true, force: true });
   }
   return { child, messages, diagnostics, until, send, close };
 }
@@ -66,6 +76,7 @@ test('live operation reports progress, rejects busy, cancels and cleans child an
   assert.equal((await c.send('cancel')).ok, true);
   const cancelled = await c.until(() => c.messages.find((m) => m.state === 'cancelled'));
   assert.equal(cancelled.operationId, started.result.operationId);
+  assert.equal(cancelled.detail, 'Fixture operation cancelled');
   await cleaned(resource);
   assert.equal((await c.send('inspect')).result.diff.length, 2);
 });
@@ -127,4 +138,32 @@ test('bundled Node and backend run from another directory without Node on PATH',
   assert.equal((await c.send('inspect')).ok, true);
   await c.send('start');
   await c.until(() => c.messages.find((m) => m.state === 'completed'));
+});
+
+test('operation directories stay beneath the supplied session and cancel preserves that session', async (t) => {
+  const session = await mkdtemp(resolve(tmpdir(), 'nortuscc-fixture-session-check-'));
+  t.after(() => rm(session, { recursive: true, force: true }));
+  const c = client(process.execPath, ['--import', 'tsx', 'backend/main.ts'], resolve('.'), {
+    ...process.env,
+    NORTUSCC_FIXTURE_SESSION: session,
+  });
+  t.after(() => c.close());
+  await c.send('start');
+  const resource = await c.until(() => c.diagnostics.find((d) => d.event === 'resource'));
+  assert.equal(resolve(resource.directory, '..'), session);
+  await c.send('cancel');
+  await cleaned(resource);
+  await access(session);
+});
+
+test('fixture child failure publishes a truthful failed state and preserves the preview', async (t) => {
+  const c = client();
+  t.after(() => c.close());
+  await c.send('start');
+  const resource = await c.until(() => c.diagnostics.find((d) => d.event === 'resource'));
+  process.kill(resource.childPid, 'SIGTERM');
+  const failed = await c.until(() => c.messages.find((message) => message.state === 'failed'));
+  assert.equal(failed.detail, 'Fixture operation failed');
+  await cleaned(resource);
+  assert.equal((await c.send('inspect')).result.diff.length, 2);
 });

@@ -1,6 +1,8 @@
 import { Effect, Exit } from 'effect';
 import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { statSync } from 'node:fs';
+import { isAbsolute, dirname, basename } from 'node:path';
 import {
   decodeRequest,
   decodeMessage,
@@ -11,9 +13,18 @@ import {
 import { desiredFixture, inspectFixture, type Value } from './fixture.ts';
 import { fixtureOperation } from './operation.ts';
 
+const sessionPath = process.env.NORTUSCC_FIXTURE_SESSION;
+if (!sessionPath || !isAbsolute(sessionPath) || !statSync(sessionPath).isDirectory()) {
+  throw new Error('An existing host-owned fixture session directory is required');
+}
+const sessionDirectory = sessionPath;
+
 // The child's pipe lifetime also cleans resources if the backend is killed abruptly.
 if (process.argv.includes('--fixture-child')) {
   const directory = process.argv.at(-1)!;
+  if (dirname(directory) !== sessionDirectory || !basename(directory).startsWith('operation-')) {
+    throw new Error('Fixture child directory must belong to the host session');
+  }
   let closing = false;
   const finish = async () => {
     if (closing) return;
@@ -90,7 +101,7 @@ if (process.argv.includes('--fixture-child')) {
           percent: 0,
           detail: 'Preparing a temporary fixture',
         });
-        operation.done = Effect.runPromiseExit(fixtureOperation(id, emit), {
+        operation.done = Effect.runPromiseExit(fixtureOperation(id, sessionDirectory, emit), {
           signal: abort.signal,
         }).then((exit) => {
           const state = abort.signal.aborted
@@ -110,8 +121,8 @@ if (process.argv.includes('--fixture-child')) {
               state === 'completed'
                 ? 'Fixture applied and temporary resources removed'
                 : state === 'cancelled'
-                  ? 'Cancelled; temporary resources removed'
-                  : 'Fixture failed; temporary resources removed',
+                  ? 'Fixture operation cancelled'
+                  : 'Fixture operation failed',
           });
         });
         break;

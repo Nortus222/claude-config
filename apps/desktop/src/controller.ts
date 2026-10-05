@@ -23,6 +23,31 @@ export class FixtureController {
   private listeners = new Set<() => void>();
   private early = new Map<string, Progress>();
   private starting = false;
+  private revision = 0;
+  private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
+  private owns(revision: number) {
+    return !this.disposed && this.revision === revision;
+  }
+  private establish(
+    reply: { generation: number; data: unknown },
+    detail: string,
+    revision: number,
+  ) {
+    if (!this.owns(revision)) return;
+    const fixture = decodeFixture(reply.data);
+    this.generation = reply.generation;
+    const disconnected = this.earlyDisconnects.get(reply.generation);
+    this.earlyDisconnects.clear();
+    if (disconnected) {
+      this.revision++;
+      this.update({
+        fixture,
+        connection: 'disconnected',
+        pending: false,
+        detail: disconnected.detail,
+      });
+    } else this.update({ fixture, connection: 'connected', detail });
+  }
   constructor(private bridge: Bridge | null) {
     if (!bridge)
       this.state = {
@@ -45,33 +70,41 @@ export class FixtureController {
   }
   async connect() {
     if (!this.bridge) return;
+    const revision = ++this.revision;
+    this.generation = null;
+    this.earlyDisconnects.clear();
+    this.update({ pending: true });
     try {
       const unlisten = await this.bridge.subscribe((event) => this.receive(event));
-      if (this.disposed) {
+      if (!this.owns(revision)) {
         unlisten();
         return;
       }
       this.unlisten = unlisten;
       const reply = await this.bridge.invoke('inspect_fixture');
-      if (this.disposed) return;
-      this.generation = reply.generation;
-      this.update({
-        fixture: decodeFixture(reply.data),
-        connection: 'connected',
-        detail: 'Bundled backend connected',
-      });
+      this.establish(reply, 'Bundled backend connected', revision);
     } catch (error) {
-      this.update({ connection: 'disconnected', detail: String(error) });
+      if (this.owns(revision)) this.update({ connection: 'disconnected', detail: String(error) });
+    } finally {
+      if (this.owns(revision)) this.update({ pending: false });
     }
   }
   private receive(event: HostEvent) {
-    if (event.generation !== this.generation || this.disposed) return;
+    if (this.disposed) return;
+    if (this.generation === null && this.state.connection === 'connecting') {
+      if (event.event === 'disconnected' && this.earlyDisconnects.size < 16)
+        this.earlyDisconnects.set(event.generation, event);
+      return;
+    }
+    if (event.generation !== this.generation) return;
     if (event.event === 'disconnected') {
+      this.revision++;
       this.starting = false;
       this.early.clear();
       this.update({ connection: 'disconnected', pending: false, detail: event.detail });
       return;
     }
+    if (this.state.connection !== 'connected') return;
     if (this.starting) {
       if (this.early.size < 8 || this.early.has(event.operationId))
         this.early.set(event.operationId, event);
@@ -86,12 +119,17 @@ export class FixtureController {
     if (event.state === 'completed') void this.refresh();
   }
   private async refresh() {
+    const revision = this.revision;
     try {
       const reply = await this.bridge!.invoke('inspect_fixture');
-      if (reply.generation === this.generation && this.state.connection === 'connected')
+      if (
+        this.owns(revision) &&
+        reply.generation === this.generation &&
+        this.state.connection === 'connected'
+      )
         this.update({ fixture: decodeFixture(reply.data) });
     } catch (error) {
-      this.update({ detail: String(error) });
+      if (this.owns(revision)) this.update({ detail: String(error) });
     }
   }
   async start() {
@@ -102,12 +140,18 @@ export class FixtureController {
       this.state.operation?.state === 'running'
     )
       return;
+    const revision = ++this.revision;
     this.starting = true;
     this.early.clear();
     this.update({ pending: true, operation: null, detail: 'Starting fixture operation' });
     try {
       const reply = await this.bridge.invoke('start_fixture');
-      if (reply.generation !== this.generation || this.state.connection !== 'connected') return;
+      if (
+        !this.owns(revision) ||
+        reply.generation !== this.generation ||
+        this.state.connection !== 'connected'
+      )
+        return;
       const id = (reply.data as { operationId?: unknown }).operationId;
       if (typeof id !== 'string' || !id) throw new Error('Invalid operation acknowledgement');
       this.update({
@@ -125,10 +169,12 @@ export class FixtureController {
       this.early.clear();
       if (buffered) this.receive({ ...buffered, generation: reply.generation });
     } catch (error) {
-      this.update({ detail: String(error) });
+      if (this.owns(revision)) this.update({ detail: String(error) });
     } finally {
-      this.starting = false;
-      this.update({ pending: false });
+      if (this.owns(revision)) {
+        this.starting = false;
+        this.update({ pending: false });
+      }
     }
   }
   async cancel() {
@@ -139,20 +185,23 @@ export class FixtureController {
   }
   private async command(command: Command) {
     if (!this.bridge || this.state.pending || this.state.connection !== 'connected') return;
+    const revision = ++this.revision;
     this.update({ pending: true });
     try {
       await this.bridge.invoke(command);
     } catch (error) {
-      this.update({ detail: String(error) });
+      if (this.owns(revision)) this.update({ detail: String(error) });
     } finally {
-      this.update({ pending: false });
+      if (this.owns(revision)) this.update({ pending: false });
     }
   }
   async restart() {
     if (!this.bridge || this.state.pending) return;
+    const revision = ++this.revision;
     this.generation = null;
     this.starting = false;
     this.early.clear();
+    this.earlyDisconnects.clear();
     this.update({
       pending: true,
       connection: 'connecting',
@@ -161,20 +210,17 @@ export class FixtureController {
     });
     try {
       const reply = await this.bridge.invoke('restart_backend');
-      this.generation = reply.generation;
-      this.update({
-        fixture: decodeFixture(reply.data),
-        connection: 'connected',
-        detail: 'Fresh backend connected. Fixture reset.',
-      });
+      this.establish(reply, 'Fresh backend connected. Fixture reset.', revision);
     } catch (error) {
-      this.update({ connection: 'disconnected', detail: String(error) });
+      if (this.owns(revision)) this.update({ connection: 'disconnected', detail: String(error) });
     } finally {
-      this.update({ pending: false });
+      if (this.owns(revision)) this.update({ pending: false });
     }
   }
   dispose() {
     this.disposed = true;
+    this.revision++;
+    this.earlyDisconnects.clear();
     this.unlisten?.();
     this.listeners.clear();
   }

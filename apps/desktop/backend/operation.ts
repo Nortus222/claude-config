@@ -2,17 +2,20 @@ import { Effect } from 'effect';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { desiredFixture } from './fixture.ts';
 import type { Progress } from './protocol.ts';
 
 /** Scope owns the fixture directory and child until completion or interruption. */
-export function fixtureOperation(operationId: string, emit: (progress: Progress) => void) {
+export function fixtureOperation(
+  operationId: string,
+  sessionDirectory: string,
+  emit: (progress: Progress) => void,
+) {
   return Effect.scoped(
     Effect.gen(function* () {
       const directory = yield* Effect.acquireRelease(
-        Effect.promise(() => mkdtemp(join(tmpdir(), 'nortuscc-fixture-'))),
+        Effect.promise(() => mkdtemp(join(sessionDirectory, 'operation-'))),
         (directory) => Effect.promise(() => rm(directory, { recursive: true, force: true })),
       );
       const child = yield* Effect.acquireRelease(
