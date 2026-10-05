@@ -5,8 +5,9 @@ import { Backups, Fs, MachinePaths, type Disposition, type Domain, type Observed
 import type { DesktopServices } from '../../backend/session.ts';
 
 // A test machine described by <stateRoot>/fake-machine.json. `slow` steps are interruptible and
-// never finish; `sleepy` steps are file-like units that take 300 ms; `fail` steps fail.
-export type FakeItem = { key: string; disposition: Disposition; behavior?: 'slow' | 'sleepy' | 'fail' };
+// never finish; `sleepy` steps are file-like units that take 300 ms; `fail` steps fail; `loud` steps
+// fail with a 2 MB message, as an installer's captured output might.
+export type FakeItem = { key: string; disposition: Disposition; behavior?: 'slow' | 'sleepy' | 'fail' | 'loud' };
 
 const machineFile = (stateRoot: string) => join(stateRoot, 'fake-machine.json');
 export const appliedFile = (stateRoot: string, key: string) => join(stateRoot, 'applied', encodeURIComponent(key));
@@ -53,6 +54,7 @@ export const fakeDomain: Domain<DesktopServices> = {
       const note = report.items.find((i) => i.key === step.key)?.note;
       if (note === 'slow') return yield* Effect.never;
       if (note === 'fail') return yield* Effect.fail(new Error(`fake failure for ${step.key}`));
+      if (note === 'loud') return yield* Effect.fail(new Error('x'.repeat(2_000_000)));
       if (note === 'sleepy') yield* Effect.sleep('300 millis');
       const { stateRoot } = yield* MachinePaths;
       const fs = yield* Fs;

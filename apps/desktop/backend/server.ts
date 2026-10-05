@@ -4,6 +4,8 @@ import { probeLoginPath } from './login-path.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
 import { Session, SessionError, type DesktopServices } from './session.ts';
 
+const MAX_NOTE_LENGTH = 4096;
+
 // Serves protocol v2 on stdin/stdout for one session until shutdown, EOF or a signal.
 export function serve(session: Session): void {
   let closing = false;
@@ -20,8 +22,14 @@ export function serve(session: Session): void {
     if (Buffer.byteLength(line) + 1 > MAX_RECORD_BYTES) return reject(id, 'OVERSIZED', `Result exceeds ${MAX_RECORD_BYTES} bytes`);
     write(JSON.parse(line));
   };
-  const emitRun = (runId: string, progress: RunProgress) =>
-    write({ version: PROTOCOL_VERSION, event: 'progress', runId, progress });
+  // Domains may put captured installer output in a note; capping it keeps every event within the record limit.
+  const emitRun = (runId: string, progress: RunProgress) => {
+    const capped =
+      progress.type === 'finished' ? { ...progress, note: progress.note.slice(0, MAX_NOTE_LENGTH) }
+      : progress.type === 'failed' ? { ...progress, message: progress.message.slice(0, MAX_NOTE_LENGTH) }
+      : progress;
+    write({ version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped });
+  };
   const shutdown = async () => {
     if (closing) return;
     closing = true;

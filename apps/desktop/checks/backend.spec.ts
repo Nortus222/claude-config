@@ -95,6 +95,17 @@ test('apply replies before its events and runs the plan to done', async (t) => {
   assert.ok((await c.send('inspect')).result.items.every((i: any) => i.disposition === 'in-sync'));
 });
 
+test('a step note above the record limit is truncated and the run completes', async (t) => {
+  const h = home(t, [{ key: 'config:loud', disposition: 'apply', behavior: 'loud' }, { key: 'config:b', disposition: 'apply' }]);
+  const c = client(t, h.env);
+  await c.send('inspect');
+  const applied = await c.send('apply', { planId: (await c.send('preview', { exclude: [] })).result.planId });
+  assert.deepEqual((await c.terminal(applied.result.runId)).progress, { type: 'done', ok: 1, failed: 1 });
+  const finished = c.messages.find((m) => m.runId === applied.result.runId && m.progress.key === 'config:loud' && m.progress.type === 'finished');
+  assert.equal(finished.progress.outcome, 'failed');
+  assert.ok(finished.progress.note.length > 0 && finished.progress.note.length <= 4096, `note length ${finished.progress.note.length}`);
+});
+
 test('busy rejection, cancel, and a released lock', async (t) => {
   const h = home(t, [{ key: 'config:slow', disposition: 'apply', behavior: 'slow' }, { key: 'config:b', disposition: 'apply' }]);
   const c = client(t, h.env);
