@@ -6,7 +6,15 @@ import type { LockHeld } from './errors.ts';
 import type { MachinePaths } from './paths.ts';
 import type { Domain, MachineReport, Plan, PlanKind, Progress, Selection, Skipped, Step, StepResult } from './model.ts';
 
-export const inspect = <R>(desired: DesiredConfig, domains: ReadonlyArray<Domain<R>>): Effect.Effect<MachineReport, never, R> =>
+// The services a set of domains needs: the union of each domain's requirements.
+export type DomainServices<D extends ReadonlyArray<Domain<any>>> = D[number] extends infer E
+  ? E extends Domain<infer R> ? R : never
+  : never;
+
+export const inspect = <const D extends ReadonlyArray<Domain<any>>>(
+  desired: DesiredConfig,
+  domains: D,
+): Effect.Effect<MachineReport, never, DomainServices<D>> =>
   Effect.gen(function* () {
     const items = [];
     const probeErrors = [];
@@ -19,7 +27,7 @@ export const inspect = <R>(desired: DesiredConfig, domains: ReadonlyArray<Domain
   });
 
 // Pure: decides what would happen, including what will not and why.
-export const plan = <R>(kind: PlanKind, report: MachineReport, selection: Selection, domains: ReadonlyArray<Domain<R>>): Plan => {
+export const plan = (kind: PlanKind, report: MachineReport, selection: Selection, domains: ReadonlyArray<Domain<any>>): Plan => {
   const skipped: Skipped[] = [];
   const chosen = report.items.filter((item) => {
     const keep = !selection.exclude.includes(item.key) && (selection.only === undefined || selection.only.includes(item.key));
@@ -45,20 +53,40 @@ const whenAborted = (signal: AbortSignal) =>
 
 type Outcome = { readonly outcome: 'ok' | 'failed' | 'cancelled'; readonly note: string };
 
+// A failure's message, else its `_tag`, so a note is never empty.
+const describe = (error: unknown): string => {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'object' && error !== null && '_tag' in error && typeof error._tag === 'string' && error._tag) return error._tag;
+  return String(error);
+};
+
 const settle = (exit: Exit.Exit<StepResult, unknown>): Outcome => {
   if (Exit.isSuccess(exit)) return { outcome: exit.value.ok ? 'ok' : 'failed', note: exit.value.note ?? '' };
   if (Cause.hasInterruptsOnly(exit.cause)) return { outcome: 'cancelled', note: 'cancelled' };
-  const error = Cause.squash(exit.cause);
-  return { outcome: 'failed', note: error instanceof Error ? error.message : String(error) };
+  return { outcome: 'failed', note: describe(Cause.squash(exit.cause)) };
 };
 
-// The only executor. Holds the apply lock, runs steps in order, and stops cleanly when the signal fires.
-export const execute = <R>(
+const sameStep = (a: Step, b: Step) =>
+  a.key === b.key && a.domain === b.domain && a.action === b.action && a.summary === b.summary
+  && a.interruptible === b.interruptible
+  && a.touches.length === b.touches.length && a.touches.every((t, i) => t === b.touches[i]);
+
+// Structural, order-sensitive equality: the app's check that a previewed plan is not stale.
+export const samePlan = (a: Plan, b: Plan): boolean =>
+  a.kind === b.kind
+  && a.steps.length === b.steps.length && a.steps.every((s, i) => sameStep(s, b.steps[i]!))
+  && a.skipped.length === b.skipped.length
+  && a.skipped.every((s, i) => s.key === b.skipped[i]!.key && s.reason === b.skipped[i]!.reason);
+
+// The only executor. Holds the apply lock, runs steps in order, passing each `run` the report the
+// plan came from, and stops cleanly when the signal fires.
+export const execute = <const D extends ReadonlyArray<Domain<any>>>(
   plan: Plan,
-  domains: ReadonlyArray<Domain<R>>,
+  report: MachineReport,
+  domains: D,
   options: { readonly signal?: AbortSignal } = {},
-): Stream.Stream<Progress, LockHeld, R | MachinePaths | Backups> =>
-  Stream.callback<Progress, LockHeld, R | MachinePaths | Backups>((queue) =>
+): Stream.Stream<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups> =>
+  Stream.callback<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups>((queue) =>
     Effect.gen(function* () {
       yield* acquireApplyLock;
       const backups = yield* Backups;
@@ -73,9 +101,9 @@ export const execute = <R>(
           return yield* Queue.end(queue);
         }
         yield* Queue.offer(queue, { type: 'started', index, total, step });
-        const domain = domains.find((d) => d.name === step.domain);
-        const body: Effect.Effect<StepResult, unknown, R> = domain
-          ? Effect.suspend(() => domain.run(step))
+        const domain: Domain<DomainServices<D>> | undefined = domains.find((d) => d.name === step.domain);
+        const body: Effect.Effect<StepResult, unknown, DomainServices<D>> = domain
+          ? Effect.suspend(() => domain.run(step, report))
           : Effect.succeed({ ok: false, note: `no domain for ${step.domain}` });
         const result = step.interruptible
           ? settle(yield* Effect.exit(Effect.raceFirst(body, Effect.andThen(whenAborted(signal), Effect.interrupt))))

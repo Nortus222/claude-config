@@ -51,6 +51,8 @@ export type Step = {
 };
 
 export type Skipped = { readonly key: string; readonly reason: string };
+// `steps` and `skipped` must be deterministic for the same report and selection (no timestamps or
+// random ids in a summary or reason): `samePlan` compares a preview against a fresh plan to detect staleness.
 export type Plan = { readonly kind: PlanKind; readonly steps: ReadonlyArray<Step>; readonly skipped: ReadonlyArray<Skipped> };
 export type StepResult = { readonly ok: boolean; readonly note?: string };
 
@@ -70,5 +72,6 @@ export type Domain<R = never> = {
   readonly steps: (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) =>
     { steps: ReadonlyArray<Step>; skipped: ReadonlyArray<Skipped> };
   // A step must not interrupt itself: self-interruption reads as cancellation and ends the run.
-  readonly run: (step: Step) => Effect.Effect<StepResult, unknown, R>;
+  // `report` is the one the plan was made from, so a step can read the observed item and `report.desired`.
+  readonly run: (step: Step, report: MachineReport) => Effect.Effect<StepResult, unknown, R>;
 };
