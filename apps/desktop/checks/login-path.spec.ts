@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { missingTools, probeLoginPath } from '../backend/login-path.ts';
@@ -27,6 +27,30 @@ test('a hanging shell times out and falls back to the inherited PATH', async () 
   assert.ok(Date.now() - started < 3000);
   assert.equal(result.path, '/inherited');
   assert.match(result.error!, /timed out/);
+});
+
+test('a background process holding stdout does not delay the PATH or outlive the probe', async () => {
+  // An rc file that starts a background job leaves stdout open after the probe script prints.
+  const pidFile = join(dir, 'background.pid');
+  const shell = script('background', `/bin/sleep 30 &\necho $! > ${pidFile}\nPATH=/opt/tools/bin:/usr/bin\nexport PATH\n/bin/sh -c "$2"`);
+  const started = Date.now();
+  const result = await probeLoginPath({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 5000 });
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+  assert.deepEqual(result, { path: '/opt/tools/bin:/usr/bin' });
+  const pid = Number(readFileSync(pidFile, 'utf8'));
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const deadline = Date.now() + 1000;
+  while (alive() && Date.now() < deadline) await new Promise((done) => setTimeout(done, 20));
+  const lingering = alive();
+  if (lingering) process.kill(pid, 'SIGKILL');
+  assert.equal(lingering, false, 'the background sleep outlived the probe');
 });
 
 test('a missing shell falls back with a probe error', async () => {

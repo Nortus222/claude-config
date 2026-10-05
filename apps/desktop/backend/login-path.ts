@@ -9,21 +9,32 @@ const MARK = '__NORTUSCC_PATH__';
 // Fixed: the shell runs only this, so rc-file output around the markers is ignored.
 const SCRIPT = `printf '${MARK}%s${MARK}' "$PATH"`;
 
+const FOUND = new RegExp(`${MARK}(.*?)${MARK}`, 's');
+
+// Resolves with the PATH between the markers as soon as it is printed, or undefined when the shell
+// closes stdout without it; either way the shell's process group is killed, so background jobs an
+// rc file started cannot hold the probe open.
 const capture = (shell: string, env: Readonly<Record<string, string | undefined>>, timeoutMs: number) =>
-  new Promise<string>((resolve, reject) => {
+  new Promise<string | undefined>((resolve, reject) => {
     const child = spawn(shell, ['-ilc', SCRIPT], { env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
     let out = '';
-    const timer = setTimeout(() => {
+    const finish = (settle: () => void) => {
+      clearTimeout(timer);
       try {
         process.kill(-child.pid!, 'SIGKILL');
       } catch {
         // Already gone.
       }
-      reject(new Error(`timed out after ${timeoutMs} ms`));
-    }, timeoutMs);
-    child.stdout.on('data', (chunk) => { out += chunk.toString(); });
+      settle();
+    };
+    const timer = setTimeout(() => finish(() => reject(new Error(`timed out after ${timeoutMs} ms`))), timeoutMs);
+    child.stdout.on('data', (chunk) => {
+      out += chunk.toString();
+      const found = out.match(FOUND);
+      if (found) finish(() => resolve(found[1]));
+    });
     child.on('error', (err) => { clearTimeout(timer); reject(err); });
-    child.on('close', () => { clearTimeout(timer); resolve(out); });
+    child.on('close', () => finish(() => resolve(out.match(FOUND)?.[1])));
   });
 
 // Reads PATH once from the user's login shell, so installers resolve as they do in a terminal.
@@ -35,8 +46,7 @@ export async function probeLoginPath(input: {
   const fallback = input.env.PATH ?? '';
   const shell = input.env.SHELL && isAbsolute(input.env.SHELL) ? input.env.SHELL : '/bin/zsh';
   try {
-    const out = await capture(shell, input.env, input.timeoutMs ?? 5000);
-    const found = out.match(new RegExp(`${MARK}(.*?)${MARK}`, 's'))?.[1];
+    const found = await capture(shell, input.env, input.timeoutMs ?? 5000);
     if (found) return { path: found };
     return { path: fallback, error: `login shell ${shell} reported no PATH; using the app's PATH` };
   } catch (err) {
