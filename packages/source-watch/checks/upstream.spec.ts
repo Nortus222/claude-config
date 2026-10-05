@@ -131,3 +131,16 @@ test('an unreachable or empty upstream is reported, not thrown', async (t) => {
   assert.equal(report.status, 'unreachable');
   assert.ok(report.reason);
 });
+
+test('a moved or deleted upstream tag follows upstream on the next run', async (t) => {
+  const root = tempDir(t);
+  const { repo } = history(root);
+  assert.equal((await watch(root, watched(repo.url, { baseline: 'v1' }))).status, 'ahead');
+  repo.commit('more', { 'more.txt': 'x\n' });
+  gitSync(repo.dir, 'tag', '-f', 'v2');
+  gitSync(repo.dir, 'tag', '-d', 'v1');
+  const moved = await watch(root, watched(repo.url, { baseline: 'v2' }));
+  assert.equal(moved.status, 'up-to-date');
+  assert.deepEqual(moved.latest?.tags, ['v2']);
+  assert.equal((await watch(root, watched(repo.url, { baseline: 'v1' }))).status, 'baseline-missing');
+});

@@ -44,7 +44,7 @@ const inspect = (source: WatchedSource, cacheDir: string): Effect.Effect<SourceR
     const dir = cacheFolder(cacheDir, source.url);
     const run: Run = (args, ok) => git.run(args, ok === undefined ? { cwd: dir } : { cwd: dir, ok });
 
-    if (existsSync(dir)) yield* run(['fetch', '--prune', '--tags', '--quiet', 'origin', '+refs/heads/*:refs/heads/*']);
+    if (existsSync(dir)) yield* run(['fetch', '--prune', '--quiet', 'origin', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']);
     else yield* git.run(['clone', '--bare', '--filter=blob:none', '--quiet', '--', source.url, dir]);
 
     const latest = yield* revision(run, 'HEAD');
@@ -95,9 +95,8 @@ const revision = (run: Run, rev: string): Effect.Effect<Revision, GitFailed> =>
 const findCommit = (run: Run, ref: string): Effect.Effect<string | undefined, GitFailed> =>
   Effect.gen(function* () {
     if (ref.startsWith('-')) return undefined;
-    const resolve = run(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).pipe(
+    const resolve = run(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], [0, 1]).pipe(
       Effect.map((out) => out.trim()),
-      Effect.orElseSucceed(() => ''),
     );
     let sha = yield* resolve;
     if (sha === '' && FULL_SHA.test(ref)) {
