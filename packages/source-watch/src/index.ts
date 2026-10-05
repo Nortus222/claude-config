@@ -8,3 +8,5 @@ export { cacheFolder, watchUpstream } from './upstream.ts';
 export { parseStatus, watchCheckout } from './local.ts';
 export { watchSource, watchSources } from './watch.ts';
 export type { WatchOptions } from './watch.ts';
+export { DocumentInvalid, IGNORES_FILE, PINS_FILE, editEntry } from './documents.ts';
+export type { Edited, Field } from './documents.ts';
