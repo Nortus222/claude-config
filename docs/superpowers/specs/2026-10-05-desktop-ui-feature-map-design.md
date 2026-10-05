@@ -71,15 +71,15 @@ flowchart LR
     App["Desktop app<br/>(viewer + controller)"] <--> Agent["Local agent<br/>(background service)"]
     Agent --> Homes["~/.claude, ~/.codex<br/>(backups first)"]
   end
-  Agent <-->|"revisions, accepted items,<br/>opt-in status"| Hosted["Hosted service<br/>accounts · teams · feed · index"]
-  Hosted <-->|"read setups,<br/>publish revisions"| Git["Git repos<br/>(setups, original sources)"]
-  Agent -->|"author only: watch"| Git
+  Agent <-->|"revisions, accepted items,<br/>status summaries"| Hosted["Hosted service<br/>accounts · teams · feed · index"]
+  Agent <-->|"fetch setups, tag revisions;<br/>author only: watch sources"| Git["Git repos<br/>(setups, original sources)"]
 ```
 
 - **Local agent**: the engine plus the reconciler (#42), running in the background on each
   machine. It inspects the machine and detects drift, receives revisions and accepted items,
   and applies them according to the machine's policy. It takes a backup before every change
-  and reports status when the user opts in. The window does not need to be open. It
+  and reports a status summary to its owner's account (on by default, can be turned off per
+  machine; sharing it with a team is a separate opt-in). The window does not need to be open. It
   succeeds the fixture backend in `apps/desktop`.
 - **Desktop app**: views and controls the local agent, and through it the hosted service. The
   renderer still never chooses paths or commands (the restriction from #39).
@@ -91,7 +91,8 @@ flowchart LR
 
 ### Safety rules
 
-- Every apply is preceded by a backup in `~/.claude/backups/`, and can be restored from History.
+- Every apply is preceded by a backup in `~/.config/nortuscc/backups/`, and can be restored from
+  History.
 - **Auto-apply never applies items that run code or remove anything.** New or changed hooks, MCP
   servers, plugins and destructive changes always wait for a person on that machine, even when
   the machine's policy is auto-apply.
