@@ -38,7 +38,7 @@ erased at run time. Type-checking resolves the engine's own imports from
 ```ts
 type WatchedSource = {
   readonly source: string;          // as the manifest writes it, e.g. 'mattpocock/skills'
-  readonly url: string;             // what is fetched; https://github.com/<source>.git by default
+  readonly url: string;             // what is fetched; see below
   readonly baseline?: string;       // a ref: the pin, or whatever the caller compares against
   readonly exact: boolean;          // an exact source does not report skills added upstream
   readonly skills: ReadonlyArray<string>; // the setup's skills from this source
@@ -47,7 +47,9 @@ type WatchedSource = {
 ```
 
 `sourcesFrom(config, { checkouts? })` is pure. It groups `config.skills` by `source` in first-seen
-order and includes every declared skill, whether or not this machine installs it. `baseline` is
+order and includes every declared skill, whether or not this machine installs it. `url` is the
+source itself when it already looks like a URL (contains `://` or starts with `git@`), else
+`https://github.com/<source>.git`, the CLI's own fallback. `baseline` is
 the source's pin ref. Pins are per source, so every skill of a source carries the same pin. A
 source is `exact` when any of its manifest groups is. `checkouts` maps a source to a local path.
 Callers may also build `WatchedSource` values by hand, for example to give an unpinned source a
@@ -123,9 +125,11 @@ credential helpers in place, because private sources need them, and sets none of
    tags that point at it.
 3. **No baseline** gives `unpinned`. The report has `latest` and the declared skills' paths at
    latest, with `unchanged` or `missing` status, and no commits.
-4. **Baseline.** Resolve `<ref>^{commit}`. If that fails and the ref looks like a sha, try
+4. **Baseline.** Resolve `<ref>^{commit}`; a ref starting with `-` is never passed to git and
+   reads as missing. If that fails and the ref is a full-length sha, try
    `git fetch origin <ref>` once and resolve again. If it still fails, the status is
    `baseline-missing`.
+   An `unreachable` or `baseline-missing` report has no skills.
 5. **Status.** `up-to-date` when the baseline equals latest. `ahead` when the baseline is an
    ancestor of latest. `diverged` otherwise, for example after a force-push or with a pin on
    another branch.
@@ -152,12 +156,12 @@ credential helpers in place, because private sources need them, and sets none of
    - `branch` comes from `rev-parse --abbrev-ref HEAD`.
    - `uncommitted` comes from `status --porcelain=v1 -z --untracked-files=all`.
    - Skill folders are discovered from `ls-files --cached --others --exclude-standard`.
-   - With an upstream, `unpushed` is `log @{u}..HEAD`. Each declared or discovered skill whose
-     folder has unpushed commits or uncommitted paths gets
-     `diff @{u} -- <folder>/SKILL.md`, or for an untracked `SKILL.md`,
-     `diff --no-index /dev/null <file>`.
-   - With no upstream, the status is `no-upstream`, and only the uncommitted paths and their
-     diffs against `HEAD` are reported.
+   - With an upstream, `unpushed` is `log @{u}..HEAD`. Local edits are measured from
+     `merge-base HEAD @{u}`, so upstream commits not yet pulled are not mistaken for local ones.
+     Each discovered skill whose folder has a path changed since that point (committed,
+     staged, unstaged or untracked) gets `diff <merge-base> -- <folder>/SKILL.md`, or for an
+     untracked `SKILL.md`, `diff --no-index /dev/null <file>`.
+   - With no upstream, the status is `no-upstream`, and edits are measured from `HEAD`.
    - The status is otherwise `clean` or `edits`.
 
 `watchSources(sources, { cacheDir })` runs `watchSource` for up to four sources at once and
