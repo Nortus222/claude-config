@@ -4,7 +4,7 @@ import { constants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PORTED, USAGE, VERBS } from './commands.mjs';
-import { isCheckout, missingRuntime, npmCommand, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
+import { INSTALL_STDIO, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
 
 const [major] = process.versions.node.split('.').map(Number);
 if (major < 24) {
@@ -25,21 +25,38 @@ if (!VERBS.includes(verb)) {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-if (isCheckout(root)) {
-  if (missingRuntime(root)) {
-    console.error(`nortuscc: installing runtime dependencies in ${root}`);
+// Spawns npm to install the runtime; returns why it failed, or null on success.
+function installRuntime() {
+  try {
     const npm = npmCommand({ args: RUNTIME_INSTALL });
-    const installed = spawnSync(npm.cmd, npm.args, { cwd: root, stdio: 'inherit' });
-    if (installed.status !== 0) {
-      console.error(`nortuscc: could not install dependencies; run 'npm ${RUNTIME_INSTALL.join(' ')}' in ${root}`);
-      process.exit(1);
-    }
+    const installed = spawnSync(npm.cmd, npm.args, { cwd: root, stdio: INSTALL_STDIO });
+    if (installed.error) return installed.error.message;
+    if (installed.status !== 0) return installed.signal ? `npm was killed by ${installed.signal}` : `npm exited with ${installed.status}`;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
   }
-  const { main } = await import('../src/main.ts');
-  process.exit(await main([verb, ...rest]));
 }
 
-// An npx copy: legacy JavaScript still runs here; TypeScript commands run from the checkout.
+if (isCheckout(root)) {
+  let runtime = true;
+  if (missingRuntime(root)) {
+    console.error(`nortuscc: installing runtime dependencies in ${root}`);
+    const failure = installRuntime();
+    if (failure) {
+      console.error(`nortuscc: could not install dependencies (${failure}); run 'npm ${RUNTIME_INSTALL.join(' ')}' in ${root}`);
+      if (onInstallFailure(verb, PORTED) === 'exit') process.exit(1);
+      runtime = false;
+    }
+  }
+  if (runtime) {
+    const { main } = await import('../src/main.ts');
+    process.exit(await main([verb, ...rest]));
+  }
+}
+
+// An npx copy, or a checkout without its runtime: legacy JavaScript still runs here; TypeScript
+// commands run from the checkout.
 if (!PORTED.includes(verb)) {
   const { run } = await import(`../src/commands/${verb}.mjs`);
   process.exit(await run(rest));

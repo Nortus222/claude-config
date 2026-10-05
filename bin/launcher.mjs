@@ -8,6 +8,14 @@ export const RUNTIME_INSTALL = [
   '--no-audit', '--no-fund',
 ];
 
+// npm's stdout goes to stderr: a command's report on stdout stays clean.
+export const INSTALL_STDIO = ['ignore', 2, 2];
+
+// After a failed runtime install: legacy verbs never need `effect`, so they still run; ported verbs cannot.
+export function onInstallFailure(verb, ported) {
+  return ported.includes(verb) ? 'exit' : 'legacy';
+}
+
 // How to run npm with argv only: npm's JS entry point under this Node, else plain `npm` off Windows.
 export function npmCommand({ args, node = process.execPath, npmExecPath = process.env.npm_execpath, platform = process.platform, exists = existsSync }) {
   const bundled = join(dirname(node), 'node_modules', 'npm', 'bin', 'npm-cli.js');

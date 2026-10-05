@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isCheckout, missingRuntime, npmCommand, recordedCheckout } from '../bin/launcher.mjs';
+import { INSTALL_STDIO, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout } from '../bin/launcher.mjs';
 import { PORTED, VERBS } from '../bin/commands.mjs';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'nortuscc-launcher-'));
@@ -76,4 +76,15 @@ test('npmCommand prefers npm_execpath, then the bundled npm-cli.js, then plain n
     { cmd: 'npm', args: ['ci'] },
   );
   assert.throws(() => npmCommand({ args, node, npmExecPath: undefined, platform: 'win32', exists: () => false }));
+});
+
+test('a failed runtime install falls back to legacy for unported verbs and exits for ported ones', () => {
+  assert.equal(onInstallFailure('status', ['apply']), 'legacy');
+  assert.equal(onInstallFailure('apply', ['apply']), 'exit');
+  const legacy = VERBS.find((verb) => !PORTED.includes(verb));
+  if (legacy) assert.equal(onInstallFailure(legacy, PORTED), 'legacy');
+});
+
+test('npm output goes to stderr so it never mixes with a command report', () => {
+  assert.deepEqual(INSTALL_STDIO, ['ignore', 2, 2]);
 });
