@@ -8,8 +8,9 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+const UNAVAILABLE: &str = "Backend unavailable; restart explicitly";
 struct Session {
-    backend: Option<Backend>,
+    backend: Option<Arc<Backend>>,
     generation: u64,
 }
 struct Owner {
@@ -29,32 +30,37 @@ impl Owner {
             }),
         )
     }
-    fn request(&self, request: Request) -> Result<Value, String> {
-        let session = self.session.lock().unwrap();
-        let data = session
-            .backend
-            .as_ref()
-            .ok_or("Backend unavailable; restart explicitly")?
-            .request(request)?;
-        Ok(json!({"generation":session.generation,"data":data}))
+}
+// Sends one request to the current backend, holding the session lock only to read it, so a slow
+// request never delays a restart, a generation read or quitting.
+fn request(session: &Mutex<Session>, request: Request) -> Result<Value, String> {
+    let (backend, generation) = {
+        let session = session.lock().unwrap();
+        (session.backend.clone().ok_or(UNAVAILABLE)?, session.generation)
+    };
+    let data = backend.request(request)?;
+    Ok(json!({"generation": generation, "data": data}))
+}
+// The current backend's generation, or an error when none is running.
+fn generation(session: &Mutex<Session>) -> Result<Value, String> {
+    let session = session.lock().unwrap();
+    if session.backend.is_none() {
+        return Err(UNAVAILABLE.into());
     }
+    Ok(json!({"generation": session.generation, "data": null}))
 }
 async fn dispatch(
     owner: tauri::State<'_, Arc<Owner>>,
-    request: Request,
+    command: Request,
 ) -> Result<Value, String> {
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || owner.request(request))
+    tauri::async_runtime::spawn_blocking(move || request(&owner.session, command))
         .await
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn backend_generation(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    let session = owner.session.lock().unwrap();
-    if session.backend.is_none() {
-        return Err("Backend unavailable; restart explicitly".into());
-    }
-    Ok(json!({"generation": session.generation, "data": null}))
+    generation(&owner.session)
 }
 #[tauri::command]
 async fn inspect_machine(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
@@ -87,7 +93,7 @@ async fn restart_backend(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, S
             old.shutdown();
         }
         session.generation += 1;
-        session.backend = Some(owner.spawn(session.generation)?);
+        session.backend = Some(Arc::new(owner.spawn(session.generation)?));
         Ok(json!({"generation":session.generation,"data":null}))
     })
     .await
@@ -184,7 +190,7 @@ fn main() {
                 app: app.handle().clone(),
             });
             match owner.spawn(1) {
-                Ok(backend) => owner.session.lock().unwrap().backend = Some(backend),
+                Ok(backend) => owner.session.lock().unwrap().backend = Some(Arc::new(backend)),
                 Err(error) => eprintln!("Backend startup failed: {error}"),
             }
             app.manage(owner);
@@ -206,10 +212,47 @@ fn main() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 if let Some(owner) = app.try_state::<Arc<Owner>>() {
-                    if let Some(backend) = owner.session.lock().unwrap().backend.take() {
+                    let backend = owner.session.lock().unwrap().backend.take();
+                    if let Some(backend) = backend {
                         backend.shutdown();
                     }
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn a_request_in_flight_does_not_block_reading_the_generation() {
+        // Answers inspect after a second and shutdown at once.
+        let source = r#"
+            import { createInterface } from 'node:readline';
+            createInterface({ input: process.stdin }).on('line', (line) => {
+                const { id, command } = JSON.parse(line);
+                const reply = () => process.stdout.write(JSON.stringify({ version: 2, id, ok: true, result: { command } }) + '\n');
+                if (command === 'shutdown') { reply(); process.exit(0); }
+                setTimeout(reply, 1000);
+            });
+        "#;
+        let (backend, directory) = host::lifecycle_tests::fake_backend(source, Arc::new(|_| {}));
+        let session = Arc::new(Mutex::new(Session {
+            backend: Some(Arc::new(backend)),
+            generation: 7,
+        }));
+        let inflight = session.clone();
+        let slow = std::thread::spawn(move || request(&inflight, Request::Inspect));
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        assert_eq!(generation(&session).unwrap()["generation"], 7);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(!slow.is_finished(), "the inspect should still be in flight");
+        let reply = slow.join().unwrap().unwrap();
+        assert_eq!(reply["generation"], 7);
+        assert_eq!(reply["data"]["command"], "inspect");
+        drop(session);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

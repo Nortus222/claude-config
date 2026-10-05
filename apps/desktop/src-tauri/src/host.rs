@@ -488,10 +488,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod lifecycle_tests {
+pub(crate) mod lifecycle_tests {
     use super::*;
     use std::path::PathBuf;
-    fn fake_backend(source: &str, emit: Emit) -> (Backend, PathBuf) {
+    // Runs `source` on the bundled Bun as the backend; returns its temporary resources directory.
+    pub(crate) fn fake_backend(source: &str, emit: Emit) -> (Backend, PathBuf) {
         static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
         let directory = std::env::temp_dir().join(format!(
             "nortuscc-host-test-{}-{}",
