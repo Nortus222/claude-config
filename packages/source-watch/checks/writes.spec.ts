@@ -1,7 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { Effect } from 'effect';
 import { ignoreRevision } from '../src/ignores.ts';
 import { pinSource } from '../src/pins.ts';
@@ -117,4 +117,13 @@ test('only full commit shas can be ignored', async (t) => {
   await Effect.runPromise(ignoreRevision(repo, 'a', 'B'.repeat(40), options));
   await Effect.runPromise(ignoreRevision(repo, 'b', 'c'.repeat(64), options));
   assert.equal(read(repo, 'source-ignores.json'), ignored({ a: 'B'.repeat(40), b: 'c'.repeat(64) }));
+});
+
+test('the backup path is absolute even when the backup directory is relative', async (t) => {
+  const original = pins({ a: 'v1' });
+  const { repo, options } = setup(t, original);
+  const relativeDir = relative(process.cwd(), options.backupDir);
+  const written = await Effect.runPromise(pinSource(repo, 'a', 'v2', { backupDir: relativeDir }));
+  assert.ok(isAbsolute(written.backup!));
+  assert.equal(readFileSync(written.backup!, 'utf8'), original);
 });

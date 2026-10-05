@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { Data, Effect } from 'effect';
 import { redact } from './redact.ts';
 
@@ -52,7 +52,7 @@ export function readEntries(text: string, field: Field): Record<string, string> 
 }
 
 // Sets (or, with `value` undefined, removes) one source's entry. Pure; throws DocumentInvalid
-// rather than touch an invalid document. Key order, unknown fields, indentation, line endings
+// rather than touch an invalid document or write an empty source or value. Key order, unknown fields, indentation, line endings
 // and the final newline are kept. An absent document starts as `{ version: 1, <field>: {} }`.
 export function editEntry(text: string | undefined, field: Field, source: string, value: string | undefined): Edited {
   const original = text ?? JSON.stringify({ version: 1, [field]: {} }, null, 2) + '\n';
@@ -60,6 +60,7 @@ export function editEntry(text: string | undefined, field: Field, source: string
   const entries = { ...((document[field] as Record<string, string> | undefined) ?? {}) };
   const previous = Object.hasOwn(entries, source) ? entries[source] : undefined;
   const edited = (next: string): Edited => (previous === undefined ? { text: next } : { text: next, previous });
+  if (source === '' || value === '') throw invalid(field, `${field} needs non-empty string keys and values`);
   if (value === previous) return edited(original);
 
   if (value === undefined) delete entries[source];
@@ -92,8 +93,9 @@ const readText = (path: string) =>
 
 // Copies the file to `<dir>/<name>.<UTC timestamp>`, adding `-<n>` when that name is taken.
 async function backUp(path: string, dir: string): Promise<string> {
-  await mkdir(dir, { recursive: true });
-  const base = join(dir, `${basename(path)}.${new Date().toISOString().replace(/[-:.]/g, '')}`);
+  const absolute = resolve(dir);
+  await mkdir(absolute, { recursive: true });
+  const base = join(absolute, `${basename(path)}.${new Date().toISOString().replace(/[-:.]/g, '')}`);
   for (let n = 0; ; n++) {
     const target = n === 0 ? base : `${base}-${n}`;
     try {

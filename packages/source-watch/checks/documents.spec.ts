@@ -77,3 +77,12 @@ test('an invalid ignores document names its own file', () => {
     (error) => error instanceof DocumentInvalid && /^source-ignores\.json is not JSON/.test(error.reason),
   );
 });
+
+test('an empty source or value is refused rather than written', () => {
+  for (const [source, value] of [['', 'v1'], ['a', '']] as const) {
+    assert.throws(
+      () => editEntry(undefined, 'pins', source, value),
+      (error) => error instanceof DocumentInvalid && /non-empty string keys and values$/.test(error.reason),
+    );
+  }
+});
