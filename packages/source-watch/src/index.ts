@@ -6,3 +6,5 @@ export { DIFF_FLAGS, Git, GitFailed, LOG_FORMAT, nodeGit, parseLog } from './git
 export type { RunOptions } from './git.ts';
 export { cacheFolder, watchUpstream } from './upstream.ts';
 export { parseStatus, watchCheckout } from './local.ts';
+export { watchSource, watchSources } from './watch.ts';
+export type { WatchOptions } from './watch.ts';
