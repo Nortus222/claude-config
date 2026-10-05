@@ -36,7 +36,7 @@ export const plan = (kind: PlanKind, report: MachineReport, selection: Selection
   });
   const steps: Step[] = [];
   for (const domain of domains) {
-    const part = domain.steps(chosen.filter((item) => item.domain === domain.name), selection, kind);
+    const part = domain.steps(chosen.filter((item) => item.domain === domain.name), selection, kind, report.desired);
     steps.push(...part.steps);
     skipped.push(...part.skipped);
   }
