@@ -45,3 +45,42 @@ test('interrupting a run kills the whole process group', { skip: process.platfor
   await sleep(200);
   assert.throws(() => process.kill(grandchild, 0), { code: 'ESRCH' });
 });
+
+const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test('interrupting kills a grandchild that outlives its exited leader in capture mode', { skip: process.platform === 'win32' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'machine-proc-'));
+  const pidFile = join(dir, 'grandchild');
+  const script = `const c = require('node:child_process').spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'] });`
+    + `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); process.exit(0);`;
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(exec(['-e', script]));
+    while (!existsSync(pidFile)) yield* Effect.promise(() => sleep(20));
+    yield* Effect.promise(() => sleep(100));
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses())));
+  const grandchild = Number(readFileSync(pidFile, 'utf8'));
+  await sleep(200);
+  assert.equal(pidAlive(grandchild), false);
+});
+
+test('a child that ignores SIGTERM is killed by the SIGKILL escalation', { skip: process.platform === 'win32' }, async () => {
+  const started = Date.now();
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(exec(['-e', `process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000);`]));
+    yield* Effect.promise(() => sleep(500));
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses())));
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 1400 && elapsed < 3000, `elapsed ${elapsed}`);
+});
+
+test('interrupting after the child already closed returns promptly', async () => {
+  const started = Date.now();
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(exec(['-e', '0']));
+    yield* Effect.promise(() => sleep(500));
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses())));
+  assert.ok(Date.now() - started < 1200);
+});

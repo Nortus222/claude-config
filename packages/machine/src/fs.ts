@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
@@ -37,12 +38,12 @@ export const nodeFs = Layer.succeed(Fs, {
   writeTextAtomic: (path, text) =>
     attempt('write', path, async () => {
       await mkdir(dirname(path), { recursive: true });
-      const temp = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+      const temp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
       try {
         await writeFile(temp, text, 'utf8');
         await rename(temp, path);
       } catch (err) {
-        await rm(temp, { force: true });
+        await rm(temp, { force: true }).catch(() => undefined);
         throw err;
       }
     }),
@@ -54,7 +55,8 @@ export const nodeFs = Layer.succeed(Fs, {
       await mkdir(dirname(to), { recursive: true });
       try {
         await rename(from, to);
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
         await copyTree(from, to)();
         await rm(from, { recursive: true, force: true });
       }

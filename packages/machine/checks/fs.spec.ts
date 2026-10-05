@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Effect, Exit } from 'effect';
 import { Fs, nodeFs } from '../src/index.ts';
 
 const run = <A, E>(effect: Effect.Effect<A, E, Fs>) => Effect.runPromise(effect.pipe(Effect.provide(nodeFs)));
@@ -47,4 +47,24 @@ test('exists sees a dangling symlink', async () => {
   const dir = scratch();
   symlinkSync(join(dir, 'missing'), join(dir, 'dangling'));
   assert.equal(await run(Fs.use((fs) => fs.exists(join(dir, 'dangling')))), true);
+});
+
+test('a failed writeTextAtomic fails with FsFailed and leaves no temp file', async () => {
+  const dir = scratch();
+  mkdirSync(join(dir, 'target'));
+  const exit = await Effect.runPromiseExit(Fs.use((fs) => fs.writeTextAtomic(join(dir, 'target'), 'x')).pipe(Effect.provide(nodeFs)));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('FsFailed'));
+  assert.deepEqual(readdirSync(dir), ['target']);
+});
+
+test('move onto an existing non-empty directory fails and keeps the source', async () => {
+  const dir = scratch();
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src', 'f'), 'x');
+  mkdirSync(join(dir, 'dst'));
+  writeFileSync(join(dir, 'dst', 'g'), 'y');
+  const exit = await Effect.runPromiseExit(Fs.use((fs) => fs.move(join(dir, 'src'), join(dir, 'dst'))).pipe(Effect.provide(nodeFs)));
+  assert.ok(Exit.isFailure(exit));
+  assert.equal(readFileSync(join(dir, 'src', 'f'), 'utf8'), 'x');
+  assert.equal(existsSync(join(dir, 'dst', 'f')), false);
 });

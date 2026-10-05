@@ -30,12 +30,16 @@ export const nodeProcesses = (options: { readonly path?: string } = {}) =>
           stdio: command.output === 'capture' ? ['ignore', 'pipe', 'inherit'] : 'inherit',
         });
         let stdout = '';
+        let closed = false;
         child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
-        child.on('close', (code, signal) => resume(Effect.succeed({ code: code ?? (signal ? 128 : 1), stdout })));
+        child.on('close', (code, signal) => {
+          closed = true;
+          resume(Effect.succeed({ code: code ?? (signal ? 128 : 1), stdout }));
+        });
 
         return Effect.promise(() => new Promise<void>((done) => {
-          if (child.exitCode !== null || child.signalCode !== null) return done();
+          if (closed) return done();
           const signalGroup = (sig: NodeJS.Signals) => {
             try {
               if (process.platform === 'win32' || child.pid === undefined) child.kill(sig);
