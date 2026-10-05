@@ -1037,10 +1037,10 @@ git commit -m "feat: check skill sources upstream through Processes and report u
   - one per declared skill, key `skill:<name>`, no target, `group` = source, `label` = name, `from` = the skill's `from`:
     - installed → state `ok`, disposition `in-sync`
     - not installed, `install` → state `missing`, disposition `apply`
-    - not installed, not `install` → state `missing`, disposition `excluded`, note `optional`
+    - not installed, not `install` → state `missing`, disposition `excluded`, note `optional` when the skill is optional, else `not chosen for this machine`
   - one per installed, undeclared skill: with a lock source → state `extra`, disposition `undeclared`, note `not in the manifest`, group = lock source; without → state `local`, disposition `excluded`, note `authored locally`, group `''`.
   - for every `ok` skill and each target in `TARGETS` that cannot load it: key `skill-link:<target>:<name>`, `target`, state `unlinked`, disposition `apply`, group = source, label = name, note `not loadable by <agent id>`. Exposure is read only when some skill is `ok`; its errors become probe errors.
-  - a store that cannot be listed: one probe error `could not read <agentsSkills>: <message>`, every declared skill reads as missing.
+  - a store that cannot be listed: one probe error `could not read <agentsSkills>: <message>`; every declared skill reads as state `unknown`, disposition `blocked`, note `store unreadable` (never `missing`, which an apply would reinstall).
 
 - [ ] **Step 1: Failing tests**
 
@@ -1076,7 +1076,7 @@ test('a skill one agent cannot load becomes a per-agent link item', async () => 
 });
 ```
 
-Add one test for an unreadable store (chmod 000 on `agentsSkills`, root-skip as in Task 4): the probe error appears and the declared skill reads as `missing`.
+Add one test for an unreadable store (chmod 000 on `agentsSkills`, root-skip as in Task 4): the probe error appears, each declared skill reads as `unknown`/`blocked` with note `store unreadable`, and an apply plan has no steps and skips each with reason `store unreadable`.
 
 - [ ] **Step 2: Run, verify failure.**
 
@@ -1113,7 +1113,7 @@ git commit -m "feat: inspect skills as store and per-agent exposure items"
 | update | a remove or install step present | `skills:manifest` | `write-manifest` | `write skills-manifest.txt` | `['skills-manifest.txt']` | — | false |
 | apply | `missing`+`apply`, plus `unlinked` whose `target` is in `selection.targets`, grouped per source | `skills:install:<source>` | `install-skills` | `installing N skill(s) from <source>` | `skills/<n>`… | `selection.targets` | true |
 
-  - Skipped: `apply` with `'skills'` in `selection.declined` → every `apply`-disposition skill item `{ key, reason: 'skills declined' }` and no steps. `apply` → `missing`+`excluded` items `{ key, reason: 'optional, not chosen' }`. `update` → `blocked` items `{ key, reason: 'source unreachable' }`. `uninstall` and `capture` → no steps, no skips. Capture's manifest regeneration arrives with the capture cutover (#59), which owns the `--allow-shrink` choice.
+  - Skipped: `apply` with `'skills'` in `selection.declined` → every `apply`-disposition skill item `{ key, reason: 'skills declined' }` and no steps. `apply` → `missing`+`excluded` items `{ key, reason: 'optional, not chosen' }`, and `blocked` items `{ key, reason: 'store unreadable' }`. `update` → `blocked` items `{ key, reason: 'source unreachable' }`. `uninstall` and `capture` → no steps, no skips. Capture's manifest regeneration arrives with the capture cutover (#59), which owns the `--allow-shrink` choice.
   - `run(step, report)`:
     - `remove` / `update-skills`: `Backups.preserve(join(agentsSkills, n), join('skills', n))` for each name **before** running `removeCommand`/`updateCommand` via `runInstaller`.
     - `install-skills` with key `skills:install:<source>`: `runInstaller(addCommand({ source, skills: names, targets: step.targets ?? TARGETS }))`.

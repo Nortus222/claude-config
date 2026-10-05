@@ -59,6 +59,14 @@ test('inspect reports ok, missing, optional, extra and local skills', async () =
   assert.deepEqual(report.probeErrors, []);
 });
 
+test('a non-optional skill this machine opted out of is noted as not chosen, not optional', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.agentsSkills, { recursive: true });
+  const report = await m.run(inspectSkills(desiredWith([skill('skipped', 'o/r', { optional: false, install: false })])));
+  assert.deepEqual(report.items.map((i) => [i.key, i.state, i.disposition, i.note]),
+    [['skill:skipped', 'missing', 'excluded', 'not chosen for this machine']]);
+});
+
 test('a manifest skill installed from a different source still counts as present', async () => {
   const m = skillsMachine();
   mkdirSync(join(m.paths.agentsSkills, 'thing'), { recursive: true });
@@ -98,16 +106,25 @@ test('items are ordered: declared, undeclared, then links in declared order with
   ]);
 });
 
-test('an unreadable store is a probe error and every declared skill reads as missing', async () => {
+test('an unreadable store is a probe error and every declared skill reads as unknown and blocked', async () => {
   if (process.getuid?.() === 0) return;
   const m = skillsMachine();
   mkdirSync(m.paths.agentsSkills, { recursive: true });
   chmodSync(m.paths.agentsSkills, 0o000);
   try {
-    const report = await m.run(inspectSkills(desiredWith([skill('want', 'o/r')])));
+    const report = await m.run(inspectSkills(desiredWith([skill('want', 'o/r'), skill('maybe', 'o/r', { optional: true, install: false })])));
     assert.equal(report.probeErrors.length, 1);
     assert.match(report.probeErrors[0]!, new RegExp(`^could not read ${m.paths.agentsSkills}: `));
-    assert.deepEqual(report.items.map((i) => [i.key, i.state]), [['skill:want', 'missing']]);
+    assert.deepEqual(report.items.map((i) => [i.key, i.state, i.disposition, i.note]), [
+      ['skill:want', 'unknown', 'blocked', 'store unreadable'],
+      ['skill:maybe', 'unknown', 'blocked', 'store unreadable'],
+    ]);
+    const p = plan('apply', report, selectAll, [skillsDomain]);
+    assert.deepEqual(p.steps, []);
+    assert.deepEqual(p.skipped, [
+      { key: 'skill:want', reason: 'store unreadable' },
+      { key: 'skill:maybe', reason: 'store unreadable' },
+    ]);
   } finally {
     chmodSync(m.paths.agentsSkills, 0o755);
   }

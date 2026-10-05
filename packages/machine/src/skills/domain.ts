@@ -10,6 +10,8 @@ import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } 
 import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
 import { installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
 
+const STORE_UNREADABLE = 'store unreadable';
+
 // What the machine holds for the skills domain: declared skills, installed-but-undeclared ones,
 // and a per-agent item for each installed skill an agent cannot load.
 export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
@@ -32,13 +34,16 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   for (const skill of desired.skills) {
     declared.add(skill.name);
     const base = { key: `skill:${skill.name}`, domain: 'skills', label: skill.name, group: skill.source, from: skill.from } as const;
-    if (present.has(skill.name)) {
+    // An unlistable store says nothing about what is installed; reading it as missing would reinstall everything.
+    if (listed._tag === 'Failure') {
+      items.push({ ...base, state: 'unknown', disposition: 'blocked', note: STORE_UNREADABLE });
+    } else if (present.has(skill.name)) {
       okSkills.push({ name: skill.name, source: skill.source });
       items.push({ ...base, state: 'ok', disposition: 'in-sync' });
     } else if (skill.install) {
       items.push({ ...base, state: 'missing', disposition: 'apply' });
     } else {
-      items.push({ ...base, state: 'missing', disposition: 'excluded', note: 'optional' });
+      items.push({ ...base, state: 'missing', disposition: 'excluded', note: skill.optional ? 'optional' : 'not chosen for this machine' });
     }
   }
 
@@ -102,8 +107,10 @@ const applySteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
   }
   const wanted = items.filter((i) => (i.state === 'missing' && i.disposition === 'apply')
     || (i.state === 'unlinked' && i.target !== undefined && selection.targets.includes(i.target)));
-  const skipped: Skipped[] = items.filter((i) => i.state === 'missing' && i.disposition === 'excluded')
-    .map((i) => ({ key: i.key, reason: 'optional, not chosen' }));
+  const skipped: Skipped[] = [
+    ...items.filter((i) => i.state === 'missing' && i.disposition === 'excluded').map((i) => ({ key: i.key, reason: 'optional, not chosen' })),
+    ...items.filter((i) => i.disposition === 'blocked').map((i) => ({ key: i.key, reason: STORE_UNREADABLE })),
+  ];
   return { steps: installSteps(wanted, selection.targets), skipped };
 };
 
