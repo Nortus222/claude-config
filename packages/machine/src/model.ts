@@ -69,5 +69,6 @@ export type Domain<R = never> = {
   readonly inspect: (desired: DesiredConfig) => Effect.Effect<{ items: ReadonlyArray<Observed>; probeErrors: ReadonlyArray<string> }, never, R>;
   readonly steps: (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) =>
     { steps: ReadonlyArray<Step>; skipped: ReadonlyArray<Skipped> };
+  // A step must not interrupt itself: self-interruption reads as cancellation and ends the run.
   readonly run: (step: Step) => Effect.Effect<StepResult, unknown, R>;
 };

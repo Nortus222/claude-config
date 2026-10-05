@@ -75,7 +75,7 @@ export const execute = <R>(
         yield* Queue.offer(queue, { type: 'started', index, total, step });
         const domain = domains.find((d) => d.name === step.domain);
         const body: Effect.Effect<StepResult, unknown, R> = domain
-          ? domain.run(step)
+          ? Effect.suspend(() => domain.run(step))
           : Effect.succeed({ ok: false, note: `no domain for ${step.domain}` });
         const result = step.interruptible
           ? settle(yield* Effect.exit(Effect.raceFirst(body, Effect.andThen(whenAborted(signal), Effect.interrupt))))
@@ -90,5 +90,5 @@ export const execute = <R>(
       }
       yield* Queue.offer(queue, { type: 'done', ok, failed, backups: yield* backups.dir });
       yield* Queue.end(queue);
-    }).pipe(Effect.catch((error: LockHeld) => Queue.fail(queue, error))),
+    }).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
   );

@@ -102,3 +102,44 @@ test('cancelling interrupts an interruptible step and runs its finalizer', async
   assert.deepEqual(events.map((e) => e.type === 'finished' ? `${e.key}:${e.outcome}` : e.type), ['started', 'proc-a:cancelled', 'cancelled']);
   assert.equal(finalized, true);
 });
+
+test('a domain whose run throws synchronously finishes failed and the run continues', async () => {
+  const { collect } = machine();
+  const domain = fake((s) => { if (s.key === 'a') throw new Error('sync'); return Effect.succeed({ ok: true }); });
+  const exit = await collect(execute({ kind: 'apply', steps: [step('a'), step('b')], skipped: [] }, [domain]));
+  const events = Exit.isSuccess(exit) ? exit.value : [];
+  assert.deepEqual(events.map((e) => e.type === 'finished' ? `${e.key}:${e.outcome}` : e.type),
+    ['started', 'a:failed', 'started', 'b:ok', 'done']);
+});
+
+test('a lock acquisition defect fails the stream instead of hanging', async () => {
+  const { stateRoot, collect } = machine();
+  const file = join(stateRoot, 'not-a-dir');
+  writeFileSync(file, '');
+  const paths = { repo: file, claude: file, codex: file, codexOpenRouter: file, agentsSkills: file, stateRoot: join(file, 'sub'), backups: join(file, 'b') };
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs)));
+  const run = Effect.runPromiseExit(
+    Stream.runCollect(execute({ kind: 'apply', steps: [step('a')], skipped: [] }, [fake(() => Effect.succeed({ ok: true }))])).pipe(Effect.provide(layer)),
+  );
+  const timeout = new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 3000).unref());
+  const result = await Promise.race([run, timeout]);
+  assert.notEqual(result, 'hung');
+  assert.ok(typeof result !== 'string' && Exit.isFailure(result));
+  void collect;
+});
+
+test('done reports the run folder once a step moved a file aside', async () => {
+  const { stateRoot, collect } = machine();
+  const file = join(stateRoot, 'victim.txt');
+  writeFileSync(file, 'x');
+  const domain = fake(() => Effect.gen(function* () {
+    yield* (yield* Backups).moveAside(file, 'victim.txt', 'claude');
+    return { ok: true };
+  }) as never);
+  const exit = await collect(execute({ kind: 'apply', steps: [step('a')], skipped: [] }, [domain]));
+  const events = Exit.isSuccess(exit) ? exit.value : [];
+  const last = events.at(-1) as { type: string; backups?: string };
+  assert.equal(last.type, 'done');
+  assert.ok(last.backups?.startsWith(join(stateRoot, 'backups', 'nortuscc-')));
+  assert.equal(existsSync(join(last.backups!, 'claude', 'victim.txt')), true);
+});
