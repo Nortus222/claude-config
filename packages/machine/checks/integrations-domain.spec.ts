@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer } from 'effect';
+import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
-import { backupsForRun, machinePaths, nodeFs, nodeProcesses, plan, selectAll, type MachineReport, type Selection } from '../src/index.ts';
+import { backupsForRun, execute, machinePaths, nodeFs, nodeProcesses, plan, Processes, selectAll, type MachineReport, type Progress, type Selection } from '../src/index.ts';
 import { categoryOf, integrationKey, integrationsDomain, TYPE_ORDER, type IntegrationsOptions } from '../src/integrations/domain.ts';
 import { CLAUDE_MARKETPLACE, CLAUDE_PLUGIN, CODEX_MARKETPLACE, CODEX_PLUGIN, desiredOf, fakeBin, HOOK, MCP } from './support/integrations.ts';
 
@@ -170,4 +170,122 @@ test('steps are deterministic, so a preview can be compared', async () => {
   const m = machine();
   const report = await m.inspect(desiredOf([HOOK, CLAUDE_PLUGIN, MCP]));
   assert.deepEqual(plan('apply', report, selectAll, [m.domain]), plan('apply', report, selectAll, [m.domain]));
+});
+
+const runAll = async (m: ReturnType<typeof machine>, desired: DesiredConfig, options: { signal?: AbortSignal; select?: Selection } = {}) => {
+  const report = await m.inspect(desired);
+  const chosen = plan('apply', report, options.select ?? selectAll, [m.domain]);
+  const events = await Effect.runPromise(
+    Stream.runCollect(execute(chosen, report, [m.domain], { signal: options.signal })).pipe(Effect.map((c) => [...c]), Effect.provide(m.layer)),
+  );
+  return events as Progress[];
+};
+const outcomes = (events: Progress[]) => events.flatMap((e) => (e.type === 'finished' ? [`${e.key}:${e.outcome}`] : []));
+
+// Out of manifest order on purpose: the domain's order, not the manifest's, puts the marketplace first.
+test('installers run in type order through the real executor', async () => {
+  const m = machine();
+  m.fake.tool('claude');
+  m.fake.tool('codex');
+  const events = await runAll(m, desiredOf([MCP, CLAUDE_PLUGIN, HOOK, CLAUDE_MARKETPLACE]));
+  assert.deepEqual(m.fake.calls(), [
+    'claude plugin marketplace add mksglu/context-mode',
+    'claude plugin install context-mode@context-mode',
+    'codex mcp add srv -- srv',
+  ]);
+  assert.deepEqual(outcomes(events), ['hk', 'cm-market', 'cm', 'srv'].map((id) => `${integrationKey(id)}:ok`));
+  assert.match(readFileSync(join(m.claude, 'settings.json'), 'utf8'), /h\.mjs/);
+});
+
+test('a Codex plugin and marketplace install through codex, never claude', async () => {
+  const m = machine();
+  m.fake.codex({ installed: [] }, { marketplaces: [] });
+  m.fake.tool('claude', 'exit 9');
+  await runAll(m, desiredOf([CODEX_PLUGIN, CODEX_MARKETPLACE]));
+  assert.deepEqual(m.fake.calls().slice(2), ['codex plugin marketplace add mksglu/context-mode', 'codex plugin add context-mode@context-mode']);
+});
+
+// One failing installer never takes the rest of the run with it.
+test('a failed or unlaunchable installer is a failed step and later steps still run', async () => {
+  const m = machine();
+  m.fake.tool('claude', 'case "$*" in "plugin marketplace"*) exit 4 ;; esac');
+  const events = await runAll(m, desiredOf([CLAUDE_MARKETPLACE, CLAUDE_PLUGIN, MCP]));
+  const finished = events.flatMap((e) => (e.type === 'finished' ? [e] : []));
+  assert.deepEqual(finished.map((e) => e.outcome), ['failed', 'ok', 'failed']);
+  assert.equal(finished[0]!.note, 'exited 4');
+  // codex is not in the fake bin, so the MCP installer cannot launch.
+  assert.match(finished[2]!.note, /could not launch codex/);
+  assert.deepEqual(events.at(-1), { type: 'done', ok: 1, failed: 2, backups: undefined });
+});
+
+test('an MCP prerequisite unset after planning fails before spawning anything', async () => {
+  const m = machine({ env: { KEY: 'set' } });
+  m.fake.tool('codex');
+  const desired = desiredOf([{ ...MCP, requiresEnv: ['KEY'] }]);
+  const report = await m.inspect(desired);
+  const chosen = plan('apply', report, selectAll, [m.domain]);
+  const unset = integrationsDomain({ paths: m.paths, env: {} });
+  const events = await Effect.runPromise(
+    Stream.runCollect(execute(chosen, report, [unset])).pipe(Effect.map((c) => [...c]), Effect.provide(m.layer)),
+  );
+  const finished = events.find((e) => e.type === 'finished');
+  assert.equal(finished?.type === 'finished' && finished.outcome, 'failed');
+  assert.match(finished?.type === 'finished' ? finished.note : '', /set KEY before installing srv/);
+  assert.deepEqual(m.fake.calls(), []);
+});
+
+test('the hook step backs settings.json up into the run folder', async () => {
+  const m = machine();
+  writeFileSync(join(m.claude, 'settings.json'), '{"theme":"dark"}');
+  const events = await runAll(m, desiredOf([HOOK]));
+  const done = events.at(-1);
+  assert.equal(done?.type, 'done');
+  const folder = done?.type === 'done' ? done.backups : undefined;
+  assert.ok(folder);
+  assert.equal(readFileSync(join(folder!, 'claude', 'settings.json'), 'utf8'), '{"theme":"dark"}');
+});
+
+test('cancelling during an installer kills it and stops before the next step', async () => {
+  const m = machine();
+  const marker = join(m.home, 'started');
+  m.fake.tool('claude', `touch '${marker}'; sleep 30`);
+  m.fake.tool('codex');
+  const controller = new AbortController();
+  const watcher = setInterval(() => { if (existsSync(marker)) controller.abort(); }, 20);
+  const started = Date.now();
+  const events = await runAll(m, desiredOf([CLAUDE_PLUGIN, MCP]), { signal: controller.signal });
+  clearInterval(watcher);
+  assert.ok(Date.now() - started < 10_000, 'the sleeping installer must be killed, not awaited');
+  assert.deepEqual(outcomes(events), [`${integrationKey('cm')}:cancelled`]);
+  assert.deepEqual(events.at(-1), { type: 'cancelled', remaining: [integrationKey('srv')], backups: undefined });
+  assert.equal(m.fake.calls().some((c) => c.startsWith('codex')), false);
+});
+
+// The desktop backend speaks JSON lines on stdout: its installers must not inherit it.
+test('installerOutput capture runs installers with captured output; the default inherits', async () => {
+  const seen: string[] = [];
+  const recording = Layer.succeed(Processes, {
+    run: (command) => Effect.sync(() => { seen.push(command.output); return { code: 0, stdout: '' }; }),
+  });
+  for (const installerOutput of ['capture', undefined] as const) {
+    const m = machine(installerOutput ? { installerOutput } : {});
+    const report = await m.inspect(desiredOf([CLAUDE_PLUGIN]));
+    const chosen = plan('apply', report, selectAll, [m.domain]);
+    await Effect.runPromise(
+      Stream.runCollect(execute(chosen, report, [m.domain]))
+        .pipe(Effect.provide(backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, recording))))),
+    );
+  }
+  assert.deepEqual(seen, ['capture', 'inherit']);
+});
+
+test('run reports a step whose declaration is gone as failed', async () => {
+  const m = machine();
+  const report = await m.inspect(desiredOf([CLAUDE_PLUGIN]));
+  const chosen = plan('apply', report, selectAll, [m.domain]);
+  const events = await Effect.runPromise(
+    Stream.runCollect(execute(chosen, { ...report, desired: desiredOf([]) }, [m.domain])).pipe(Effect.map((c) => [...c]), Effect.provide(m.layer)),
+  );
+  const finished = events.find((e) => e.type === 'finished');
+  assert.deepEqual(finished?.type === 'finished' && [finished.outcome, finished.note], ['failed', 'no longer declared']);
 });

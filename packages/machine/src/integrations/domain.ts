@@ -2,12 +2,12 @@ import { Effect } from 'effect';
 import type { DesiredConfig, ResolvedIntegration } from '@nortuscc/profile-engine';
 import type { Backups } from '../backups.ts';
 import type { Fs } from '../fs.ts';
-import type { Disposition, Domain, InstallCategory, Observed, Skipped, Step } from '../model.ts';
+import type { Disposition, Domain, InstallCategory, Observed, Skipped, Step, StepResult } from '../model.ts';
 import type { MachinePathsValue } from '../paths.ts';
-import type { Processes } from '../processes.ts';
-import { asDeclaration, commandLine, type Declaration, type Inspected, type IntegrationType } from './declaration.ts';
-import { describeHook, hookPaths, inspectHook } from './hooks.ts';
-import { describeMcp, inspectMcp, type Env } from './mcp.ts';
+import { Processes } from '../processes.ts';
+import { asDeclaration, commandLine, type Declaration, type Inspected, type Installer, type IntegrationType } from './declaration.ts';
+import { describeHook, hookPaths, inspectHook, installHook } from './hooks.ts';
+import { blockedNote, describeMcp, inspectMcp, mcpCommand, missingEnv, type Env } from './mcp.ts';
 import { claudePluginState, EMPTY_PLUGIN_STATE, inspectPlugin, installCommand, readCodexState } from './plugins.ts';
 
 // Prerequisites first: a marketplace before its plugins; hooks are inert, so cheapest first.
@@ -66,6 +66,14 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
     };
   };
 
+  const output = options.installerOutput ?? 'inherit';
+
+  // An installer's exit code is the step's result. A launch failure propagates; its message names the command.
+  const runInstaller = (installer: Installer): Effect.Effect<StepResult, unknown, Processes> =>
+    Processes.use((p) => p.run({ cmd: installer.cmd, args: installer.args, output })).pipe(
+      Effect.map(({ code }) => ({ ok: code === 0, note: code === 0 ? '' : `exited ${code}` })),
+    );
+
   return {
     name: 'integrations',
 
@@ -118,6 +126,17 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
       return { steps, skipped };
     },
 
-    run: (step) => Effect.succeed({ ok: false, note: `not yet implemented: ${step.key}` }),
+    run: (step, report) => {
+      const resolved = report.desired.integrations.find((r) => integrationKey(r.id) === step.key);
+      if (!resolved) return Effect.succeed({ ok: false, note: 'no longer declared' });
+      const d = asDeclaration(resolved.declaration);
+      if (d.type === 'hook') return installHook(paths, d);
+      if (d.type === 'mcp') {
+        // Checked again here: the environment may have changed since the plan was made.
+        const missing = missingEnv(d, env);
+        return missing.length ? Effect.succeed({ ok: false, note: blockedNote(d, missing) }) : runInstaller(mcpCommand(d));
+      }
+      return runInstaller(installCommand(d));
+    },
   };
 };
