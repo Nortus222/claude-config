@@ -1,4 +1,5 @@
-import { readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { LockHeld } from './errors.ts';
@@ -26,11 +27,21 @@ const holder = (path: string): number | undefined => {
 export const acquireApplyLock = Effect.gen(function* () {
   const { stateRoot } = yield* MachinePaths;
   const path = join(stateRoot, 'apply.lock');
-  const claim = () => writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: 'wx' });
+  // Link a fully written temp file into place: the lock is atomic to create and never seen half-written.
+  const claim = () => {
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      linkSync(temp, path);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+  };
 
   yield* Effect.acquireRelease(
     Effect.suspend(() => {
       mkdirSync(stateRoot, { recursive: true });
+      let last = 0;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           claim();
@@ -38,11 +49,12 @@ export const acquireApplyLock = Effect.gen(function* () {
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return Effect.die(err);
           const pid = holder(path);
+          last = pid ?? 0;
           if (pid !== undefined && alive(pid)) return Effect.fail(new LockHeld({ path, pid }));
           rmSync(path, { force: true });
         }
       }
-      return Effect.fail(new LockHeld({ path, pid: holder(path) ?? 0 }));
+      return Effect.fail(new LockHeld({ path, pid: last }));
     }),
     () => Effect.sync(() => {
       if (holder(path) === process.pid) rmSync(path, { force: true });

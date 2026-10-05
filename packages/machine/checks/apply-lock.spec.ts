@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Effect, Exit, type Scope } from 'effect';
 import { acquireApplyLock, machinePaths, type MachinePaths } from '../src/index.ts';
@@ -44,4 +44,31 @@ test('an unreadable lock file is taken over', async () => {
   mkdirSync(join(lock, '..'), { recursive: true });
   writeFileSync(lock, 'garbage');
   assert.ok(Exit.isSuccess(await run(acquireApplyLock)));
+});
+
+test('the lock is removed when the scoped effect fails', async () => {
+  const { lock, run } = setup();
+  const exit = await run(Effect.andThen(acquireApplyLock, Effect.fail('x')));
+  assert.ok(Exit.isFailure(exit));
+  assert.equal(existsSync(lock), false);
+});
+
+test('the lock is removed when the scoped effect is interrupted', async () => {
+  const { lock, run } = setup();
+  const exit = await run(Effect.andThen(acquireApplyLock, Effect.interrupt));
+  assert.ok(Exit.isFailure(exit));
+  assert.equal(existsSync(lock), false);
+});
+
+test('release leaves a lock that holds another pid', async () => {
+  const { lock, run } = setup();
+  const exit = await run(Effect.andThen(acquireApplyLock, Effect.sync(() => writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: 'x' })))));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(existsSync(lock), true);
+});
+
+test('no temp files are left behind', async () => {
+  const { lock, run } = setup();
+  await run(Effect.andThen(acquireApplyLock, Effect.sync(() => readdirSync(dirname(lock)))));
+  assert.deepEqual(readdirSync(dirname(lock)), []);
 });
