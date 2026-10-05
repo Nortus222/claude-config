@@ -83,7 +83,7 @@ export const configSteps = (items: ReadonlyArray<Observed>, selection: Selection
   for (const item of items) {
     const file = FILES.find((f) => f.id === configFileId(item.key));
     const decision: Decision = !file ? skip(item, 'not a managed file')
-      : !selection.targets.includes(item.target) ? skip(item, 'target not selected')
+      : item.target !== undefined && !selection.targets.includes(item.target) ? skip(item, 'target not selected')
       : item.disposition === 'excluded' ? skip(item, 'not managed on this machine')
       : kind === 'apply' ? applyDecision(item, file, selection.force)
       : captureDecision(item, file, selection.force);
