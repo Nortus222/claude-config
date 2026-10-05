@@ -174,6 +174,114 @@ test('a disconnect fails the running run; restart clears it and ignores the old 
   assert.equal(c.state.connection, 'connected');
 });
 
+// A promise the test settles by hand, to hold a bridge call open.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test('a disconnect that arrives before connect learns its generation wins and skips the inspect', async () => {
+  const f = fake({
+    backend_generation: () => (f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' }), null),
+    inspect_machine: () => inspection(['config:a']),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'disconnected');
+  assert.equal(c.state.detail, 'Backend exited; restart explicitly');
+  assert.equal(c.state.pending, false);
+  assert.equal(f.calls.some(([n]) => n === 'inspect_machine'), false);
+});
+
+test('a disconnect that arrives before restart learns its generation wins and skips the inspect', async () => {
+  let generation = 1;
+  const f = fake({
+    inspect_machine: () => inspection(['config:a']),
+    restart_backend: () => {
+      generation = 2;
+      f.emit({ generation: 2, event: 'disconnected', detail: 'Fresh backend exited' });
+      return null;
+    },
+  });
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
+  const c = new MachineController(bridge);
+  await c.connect();
+  await c.restart();
+  assert.equal(c.state.connection, 'disconnected');
+  assert.equal(c.state.detail, 'Fresh backend exited');
+  assert.equal(c.state.pending, false);
+  assert.equal(f.calls.filter(([n]) => n === 'inspect_machine').length, 1);
+});
+
+test('dispose while subscribe is pending unregisters and makes no request', async () => {
+  const subscribed = deferred<() => void>();
+  let unlistened = 0;
+  const invoked: Command[] = [];
+  const bridge: Bridge = {
+    subscribe: () => subscribed.promise,
+    invoke: async (command) => (invoked.push(command), { generation: 1, data: null }),
+  };
+  const c = new MachineController(bridge);
+  const connecting = c.connect();
+  c.dispose();
+  subscribed.resolve(() => { unlistened++; });
+  await connecting;
+  assert.equal(unlistened, 1);
+  assert.deepEqual(invoked, []);
+});
+
+test('a superseded preview reply does not change state', async () => {
+  let generation = 1;
+  const slow = deferred<unknown>();
+  let previews = 0;
+  const f = fake({
+    inspect_machine: () => inspection(['config:a', 'config:b']),
+    preview_plan: () => (++previews === 1 ? slow.promise : { planId: 'p2', plan: plan(['config:a']) }),
+    restart_backend: () => ((generation = 2), null),
+  });
+  // Replies carry the generation current when they return, so the late reply matches the new backend.
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
+  const c = new MachineController(bridge);
+  await c.connect();
+  const first = c.previewPlan();
+  f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' });
+  await c.restart();
+  c.toggle('config:b');
+  await c.previewPlan();
+  const before = c.state;
+  slow.resolve({ planId: 'p1', plan: plan(['config:a', 'config:b']) });
+  await first;
+  assert.equal(c.state, before);
+  assert.equal(c.state.preview?.planId, 'p2');
+});
+
+test('a cancel rejection that arrives after a restart does not change state', async () => {
+  let generation = 1;
+  const cancelled = deferred<unknown>();
+  const f = fake({
+    inspect_machine: () => inspection(['config:a']),
+    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
+    apply_plan: () => ({ status: 'started', runId: 'r1' }),
+    cancel_apply: () => cancelled.promise,
+    restart_backend: () => ((generation = 2), null),
+  });
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
+  const c = new MachineController(bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  const cancelling = c.cancel();
+  f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' });
+  await c.restart();
+  const before = c.state;
+  cancelled.reject(new Error('Backend exited; restart explicitly'));
+  await cancelling;
+  assert.equal(c.state, before);
+  assert.equal(c.state.connection, 'connected');
+});
+
 test('advance ignores nothing it should not', () => {
   const run: RunView = { runId: 'r', steps: [{ key: 'a', summary: 'a', status: 'pending', note: '' }], outcome: 'running', summary: '' };
   assert.equal(advance(run, { type: 'failed', message: 'another nortuscc run (pid 4) holds /s/apply.lock' }).summary, 'another nortuscc run (pid 4) holds /s/apply.lock');

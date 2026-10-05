@@ -214,12 +214,14 @@ export class MachineController {
     if (finished && this.owns(revision)) await this.inspect();
   }
 
+  // Asks the backend to stop the run; a failure is shown unless a disconnect or restart superseded it.
   async cancel() {
     if (!this.bridge || this.state.connection !== 'connected' || this.state.run?.outcome !== 'running') return;
+    const revision = this.revision;
     try {
       await this.bridge.invoke('cancel_apply');
     } catch (error) {
-      if (!this.disposed) this.update({ detail: message(error) });
+      if (this.owns(revision)) this.update({ detail: message(error) });
     }
   }
 
