@@ -2,7 +2,7 @@
 
 Resolves what a machine should have: the repository's base profile, approved revision pins
 (`skill-pins.json`), and one machine's overrides. Every resolved value records the layer and
-document that decided it. Design: `docs/superpowers/specs/2026-10-05-profile-engine-design.md`.
+document that decided it. Decision: `docs/adr/0006-profile-engine-layers-and-provenance.md`.
 
 The engine reads today's `skills-manifest.txt`, `integrations.json` and
 `claude/settings.keys.json` with the CLI's meaning. Golden tests in `checks/golden.spec.ts`
