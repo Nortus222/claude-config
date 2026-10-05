@@ -30,7 +30,7 @@ const syncCopy = (step: Step, file: ResolvedFile, expected: string) =>
     if (step.action === 'capture-file') {
       if (now.localText === undefined) return { ok: true, note: 'nothing to capture' };
       // The repo file is a working-tree file: an uncommitted edit is not recoverable from git.
-      const backedUp = yield* backups.moveAside(src, file.dest, file.target);
+      const backedUp = yield* backups.moveAside(src, `${file.dest}.repo`, file.target);
       yield* fs.writeTextAtomic(src, now.localText);
       yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localText)!));
       return { ok: true, note: outcomeNote('copied', backedUp) };
