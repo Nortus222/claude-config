@@ -4,7 +4,7 @@ Watches the skill sources a setup uses. For each source it reports the latest up
 whether it is ahead of the source's baseline (its pin), the commits between them, the setup's
 skills that changed with their `SKILL.md` diffs, and, for the author's own checkouts, edits not
 yet pushed. It is the data layer behind the desktop app's Sources screen (#52). Nothing uses it
-yet. Design: `docs/superpowers/specs/2026-10-05-source-watch-design.md`.
+yet. Decision: `docs/adr/0013-upstream-changes-from-git-trees.md`.
 
 ```ts
 import { Effect } from 'effect';
@@ -41,7 +41,7 @@ from. `accepted` names each source the author brought into Contents, the full sh
 (it must equal the report's `latest`), the skills to name without detail (`ignored`) and the
 upstream-new skills they added (`added`). Up-to-date sources are left out. Sources the draft
 cannot describe come back in `skipped` as `not-watched`, `stale` or `no-data`. It is pure and
-writes no author names. Design: `docs/superpowers/specs/2026-10-05-source-changelog-design.md`.
+writes no author names.
 
 ```ts
 const { markdown, skipped } = draftChangelog(reports, [

@@ -2,7 +2,7 @@
 
 Inspects a machine, plans changes against the profile engine's `DesiredConfig`, and executes
 plans with backups, progress and cancellation. The CLI and the desktop app both use it.
-Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
+Decision: `docs/adr/0007-one-machine-core-for-cli-and-desktop.md`.
 
 - `pathsFromEnvironment` is the only reader of the environment; everything else takes
   `MachinePaths`.
@@ -13,6 +13,14 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
   Codex from `DesiredConfig.integrations`. Installers run through `Processes` as interruptible steps;
   pass `installerOutput: 'capture'` where stdout is a protocol channel (the desktop backend).
   Build its `paths` from the same `pathsFromEnvironment` value as the `MachinePaths` layer, and pass the environment MCP prerequisites are checked against (the desktop backend: the login shell's, not its own).
+- `Observed.target` is absent for agent-neutral items (shared skills); `Step.targets` names the agents
+  an installer step acts for. `update` is a plan kind of its own (adopt, refresh, prune skills).
+- `skillsDomain` inspects the shared skill store and each agent's exposure as items, and plans apply
+  and update steps. `write-manifest` writes only under `MachinePaths.repo`. Skills steps name their
+  skills in `touches` as `skills/<name>`. `inspectUpdates` is the upstream check.
+- `probeUndeclared(desired, { targets, installed, hookCommands })` reports what is present but
+  undeclared. It reads agents, skill links and hooks; plugin and marketplace observations and
+  declared hook commands are inputs from the integrations domain.
 - `inspect` → `plan` → `execute(plan, report, domains, { signal })`. `execute` holds
   `<stateRoot>/apply.lock`, emits `Progress`, never interrupts a step marked
   `interruptible: false`, and ends with `done` or `cancelled`. Provide a fresh `backupsForRun()`

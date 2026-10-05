@@ -6,3 +6,7 @@ apps/desktop/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/resources/
 apps/desktop/src-tauri/gen/
+
+# Working documents: specs, plans and research stay local. Decisions go in docs/adr/.
+docs/superpowers/
+docs/research/

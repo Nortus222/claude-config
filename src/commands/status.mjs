@@ -127,7 +127,7 @@ export async function run(args = [], deps = {}) {
   //
   // A per-key label like `settings.json#effortLevel` runs well past the
   // shared default width, so size the column to this batch of rows — the
-  // same fix update.mjs already applies to its own arbitrary labels.
+  // same fix src/commands/update.ts already applies to its own arbitrary labels.
   const configWidth = labelWidth(rows.map((r) => r.dest));
   const lines = manageConfig
     ? rows.map((r) => formatRow(r.dest, r.state, r.note ?? noteFor(r), configWidth))

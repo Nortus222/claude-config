@@ -53,6 +53,12 @@ test('a legacy state writer takes over a dead holder and releases the lock', () 
   assert.equal(existsSync(lock), false);
 });
 
+test('a ported command runs its TypeScript module', () => {
+  const result = run('update', '--check', '--yes');
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--check is mutually exclusive/);
+});
+
 test('an unported command reaches its legacy module through main.ts', () => {
   const state = mkdtempSync(join(tmpdir(), 'nortuscc-main-'));
   const result = spawnSync(process.execPath, [bin, 'apply', '--take-local'], {

@@ -117,7 +117,7 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
         const d = declared.get(item.key);
         if (!d) skip(item.key, 'no longer declared');
         else if (item.disposition === 'in-sync') continue;
-        else if (!selection.targets.includes(item.target)) skip(item.key, 'target not selected');
+        else if (item.target === undefined || !selection.targets.includes(item.target)) skip(item.key, 'target not selected');
         else if (selection.declined.includes(categoryOf(d.type))) skip(item.key, `declined (--no-${categoryOf(d.type)})`);
         else if (item.disposition === 'blocked') skip(item.key, item.note ?? item.state);
         else if (item.disposition === 'apply' || selection.only?.includes(item.key)) steps.push(stepFor(d));

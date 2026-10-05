@@ -20,6 +20,8 @@ export class Fs extends Context.Service<
     readonly list: (dir: string) => Effect.Effect<string[] | undefined, FsFailed>;
     // The path itself, never what a link points at; undefined when absent.
     readonly stat: (path: string) => Effect.Effect<{ readonly kind: FileKind } | undefined, FsFailed>;
+    // Where `path` resolves after following every link; undefined when it, or a link's target, is absent.
+    readonly realPath: (path: string) => Effect.Effect<string | undefined, FsFailed>;
     readonly readLink: (path: string) => Effect.Effect<string, FsFailed>;
     // Creates `path` as a link to `target`, creating parents.
     readonly symlink: (target: string, path: string) => Effect.Effect<void, FsFailed>;
@@ -113,6 +115,10 @@ export const nodeFs = Layer.succeed(Fs, {
     const info = await lstatOrUndefined(path);
     return info && { kind: kindOf(info) };
   }),
+  realPath: (path) => attempt('realpath', path, () => realpath(path).catch((err) => {
+    if (absent(err)) return undefined;
+    throw err;
+  })),
   readLink: (path) => attempt('readlink', path, () => readlink(path)),
   symlink: (target, path) =>
     attempt('symlink', path, async () => {
