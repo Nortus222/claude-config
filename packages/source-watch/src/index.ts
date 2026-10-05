@@ -8,3 +8,5 @@ export { cacheFolder, watchUpstream } from './upstream.ts';
 export { parseStatus, watchCheckout } from './local.ts';
 export { watchSource, watchSources } from './watch.ts';
 export type { WatchOptions } from './watch.ts';
+export { draftChangelog } from './changelog.ts';
+export type { AcceptedSource, ChangelogDraft, SkippedSource } from './changelog.ts';
