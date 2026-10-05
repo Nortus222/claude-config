@@ -1,0 +1,22 @@
+{
+  "name": "@nortuscc/profile-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Resolves a machine's desired agent configuration from a base profile, revision pins and machine overrides, with provenance",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --test \"checks/*.spec.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "25.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
