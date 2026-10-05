@@ -4,13 +4,15 @@ import { probeLoginPath } from './login-path.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
 import { Session, SessionError, type DesktopServices } from './session.ts';
 
-const write = (message: unknown) => {
-  process.stdout.write(JSON.stringify(decodeMessage(message)) + '\n');
-};
-
 // Serves protocol v2 on stdin/stdout for one session until shutdown, EOF or a signal.
 export function serve(session: Session): void {
   let closing = false;
+  let stdoutBroken = false;
+  // Writes after the host closed stdout are dropped; the error itself triggers shutdown.
+  const write = (message: unknown) => {
+    if (stdoutBroken) return;
+    process.stdout.write(JSON.stringify(decodeMessage(message)) + '\n');
+  };
   const reject = (id: string, code: ErrorCode, message: string) =>
     write({ version: PROTOCOL_VERSION, id, ok: false, error: { code, message: message.slice(0, 500) } });
   const reply = (id: string, result: unknown) => {
@@ -91,6 +93,14 @@ export function serve(session: Session): void {
     }
   });
   process.stdin.on('end', shutdown);
+  process.stdout.on('error', () => {
+    stdoutBroken = true;
+    void shutdown();
+  });
+  process.stdout.on('close', () => {
+    stdoutBroken = true;
+    void shutdown();
+  });
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 }

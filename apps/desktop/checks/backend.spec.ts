@@ -186,3 +186,17 @@ test('the bundled Bun backend runs from another directory with an empty PATH', a
   assert.equal(inspected.ok, true, JSON.stringify(inspected));
   assert.equal(inspected.result.profile.repo, checkout);
 });
+
+test('a closed stdout shuts down like EOF: the current step finishes and the lock is released', async (t) => {
+  const h = home(t, [{ key: 'config:sleepy', disposition: 'apply', behavior: 'sleepy' }, { key: 'config:b', disposition: 'apply' }]);
+  const c = client(t, h.env);
+  await c.send('inspect');
+  const applied = await c.send('apply', { planId: (await c.send('preview', { exclude: [] })).result.planId });
+  await c.until(() => c.messages.find((m) => m.runId === applied.result.runId && m.progress.type === 'started'));
+  const exited = once(c.child, 'exit');
+  c.child.stdout.destroy();
+  assert.equal((await exited)[0], 0, c.stderr.join('\n'));
+  assert.equal(readFileSync(appliedFile(h.stateRoot, 'config:sleepy'), 'utf8'), 'applied\n');
+  // A broken pipe is only noticed on the next write, so the following step may already have begun.
+  assert.equal(existsSync(join(h.stateRoot, 'apply.lock')), false);
+});
