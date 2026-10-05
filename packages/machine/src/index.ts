@@ -10,3 +10,4 @@ export * from './apply-lock.ts';
 export * from './model.ts';
 export * from './run.ts';
 export * from './skills/index.ts';
+export * from './undeclared/probe.ts';
