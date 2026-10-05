@@ -1,7 +1,8 @@
 import { build } from 'esbuild';
 import { mkdir, copyFile, chmod, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const target = `${process.platform}-${process.arch}`;
@@ -45,7 +46,9 @@ const runtime = resolve(resources, 'bun');
 await copyFile(sourceRuntime, runtime);
 await chmod(runtime, 0o755);
 await copyFile(licensePath, resolve(resources, 'BUN-LICENSE.md'));
-await copyFile(resolve(root, 'node_modules/effect/LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
+// Effect is hoisted to the workspace root, so find it the way Node would.
+const effectRoot = dirname(createRequire(import.meta.url).resolve('effect/package.json'));
+await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
 await writeFile(
   resolve(resources, 'runtime.json'),
   JSON.stringify({ target, bun: bunVersion, executable: 'bun' }, null, 2),
