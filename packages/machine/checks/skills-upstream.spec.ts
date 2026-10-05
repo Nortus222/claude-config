@@ -8,7 +8,7 @@ import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
   availableSkills, inspectSource, inspectUpdates, machinePaths, nodeFs, nodeProcesses, planUpdates, skillFolder,
-  sourcesOf, updatableSkills, upstreamSkills,
+  sourcesOf, updatableSkills, updateItems, upstreamSkills,
 } from '../src/index.ts';
 
 const skillsMachine = () => {
@@ -86,7 +86,7 @@ test('planUpdates calls a matching tree SHA current', () => {
   const remote = new Map([['u', new Map([['p/tdd', 'aaa']])]]);
   const lock = lockOf({ tdd: { ...ENTRY, sourceUrl: 'u', skillPath: 'p/tdd/SKILL.md' } });
   const plan = planUpdates({ lock, installed: ['tdd'], remoteTrees: remote });
-  assert.deepEqual(plan.current, ['tdd']);
+  assert.deepEqual(plan.current, [{ name: 'tdd', source: 'mattpocock/skills' }]);
   assert.deepEqual(plan.outdated, []);
 });
 
@@ -124,7 +124,7 @@ test('planUpdates isolates an unreachable source from a reachable one', () => {
     b: { ...ENTRY, sourceUrl: 'down', skillPath: 'p/b/SKILL.md' },
   });
   const plan = planUpdates({ lock, installed: ['a', 'b'], remoteTrees: remote });
-  assert.deepEqual(plan.current, ['a']);
+  assert.deepEqual(plan.current, [{ name: 'a', source: 'mattpocock/skills' }]);
   assert.deepEqual(plan.unknown.map((u) => u.name), ['b']);
 });
 
@@ -286,4 +286,30 @@ test('inspectUpdates turns the plan into skill items', async () => {
       note: `old0000 -> ${src.tree('s/b').slice(0, 7)}` },
     { key: 'skill:b', domain: 'skills', label: 'b', group: 'o/r', state: 'available', disposition: 'excluded', note: 'available' },
   ]);
+});
+
+test('updateItems maps gone, unknown and local, and names current skills by their lock source', () => {
+  const desired = { files: [], skills: [], integrations: [], allow: {}, issues: [] } as DesiredConfig;
+  const items = updateItems({
+    current: [{ name: 'c', source: 'lock/src' }], outdated: [],
+    gone: [{ name: 'g', source: 'o/r', path: 'p/g' }],
+    unknown: [{ name: 'u', source: 'o/r' }],
+    local: ['mine'], available: [],
+  }, desired);
+  assert.deepEqual(items, [
+    { key: 'skill:c', domain: 'skills', label: 'c', group: 'lock/src', state: 'current', disposition: 'in-sync' },
+    { key: 'skill:g', domain: 'skills', label: 'g', group: 'o/r', state: 'gone', disposition: 'apply', note: 'gone upstream' },
+    { key: 'skill:u', domain: 'skills', label: 'u', group: 'o/r', state: 'unknown', disposition: 'blocked', note: 'source unreachable' },
+    { key: 'skill:mine', domain: 'skills', label: 'mine', group: '', state: 'local', disposition: 'excluded', note: 'no recorded source' },
+  ]);
+});
+
+test('inspectUpdates reports an unreadable store as one probe error and no items', async () => {
+  const m = skillsMachine();
+  mkdirSync(join(m.paths.agentsSkills, '..'), { recursive: true });
+  writeFileSync(m.paths.agentsSkills, 'a file, not a directory');
+  const desired = { files: [], skills: [], integrations: [], allow: {}, issues: [] } as DesiredConfig;
+  const out = await Effect.runPromise(inspectUpdates(desired).pipe(Effect.provide(Layer.mergeAll(m.layer, nodeProcesses()))));
+  assert.deepEqual(out.items, []);
+  assert.equal(out.probeErrors.length, 1);
 });

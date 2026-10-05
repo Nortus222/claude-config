@@ -93,7 +93,7 @@ export type Upstream = {
 };
 
 export type UpdatePlan = {
-  current: string[];
+  current: { name: string; source: string }[];
   outdated: { name: string; source: string; from: string | null; to: string }[];
   gone: { name: string; source: string; path: string }[];
   unknown: { name: string; source: string }[];
@@ -131,7 +131,7 @@ export function planUpdates(input: {
       continue;
     }
     if (remote === entry.hash) {
-      plan.current.push(entry.name);
+      plan.current.push({ name: entry.name, source: entry.source });
       continue;
     }
     // A missing hash lands here too, as `from: null`. We cannot verify what is
@@ -210,7 +210,10 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
       const treeAt = new Map<string, string>();
       const skillPaths: string[] = [];
       for (const record of listed.stdout.split('\0').filter(Boolean)) {
-        const [meta, path] = record.split('\t') as [string, string];
+        // Split at the first tab only: with -z a path is not quoted and may itself hold a tab.
+        const tab = record.indexOf('\t');
+        const meta = record.slice(0, tab);
+        const path = record.slice(tab + 1);
         const [, type, sha] = meta.split(' ');
         if (type === 'tree') treeAt.set(path, sha!);
         else if (type === 'blob' && /(^|\/)SKILL\.md$/.test(path)) skillPaths.push(path);
@@ -258,9 +261,8 @@ export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[
       ...(from === undefined ? {} : { from }),
     };
   };
-  // A current skill carries no source in the plan, so the manifest's declaration is the only one known.
   return [
-    ...plan.current.map((name) => item(name, declared.get(name)?.source ?? '', 'current', 'in-sync')),
+    ...plan.current.map((s) => item(s.name, s.source, 'current', 'in-sync')),
     ...plan.outdated.map((s) => item(s.name, s.source, 'outdated', 'apply', `${short(s.from)} -> ${short(s.to)}`)),
     ...plan.gone.map((s) => item(s.name, s.source, 'gone', 'apply', 'gone upstream')),
     ...plan.unknown.map((s) => item(s.name, s.source, 'unknown', 'blocked', 'source unreachable')),
