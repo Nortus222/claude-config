@@ -27,7 +27,7 @@ function Test-Runtime {
     if (-not (Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue)) { return $false }
     if (-not (Get-Command npx.cmd -CommandType Application -ErrorAction SilentlyContinue)) { return $false }
     try {
-        & node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'
+        & node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)'
         return $LASTEXITCODE -eq 0
     } catch { return $false }
 }
@@ -55,7 +55,7 @@ function Install-Prerequisite([string] $PackageId, [string] $DownloadUrl) {
 
 Write-Host 'Checking the tools needed to start configuration...'
 if (-not (Test-Runtime)) {
-    if (Confirm-Install 'Node.js 18+ with npm and npx is required. Install Node.js LTS with WinGet?') {
+    if (Confirm-Install 'Node.js 24+ with npm and npx is required. Install Node.js LTS with WinGet?') {
         Install-Prerequisite 'OpenJS.NodeJS.LTS' 'https://nodejs.org/en/download'
     }
 }
@@ -67,7 +67,7 @@ if (-not (Test-Git)) {
 }
 
 if (-not (Test-Runtime) -or -not (Test-Git)) {
-    Write-Host 'Setup requires Node.js 18+, npm, npx, and Git. Install the missing tools, reopen your terminal, and rerun setup.ps1.'
+    Write-Host 'Setup requires Node.js 24+, npm, npx, and Git. Install the missing tools, reopen your terminal, and rerun setup.ps1.'
     exit 1
 }
 
