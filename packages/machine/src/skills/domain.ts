@@ -1,10 +1,13 @@
+import { join } from 'node:path';
 import { Effect } from 'effect';
-import { TARGETS, type DesiredConfig } from '@nortuscc/profile-engine';
-import type { Observed } from '../model.ts';
+import { TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
+import { Backups } from '../backups.ts';
+import type { Domain, MachineReport, Observed, PlanKind, Selection, Skipped, Step, StepResult } from '../model.ts';
 import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
-import { SKILL_AGENTS } from './installer.ts';
-import { sourceOf } from './manifest.ts';
+import type { Processes } from '../processes.ts';
+import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
+import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
 import { installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
 
 // What the machine holds for the skills domain: declared skills, installed-but-undeclared ones,
@@ -70,3 +73,162 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   }
   return { items, probeErrors };
 });
+
+const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+const sortedUnique = (names: Iterable<string>) => [...new Set(names)].sort(byCodePoint);
+const touchesOf = (names: Iterable<string>) => sortedUnique(names).map((n) => `skills/${n}`);
+const INSTALL_PREFIX = 'skills:install:';
+
+// The skill names a skills step acts on, read back from its `skills/<name>` touches.
+export const skillNamesOf = (step: Step): string[] =>
+  step.touches.filter((t) => t.startsWith('skills/')).map((t) => t.slice('skills/'.length));
+
+// One install step per source, sources in code-point order.
+const installSteps = (items: ReadonlyArray<Observed>, targets: ReadonlyArray<Target>): Step[] => {
+  const bySource = new Map<string, string[]>();
+  for (const item of items) bySource.set(item.group, [...(bySource.get(item.group) ?? []), item.label]);
+  return [...bySource.keys()].sort(byCodePoint).map((source) => {
+    const touches = touchesOf(bySource.get(source)!);
+    return {
+      key: `${INSTALL_PREFIX}${source}`, domain: 'skills', action: 'install-skills',
+      summary: `installing ${touches.length} skill(s) from ${source}`, touches, interruptible: true, targets,
+    };
+  });
+};
+
+const applySteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
+  if (selection.declined.includes('skills')) {
+    return { steps: [], skipped: items.filter((i) => i.disposition === 'apply').map((i) => ({ key: i.key, reason: 'skills declined' })) };
+  }
+  const wanted = items.filter((i) => (i.state === 'missing' && i.disposition === 'apply')
+    || (i.state === 'unlinked' && i.target !== undefined && selection.targets.includes(i.target)));
+  const skipped: Skipped[] = items.filter((i) => i.state === 'missing' && i.disposition === 'excluded')
+    .map((i) => ({ key: i.key, reason: 'optional, not chosen' }));
+  return { steps: installSteps(wanted, selection.targets), skipped };
+};
+
+// Prune, refresh, adopt, then re-expose; the manifest is rewritten only when the skill set changed.
+const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
+  const named = (state: string) => items.filter((i) => i.state === state).map((i) => i.label);
+  const gone = named('gone');
+  const outdated = named('outdated');
+  const steps: Step[] = [];
+  if (gone.length) {
+    const touches = touchesOf(gone);
+    steps.push({ key: 'skills:remove', domain: 'skills', action: 'remove', summary: `removing ${touches.length} skill(s)`, touches, interruptible: true });
+  }
+  if (outdated.length) {
+    const touches = touchesOf(outdated);
+    steps.push({ key: 'skills:update', domain: 'skills', action: 'update-skills', summary: `updating ${touches.length} skill(s)`, touches, interruptible: true });
+  }
+  const installs = installSteps(items.filter((i) => i.state === 'available'), selection.targets);
+  steps.push(...installs);
+  if (steps.length) {
+    steps.push({
+      key: 'skills:expose', domain: 'skills', action: 'install-skills',
+      summary: `re-exposing skills to ${selection.targets.map((t) => SKILL_AGENTS[t]).join(', ')}`,
+      touches: touchesOf(outdated), interruptible: true, targets: selection.targets,
+    });
+  }
+  if (gone.length || installs.length) {
+    steps.push({
+      key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: `write ${MANIFEST_FILE}`,
+      touches: [MANIFEST_FILE], interruptible: false,
+    });
+  }
+  const skipped = items.filter((i) => i.disposition === 'blocked').map((i) => ({ key: i.key, reason: 'source unreachable' }));
+  return { steps, skipped };
+};
+
+const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) =>
+  kind === 'apply' ? applySteps(items, selection)
+  : kind === 'update' ? updateSteps(items, selection)
+  : { steps: [], skipped: [] };
+
+// Copies each named store folder to the run's backups before the installer touches it.
+const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
+  const store = (yield* MachinePaths).agentsSkills;
+  const backups = yield* Backups;
+  for (const name of names) yield* backups.preserve(join(store, name), join('skills', name));
+});
+
+// Re-adds every scoped skill a readable target cannot load. An unreadable target is reported, never repaired.
+const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () {
+  const installed = new Set(yield* installedSkillNames);
+  const scope = sortedUnique([...report.desired.skills.map((s) => s.name), ...skillNamesOf(step)]).filter((n) => installed.has(n));
+  const lock = yield* readSkillLock;
+  const exposure = yield* readExposure(step.targets ?? TARGETS);
+  const readable = (step.targets ?? TARGETS).filter((t) => exposure.list[t] !== undefined);
+  const bySource = new Map<string, string[]>();
+  for (const name of scope) {
+    const source = sourceOf(lock.skills[name]);
+    if (!source || readable.every((t) => exposure.list[t]!.includes(name))) continue;
+    bySource.set(source, [...(bySource.get(source) ?? []), name]);
+  }
+  let ok = true;
+  let count = 0;
+  const failures: string[] = [];
+  for (const source of [...bySource.keys()].sort(byCodePoint)) {
+    const skills = bySource.get(source)!;
+    const result = yield* runInstaller(addCommand({ source, skills, targets: readable }));
+    if (result.ok) count += skills.length;
+    else {
+      ok = false;
+      failures.push(`${source}: ${result.note}`);
+    }
+  }
+  const parts = [
+    ...(count > 0 ? [`re-exposed ${count} skill(s) to ${readable.map((t) => SKILL_AGENTS[t]).join(', ')}`] : []),
+    ...failures,
+    ...exposure.errors,
+  ];
+  return { ok, note: parts.join('; ') };
+});
+
+// Regenerates the manifest from what is installed, behind the shrink guard. Writes only into `paths.repo`.
+const writeManifest = (report: MachineReport) => Effect.gen(function* () {
+  const fs = yield* Fs;
+  const paths = yield* MachinePaths;
+  const lock = yield* readSkillLock;
+  const installed = yield* installedSkillNames;
+  const present = new Set(installed);
+  const before = groupsOf(report.desired.skills);
+  const pruned = report.items.filter((i) => i.domain === 'skills' && i.state === 'gone' && !present.has(i.label)).map((i) => i.label);
+  const declared = before
+    .map((g) => (g.optional ? { ...g, skills: g.skills.filter((n) => !pruned.includes(n)) } : g))
+    .filter((g) => g.skills.length > 0);
+  const groups = installedGroups(lock, installed, declared);
+  const outcome = manifestOutcome({ before, groups, prunedNames: pruned });
+  if (!outcome.write) return { ok: true, note: `left alone — ${outcome.reason}` };
+  yield* fs.writeTextAtomic(join(paths.repo, MANIFEST_FILE), emitManifest(groups));
+  return { ok: true, note: `written — ${outcome.reason}` };
+});
+
+const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>
+  Effect.gen(function* () {
+    const names = skillNamesOf(step);
+    switch (step.action) {
+      case 'remove':
+        yield* preserveAll(names);
+        return yield* runInstaller(removeCommand(names));
+      case 'update-skills':
+        yield* preserveAll(names);
+        return yield* runInstaller(updateCommand(names));
+      case 'install-skills':
+        if (step.key === 'skills:expose') return yield* reExpose(step, report);
+        if (step.key.startsWith(INSTALL_PREFIX)) {
+          return yield* runInstaller(addCommand({ source: step.key.slice(INSTALL_PREFIX.length), skills: names, targets: step.targets ?? TARGETS }));
+        }
+        break;
+      case 'write-manifest':
+        return yield* writeManifest(report);
+    }
+    return { ok: false, note: `skills cannot run ${step.action}` };
+  });
+
+export const skillsDomain: Domain<Fs | MachinePaths | Processes | Backups> = {
+  name: 'skills',
+  inspect: inspectSkills,
+  steps: skillSteps,
+  run: runSkillStep,
+};
