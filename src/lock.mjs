@@ -122,7 +122,7 @@ export function writeLock(lock) {
 
 // overrides.json, once a TypeScript command has written it, records the same two choices. Until
 // cutover (#59) every state write keeps it in step. It is never created here, and a malformed one
-// is left for its owner.
+// is left for its owner. A failed mirror warns and never fails the state write.
 function mirrorOverrides(lock) {
   const path = join(stateRoot(), 'overrides.json');
   let current;
@@ -140,8 +140,17 @@ function mirrorOverrides(lock) {
   if (next.manageConfig === current.manageConfig
     && JSON.stringify(next.configTargets) === JSON.stringify(current.configTargets)) return;
   const temp = join(stateRoot(), `.overrides.json.${process.pid}.tmp`);
-  writeFileSync(temp, JSON.stringify(next, null, 2) + '\n', 'utf8');
-  renameSync(temp, path);
+  try {
+    writeFileSync(temp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    renameSync(temp, path);
+  } catch (err) {
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // Best effort: the warning below is the report.
+    }
+    console.error(`nortuscc: could not update overrides.json: ${err.message}`);
+  }
 }
 
 export function setBaseline(lock, dest, hash) {
