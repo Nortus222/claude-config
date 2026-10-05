@@ -35,7 +35,7 @@ The engine spec left three decisions to #42.
    retired; `effect` (pinned, shared) is the one runtime dependency. Tests stay on `node:test`.
    Node will not strip types under `node_modules`, which the bootstrap below handles.
 3. **`SYNC`.** Deleted. The engine's `FILES`, resolved into `DesiredConfig.files`, is the only
-   table of managed files. The CLI's other duplicate parsers (`integrations.json`,
+   table of managed files. It is kept as JSON (`packages/profile-engine/src/files.json`) so the legacy commands read the same table from an `npx` copy until cutover. The CLI's other duplicate parsers (`integrations.json`,
    `skills-manifest.txt`, `settings.keys.json`) go too; the engine is their only reader.
 
 ## Layout
@@ -98,6 +98,7 @@ type Observed = {
   disposition: 'in-sync' | 'apply' | 'capture' | 'blocked' | 'excluded' | 'undeclared'
   note?: string
   from?: Origin        // provenance from the engine
+  facts?: string[]     // read only by the owning domain's steps
 }
 ```
 

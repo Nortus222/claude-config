@@ -113,10 +113,35 @@ export function writeLock(lock) {
   try {
     writeFileSync(temp, JSON.stringify(lock, null, 2) + '\n', 'utf8');
     renameSync(temp, target);
+    mirrorOverrides(lock);
   } catch (err) {
     rmSync(temp, { force: true });
     throw err;
   }
+}
+
+// overrides.json, once a TypeScript command has written it, records the same two choices. Until
+// cutover (#59) every state write keeps it in step. It is never created here, and a malformed one
+// is left for its owner.
+function mirrorOverrides(lock) {
+  const path = join(stateRoot(), 'overrides.json');
+  let current;
+  try {
+    current = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return;
+  }
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return;
+  const next = { ...current };
+  delete next.manageConfig;
+  delete next.configTargets;
+  if (lock.skillsOnly === true) next.manageConfig = false;
+  if (Array.isArray(lock.configTargets)) next.configTargets = lock.configTargets;
+  if (next.manageConfig === current.manageConfig
+    && JSON.stringify(next.configTargets) === JSON.stringify(current.configTargets)) return;
+  const temp = join(stateRoot(), `.overrides.json.${process.pid}.tmp`);
+  writeFileSync(temp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+  renameSync(temp, path);
 }
 
 export function setBaseline(lock, dest, hash) {

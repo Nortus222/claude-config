@@ -239,3 +239,26 @@ test('migration drops every legacy key that is not the Claude instruction file',
   const result = migrateLegacyState();
   assert.deepEqual(Object.keys(result.state.files), ['claude:CLAUDE.md']);
 });
+
+test('writeLock keeps an existing overrides.json in step with skillsOnly and configTargets', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(overridesPath, JSON.stringify({ version: 1, manageConfig: false, skills: { a: true } }));
+  writeLock({ version: 1, repo: null, skillsOnly: false, configTargets: ['claude'], files: {} });
+  assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1, skills: { a: true }, configTargets: ['claude'] });
+  writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
+  assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1, skills: { a: true }, manageConfig: false });
+  rmSync(overridesPath);
+});
+
+test('writeLock never creates overrides.json and leaves a malformed one alone', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
+  assert.equal(existsSync(overridesPath), false);
+  writeFileSync(overridesPath, '{');
+  writeLock({ version: 1, repo: null, skillsOnly: false, files: {} });
+  assert.equal(readFileSync(overridesPath, 'utf8'), '{');
+  rmSync(overridesPath);
+});

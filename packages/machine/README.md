@@ -18,6 +18,7 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
   interruptible step is interrupted, and the stream ends with `cancelled`. Interrupting the
   stream's fiber from outside also stops the run (finalizers run and the lock is released) but
   emits no further events.
+- The config domain (`configDomain`) owns copied files and settings keys from `DesiredConfig.files`. Its items carry `facts` that only its `steps` reads (`recorded`, `local-changed`, `local-absent`, `baseline-stale`). A step re-reads its file and fails, writing nothing, if the file's state moved since the report. Uninstall restores the earliest run's backup of each recorded file.
 
 Node 24+ runs the sources directly; Node will not strip types under `node_modules`, so consume
 the package through the workspace.
