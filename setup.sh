@@ -22,7 +22,7 @@ confirm() {
 
 runtime_ready() {
   command -v node >/dev/null 2>&1 &&
-    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)' &&
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' &&
     command -v npm >/dev/null 2>&1 &&
     command -v npx >/dev/null 2>&1
 }
@@ -52,7 +52,7 @@ install_formula() {
 
 printf 'Checking the tools needed to start configuration...\n'
 if ! runtime_ready; then
-  if confirm 'Node.js 18+ with npm and npx is required. Install Node.js with Homebrew?'; then
+  if confirm 'Node.js 24+ with npm and npx is required. Install Node.js with Homebrew?'; then
     if ! install_formula node; then
       printf 'Install Node.js and npm from https://nodejs.org/en/download and rerun setup.sh.\n' >&2
     fi
@@ -70,7 +70,7 @@ if ! git_ready; then
 fi
 
 if ! runtime_ready || ! git_ready; then
-  printf 'Setup requires Node.js 18+, npm, npx, and Git. Install the missing tools, reopen your terminal, and rerun setup.sh.\n' >&2
+  printf 'Setup requires Node.js 24+, npm, npx, and Git. Install the missing tools, reopen your terminal, and rerun setup.sh.\n' >&2
   exit 1
 fi
 

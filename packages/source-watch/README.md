@@ -33,3 +33,18 @@ npm ci && (cd ../profile-engine && npm ci)
 npm test
 npm run typecheck
 ```
+
+## Changelog draft
+
+`draftChangelog(reports, accepted)` turns reports into the Markdown changelog Publish starts
+from. `accepted` names each source the author brought into Contents, the full sha they reviewed
+(it must equal the report's `latest`), the skills to name without detail (`ignored`) and the
+upstream-new skills they added (`added`). Up-to-date sources are left out. Sources the draft
+cannot describe come back in `skipped` as `not-watched`, `stale` or `no-data`. It is pure and
+writes no author names. Design: `docs/superpowers/specs/2026-10-05-source-changelog-design.md`.
+
+```ts
+const { markdown, skipped } = draftChangelog(reports, [
+  { source: 'obra/superpowers', revision: reports[0].latest!.sha, ignored: ['writing-plans'] },
+]);
+```

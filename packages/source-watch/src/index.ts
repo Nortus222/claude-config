@@ -15,3 +15,5 @@ export { ignoreRevision, isIgnored, readIgnores } from './ignores.ts';
 export type { Ignores } from './ignores.ts';
 export { RefMissing, pinImpact } from './impact.ts';
 export type { PinImpact, SkillMove } from './impact.ts';
+export { draftChangelog } from './changelog.ts';
+export type { AcceptedSource, ChangelogDraft, SkippedSource } from './changelog.ts';

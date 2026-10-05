@@ -1,0 +1,15 @@
+{
+  "name": "@nortuscc/machine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Inspects a machine, plans changes against a resolved profile, and executes them with backups, progress and cancellation",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --test \"checks/*.spec.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@nortuscc/profile-engine": "0.1.0", "effect": "4.0.1" },
+  "devDependencies": { "@types/node": "25.5.0", "typescript": "7.0.2" },
+  "engines": { "node": ">=24" }
+}

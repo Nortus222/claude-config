@@ -504,7 +504,10 @@ to. Every command reads that table; nothing else needs to change.
 ## Development
 
 ```bash
-npm test    # node:test, no dependencies
+npm ci              # once per checkout; installs every workspace
+npm test            # the CLI suite (node --test)
+npm run test:packages
+npm run typecheck
 ```
 
 Windows support was verified on 2026-08-12 with a full `setup` run. State
@@ -512,4 +515,4 @@ resolved through `%APPDATA%`, and backup filenames worked without colons.
 
 ## Experimental desktop fixture app
 
-[`apps/desktop`](apps/desktop/README.md) contains an isolated Tauri 2 feasibility app with a React dashboard, an Effect backend, and a bundled Bun runtime. It inspects sample settings and runs cancellable operations in temporary directories. It does not manage real agent configuration. Its dependencies, lockfiles, tests and builds are separate from the zero-dependency CLI.
+[`apps/desktop`](apps/desktop/README.md) contains an isolated Tauri 2 feasibility app with a React dashboard, an Effect backend, and a bundled Bun runtime. It inspects sample settings and runs cancellable operations in temporary directories. It does not manage real agent configuration. It is an npm workspace: install with `npm ci` at the repository root.
