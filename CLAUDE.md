@@ -23,6 +23,7 @@ Feature branches target **`main`**.
 | `integrations.json` | Plugins, marketplaces, hooks and MCP servers a machine should have. Public: it may name an environment variable, never its value. May also carry an `allow` list of extras that are present on purpose |
 | `skills-manifest.txt` | Desired skill set, grouped by source repo |
 | `src/`, `bin/`, `test/` | The `nortuscc` CLI that does the reconciling |
+| `packages/profile-engine/` | Shared TypeScript/Effect engine that resolves a machine's desired configuration — base profile, revision pins, machine overrides — with per-value provenance. Not yet used by the CLI |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Designs and implementation plans |
 | `docs/runbooks/` | One-off procedures, recorded with the commands that undo them |
 
