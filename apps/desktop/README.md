@@ -6,17 +6,16 @@ The root Node 18+ CLI and its dependency-free package stay independent. Desktop 
 
 ## Local setup
 
-This package currently targets **macOS arm64**. Other platforms and cross-compilation have not been validated. You need Node 22.12+ and npm for the tooling, Bun 1.3+ for the packaged runtime, Rust, Xcode command line tools, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+This package currently targets **macOS arm64**. Other platforms and cross-compilation have not been validated. You need Node 24+ and npm for the tooling, Bun 1.3+ for the packaged runtime, Rust, Xcode command line tools, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 The app ships an official standalone Bun binary. A Homebrew executable can link libraries outside the app; the bundler rejects that case. Bun releases include no license file, so download `LICENSE.md` from the matching `bun-v<version>` tag of [oven-sh/bun](https://github.com/oven-sh/bun) and point `DESKTOP_BUN_LICENSE` at it. No installed-app startup downloads anything.
 
 ```sh
-cd apps/desktop
-npm ci
+npm ci   # at the repository root
 export DESKTOP_BUN_LICENSE=/absolute/path/bun-LICENSE.md
 # Optional; defaults to the bun on PATH:
 # export DESKTOP_BUN_RUNTIME=/absolute/path/bun-darwin-aarch64/bun
-npm run desktop:dev
+npm run desktop:dev -w apps/desktop
 ```
 
 `desktop:dev` bundles the backend, copies Bun into `src-tauri/resources/darwin-arm64`, then starts Vite and the Tauri host. `npm run dev` starts a browser preview with native actions disabled. It does not simulate a working backend.
@@ -24,13 +23,13 @@ npm run desktop:dev
 ## Verification
 
 ```sh
-npm run resources
-npm test
-npm run test:bun
-npm run typecheck
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run smoke
-# Separately, from the repository root:
+npm run resources -w apps/desktop
+npm test -w apps/desktop
+npm run test:bun -w apps/desktop
+npm run typecheck -w apps/desktop
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+npm run smoke -w apps/desktop
+# Separately, the CLI suite:
 npm test
 ```
 
@@ -43,8 +42,8 @@ The legacy suite has an existing failure named `apply --target codex installs th
 Run one full release build after targeted checks:
 
 ```sh
-npm run desktop:build
-npm run smoke -- "src-tauri/target/release/bundle/macos/Nortuscc Fixture Lab.app"
+npm run desktop:build -w apps/desktop
+npm run smoke -w apps/desktop -- "src-tauri/target/release/bundle/macos/Nortuscc Fixture Lab.app"
 ```
 
 The second command runs the packaged Rust owner with an empty PATH from a temporary working directory. It asserts inspect, apply, busy rejection, cancel, deliberate backend crash, disconnected-request rejection, fresh restart and completion. It also checks every observed fixture directory and child has disappeared. The executable supports `--smoke` for these native host checks without opening a window.
