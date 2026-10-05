@@ -111,8 +111,10 @@ layer are collected in `DesiredConfig.issues` rather than stopping at the first 
 `requireValid` turns a non-empty list into a `ProfileInvalid` failure for callers that want
 all-or-nothing.
 
-Effect Schema decodes structure: document shapes, versions and the overrides and pins formats.
-The CLI's rules are ported as plain functions that return issues: per-type integration fields,
+Effect Schema decodes the new formats, pins and overrides. The legacy `state.json` reader ports
+`parseState`'s two rules directly. The
+CLI's rules for today's documents are ported as plain functions that return issues, because a
+faithful port is simpler than re-expressing them as Schemas: per-type integration fields,
 duplicate ids, `allow` categories, empty settings files, and the name and value patterns from
 `src/secrets.mjs`. Legacy error wording is not reproduced; the golden tests compare *whether* a
 document is refused, not the message.
@@ -122,8 +124,8 @@ document is refused, not the message.
 Resolution is pure: `resolveProfile({ base, pins, overrides }) => DesiredConfig` performs no
 I/O. Effect owns loading. A `ProfileFiles` service (`Context.Service`) provides
 `readText(path)` (with `undefined` for an absent file) and `exists(path)`, the latter for the
-hook `file` check. `ProfileFiles.node` reads through `node:fs/promises`;
-`ProfileFiles.memory(record)` serves tests. `loadProfile(repoDir, { overrides? })` returns
+hook `file` check. The `nodeFiles` layer reads through `node:fs/promises`, and
+`memoryFiles(record)` serves tests. `loadProfile(repoDir, { overrides? })` returns
 `Effect<DesiredConfig, ReadFailed, ProfileFiles>`. An unreadable file is a `ReadFailed`, which
 differs from an absent one. Errors are tagged (`ReadFailed`, `ProfileInvalid`). The
 engine does not use `@effect/platform-node`: four filesystem calls do not justify its
@@ -145,11 +147,12 @@ Tests are written first, one module at a time.
     `parseConfigMode` with `NORTUSCC_STATE_DIR` set to a temporary directory.
   - **Settings**: owned keys and values equal the parsed file, and a refused file matches
     `validateOwnedKeys` refusing it.
-  - **Skills**: regrouping by source yields `parseManifest`'s output, and `install` equals the
-    CLI's default selection (`!optional`).
+  - **Skills**: the flattened list of name, source and markers equals `parseManifest`'s groups
+    flattened, which is the CLI's own view of them in `reconcile`. `install` equals the CLI's
+    default selection (`!optional`).
   - **Integrations**: accepted declarations and `allow` deep-equal `validateIntegrations`'s
     output, `enabled` equals `default`, and refusal matches.
 
 Done when the package's tests and typecheck pass, the golden tests pass against this
-repository's configuration, and the root `npm test` still passes, apart from the existing
-OpenRouter failure the desktop README records.
+repository's configuration, and the root `npm test` still passes. The baseline is 725 of 725
+with `NORTUSCC_REPO_DIR` set to the checkout.
