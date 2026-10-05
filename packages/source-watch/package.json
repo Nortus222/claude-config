@@ -1,0 +1,23 @@
+{
+  "name": "@nortuscc/source-watch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Watches the skill sources a setup uses: upstream revisions past each pin, changed skills with SKILL.md diffs, and unpushed local edits",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --test \"checks/*.spec.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "4.0.1"
+  },
+  "devDependencies": {
+    "@nortuscc/profile-engine": "file:../profile-engine",
+    "@types/node": "25.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
