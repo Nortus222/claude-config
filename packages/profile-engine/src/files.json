@@ -1,0 +1,7 @@
+[
+  { "id": "claude:CLAUDE.md", "target": "claude", "home": "claude", "src": "claude/CLAUDE.md", "dest": "CLAUDE.md", "mode": "copy", "preserveProjects": false, "capture": true },
+  { "id": "codex:AGENTS.md", "target": "codex", "home": "codex", "src": "codex/AGENTS.md", "dest": "AGENTS.md", "mode": "copy", "preserveProjects": false, "capture": true },
+  { "id": "codex:models-static.json", "target": "codex", "home": "codex-openrouter", "src": "codex/openrouter-glm/models-static.json", "dest": "models-static.json", "mode": "copy", "preserveProjects": false, "capture": false },
+  { "id": "codex:config.toml", "target": "codex", "home": "codex-openrouter", "src": "codex/openrouter-glm/config.toml", "dest": "config.toml", "mode": "copy", "preserveProjects": true, "capture": false },
+  { "id": "claude:settings.json", "target": "claude", "home": "claude", "src": "claude/settings.keys.json", "dest": "settings.json", "mode": "merge-keys", "preserveProjects": false, "capture": true }
+]
