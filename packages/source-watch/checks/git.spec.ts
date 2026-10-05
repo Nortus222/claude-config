@@ -20,7 +20,7 @@ test('returns stdout, and parseLog reads commits without emails', async (t) => {
     [second, 'second: with | odd chars', 'Ada'],
     [first, 'first', 'Ada'],
   ]);
-  assert.match(commits[0]!.date, /^2026-01-01T\d\d:\d\d:\d\d\+00:00$/);
+  assert.match(commits[0]!.date, /^2026-01-01T\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)$/);
   assert.doesNotMatch(JSON.stringify(commits), /example\.com/);
 });
 

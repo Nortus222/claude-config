@@ -25,12 +25,13 @@ function environment(allowProtocols: string | undefined): NodeJS.ProcessEnv {
   return env;
 }
 
+// Extract the most relevant error message from git's stderr, preferring fatal/error lines.
 function failure(stderr: string, args: ReadonlyArray<string>, code: number | null): GitFailed {
-  const line = stderr
-    .split('\n')
-    .map((l) => l.trim())
-    .find((l) => l !== '' && !/^(warning|hint):/.test(l) && !l.startsWith('Cloning'));
-  return new GitFailed({ reason: redact(line ?? `git ${args[0] ?? ''} exited with code ${code}`) });
+  const lines = stderr.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  const fatalOrError = lines.find((l) => /^(fatal|error):/.test(l));
+  const firstOther = lines.find((l) => !/^(warning|hint):/.test(l));
+  const line = fatalOrError ?? firstOther ?? `git ${args[0] ?? ''} exited with code ${code}`;
+  return new GitFailed({ reason: redact(line) });
 }
 
 // Runs the git on PATH without a shell, never prompting. `allowProtocols` limits the transports
@@ -76,7 +77,7 @@ export function parseLog(out: string): Commit[] {
     .filter((record) => record !== '')
     .map((record) => {
       const [sha = '', subject = '', author = '', date = ''] = record.split('\x1f');
-      return { sha, subject, author, date: date.replace('Z', '+00:00') };
+      return { sha, subject, author, date };
     });
 }
 
