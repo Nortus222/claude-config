@@ -103,7 +103,9 @@ type Observed = {
 
 `state` keeps each domain's existing values. Files use `clean`, `repo-ahead`, `local-ahead`,
 `conflict`, `unmanaged`, `missing-repo`, `unparseable-local` and `invalid`. Integrations use
-`installed`, `missing` and `blocked`. Skills use `ok`, `missing`, `extra` and `local`.
+`installed`, `missing` and `blocked`. Skills use `ok`, `missing`, `extra` and `local`, plus
+`unlinked` for a per-agent exposure item (an installed skill one agent cannot load). The
+upstream check behind `update` uses `current`, `outdated`, `gone`, `unknown` and `available`.
 `disposition` is the one cross-domain verdict. Status, the picker and the app read it, and
 exit codes derive from it.
 

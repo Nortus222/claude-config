@@ -41,7 +41,7 @@ Skills steps name their skills in `touches` as store-relative paths `skills/<nam
 2. **Unreadable agent directory.** If an agent's skill directory can't be read, the result is a probe error, never "this agent has no skills". Otherwise `update` would reinstall every skill. Pinned in Task 4 (`readExposure` error) and Task 7 (expose step makes no repair for an errored agent).
 3. **Cancel mid-update (Ctrl-C).** The running installer is interrupted. No later step runs, so the manifest is not rewritten. The command exits non-zero and says what did not run. Pinned in Task 9.
 4. **`--target claude`.** Installer calls carry only `--agent claude-code`, and exposure is judged for Claude only. Pinned in Task 7 (steps carry `targets`; run builds argv from them) and Task 9.
-5. **Absent, malformed or wrongly-shaped `.skill-lock.json`, and dangling links in the store or `~/.claude/skills`.** Each degrades to "nothing known" or "absent" without crashing. Pinned in Task 4 (lock, store) and Task 8 (probe links).
+5. **Absent, malformed or wrongly-shaped `.skill-lock.json`, and dangling links.** None crashes. A malformed lock degrades to "nothing known". A dangling link in the store counts as installed (legacy parity). A dangling link in an agent's skill directory or `~/.claude/skills` reads as absent. Pinned in Task 4 (lock, store) and Task 8 (probe links).
 
 ---
 
