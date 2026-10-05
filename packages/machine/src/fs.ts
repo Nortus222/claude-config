@@ -12,7 +12,8 @@ export class Fs extends Context.Service<
     readonly readText: (path: string) => Effect.Effect<string | undefined, FsFailed>;
     readonly writeTextAtomic: (path: string, text: string) => Effect.Effect<void, FsFailed>;
     readonly exists: (path: string) => Effect.Effect<boolean>;
-    readonly copy: (from: string, to: string) => Effect.Effect<void, FsFailed>;
+    // A link is copied as a link unless `follow`, which copies what it points at.
+    readonly copy: (from: string, to: string, options?: { readonly follow?: boolean }) => Effect.Effect<void, FsFailed>;
     readonly move: (from: string, to: string) => Effect.Effect<void, FsFailed>;
     readonly remove: (path: string) => Effect.Effect<void, FsFailed>;
     // Entry names, sorted; undefined when the directory is absent.
@@ -55,9 +56,9 @@ const writeTarget = async (path: string): Promise<string> => {
 const kindOf = (info: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
   info.isSymbolicLink() ? 'symlink' : info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other';
 
-const copyTree = (from: string, to: string) => async () => {
+const copyTree = (from: string, to: string, follow = false) => async () => {
   await mkdir(dirname(to), { recursive: true });
-  await cp(from, to, { recursive: true, verbatimSymlinks: true });
+  await cp(from, to, follow ? { recursive: true, dereference: true } : { recursive: true, verbatimSymlinks: true });
 };
 
 export const nodeFs = Layer.succeed(Fs, {
@@ -88,7 +89,7 @@ export const nodeFs = Layer.succeed(Fs, {
       }
     }),
   exists: (path) => Effect.promise(() => lstat(path).then(() => true, () => false)),
-  copy: (from, to) => attempt('copy', from, copyTree(from, to)),
+  copy: (from, to, options) => attempt('copy', from, copyTree(from, to, options?.follow)),
   // rename fails across volumes; copy then remove covers that.
   move: (from, to) =>
     attempt('move', from, async () => {

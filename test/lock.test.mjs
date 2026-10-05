@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'nortuscc-lock-'));
 const dir = join(home, '.claude');
@@ -277,4 +277,47 @@ test('withApplyLock takes over a lock whose holder died, and releases on throw',
   writeFileSync(lockPath, JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: '2026-01-01T00:00:00.000Z' }));
   await assert.rejects(withApplyLock(async () => { throw new Error('boom'); }), /boom/);
   assert.equal(existsSync(lockPath), false);
+});
+
+test('writeLock keeps an existing overrides.json in step with skillsOnly and configTargets', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(overridesPath, JSON.stringify({ version: 1, manageConfig: false, skills: { a: true } }));
+  writeLock({ version: 1, repo: null, skillsOnly: false, configTargets: ['claude'], files: {} });
+  assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1, skills: { a: true }, configTargets: ['claude'] });
+  writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
+  assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1, skills: { a: true }, manageConfig: false });
+  rmSync(overridesPath);
+});
+
+test('writeLock never creates overrides.json and leaves a malformed one alone', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
+  assert.equal(existsSync(overridesPath), false);
+  writeFileSync(overridesPath, '{');
+  writeLock({ version: 1, repo: null, skillsOnly: false, files: {} });
+  assert.equal(readFileSync(overridesPath, 'utf8'), '{');
+  rmSync(overridesPath);
+});
+
+test('writeLock still writes state.json when overrides.json cannot be replaced', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  // A directory occupies the mirror's temp path, so its write fails with EISDIR on every platform
+  // while the existing overrides.json stays readable and out of step.
+  const blocker = join(stateRoot(), `.overrides.json.${process.pid}.tmp`);
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(overridesPath, JSON.stringify({ version: 1 }));
+  mkdirSync(blocker);
+  try {
+    writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
+    assert.equal(readLock().skillsOnly, true);
+    assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1 });
+    assert.deepEqual(readdirSync(stateRoot()).filter((n) => /^\.(overrides|state)\.json\..*\.tmp$/.test(n) && n !== basename(blocker)), []);
+  } finally {
+    rmSync(blocker, { recursive: true, force: true });
+    rmSync(overridesPath, { force: true });
+  }
 });

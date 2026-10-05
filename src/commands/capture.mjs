@@ -103,7 +103,8 @@ export async function run(allArgs = [], entries = SYNC) {
 
     const res = captureCopy(src, dest, `${entry.target}:${entry.dest}`, lock, {
       force: takeLocal,
-      relative: entry.dest,
+      // Not entry.dest: that is the path uninstall reads as the machine's original.
+      relative: `${entry.dest}.repo`,
       agent: entry.target,
     });
 

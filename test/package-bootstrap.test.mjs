@@ -24,6 +24,7 @@ before(() => {
   ))[0];
 
   assert.ok(packed.files.some((entry) => entry.path === 'integrations.json'));
+  assert.ok(packed.files.some((entry) => entry.path === 'packages/profile-engine/src/files.json'));
   assert.ok(packed.files.some((entry) => entry.path === 'src/commands/setup.mjs'));
   assert.equal(packed.files.some((entry) => entry.path.startsWith('test/')), false);
 
