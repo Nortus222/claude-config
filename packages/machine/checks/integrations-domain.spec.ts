@@ -289,3 +289,10 @@ test('run reports a step whose declaration is gone as failed', async () => {
   const finished = events.find((e) => e.type === 'finished');
   assert.deepEqual(finished?.type === 'finished' && [finished.outcome, finished.note], ['failed', 'no longer declared']);
 });
+
+test('the package root exports the integrations domain', async () => {
+  const root = await import('../src/index.ts');
+  assert.equal(typeof root.integrationsDomain, 'function');
+  assert.ok(typeof root.readCodexState === 'object' || Effect.isEffect(root.readCodexState));
+  assert.equal(typeof root.userScopeInstalls, 'function');
+});

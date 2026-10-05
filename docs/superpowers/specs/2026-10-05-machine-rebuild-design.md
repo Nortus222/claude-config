@@ -167,7 +167,7 @@ Each domain implements:
 type Domain<R> = {
   name: 'config' | 'integrations' | 'skills'
   inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }, never, R>
-  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture') =>
+  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture', desired: DesiredConfig) =>
     { steps: Step[]; skipped: { key: string; reason: string }[] }
   run: (step: Step, report: MachineReport) => Effect<StepResult, unknown, R>
 }
@@ -176,6 +176,9 @@ type Domain<R> = {
 `inspect`, `plan` and `execute` take the domain array generically, so domains needing different
 services mix and the run requires their union. A failed step's note is its error's message (each
 package error states one), else its tag.
+
+`plan` passes each domain's `steps` the report's `desired`, because an observed item does not carry its
+declaration (the integrations domain needs a declaration's type and installer command).
 
 The three domains and the undeclared-items probe are the units the parallel issues build.
 
