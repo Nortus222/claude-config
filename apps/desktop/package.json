@@ -16,6 +16,8 @@
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
+    "@nortuscc/machine": "0.1.0",
+    "@nortuscc/profile-engine": "0.1.0",
     "effect": "4.0.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
