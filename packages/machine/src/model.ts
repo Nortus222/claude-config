@@ -69,7 +69,8 @@ export type Progress =
 export type Domain<R = never> = {
   readonly name: DomainName;
   readonly inspect: (desired: DesiredConfig) => Effect.Effect<{ items: ReadonlyArray<Observed>; probeErrors: ReadonlyArray<string> }, never, R>;
-  readonly steps: (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) =>
+  // `desired` is the report's: a step may need a declaration the observed item does not carry.
+  readonly steps: (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) =>
     { steps: ReadonlyArray<Step>; skipped: ReadonlyArray<Skipped> };
   // A step must not interrupt itself: self-interruption reads as cancellation and ends the run.
   // `report` is the one the plan was made from, so a step can read the observed item and `report.desired`.
