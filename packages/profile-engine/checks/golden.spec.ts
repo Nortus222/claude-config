@@ -9,7 +9,7 @@ import { Effect } from 'effect';
 import { SYNC } from '../../../src/manifest.mjs';
 import { configEntries, parseConfigMode } from '../../../src/config-mode.mjs';
 import { parseManifest } from '../../../src/skills.mjs';
-import { validateIntegrations } from '../../../src/integrations/manifest.mjs';
+import { readIntegrations } from '../../../src/integrations/manifest.mjs';
 import { validateOwnedKeys } from '../../../src/settings-keys.mjs';
 import {
   FILES, loadProfile, nodeFiles, overridesFromLegacyState,
@@ -57,7 +57,8 @@ function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 // Compares settings, skills and integrations for one repo directory.
-function assertDocumentsAgree(dir: string, config: DesiredConfig, label: string): void {
+// With `refusal`, also requires that the CLI itself reported errors.
+function assertDocumentsAgree(dir: string, config: DesiredConfig, label: string, refusal = false): void {
   const settingsText = readOptional(join(dir, 'claude/settings.keys.json'));
   const settingsValue = parseOrUndefined(settingsText);
   const legacyKeys =
@@ -79,14 +80,8 @@ function assertDocumentsAgree(dir: string, config: DesiredConfig, label: string)
   );
   assert.ok(config.skills.every((s) => s.install === !s.optional), `${label}: default selection`);
 
-  const integrationsText = readOptional(join(dir, 'integrations.json'));
-  const parsed = parseOrUndefined(integrationsText);
-  const legacy =
-    integrationsText === undefined
-      ? { integrations: [], allow: {}, errors: [] }
-      : parsed === undefined
-        ? { integrations: [], allow: {}, errors: ['invalid json'] }
-        : validateIntegrations(parsed, { repo: dir });
+  const legacy = readIntegrations({ repo: dir });
+  if (refusal) assert.ok(legacy.errors.length > 0, `${label}: the CLI refuses the document`);
   assert.deepEqual(config.integrations.map((i) => i.declaration), legacy.integrations, `${label}: integrations`);
   assert.deepEqual(config.allow, legacy.allow, `${label}: allow`);
   assert.equal(
@@ -173,6 +168,47 @@ const FIXTURES: Record<string, Record<string, string>> = {
   'allow valid': { 'integrations.json': integrationsDoc([plugin], { allow: { plugins: ['a@b'], skills: ['s'] } }) },
   'allow unknown category': { 'integrations.json': integrationsDoc([plugin], { allow: { widgets: ['a'] } }) },
 };
+
+const market = { id: 'm', label: 'm', target: 'claude', type: 'marketplace', default: true };
+// Every integration refusal the engine's own tests list; the CLI must refuse each one too.
+const REFUSALS: Record<string, string> = {
+  'invalid json': '{',
+  'not an object': '[]',
+  'wrong version': JSON.stringify({ version: 2, integrations: [] }),
+  'no integrations array': JSON.stringify({ version: 1 }),
+  'item not an object': integrationsDoc(['x']),
+  'missing id': integrationsDoc([{ ...plugin, id: '' }]),
+  'duplicate id': integrationsDoc([plugin, plugin]),
+  'missing label': integrationsDoc([{ ...plugin, label: '' }]),
+  'unsupported target': integrationsDoc([{ ...plugin, target: 'cursor' }]),
+  'unknown type': integrationsDoc([{ ...plugin, type: 'widget' }]),
+  'default not boolean': integrationsDoc([{ ...plugin, default: 'yes' }]),
+  'plugin without name': integrationsDoc([{ ...plugin, plugin: '' }]),
+  'marketplace without source': integrationsDoc([{ ...market, name: 'm' }]),
+  'marketplace without name': integrationsDoc([{ ...market, marketplace: 'o/r' }]),
+  'mcp without command': integrationsDoc([{ id: 'c', label: 'c', target: 'codex', type: 'mcp', default: true }]),
+  'hook without event': integrationsDoc([{ ...hook, event: '' }]),
+  'hook without file': integrationsDoc([{ ...hook, file: '' }]),
+  'hook file not in repo': integrationsDoc([hook]),
+  'requiresEnv not names': integrationsDoc([{ ...plugin, requiresEnv: [1] }]),
+  'secret field name': integrationsDoc([{ ...plugin, token: 'x' }]),
+  'secret value': integrationsDoc([{ ...plugin, note: 'sk-abcdef12' }]),
+  'secret value in a list': integrationsDoc([{ ...plugin, args: ['ok', 'ghp_abcdefgh1'] }]),
+  'allow not an object': integrationsDoc([plugin], { allow: [] }),
+  'allow unknown category': integrationsDoc([plugin], { allow: { widgets: [] } }),
+  'allow not ids': integrationsDoc([plugin], { allow: { plugins: [''] } }),
+};
+
+for (const [label, text] of Object.entries(REFUSALS)) {
+  test(`refusal agrees with the CLI: ${label}`, () =>
+    withTempDir(async (dir) => {
+      writeFileSync(join(dir, 'integrations.json'), text);
+      const config = await load(dir);
+      assertDocumentsAgree(dir, config, label, true);
+      assert.deepEqual(config.integrations, [], `${label}: no integrations`);
+      assert.ok(config.issues.some((i) => i.source === 'integrations.json'), `${label}: engine issue`);
+    }));
+}
 
 for (const [label, files] of Object.entries(FIXTURES)) {
   test(`fixture agrees with the CLI: ${label}`, () =>
