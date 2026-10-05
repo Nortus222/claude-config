@@ -12,7 +12,7 @@ This fits the repository: `package.json` declares ESM and Node >=18, with no run
 
 | Concern | Electron | Tauri 2 |
 |---|---|---|
-| TypeScript/Effect backend | Node is built into the main process; a Node utility process can host the engine | Requires a packaged Node sidecar or separately supplied runtime |
+| TypeScript/Effect backend | Node is built into the main process; a Node utility process can host the engine | Requires a JavaScript runtime sidecar, such as Node or Bun; Node best fits existing code |
 | Existing `.mjs` modules | Main-process ESM supports `.mjs` and `type: module` | Reuse inside the Node sidecar, with additional packaging |
 | Renderer consistency | Bundles Chromium | Uses WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux |
 | Privileged boundary | Sandboxed renderer, isolated preload, validated IPC | Rust commands and scoped capabilities; sidecar still validates its requests |
@@ -20,7 +20,7 @@ This fits the repository: `package.json` declares ESM and Node >=18, with no run
 
 Electron's main process has Node APIs, and `utilityProcess.fork` supplies a child Node process with message ports. This lets the engine stay independent of Electron while a small adapter handles transport. Utility processes improve responsiveness and crash isolation; they are privileged processes, not a security sandbox for installer code. [Process model](https://www.electronjs.org/docs/latest/tutorial/process-model), [utilityProcess](https://www.electronjs.org/docs/latest/api/utility-process).
 
-Tauri supports a TypeScript backend, but through a sidecar. Its guide packages Node code with `@yao-pkg/pkg` or embeds Node and bundled JavaScript; a persistent engine needs an IPC protocol and lifecycle supervision. Its system webviews introduce a broader rendering test matrix. Prefer it if reducing shell footprint outweighs maintaining that integration. Actual package size and memory savings need measurement after bundling the Node runtime. [Node sidecar guide](https://v2.tauri.app/learn/sidecar-nodejs/), [webview implementations](https://v2.tauri.app/reference/webview-versions/).
+Tauri supports a TypeScript backend, but through a sidecar. Node is the easiest reuse path here, while a Bun executable is another possibility. Its Node guide packages code with `@yao-pkg/pkg` or embeds Node and bundled JavaScript; a persistent engine needs an IPC protocol and lifecycle supervision. Its system webviews introduce a broader rendering test matrix. Prefer it if reducing shell footprint outweighs maintaining that integration. Actual package size and memory savings need measurement after bundling the backend runtime. [Node sidecar guide](https://v2.tauri.app/learn/sidecar-nodejs/), [webview implementations](https://v2.tauri.app/reference/webview-versions/), [follow-up shell research](./2026-10-05-desktop-shell-options.md).
 
 ## UI choices
 
