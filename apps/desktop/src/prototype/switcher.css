@@ -1,0 +1,41 @@
+/* PROTOTYPE — floating variant switcher; deliberately unlike any variant. */
+.proto-switcher {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 999px;
+  background: #ff3d7f;
+  color: #fff;
+  font: 600 12px/1 ui-monospace, 'SF Mono', Menlo, monospace;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.35), 0 0 0 2px #fff;
+}
+.proto-switcher span {
+  padding: 0 12px;
+  white-space: nowrap;
+}
+.proto-switcher b {
+  background: #fff;
+  color: #ff3d7f;
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-right: 6px;
+}
+.proto-switcher button {
+  all: unset;
+  cursor: pointer;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.18);
+}
+.proto-switcher button:hover {
+  background: rgb(255 255 255 / 0.32);
+}

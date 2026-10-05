@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "prototype": "vite --host 127.0.0.1 --open /prototype.html",
     "test": "tsx --test checks/*.spec.ts",
     "typecheck": "tsc --noEmit",
     "resources": "node scripts/bundle.mjs",
