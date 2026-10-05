@@ -112,14 +112,15 @@ test('an unreadable store is a probe error and every declared skill reads as unk
   mkdirSync(m.paths.agentsSkills, { recursive: true });
   chmodSync(m.paths.agentsSkills, 0o000);
   try {
-    const report = await m.run(inspectSkills(desiredWith([skill('want', 'o/r'), skill('maybe', 'o/r', { optional: true, install: false })])));
+    const desired = desiredWith([skill('want', 'o/r'), skill('maybe', 'o/r', { optional: true, install: false })]);
+    const report = await m.run(inspectSkills(desired));
     assert.equal(report.probeErrors.length, 1);
     assert.match(report.probeErrors[0]!, new RegExp(`^could not read ${m.paths.agentsSkills}: `));
     assert.deepEqual(report.items.map((i) => [i.key, i.state, i.disposition, i.note]), [
       ['skill:want', 'unknown', 'blocked', 'store unreadable'],
       ['skill:maybe', 'unknown', 'blocked', 'store unreadable'],
     ]);
-    const p = plan('apply', report, selectAll, [skillsDomain]);
+    const p = plan('apply', { desired, ...report }, selectAll, [skillsDomain]);
     assert.deepEqual(p.steps, []);
     assert.deepEqual(p.skipped, [
       { key: 'skill:want', reason: 'store unreadable' },
