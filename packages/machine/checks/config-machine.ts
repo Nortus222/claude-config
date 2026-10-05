@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { Effect, Layer } from 'effect';
+import { Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
-import { backupsForRun, machinePaths, nodeFs, stateStore, type MachinePathsValue } from '../src/index.ts';
+import {
+  backupsForRun, configDomain, execute, inspect, machinePaths, nodeFs, plan, selectAll, stateStore,
+  type MachinePathsValue, type MachineReport, type Plan, type PlanKind, type Selection,
+} from '../src/index.ts';
 import { inspectConfig } from '../src/config/inspect.ts';
 
 export const REPO_FILES: Readonly<Record<string, string>> = {
@@ -44,5 +47,19 @@ export const configMachine = (repoFiles: Readonly<Record<string, string>> = REPO
       version: 1, repo: null, skillsOnly: false,
       files: Object.fromEntries(Object.entries(files).map(([key, hash]) => [key, { hash, appliedAt: '2026-10-05T00:00:00.000Z' }])),
     }));
-  return { root, paths, write, read, desired, layer, observe, state, baselines };
+  const report = async (overrides?: Input<MachineOverrides>) =>
+    Effect.runPromise(inspect(await desired(overrides), [configDomain]).pipe(Effect.provide(layer())));
+  const planFor = (r: MachineReport, kind: PlanKind = 'apply', selection: Partial<Selection> = {}) =>
+    plan(kind, r, { ...selectAll, ...selection }, [configDomain]);
+  const executePlan = (p: Plan, r: MachineReport) =>
+    Effect.runPromise(Stream.runCollect(execute(p, r, [configDomain])).pipe(Effect.map((c) => [...c]), Effect.provide(layer())));
+  // Inspect, plan and execute in one go, as a command does.
+  const sync = async (kind: PlanKind = 'apply', selection: Partial<Selection> = {}) => {
+    const r = await report();
+    const p = planFor(r, kind, selection);
+    const events = await executePlan(p, r);
+    const notes = Object.fromEntries(events.flatMap((e) => (e.type === 'finished' ? [[e.key, `${e.outcome}: ${e.note}`]] : [])));
+    return { report: r, plan: p, events, notes };
+  };
+  return { root, paths, write, read, desired, layer, observe, state, baselines, report, plan: planFor, execute: executePlan, sync };
 };
