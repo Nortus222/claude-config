@@ -9,9 +9,12 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { MAX_RECORD_BYTES } from '../backend/protocol.ts';
 
+// FIXTURE_RUNTIME runs the backend source on another runtime, such as the bundled Bun.
+const runtime = process.env.FIXTURE_RUNTIME;
+
 export function client(
-  command = process.execPath,
-  args = ['--import', 'tsx', 'backend/main.ts'],
+  command = runtime ?? process.execPath,
+  args = runtime ? ['backend/main.ts'] : ['--import', 'tsx', 'backend/main.ts'],
   cwd = resolve('.'),
   env = process.env,
 ) {
@@ -124,12 +127,12 @@ test('malformed and oversized records are rejected and next valid request still 
   assert.equal(c.diagnostics.length, 0);
 });
 
-test('bundled Node and backend run from another directory without Node on PATH', async (t) => {
+test('bundled Bun and backend run from another directory without a runtime on PATH', async (t) => {
   const cwd = await mkdtemp(resolve(tmpdir(), 'fixture-smoke-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const root = resolve('src-tauri/resources', `${process.platform}-${process.arch}`);
   const c = client(
-    resolve(root, process.platform === 'win32' ? 'node.exe' : 'node'),
+    resolve(root, process.platform === 'win32' ? 'bun.exe' : 'bun'),
     [resolve(root, 'backend.mjs')],
     cwd,
     { PATH: '' },
@@ -143,7 +146,7 @@ test('bundled Node and backend run from another directory without Node on PATH',
 test('operation directories stay beneath the supplied session and cancel preserves that session', async (t) => {
   const session = await mkdtemp(resolve(tmpdir(), 'nortuscc-fixture-session-check-'));
   t.after(() => rm(session, { recursive: true, force: true }));
-  const c = client(process.execPath, ['--import', 'tsx', 'backend/main.ts'], resolve('.'), {
+  const c = client(undefined, undefined, resolve('.'), {
     ...process.env,
     NORTUSCC_FIXTURE_SESSION: session,
   });

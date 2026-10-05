@@ -184,21 +184,22 @@ pub struct Backend {
 }
 impl Backend {
     pub fn spawn(resources: &Path, emit: Emit) -> Result<Self, String> {
-        let node = resources.join(if cfg!(windows) { "node.exe" } else { "node" });
+        let bun = resources.join(if cfg!(windows) { "bun.exe" } else { "bun" });
         let script = resources.join("backend.mjs");
-        if !node.is_absolute() || !node.is_file() || !script.is_file() {
+        if !bun.is_absolute() || !bun.is_file() || !script.is_file() {
             return Err(format!(
                 "Missing bundled runtime at {}",
                 resources.display()
             ));
         }
         let session = SessionDirectory::create()?;
-        let mut command = Command::new(node);
+        let mut command = Command::new(bun);
         command
             .arg(script)
             .current_dir(resources)
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
+            .env_remove("BUN_OPTIONS")
             .env("NORTUSCC_FIXTURE_SESSION", &session.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -468,9 +469,9 @@ mod lifecycle_tests {
             NEXT_DIRECTORY.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir(&directory).unwrap();
-        let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/node");
+        let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/bun");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(runtime, directory.join("node")).unwrap();
+        std::os::unix::fs::symlink(runtime, directory.join("bun")).unwrap();
         std::fs::write(directory.join("backend.mjs"), source).unwrap();
         (
             Backend::spawn(&directory, Arc::new(|_| {})).unwrap(),
@@ -479,26 +480,20 @@ mod lifecycle_tests {
     }
     #[test]
     fn abrupt_death_before_child_spawn_removes_operation_directory() {
-        let bundle =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/backend.mjs");
-        let source = format!(
-            r#"
+        // Mirrors the backend's window between creating an operation directory and spawning its child.
+        let source = r#"
             import fs from 'node:fs';
-            import promises from 'node:fs/promises';
-            import {{ syncBuiltinESMExports }} from 'node:module';
-            const original = promises.mkdtemp;
-            promises.mkdtemp = async prefix => {{
-                const directory = await original(prefix);
+            import { join } from 'node:path';
+            import { createInterface } from 'node:readline';
+            createInterface({ input: process.stdin }).on('line', line => {
+                const { id } = JSON.parse(line);
+                process.stdout.write(JSON.stringify({ version: 1, id, ok: true, result: { operationId: 'pre-child' } }) + '\n');
+                const directory = fs.mkdtempSync(join(process.env.NORTUSCC_FIXTURE_SESSION, 'operation-'));
                 fs.writeFileSync(new URL('./created.txt', import.meta.url), directory);
                 process.kill(process.pid, 'SIGSTOP');
-                return directory;
-            }};
-            syncBuiltinESMExports();
-            await import({});
-        "#,
-            serde_json::to_string(bundle.to_str().unwrap()).unwrap()
-        );
-        let (backend, resources) = fake_backend(&source);
+            });
+        "#;
+        let (backend, resources) = fake_backend(source);
         backend.request("start").unwrap();
         let marker = resources.join("created.txt");
         let deadline = Instant::now() + Duration::from_secs(2);

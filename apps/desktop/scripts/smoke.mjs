@@ -49,7 +49,7 @@ try {
     assert.equal(code, 0, output);
     assert.match(output, /Packaged Rust owner smoke passed/);
   } else {
-    child = spawn(join(resources, 'node'), [join(resources, 'backend.mjs')], {
+    child = spawn(join(resources, 'bun'), [join(resources, 'backend.mjs')], {
       cwd: directory,
       env: { PATH: '', NORTUSCC_FIXTURE_SESSION: directory },
       stdio: ['pipe', 'pipe', 'pipe'],
