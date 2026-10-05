@@ -6,6 +6,7 @@ import type { MachinePaths } from '../paths.ts';
 import type { StateStore } from '../state.ts';
 import { inspectConfig } from './inspect.ts';
 import { configSteps } from './steps.ts';
+import { restoreFile } from './restore.ts';
 import { syncFile } from './sync.ts';
 
 export { CHANGED_SINCE_APPLY } from './steps.ts';
@@ -18,7 +19,7 @@ export const configDomain: Domain<MachinePaths | Fs | StateStore | Backups> = {
   inspect: inspectConfig,
   steps: configSteps,
   run: (step, report) =>
-    SYNC_ACTIONS.has(step.action)
-      ? syncFile(step, report)
+    step.action === 'restore' ? restoreFile(step, report)
+      : SYNC_ACTIONS.has(step.action) ? syncFile(step, report)
       : Effect.succeed<StepResult>({ ok: false, note: `config does not run ${step.action}` }),
 };
