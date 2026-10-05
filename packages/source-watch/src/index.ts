@@ -13,3 +13,5 @@ export type { Edited, Field, WriteOptions, Written } from './documents.ts';
 export { pinSource } from './pins.ts';
 export { ignoreRevision, isIgnored, readIgnores } from './ignores.ts';
 export type { Ignores } from './ignores.ts';
+export { RefMissing, pinImpact } from './impact.ts';
+export type { PinImpact, SkillMove } from './impact.ts';
