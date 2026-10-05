@@ -2,3 +2,7 @@
 .claude/worktrees/
 node_modules/
 .superpowers/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/resources/
+apps/desktop/src-tauri/gen/

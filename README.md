@@ -509,3 +509,7 @@ npm test    # node:test, no dependencies
 
 Windows support was verified on 2026-08-12 with a full `setup` run. State
 resolved through `%APPDATA%`, and backup filenames worked without colons.
+
+## Experimental desktop fixture app
+
+[`apps/desktop`](apps/desktop/README.md) contains an isolated Tauri 2 feasibility app with a React dashboard, an Effect backend, and a bundled Node runtime. It inspects sample settings and runs cancellable operations in temporary directories. It does not manage real agent configuration. Its dependencies, lockfiles, tests and builds are separate from the zero-dependency CLI.

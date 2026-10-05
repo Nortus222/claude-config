@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nortuscc Fixture Lab",
+  "version": "0.1.0",
+  "identifier": "com.nortuscc.fixture-lab",
+  "build": {
+    "beforeDevCommand": "npm run resources && npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nortuscc Fixture Lab",
+        "width": 1100,
+        "height": 820,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "resources": { "resources/darwin-arm64/": "fixture-runtime/" },
+    "icon": ["icons/icon.png", "icons/icon.icns"]
+  }
+}
