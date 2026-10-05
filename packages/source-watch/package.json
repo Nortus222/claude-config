@@ -13,11 +13,11 @@
     "effect": "4.0.1"
   },
   "devDependencies": {
-    "@nortuscc/profile-engine": "file:../profile-engine",
+    "@nortuscc/profile-engine": "0.1.0",
     "@types/node": "25.5.0",
     "typescript": "7.0.2"
   },
   "engines": {
-    "node": ">=22.18"
+    "node": ">=24"
   }
 }
