@@ -12,7 +12,7 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
 - `inspect` → `plan` → `execute(plan, report, domains, { signal })`. `execute` holds
   `<stateRoot>/apply.lock`, emits `Progress`, never interrupts a step marked
   `interruptible: false`, and ends with `done` or `cancelled`. Provide a fresh `backupsForRun()`
-  layer per execution; within a run the first backup of a path wins.
+  layer per execution; within a run the first backup call for a path decides, including that the path was absent.
 - `samePlan(a, b)` compares plans structurally, so a domain's `steps` must be deterministic.
 - Cancelling: aborting `signal` is the graceful path — the current file step finishes, an
   interruptible step is interrupted, and the stream ends with `cancelled`. Interrupting the
