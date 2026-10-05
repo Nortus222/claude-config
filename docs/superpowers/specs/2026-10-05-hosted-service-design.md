@@ -56,8 +56,9 @@ flowchart LR
 - **`packages/hosted-protocol`**: Effect Schemas for every request and response body, and the
   error codes. The service and the local agent both import it. It is TypeScript restricted to
   erasable syntax and has no build step, the same setup as `packages/profile-engine`.
-- **`apps/service`**: a Node 22 HTTP server in TypeScript with `effect@4.0.1`, an independent
-  package with its own lockfile. Two Effect services form its boundaries:
+- **`apps/service`**: a Node 24 HTTP server in TypeScript with the repository's pinned
+  `effect`, a workspace in the root lockfile like every other package. Two Effect services
+  form its boundaries:
   - `Store`, with an in-memory implementation for tests and a Cosmos implementation for
     production;
   - `GitHub` (device-code request, token exchange, `GET /user`), with a fake for tests.
