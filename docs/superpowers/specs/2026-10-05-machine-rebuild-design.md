@@ -109,12 +109,12 @@ exit codes derive from it.
 
 ### Plan
 
-`planApply`, `planUninstall` and `planCapture` are pure. Each takes a report and a `Selection`,
+`plan(kind, report, selection, domains)` is pure, for `kind` `apply`, `uninstall` or `capture`. It takes a report and a `Selection`,
 and returns a `Plan`:
 
 - `Selection` holds the run-time choices the engine deliberately does not resolve: targets,
   the `--no-*` categories, picked or excluded keys, and `force` (`--take-repo`).
-- `Plan` is `{ steps, skipped: { key, reason }[] }`.
+- `Plan` is `{ kind, steps, skipped: { key, reason }[] }`.
 - A `Step` is `{ key, domain, action, summary, touches: string[], interruptible: boolean }`. Its
   `action` is one of `write-file`, `merge-keys`, `restore`, `remove`, `capture-file`,
   `write-manifest`, `install-integration` or `install-skills`.
