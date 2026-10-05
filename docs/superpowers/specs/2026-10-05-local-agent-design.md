@@ -52,7 +52,7 @@ works without an account, and the renderer never chooses a path or a command (#3
 | CLI | Stays standalone and in-process, sharing `apply.lock`. It talks to the agent only for `nortuscc agent …` | The CLI must keep working on machines with no agent |
 | IPC | A user-only Unix socket or named pipe, plus a per-start token file checked in `hello` | Same-user only, with a second check where pipe permissions are weak. No TCP port for browsers to reach |
 | Scheduling | Timer plus events, without file watching | Agents rewrite `~/.claude` constantly. Watching would mostly report the agents' own writes |
-| Safety rule | A fail-closed classifier: auto-apply only items it proves inert | Code can arrive through settings keys and copied config files, not only through integrations |
+| Safety rule | A fail-closed classifier: auto-apply only items it proves inert. Every skill waits for a person for now | Code can arrive through settings keys, copied config files and skills, not only through integrations |
 | Drift | Never auto-applied | A hand edit may be deliberate |
 | Notifications | Posted by the app under its own identity. The agent draws no UI | A headless process has no notification identity on macOS or Windows |
 | History | Append-only JSON Lines, shared by the agent and the CLI | Small, append-only data that works the same on Node and Bun with no native dependency |
@@ -96,9 +96,10 @@ agent reads no environment below that.
 ### The app
 
 - The Bun sidecar goes away. The Rust host connects to the agent's socket instead of spawning a
-  backend, so the window adds no process. #58's protocol v2 handlers (`inspect`,
-  `preview { exclude }`, `apply { planId }`, `cancel` and the `STALE` re-plan check) move into
-  the agent unchanged.
+  backend, so the window adds no process. Protocol v2's commands from #58 (`inspect`,
+  `preview { exclude }`, `apply { planId }`, `cancel` and `shutdown`) move into the agent
+  unchanged. So do their results, including the re-plan check's
+  `{ status: 'stale', planId, plan }`, and their error codes, such as `PROFILE_INVALID`.
 - The app bundles the agent: Bun plus the agent bundle, as resources. It registers the login
   service on first run (journey 1 in the feature map).
 - Rust keeps its allow-list of request names. The renderer sends only opaque item keys taken
@@ -123,15 +124,42 @@ agent reads no environment below that.
 - On any interactive command, the CLI asks a reachable agent for `status`. When items wait for
   a person, it prints one line to stderr: `2 items wait for you: run nortuscc agent review`.
 
+### Revisions
+
+What's new, pending items and decisions are all relative to a **revision**, which takes two
+forms:
+
+- **P2, local-only.** No revision records exist yet: #52's Publish creates them. A revision is
+  a commit on the tracked branch of the setup's remote, normally `origin/main` of
+  `MachinePaths.repo`, as #43 fetches it from the trusted `repoUrl`. Its items are the
+  engine's diff between the applied commit's `DesiredConfig` and this commit's. It has no
+  number and no tag. Decisions name it by commit SHA and stay on this machine.
+- **P3, a setup linked to the hosted service.** A revision is a hosted record
+  `{ number, commitSha, tag, items, … }`. Decisions name it by number and sync across the
+  user's machines.
+
+A setup switches from commits to records when a person links it to a hosted setup (see Trusted
+setups). Decisions made before the link keep their commit SHAs and are never uploaded.
+
 ### Contract with machine sync (#43)
 
 The agent needs three operations, and #43 implements them as a `SetupSource` service:
 
-- `fetch()` updates the setup's remote refs and never touches the user's working tree. The
-  author's checkout is their working copy.
-- `load(revision)` returns the `DesiredConfig` at that revision's commit, verified against the
-  revision record. It fails with `RevisionMismatch` when the recomputed items differ, and with
-  `RevisionUnavailable` when the commit cannot be fetched.
+- `fetch()` updates the setup's remote refs from its trusted `repoUrl` with the user's own Git
+  credentials, and never touches the user's working tree. The author's checkout is their
+  working copy.
+- `load(revision)` returns the `DesiredConfig` at a revision, verified:
+  - **a record (P3):** fetch the record's **tag** from `repoUrl`, and require it to resolve to
+    the record's `commitSha`. A SHA alone proves nothing, because GitHub serves a fork's
+    commits by SHA from the parent repository. Without this check, someone holding a stolen
+    machine token could register a fork commit as a revision, accept its inert items and set
+    a machine to auto-apply. `load` then recomputes the items from the engine and compares
+    them with the record;
+  - **a commit (P2):** require the commit to be reachable from the tracked remote branch
+    fetched from `repoUrl`.
+
+  It fails with `RevisionMismatch` when the tag points elsewhere or the recomputed items differ
+  from the record, and with `RevisionUnavailable` when the tag or commit cannot be fetched.
 - `effective(decisions)` returns this machine's desired configuration: the applied revision,
   plus the accepted items from newer revisions. Skipped and undecided items stay at their
   applied value. Conflicts with overrides come back as a list and are never resolved silently.
@@ -147,21 +175,80 @@ Everything lives under `<stateRoot>` (`~/.config/nortuscc` by default):
 | --- | --- |
 | `agent/` (mode 0700) | Everything below except History and decisions |
 | `agent/agent.sock`, `agent/agent.token` | The IPC endpoint and its token (see IPC) |
-| `agent/agent.json` | `{ version: 1, policy, paused, installedBy: 'app' \| 'cli', agentVersion }` |
-| `agent/setups.json` | The setups this machine trusts. In P2 that is only the user's own repo, `MachinePaths.repo` |
+| `agent/agent.json` | `{ version: 1, policy, policySource: 'default' \| 'person', paused, installedBy: 'app' \| 'cli', agentVersion }` |
+| `agent/setups.json` | The setups this machine trusts (see Trusted setups) |
+| `agent/outbox.json` (P3) | Changes waiting to reach the hosted service, in order (see Hosted service) |
+| `agent/sync.json` (P3) | `{ version: 1, seq, etag, lastSyncAt, latestRevision: { [setupId]: number } }` |
+| `agent/revisions/<setupId>.json` (P3) | The synced revision records of each setup, used for What's new and verification |
+| `agent/machine-token` (P3) | The machine token, only when no OS keychain is available. Mode 0600 |
 | `agent/notified.json` | Hashes of item sets already notified |
-| `agent/sync.json` (P3) | The last `seq`, the ETag and the time of the last successful sync |
 | `agent/agent.log` | The service's stdout and stderr, rotated at 1 MiB, keeping 3 files |
-| `decisions.json` | Accept and skip decisions with a `synced` flag. Unsynced entries are the outbox |
+| `decisions.json` | Accept and skip decisions (see Decisions) |
 | `history/<YYYY-MM>.jsonl` | History (see History) |
 
-Decisions sit beside `overrides.json`, outside `agent/`, because they are user intent like
-overrides. A `DecisionsStore` service reads and writes them with an atomic replace. While the
-agent is reachable, every writer routes decisions through it. The CLI writes the file directly
-only when no agent answers.
+### Decisions
 
-The set of trusted setups changes only through a person on this machine. A setup that appears
-through sync is offered as a prompt and is never trusted automatically.
+Decisions sit beside `overrides.json`, outside `agent/`, because they are user intent like
+overrides. The file holds the current decision for each setup and item:
+
+```json
+{
+  "version": 1,
+  "decisions": [{
+    "setupId": "01J…",
+    "itemId": "setting:claude:settings.json#effortLevel",
+    "revision": 12,
+    "commit": null,
+    "decision": "accept",
+    "decidedAt": "2026-10-05T12:00:00Z",
+    "machineId": "01J…",
+    "source": "local"
+  }]
+}
+```
+
+- `setupId` is the hosted id, or `local` for a setup not linked to the hosted service.
+- Exactly one of `revision` (a record's number, P3) and `commit` (a SHA, P2) is set.
+- `machineId` is the deciding machine, or `null` before sign-in.
+- `source` is `local` when a person decided on this machine, and `synced` when the decision
+  arrived from another machine.
+- A newer decision for the same setup and item replaces the older one. Only the current
+  decision is kept, and History keeps the past.
+
+A `DecisionsStore` service reads and writes the file with an atomic replace. Recording a local
+decision for a revision record also appends it to the outbox. While the agent is reachable,
+every writer routes decisions through it. The CLI writes the file and the outbox directly only
+when no agent answers.
+
+### Trusted setups
+
+`agent/setups.json` lists the setups this machine applies:
+
+```json
+{
+  "version": 1,
+  "setups": [{ "setupId": null, "repoUrl": "github.com/nortus222/claude-config", "checkout": "/Users/…/claude-config", "trustedAt": "…" }]
+}
+```
+
+- **The user's own setup (P2).** Installing the agent is a person on this machine acting, so it
+  adds the own repo as `setupId: null`, with `checkout: MachinePaths.repo` and `repoUrl` set to
+  that checkout's `origin` URL.
+- **Normalized URLs.** A `repoUrl` is normalized before it is stored or compared: lower-case
+  host and owner, no scheme, no credentials, no `.git` suffix, and the SSH form rewritten
+  (`git@github.com:Owner/Repo.git` → `github.com/owner/repo`).
+- **Linking or trusting (P3).** After sign-in, sync lists the account's setups. A setup whose
+  normalized `repoUrl` equals an entry with `setupId: null` is offered as a link ("this
+  checkout is your setup *name*"). Any other setup is offered for trust, showing its `repoUrl`.
+  A person accepts either offer with `trustSetup { setupId }`:
+  - a link sets the entry's `setupId`;
+  - a trust adds `{ setupId, repoUrl, checkout: null }`, and #43 fetches it into its own clone
+    under `<stateRoot>`.
+
+  This happens once per machine and setup. The done-when scenario's second machine does it for
+  the user's own setup after sign-in.
+- **Only a person changes trust.** A setup that appears through sync is offered and is never
+  trusted automatically. Removing a setup's entry is likewise a person's action.
 
 ## Run loop
 
@@ -180,17 +267,20 @@ Triggers that arrive while a job runs coalesce into one follow-up job. Jobs neve
 
 ### A job
 
-1. **Refresh.** When signed in (P3), call `GET /v1/sync` and drain the outbox (see Hosted
-   service). A revision that fails `load` is recorded as `revision-rejected` and notified. Only
-   that revision is blocked.
+1. **Refresh.** When signed in (P3), send the outbox and call `GET /v1/sync` (see Hosted
+   service). In local-only mode, use the latest #43 `fetch()`. Each new revision of a trusted
+   setup goes through `SetupSource.load`. A revision that fails is recorded as
+   `revision-rejected` and notified. Only that revision is blocked.
 2. **Resolve.** Ask `SetupSource.effective(decisions)` for the `DesiredConfig`. If the profile or
-   `overrides.json` is invalid (`ProfileInvalid`), the job continues as inspect-only and the
-   status names the problem.
+   `overrides.json` is invalid, the job continues as inspect-only, and the status and any
+   `preview` or `apply` report `PROFILE_INVALID`.
 3. **Inspect.** `inspect(desired, domains)` produces the `MachineReport`.
 4. **Sort.** Every item whose disposition is `apply` or `capture` is one of two kinds:
-   - **pending**: its desired value differs between the applied revision's configuration and the
-     effective configuration. A person accepted the change;
-   - **drift**: the machine differs from a desired value that did not change.
+   - **pending**: a setup item whose desired value differs between the applied revision's
+     configuration and the effective configuration. A person accepted the change;
+   - **drift**: everything else. That is the machine differing from a desired value that did
+     not change, and every machine-local key that is not a setup item, such as `skill-link:…`
+     (see Item ids).
 
    Drift is reported and never auto-applied.
 5. **Classify.** Each pending item is either `inert` or `held(reason)` (see Classifier).
@@ -208,10 +298,11 @@ Triggers that arrive while a job runs coalesce into one follow-up job. Jobs neve
 
 An auto-apply run:
 
-1. plans with `plan('apply', report, { ...selectAll, only: inertKeys }, domains)`;
-2. refuses the run if any step's `action` is not `write-file`, `merge-keys` or
-   `install-skills`. This guards against a classifier bug, and a refusal pauses auto-apply like
-   a failure;
+1. plans with `plan('apply', report, { ...selectAll, only: inertKeys }, domains)`. The agent
+   never builds an `uninstall`, `capture` or `update` plan on its own;
+2. refuses the run if any step's `action` is not `write-file` or `merge-keys`. This also rules
+   out `install-skills`, `update-skills`, `install-integration`, `remove` and `restore`. It
+   guards against a classifier bug, and a refusal pauses auto-apply like a failure;
 3. writes `apply-started` to History;
 4. runs `execute(plan, report, domains, { signal })` with a fresh `backupsForRun()`;
 5. writes `apply-finished` with each step's result and the backup folder.
@@ -223,7 +314,8 @@ failure and pauses nothing.
 
 The app's Review & apply and `nortuscc agent review` use `preview { exclude }` and
 `apply { planId }`, which can include held items and drift fixes. `apply` re-inspects and
-re-plans, and refuses with `STALE` and a new preview when the plan changed, as in #58.
+re-plans. When the plan changed, nothing runs, and the result is
+`{ status: 'stale', planId, plan }` with the new preview, as in #58.
 
 These are person-initiated applies, and they run even while auto-apply is paused. A person is
 an `apply` sent by the app on a click, or by the CLI from a TTY after a confirmation. Any
@@ -242,12 +334,26 @@ it does not recognise is held.
 | Instruction file: a `copy`-mode file whose `dest` ends in `.md` | Added or changed | Removed, or no longer managed |
 | Settings key in a `merge-keys` file | Added or changed, and the key is in `INERT_KEYS[file.id]` | Any key not in the table, and any removal |
 | Any other copied file, such as `codex-openrouter`'s `config.toml` | Never | Always. It can declare MCP servers or commands |
-| Skill | Added or changed **with a pin**, so its content is fixed by the verified commit | Unpinned, or removed (including `install: false`) |
+| Skill | Never, for now | Always: added, changed or removed |
 | Integration: hook, MCP server, plugin or marketplace | Never | Always |
 | Anything else | Never | Always |
 
 A held item's reason names its row, for example `held: integration` or
 `held: settings key not known to be inert`.
+
+**Why every skill is held.** A pinned skill is not provably inert today, for three reasons:
+
+- a pin is a `ref` string, not necessarily a commit SHA, so it can move;
+- the skills domain (#68) ignores pins, and installs or updates through `npx skills` from
+  upstream;
+- a skill can bring scripts that an agent later runs.
+
+Auto-apply for skills can be reconsidered only when all of these hold:
+
+- pins are full commit SHAs;
+- the install fetches exactly the pinned commit and verifies it;
+- the skill's content is part of what the verified revision covers;
+- a review decides whether a skill that bundles scripts counts as code. Until then, it does.
 
 `INERT_KEYS` is a closed, reviewed table in `packages/agent`, keyed by file id. Classification
 is by top-level key, so a nested object is inert only when its whole key is listed. It starts
@@ -264,25 +370,38 @@ const INERT_KEYS = {
   `permissions`, `enabledPlugins` and similar.
 - Adding a key is a code change with its own review and a test row.
 
-Item ids map one to one between `Observed.key` and the hosted service's item ids:
+### Item ids
+
+Only setup contents are items. One pure function, `itemIdOf(key, desired)`, maps an
+`Observed.key` to a hosted item id, or to nothing for a key that is not a setup item. It takes
+the `DesiredConfig` because a skill's id needs the source the configuration declares:
 
 | `Observed.key` | Hosted id |
 | --- | --- |
 | `config:claude:settings.json#effortLevel` | `setting:claude:settings.json#effortLevel` |
 | `config:claude:CLAUDE.md` | `file:claude:CLAUDE.md` |
-| `skill:<name>` | `skill:<source>/<name>` |
+| `skill:<name>` | `skill:<source>/<name>`, where `source` comes from `desired.skills` |
 | `integration:<id>` | `integration:<id>` |
+| `skill-link:<target>:<name>` | None. A machine-local exposure fix (#68), always drift |
+| `undeclared:…` | None. Never pending, never in a revision or a status summary |
+| A `skill:<name>` not declared in `desired.skills` (state `extra` or `local`) | None |
+| Anything else | None |
 
-The mapping is one pure function in the agent. It moves into `hosted-protocol` when #51
-creates that package.
+A key without an id is never pending, so it is never auto-applied or reported by id. The
+function lives in the agent until #51's `hosted-protocol` takes it over.
 
 ## Policy
 
-- The policy is per machine. The default is `notify`, as in the feature map's first-run
-  journey.
-- In local-only mode it lives in `agent.json`. When signed in, the service's `machine.policy`
-  is the synced copy. A local change is written to `agent.json` and sent through
-  `PATCH /v1/machines/:id` for its own id, queued when the service is offline.
+- The policy is per machine. Before sign-in, the default is `notify`, as in the feature map's
+  first-run journey, and `agent.json` records `policySource: 'default'` until a person changes
+  it.
+- When signed in, the service's `machine.policy` is the synced copy. A newly registered machine
+  starts with the account's `defaultPolicy` (`notify`).
+  - If this machine's policy was still the default at sign-in, the agent adopts the service's.
+  - If a person had set it, the agent queues that policy in the outbox, so the local choice
+    reaches the service and wins.
+- A local change is written to `agent.json` and queued in the outbox as a machine settings
+  change (see Hosted service).
 - A policy set from another of the user's machines arrives through sync. It can switch a
   machine to auto-apply, but the classifier still holds code-running items for a person on the
   machine itself.
@@ -306,42 +425,53 @@ creates that package.
 
 ### Framing
 
-JSON lines with request ids. Each record is at most 1 MiB and carries `version: 1`. Records
-decode strictly against Effect Schemas in `packages/agent`, and an unknown field is rejected.
-Errors are `{ code, message }`. Progress, status and notification events are separate records
-from responses, as in protocol v2.
+The agent's protocol is version 3: protocol v2 from #58, unchanged, plus the `hello` handshake
+and the commands below.
+
+- **Unchanged from v2:**
+  - records: JSON lines, at most 1 MiB, decoded strictly so an unknown field is rejected;
+  - the `{ version, id, command, … }` request shape;
+  - the `{ ok, result }` and `{ ok: false, error: { code, message } }` responses;
+  - progress records keyed by `runId`;
+  - v2's error codes, such as `PROFILE_INVALID`, `UNKNOWN_KEY`, `UNKNOWN_PLAN`, `BUSY` and
+    `SHUTDOWN`.
+- **Added in v3:**
+  - `version: 3`;
+  - status and notification events, which are separate records from responses, like progress;
+  - error codes `UNAUTHORIZED`, `PAUSED`, `UNKNOWN_BACKUP`, `BACKUP_PRUNED` and `NOT_SIGNED_IN`.
 
 The first record on a connection must be:
 
 ```json
-{ "version": 1, "id": "1", "request": "hello", "token": "…", "client": "app", "protocol": 1 }
+{ "version": 3, "id": "1", "command": "hello", "token": "…", "client": "app" }
 ```
 
-The agent compares the token in constant time and closes the connection on a mismatch. The
-reply is `{ agentVersion, protocol, policy, paused }`.
+The agent compares the token in constant time. On a mismatch it replies `UNAUTHORIZED` and
+closes the connection. The reply to a valid `hello` is
+`{ agentVersion, protocol: 3, policy, paused }`.
 
-### Requests
+### Commands
 
-| Request | Result |
+| Command | Result |
 | --- | --- |
-| `status` | Policy, paused state, pending, held, ready, drift, conflicts, last inspection, last sync |
+| `status` | Policy, paused state, pending, held, ready, drift, conflicts, offered setups, last inspection, last sync |
 | `inspect` | Runs a job now. Returns the `MachineReport` with each item's pending, drift or held classification |
-| `preview { exclude: key[] }` | `{ planId, plan }` |
-| `apply { planId }` | Progress events, then a final result, or `STALE` with a new preview |
-| `cancel` | Cancels the running apply through its `signal` |
-| `decide { items: [{ id, revision, decision }] }` | Records accept or skip decisions and queues them for sync |
+| `preview { exclude: key[] }` | `{ planId, plan }`, as in v2 |
+| `apply { planId }` | `{ status: 'started', runId }`, then progress records, or `{ status: 'stale', planId, plan }`, as in v2 |
+| `cancel` | Cancels the running apply through its `signal`, as in v2 |
+| `decide { items: [{ setupId, id, revision, decision }] }` | Records accept or skip decisions. `revision` is a record's number, or a commit SHA for a `local` setup. Decisions on records are queued for sync |
 | `setPolicy { policy }` | Changes this machine's policy |
 | `resume` | Clears a pause |
 | `history { before?, limit }` | History events, newest first, at most 500 |
-| `restore { backupId }` | Restores a backup that History lists |
+| `restore { backupId }` | Restores a backup that History lists and has not marked pruned |
 | `syncNow` | Triggers a sync (P3). The app sends it whenever it gains focus |
 | `subscribe` | Pushes status, progress and notification events until the connection closes |
-| `trustSetup { setupId }` | Trusts a setup that sync offered (used from P4) |
-| `signIn`, `signOut` (P3) | Runs the hosted device flow and returns the user code to show |
-| `drain` | Finishes the current step, releases the lock and exits 0 |
+| `trustSetup { setupId }` | Links or trusts a setup that sync offered (P3; see Trusted setups) |
+| `signIn`, `signOut` (P3) | Runs the hosted device flow and returns the user code to show; signs out |
+| `shutdown` | As in v2: cancels a running apply gracefully (the current file step finishes, an interruptible step is interrupted), releases the lock and exits 0 |
 
-No request takes a path, a command or a URL. Item keys are checked against the latest report,
-and a `backupId` must be a folder that History lists.
+No command takes a path, a command line or a URL. Item keys are checked against the latest
+report, and a `backupId` must be a folder that History lists.
 
 ## Notifications
 
@@ -374,19 +504,23 @@ History is append-only JSON Lines in `<stateRoot>/history/<YYYY-MM>.jsonl`. A `H
 service is shared by the agent and the CLI, so CLI applies appear too. It belongs in
 `@nortuscc/machine`, and is added after #55–#58 land so it does not collide with them.
 
-Every event is `{ "v": 1, "at": "<ISO time>", "kind": "…", "actor": "agent" | "cli" | "app", … }`:
+Every event is `{ "v": 1, "at": "<ISO time>", "kind": "…", "actor": "agent" | "cli" | "app" | "sync", … }`.
+The actor `sync` marks something another of the user's machines did, which reached this machine
+through the hosted service. Such an event also carries that machine's `machineId`.
 
 | Kind | Carries |
 | --- | --- |
 | `apply-started` | Run id, whether it was automatic, plan keys |
 | `apply-finished` | Run id, each step's outcome and note, backup folder, `done` or `cancelled` |
 | `held`, `ready` | Item ids with their reasons |
-| `decided` | Item id, revision, accept or skip |
-| `policy-changed` | Old and new policy, local or synced |
+| `decided` | Setup, item id, revision or commit, accept or skip. A decision synced from another machine has actor `sync` and that machine's `machineId` |
+| `policy-changed` | Old and new policy, `local` or `synced` |
+| `setup-trusted`, `setup-linked` | Setup id, `repoUrl` |
 | `paused`, `resumed` | Reason |
 | `restore` | Backup folder, outcome |
 | `revision-verified`, `revision-rejected` | Setup, revision, error code |
 | `sync-failed` | Error code, at most one per hour |
+| `outbox-dropped` | The entry and the service's error code (see Hosted service) |
 | `backups-pruned` | Folders removed |
 
 - Each event is a single append of one line. A reader skips a torn last line.
@@ -395,10 +529,20 @@ Every event is `{ "v": 1, "at": "<ISO time>", "kind": "…", "actor": "agent" | 
 - Restore is driven from History: the app lists `apply-finished` events with backup folders and
   sends `restore { backupId }`.
 
-Backups stay in `MachinePaths.backups`, in today's layout. After each apply, the agent prunes
-backup folders that are both older than 90 days and outside the newest 20, and records a
-`backups-pruned` event. A folder is never pruned while it is the latest backup History
-references.
+### Backup pruning
+
+Backups stay in `MachinePaths.backups` (`~/.config/nortuscc/backups/`), in today's layout. After
+each apply, the agent prunes backup folders that are both older than 90 days and outside the
+newest 20. The latest backup History references is never pruned.
+
+History keeps every event. A pruned backup is marked as gone, not hidden:
+
+- the `backups-pruned` event names each folder removed;
+- when reading History, the agent marks every `apply-finished` whose folder was pruned as
+  `backup: pruned`;
+- the app shows those applies with "backup removed on *date*" and no Restore action;
+- `restore` of a pruned folder fails with `BACKUP_PRUNED`, and of a folder History never listed
+  with `UNKNOWN_BACKUP`.
 
 ## Install and upgrade
 
@@ -431,8 +575,9 @@ The agent never downloads code.
 
 1. An app update ships a new agent bundle. When the app starts, `hello` reports the running
    agent's version.
-2. If it differs from the bundled one, the app sends `drain`, rewrites the unit if a path
-   changed, and restarts the service through the OS tool.
+2. If it differs from the bundled one, the app waits until `status` shows no apply running,
+   then sends `shutdown`. It rewrites the unit if a path changed, and restarts the service
+   through the OS tool.
 3. On app-less machines, `nortuscc pull` does the same for the checkout-run agent.
 
 A client that does not speak the agent's `protocol` does not guess. The app offers to reinstall
@@ -440,7 +585,7 @@ its bundled agent, and the CLI prints the command that does it.
 
 ### Uninstall
 
-`nortuscc agent uninstall` drains the agent, unregisters the unit, and removes `agent.sock` and
+`nortuscc agent uninstall` sends `shutdown`, unregisters the unit, and removes `agent.sock` and
 `agent.token`. It keeps History, decisions and backups. The CLI's `uninstall` of configuration
 does not remove the agent.
 
@@ -455,8 +600,11 @@ does not remove the agent.
 
 The agent adds these rules:
 
-- **Pause on failure.** A failed step in an auto-apply, a refused plan, or an auto-apply that
-  History shows started and never finished (the agent crashed) sets `paused` in `agent.json`.
+- **Pause on failure.** These set `paused` in `agent.json`:
+  - a failed step in an auto-apply;
+  - a refused plan;
+  - an auto-apply that History shows started and never finished, because the agent crashed.
+
   The agent records `paused` with the reason and notifies.
   - While paused, auto-apply stops. Inspection, sync, the outbox and person-initiated applies
     continue.
@@ -466,18 +614,22 @@ The agent adds these rules:
 - **Crash restarts.** The service manager restarts a crashed agent with its own throttling.
   Because an interrupted apply pauses auto-apply, a crash loop cannot keep changing the
   machine.
-- **These failures do not pause:**
+- **These do not pause:**
   - a held `apply.lock` waits for the next trigger;
-  - `ProfileInvalid` blocks applies until the profile is fixed;
+  - an invalid profile (`PROFILE_INVALID`) blocks applies until the profile is fixed;
   - a rejected revision blocks only that revision;
-  - an unreachable hosted service only ages the synced data.
+  - an unreachable hosted service only ages the synced data;
+  - an apply cancelled by a person (`cancel`) or by `shutdown` ends `cancelled`, with History
+    recording where it stopped.
 - **Agent unreachable.** The app shows its offline state with the last known data and its age,
   and offers *Restart agent*, which kicks the unit through the OS tool. The CLI's own commands
   are unaffected.
 
 ## Hosted service (P3)
 
-This section is the agent's side of #51, which treats these points as decided.
+This section is the agent's side of #51. It matches the hosted service spec.
+
+### Token and sign-in
 
 - **Machine token.** The token is stored in the OS keychain: macOS Keychain, libsecret
   (`secret-tool`) or Windows Credential Manager. The platform tool always receives the secret on
@@ -487,49 +639,149 @@ This section is the agent's side of #51, which treats these points as decided.
 - **Sign-in.** `signIn` runs `POST /v1/auth/device/start` and `/poll`. The app or CLI shows the
   user code. The default machine name is `<OS> machine`, and the hostname is never sent unless
   the user types it.
-- **Polling.** The agent calls `GET /v1/sync?since=<seq>` with `If-None-Match` every `pollAfter`
-  seconds, ±20% jitter. It also polls immediately after a local decision and on `syncNow`, which
-  the app sends when it gains focus. `rate_limited` and `unavailable` honour `Retry-After`.
-- **Outbox.** Unsynced entries in `decisions.json` are sent in `decidedAt` order with
-  `PUT /v1/decisions`, then marked synced. On `stale_decision`, the agent re-syncs and keeps the
-  newer decision. The service is never on the apply path: offline, the agent keeps applying
-  already-decided items under its policy.
-- **Trust.** Setups from sync that are not in `setups.json` are offered, never trusted. Revisions
-  are applied only after `SetupSource.load` verifies them against Git. The classifier reads only
-  the fetched commit.
-- **Status.** When `reportStatus` is on, the agent sends `PUT /v1/machines/self/status` after
-  each job whose status changed: revision applied, adopted, skipped, pending and
-  waiting-for-person item ids, and drift as counts only. It never sends paths, values or file
-  contents.
-- **Sign-out** revokes the token, deletes it locally and returns the machine to local-only mode
-  with its local data intact.
+  - The new machine starts with the account's `defaultPolicy` (see Policy).
+  - The agent then offers the account's setups to link or trust (see Trusted setups). Nothing
+    from a setup applies until a person accepts that offer.
+- **Sign-out** revokes the token and deletes it locally. It returns the machine to local-only
+  mode with its local data intact. Unsent outbox entries are kept and are sent if the machine
+  signs in to the same account again.
+
+### Polling
+
+The agent calls `GET /v1/sync?since=<seq>&setups=<setupId>:<latestKnownRevision>,…` with
+`If-None-Match: <etag>`.
+
+- **Setups sent:** every setup the account owns that the agent knows of, trusted or only
+  offered. `latestKnownRevision` is the newest record the agent holds for each, which is
+  `sync.json`'s `latestRevision`, or `0` for a setup it has no record of.
+- **Updating `sync.json`:** after a `200`, the agent stores `seq`, the ETag, each setup's new
+  `latestRevision`, and the new revision records in `agent/revisions/<setupId>.json`.
+- **Cadence:** every `pollAfter` seconds, ±20% jitter. Also immediately after a local decision,
+  and on `syncNow`, which the app sends when it gains focus.
+- **Throttling:** `rate_limited` and `unavailable` honour `Retry-After`.
+- **Synced decisions** replace the local decision for the same setup and item when they are
+  newer. They are stored with `source: 'synced'`, and History records them with actor `sync`.
+
+### Outbox
+
+`agent/outbox.json` holds every change waiting to reach the service, in the order it was made:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    { "kind": "decision", "setupId": "…", "itemId": "…", "revision": 12, "decision": "accept", "decidedAt": "…" },
+    { "kind": "machine", "change": { "policy": "auto-apply" }, "changedAt": "…" }
+  ]
+}
+```
+
+- A `machine` entry changes this machine's `policy`, `name` or `reportStatus`.
+- Decisions on `local` setups (P2 commits) never enter the outbox.
+- The agent sends the entries in order before each sync.
+  - Consecutive `decision` entries go together in one `PUT /v1/decisions`, up to 500.
+  - A `machine` entry is sent with `PATCH /v1/machines/:id` for this machine's own id.
+- What reaches the service last wins. The next sync tells every machine the result, including
+  this one.
+
+Each decision in the `PUT /v1/decisions` response has its own outcome:
+
+| Outcome | The agent |
+| --- | --- |
+| `stored` | Removes the entry |
+| `stale` | Removes the entry and syncs. The service already holds a decision for a newer revision, and that decision replaces the local one. A stale decision never fails the others in the batch |
+| `unprocessed` | Keeps the entry and resends it, in order, the next time the outbox is sent |
+
+Other responses:
+
+- A network failure, `rate_limited` or `unavailable` keeps every entry, and the agent retries
+  after `Retry-After` or on the next sync.
+- An `invalid` request is not retried. The agent drops the entries it sent, records each in
+  History as `outbox-dropped` with the error, and syncs. An item missing from its revision is
+  the usual cause.
+- `unauthenticated` stops syncing, and the status says the machine must sign in again.
+
+The service is never on the apply path. Offline, the agent keeps applying already-decided items
+under its policy.
+
+### Trust and verification
+
+- Setups from sync that are not in `setups.json` are offered, never trusted (see Trusted
+  setups).
+- Revisions are applied only after `SetupSource.load` verifies them. That means fetching the
+  record's tag from the trusted `repoUrl`, requiring it to resolve to `commitSha`, and
+  recomputing the items.
+- The classifier reads only the fetched commit.
+
+### Status summary
+
+When `reportStatus` is on, the agent sends `PUT /v1/machines/self/status` after each job whose
+status changed. The summary covers each trusted, linked setup:
+
+- `revisionApplied`;
+- `adopted`, the applied accepted item ids;
+- `skipped`, the skipped item ids;
+- drift, as counts per kind only.
+
+Its accepted-but-unapplied items map onto #51's two lists:
+
+| Agent state | Summary list |
+| --- | --- |
+| Pending and inert on an auto-apply machine, and not paused | `pending` |
+| `ready` (notify policy) | `waitingForPerson` |
+| `held` (classifier), on any policy | `waitingForPerson` |
+| Pending on a manual machine | `waitingForPerson` |
+| Pending inert on an auto-apply machine while paused | `waitingForPerson` |
+
+Only ids that `itemIdOf` maps are reported, so `skill-link:…` and `undeclared:…` keys never
+appear. The summary never contains paths, values or file contents.
 
 ## Testing
 
 Tests are written first, in `packages/agent/checks/*.spec.ts`, using `node:test` and
 `node:assert/strict` against temporary directories, fake executables and a fake `SetupSource`.
 
-- **Classifier:** table-driven, one case per row in both directions, every `INERT_KEYS` entry,
-  a nested object under an unlisted key, and the fail-closed default for an unknown kind.
-- **Sorting:** pending versus drift for a changed desired value, an unchanged one, and a skipped
-  item.
-- **Policy matrix:** each policy against inert, held and drift items, checking History events
-  and notifications.
+- **Classifier:** table-driven, with one case per row in both directions, every `INERT_KEYS`
+  entry, a nested object under an unlisted key, and the fail-closed default for an unknown
+  kind. Every skill change is held, and so is an auto-apply plan containing `install-skills`
+  or `update-skills`.
+- **Item ids:** every mapping row. `skill:<name>` takes its source from `desired.skills`.
+  `skill-link:…`, `undeclared:…` and undeclared skills map to nothing and are never pending.
+- **Sorting:** pending versus drift for a changed desired value, an unchanged one, a skipped
+  item and a `skill-link` fix.
+- **Policy matrix:** each policy against inert, held and drift items, checking History events,
+  notifications and the status summary lists.
+- **Revisions:**
+  - a tag that resolves to a different commit is rejected;
+  - a fork SHA with no matching tag is rejected;
+  - a P2 commit not on the tracked branch is rejected;
+  - a mismatched item list is rejected.
+- **Trust:** linking the own checkout by normalized `repoUrl`, trusting a new setup, and that
+  nothing applies from an offered setup before `trustSetup`.
+- **Outbox:** decisions and machine changes go out in order. Outcomes are handled per
+  decision: `stored`, `stale` beside `stored`, and `unprocessed` resent. `invalid` is dropped
+  and recorded.
+- **Sync:** the `setups` parameter and `sync.json` updates. `304` handling. `Retry-After`.
 - **Scheduler:** trigger coalescing, wake detection with an injected clock, and no overlapping
   jobs.
 - **Lock:** a fake CLI holds `apply.lock`, and the agent waits without pausing.
-- **Pause:** a failed step, a refused plan, and a simulated crash between `apply-started` and
-  `apply-finished` all pause; `resume` clears it; person-initiated applies run while paused.
+- **Pause:**
+  - a failed step, a refused plan, and a simulated crash between `apply-started` and
+    `apply-finished` all pause;
+  - a cancelled run does not pause;
+  - `resume` clears a pause;
+  - person-initiated applies run while paused.
 - **IPC:** a wrong token, a missing `hello`, unknown fields, an oversized record, a path where a
-  key belongs, an unknown `backupId`, `STALE`, and `drain` releasing the lock.
-- **History:** a torn last line, month rollover, and pruning that keeps the latest referenced
-  backup.
+  key belongs, `UNKNOWN_BACKUP` and `BACKUP_PRUNED`, `{ status: 'stale' }`, and `shutdown`
+  releasing the lock.
+- **History:** a torn last line, month rollover, a synced decision recorded with actor `sync`,
+  and pruning that keeps the latest referenced backup and marks pruned ones.
 - **Notifier:** deduplication across restarts, and the delivery order with fakes for each path.
 - **Unit files:** rendered text for each OS, compared with committed snapshots.
 - **Done-when scenario:** the agent runs in-process with a temporary HOME and a fixture setup
-  repo. A revision adds an inert settings key and a hook, and both are accepted. On an
-  auto-apply machine, the key is applied with a backup and the hook is held. History contains
-  `apply-finished` with that backup and a `held` event for the hook.
+  repo. A new commit on the tracked branch adds an inert settings key and a hook, and both are
+  accepted. On an auto-apply machine, the key is applied with a backup and the hook is held.
+  History contains `apply-finished` with that backup and a `held` event for the hook.
 - **macOS smoke:** opt-in, outside `npm test`. It registers the LaunchAgent under a temporary
   label, checks `hello` over the socket, and unregisters it.
 
@@ -544,9 +796,9 @@ Done when these tests and the typecheck pass, the done-when scenario passes, and
 | --- | --- | --- |
 | 1 | **Agent core**: `packages/agent` with the scheduler, job, sorting, classifier and policy; `HistoryStore` and `DecisionsStore` in `@nortuscc/machine`; pause and resume; the in-process done-when test | #42's domains (#55–#57); #43's `SetupSource` interface, faked until it lands |
 | 2 | **IPC and app cutover**: the socket or pipe server, token and protocol; the Rust host on the socket; the Bun sidecar removed; the CLI's `agent status`, `review`, `resume` and `policy` | 1, #58 |
-| 3 | **Install and upgrade**: units for the three OSes, `agent install`, `uninstall` and `run`, app registration and ownership, drain and restart on upgrade, the macOS smoke | 1 |
+| 3 | **Install and upgrade**: units for the three OSes, `agent install`, `uninstall` and `run`, app registration and ownership, `shutdown` and restart on upgrade, the macOS smoke | 1 |
 | 4 | **Notifications**: the Notifier, the app's notify-only mode, `notify-send`, the CLI reminder | 2 |
-| 5 | **Hosted client** (P3, with #51): keychain token, sign-in, sync, outbox, status reports | 1, 2, #51's `hosted-protocol` |
+| 5 | **Hosted client** (P3, with #51): keychain token, sign-in, linking and trusting setups, sync with `sync.json`, the outbox, tag verification through `SetupSource`, status reports | 1, 2, #51's `hosted-protocol` |
 
 ## Later
 
