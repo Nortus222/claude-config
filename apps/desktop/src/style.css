@@ -76,21 +76,6 @@ p {
 .disconnected i {
   background: #ea9d85;
 }
-.notice {
-  padding: 14px 17px;
-  background: #18231f;
-  border: 1px solid #2d4438;
-  border-radius: 8px;
-  display: flex;
-  gap: 16px;
-  color: #9baea2;
-  font-size: 12px;
-  margin-bottom: 26px;
-}
-.notice strong {
-  color: #b6d9c3;
-  white-space: nowrap;
-}
 .layout {
   display: grid;
   grid-template-columns: 224px 1fr;
@@ -109,47 +94,6 @@ aside h2 {
 aside > .muted {
   font-size: 12px;
   margin-top: 5px;
-}
-.profile-step {
-  margin-top: 28px;
-  display: flex;
-  gap: 11px;
-  align-items: flex-start;
-}
-.profile-step > span {
-  font-family: monospace;
-  color: #83b99a;
-  border: 1px solid #3b4d43;
-  border-radius: 4px;
-  padding: 5px;
-  font-size: 10px;
-}
-.profile-step strong {
-  font-size: 12px;
-  font-weight: 550;
-}
-.profile-step p {
-  font-size: 11px;
-  color: #83909f;
-  margin-top: 3px;
-}
-.aside-note {
-  font-size: 12px;
-  line-height: 1.7;
-  color: #8895a5;
-  border-top: 1px solid #303742;
-  padding-top: 20px;
-  margin-top: 30px;
-}
-.runtime {
-  margin-top: 30px;
-}
-.runtime p {
-  font-size: 12px;
-}
-.runtime .eyebrow {
-  display: block;
-  margin-bottom: 8px;
 }
 .content {
   display: flex;
@@ -219,34 +163,6 @@ td code {
   padding: 4px 7px;
   border-radius: 4px;
 }
-.changed {
-  color: #d4b184;
-}
-.diff {
-  padding: 0 23px 20px;
-}
-.diff > div {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 10px;
-  margin-top: 9px;
-  align-items: center;
-}
-.diff > div > span {
-  font-size: 12px;
-}
-.diff code {
-  padding: 7px 10px;
-  border-radius: 4px;
-}
-.before {
-  color: #d19a92;
-  background: #312322;
-}
-.after {
-  color: #a6d9b9;
-  background: #203129;
-}
 .operation {
   padding-bottom: 21px;
 }
@@ -255,32 +171,6 @@ td code {
 }
 .status {
   text-transform: capitalize;
-}
-.percent {
-  font-family: monospace;
-  font-size: 23px;
-  letter-spacing: -1px;
-  color: #a9d6ba;
-}
-progress {
-  display: block;
-  width: calc(100% - 46px);
-  height: 5px;
-  margin: 0 23px;
-  appearance: none;
-  border: 0;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #2b3541;
-}
-progress::-webkit-progress-bar {
-  background: #2b3541;
-}
-progress::-webkit-progress-value {
-  background: #a6d5b7;
-}
-progress::-moz-progress-bar {
-  background: #a6d5b7;
 }
 .detail {
   margin: 15px 23px 18px;
@@ -355,11 +245,118 @@ footer {
     padding-left: 15px;
     padding-right: 15px;
   }
-  .notice {
-    display: block;
-  }
-  .notice span {
-    display: block;
-    margin-top: 6px;
-  }
+}
+
+.pad {
+  padding: 0 23px 20px;
+}
+dl.profile {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin: 14px 0 0;
+}
+dl.profile dt {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #8090a0;
+  margin-top: 10px;
+}
+dl.profile dd {
+  margin: 0;
+}
+dl.profile dd code {
+  overflow-wrap: anywhere;
+  color: #b4e2c5;
+}
+.problems {
+  margin-top: 18px;
+  padding: 10px 12px;
+  background: #2a2519;
+  border: 1px solid #4d4327;
+  border-radius: 8px;
+  color: #d4b184;
+  font-size: 11px;
+}
+.problems ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  overflow-wrap: anywhere;
+}
+caption {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  font-weight: 650;
+  text-transform: uppercase;
+  color: #8997a6;
+  padding: 6px 23px 10px;
+}
+.disposition {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  border: 1px solid #414c5b;
+  color: #a9b3bf;
+}
+.disposition.apply {
+  color: #a9d6ba;
+  border-color: #365140;
+  background: #203129;
+}
+.disposition.in-sync,
+.disposition.excluded {
+  color: #7d8896;
+}
+.disposition.blocked {
+  color: #e0a39a;
+  border-color: #5a3a36;
+  background: #312322;
+}
+ol.steps,
+ol.progress-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+ol.steps li,
+ol.progress-steps li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 23px;
+  border-top: 1px solid #29323c;
+  font-size: 12px;
+}
+ol.steps li small,
+ol.progress-steps li small {
+  color: #819182;
+  font-size: 10px;
+  margin-left: auto;
+}
+ol.progress-steps li > span:first-child {
+  width: 14px;
+  font-family: monospace;
+}
+ol.progress-steps li.pending {
+  color: #909ba9;
+}
+ol.progress-steps li.running {
+  color: #a9d6ba;
+}
+ol.progress-steps li.ok {
+  color: #9dddb0;
+}
+ol.progress-steps li.failed {
+  color: #e0a39a;
+}
+ol.progress-steps li.cancelled {
+  color: #7d8896;
+}
+.skipped {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: #7d8896;
 }
