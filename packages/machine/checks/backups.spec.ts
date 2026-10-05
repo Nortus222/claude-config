@@ -42,3 +42,31 @@ test('moveAside and preserve use the legacy layout', async () => {
   assert.equal(kept, join(folder, 'claude', 'settings.json'));
   assert.equal(existsSync(join(home, 'settings.json')), true);
 });
+
+test('a repeat preserve keeps the first copy and leaves the live file alone', async () => {
+  const { home, run } = setup();
+  const live = join(home, 'settings.json');
+  writeFileSync(live, 'original');
+  const [first, second] = await run((b) => Effect.gen(function* () {
+    const first = yield* b.preserve(live, 'settings.json', 'claude');
+    writeFileSync(live, 'written by this run');
+    return [first, yield* b.preserve(live, 'settings.json', 'claude')];
+  }));
+  assert.equal(second, first);
+  assert.equal(readFileSync(first!, 'utf8'), 'original');
+  assert.equal(readFileSync(live, 'utf8'), 'written by this run');
+});
+
+test('a repeat moveAside vacates the live path without overwriting the first backup', async () => {
+  const { home, run } = setup();
+  const live = join(home, 'CLAUDE.md');
+  writeFileSync(live, 'original');
+  const [first, second] = await run((b) => Effect.gen(function* () {
+    const first = yield* b.moveAside(live, 'CLAUDE.md', 'claude');
+    writeFileSync(live, 'written by this run');
+    return [first, yield* b.moveAside(live, 'CLAUDE.md', 'claude')];
+  }));
+  assert.equal(second, first);
+  assert.equal(readFileSync(first!, 'utf8'), 'original');
+  assert.equal(existsSync(live), false);
+});
