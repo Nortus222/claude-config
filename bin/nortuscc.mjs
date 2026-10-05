@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
+import { constants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PORTED, USAGE, VERBS } from './commands.mjs';
-import { isCheckout, missingRuntime, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
+import { isCheckout, missingRuntime, npmCommand, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
 
 const [major] = process.versions.node.split('.').map(Number);
 if (major < 24) {
@@ -24,14 +24,14 @@ if (!VERBS.includes(verb)) {
 }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 if (isCheckout(root)) {
   if (missingRuntime(root)) {
     console.error(`nortuscc: installing runtime dependencies in ${root}`);
-    const installed = spawnSync(npm, RUNTIME_INSTALL, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
+    const npm = npmCommand({ args: RUNTIME_INSTALL });
+    const installed = spawnSync(npm.cmd, npm.args, { cwd: root, stdio: 'inherit' });
     if (installed.status !== 0) {
-      console.error(`nortuscc: could not install dependencies; run 'npm ci' in ${root}`);
+      console.error(`nortuscc: could not install dependencies; run 'npm ${RUNTIME_INSTALL.join(' ')}' in ${root}`);
       process.exit(1);
     }
   }
@@ -50,4 +50,8 @@ if (!checkout) {
   process.exit(2);
 }
 const handed = spawnSync(process.execPath, [join(checkout, 'bin', 'nortuscc.mjs'), verb, ...rest], { stdio: 'inherit' });
-process.exit(handed.status ?? 1);
+if (handed.error) {
+  console.error(`nortuscc: could not run ${checkout}: ${handed.error.message}`);
+  process.exit(1);
+}
+process.exit(handed.status ?? 128 + (constants.signals[handed.signal] ?? 0));
