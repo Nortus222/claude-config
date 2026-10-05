@@ -11,6 +11,12 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
   `execute` accept domains needing different services; the requirement is their union.
 - `Observed.target` is absent for agent-neutral items (shared skills); `Step.targets` names the agents
   an installer step acts for. `update` is a plan kind of its own (adopt, refresh, prune skills).
+- `skillsDomain` inspects the shared skill store and each agent's exposure as items, and plans apply
+  and update steps. `write-manifest` writes only under `MachinePaths.repo`. Skills steps name their
+  skills in `touches` as `skills/<name>`. `inspectUpdates` is the upstream check.
+- `probeUndeclared(desired, { targets, installed, hookCommands })` reports what is present but
+  undeclared. It reads agents, skill links and hooks; plugin and marketplace observations and
+  declared hook commands are inputs from the integrations domain.
 - `inspect` → `plan` → `execute(plan, report, domains, { signal })`. `execute` holds
   `<stateRoot>/apply.lock`, emits `Progress`, never interrupts a step marked
   `interruptible: false`, and ends with `done` or `cancelled`. Provide a fresh `backupsForRun()`

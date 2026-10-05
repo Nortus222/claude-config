@@ -48,6 +48,7 @@ test('recordedCheckout accepts only an existing nortuscc checkout', () => {
 
 test('PORTED is a subset of VERBS', () => {
   assert.ok(PORTED.every((verb) => VERBS.includes(verb)));
+  assert.ok(PORTED.includes('update'));
 });
 
 test('recordedCheckout rejects a checkout recorded under node_modules', () => {
