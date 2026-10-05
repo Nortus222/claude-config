@@ -216,3 +216,11 @@ Done when the package's tests and typecheck pass, no test touches the network, a
   `HEAD`. Deleting that source's cache folder fixes it.
 - Diffs are not size-capped.
 - A local checkout's comparison uses whatever its remote-tracking branch last fetched.
+- git runs without a timeout, and `GIT_TERMINAL_PROMPT=0` does not stop ssh prompting on a tty,
+  so a stalled or prompting transport stalls that source.
+- The cache's git config records the URL as given, credentials included; only the folder name
+  is hashed.
+- Two sources with the same URL share one cache folder and may collide in one run; the loser
+  reports `unreachable`.
+- A corrupt cache folder (an interrupted fetch, say) keeps failing. Delete that source's cache
+  folder.

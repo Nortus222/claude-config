@@ -17,7 +17,11 @@ const reports = await Effect.runPromise(
 ```
 
 Each source keeps a bare partial clone in `cacheDir`, refreshed on every run. If an upstream
-renames its default branch, delete that source's cache folder. Local checkouts are only read,
+renames its default branch, or a cache folder is corrupt (an interrupted fetch, say), delete that
+source's cache folder. The cache's git config records each URL as given, credentials included; only
+the folder name is hashed. Two sources with the same URL share a folder and may collide in one run;
+the loser reports `unreachable`. git runs without a timeout and `GIT_TERMINAL_PROMPT=0` does not stop
+ssh prompting on a tty, so a stalled transport stalls that source. Local checkouts are only read,
 never fetched.
 
 Sources are TypeScript run directly by Node 22.18+, so there is no build step. Tests build git
