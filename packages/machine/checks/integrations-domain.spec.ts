@@ -253,8 +253,12 @@ test('cancelling during an installer kills it and stops before the next step', a
   const controller = new AbortController();
   const watcher = setInterval(() => { if (existsSync(marker)) controller.abort(); }, 20);
   const started = Date.now();
-  const events = await runAll(m, desiredOf([CLAUDE_PLUGIN, MCP]), { signal: controller.signal });
-  clearInterval(watcher);
+  let events;
+  try {
+    events = await runAll(m, desiredOf([CLAUDE_PLUGIN, MCP]), { signal: controller.signal });
+  } finally {
+    clearInterval(watcher);
+  }
   assert.ok(Date.now() - started < 10_000, 'the sleeping installer must be killed, not awaited');
   assert.deepEqual(outcomes(events), [`${integrationKey('cm')}:cancelled`]);
   assert.deepEqual(events.at(-1), { type: 'cancelled', remaining: [integrationKey('srv')], backups: undefined });

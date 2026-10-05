@@ -9,4 +9,14 @@ export * from './backups.ts';
 export * from './apply-lock.ts';
 export * from './model.ts';
 export * from './run.ts';
-export * from './integrations/index.ts';
+export {
+  integrationsDomain,
+  integrationKey,
+  type IntegrationsOptions,
+  type IntegrationsServices,
+  readCodexState,
+  userScopeInstalls,
+  knownMarketplaces,
+  hookCommand,
+  type PluginState,
+} from './integrations/index.ts';

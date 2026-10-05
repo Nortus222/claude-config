@@ -103,9 +103,10 @@ type Observed = {
 
 `state` keeps each domain's existing values. Files use `clean`, `repo-ahead`, `local-ahead`,
 `conflict`, `unmanaged`, `missing-repo`, `unparseable-local` and `invalid`. Integrations use
-`installed`, `missing` and `blocked`. Skills use `ok`, `missing`, `extra` and `local`.
+`installed`, `missing`, `blocked` and `unknown` (an agent's CLI could not say). Skills use `ok`, `missing`, `extra` and `local`.
 `disposition` is the one cross-domain verdict. Status, the picker and the app read it, and
-exit codes derive from it.
+exit codes derive from it. An `unknown` integration is `blocked`, so it never becomes a step, but a dirty
+count for an exit code leaves it out, as `status` does today: re-running apply cannot repair it.
 
 ### Plan
 

@@ -12,6 +12,7 @@ Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
 - `integrationsDomain({ paths, env, installerOutput })` installs hooks, marketplaces, plugins and MCP for Claude and
   Codex from `DesiredConfig.integrations`. Installers run through `Processes` as interruptible steps;
   pass `installerOutput: 'capture'` where stdout is a protocol channel (the desktop backend).
+  Build its `paths` from the same `pathsFromEnvironment` value as the `MachinePaths` layer, and pass the environment MCP prerequisites are checked against (the desktop backend: the login shell's, not its own).
 - `inspect` → `plan` → `execute(plan, report, domains, { signal })`. `execute` holds
   `<stateRoot>/apply.lock`, emits `Progress`, never interrupts a step marked
   `interruptible: false`, and ends with `done` or `cancelled`. Provide a fresh `backupsForRun()`
