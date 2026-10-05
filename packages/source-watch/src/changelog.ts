@@ -59,11 +59,14 @@ function section(report: SourceReport, choice: AcceptedSource): string {
   return [heading, '', ...items(report, choice)].join('\n');
 }
 
-// A revision's name: its highest version-like tag, else its first tag, else a short sha.
+// A revision's name: its highest version-like tag (one containing a digit), final releases before
+// pre-releases (a `-` right after a digit), else its first tag, else a short sha.
 function label(revision: Revision): string {
   const versions = revision.tags.filter((tag) => /\d/.test(tag));
-  if (versions.length > 0) {
-    return versions.reduce((best, tag) => (tag.localeCompare(best, 'en', { numeric: true }) > 0 ? tag : best));
+  const finals = versions.filter((tag) => !/\d-/.test(tag));
+  const pool = finals.length > 0 ? finals : versions;
+  if (pool.length > 0) {
+    return pool.reduce((best, tag) => (tag.localeCompare(best, 'en', { numeric: true }) > 0 ? tag : best));
   }
   return revision.tags[0] ?? revision.sha.slice(0, 7);
 }

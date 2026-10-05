@@ -65,9 +65,11 @@ blank line, and the Markdown ends with a single newline (or is `''`).
 
 Heading: `## <source> <from> → <to>` for `ahead` and `diverged`, and `## <source> pinned at
 <to>` for `unpinned`. `<to>` labels `latest`, `<from>` labels `baseline`. A label is a tag of the
-revision when it has one: tags containing a digit are preferred, and the highest of them in
-numeric-aware order (`localeCompare` with `numeric: true`) wins, else the first tag. With no tag
-it is the sha's first seven characters.
+revision when it has one: tags containing a digit (version-like) are preferred, and among them
+those with no pre-release suffix (a `-` right after a digit, so `v2.0.0-rc1` is a pre-release and
+`release-2` is not). The highest of the final tags in numeric-aware order (`localeCompare` with
+`numeric: true`) wins; with no final tag, the highest of all version-like tags; with none, the
+first tag. With no tag it is the sha's first seven characters.
 
 List items, in this order:
 
@@ -114,8 +116,9 @@ carry emails, and author names are not written. Labels come from tags and shas o
 Test-first, in `checks/changelog.spec.ts`, with hand-built `SourceReport` values and no git:
 
 - a full draft compared exactly against expected Markdown (two sources, every item kind)
-- labels: tag preferred over sha, the highest version-like tag among several, a non-version
-  tag when it is the only one, a short sha without tags
+- labels: tag preferred over sha, the highest version-like tag among several, a final release
+  outranking its release candidates (and the highest candidate when only candidates exist), a
+  non-version tag when it is the only one, a short sha without tags
 - up-to-date omitted; `stale`, `no-data` and `not-watched` skipped; empty result is `''`
 - unpinned heading
 - ignored skills moved to the "Also updated" line; `added` limited to the report's `added`

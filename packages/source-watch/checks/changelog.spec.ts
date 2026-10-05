@@ -43,6 +43,13 @@ test('prefers the highest version-like tag, else the first tag', () => {
   assert.equal(draftChangelog([r], [accept(r)]).markdown, `## x/y stable → v6.10.0\n\n${NONE}\n`);
 });
 
+test('a final release outranks its release candidates', () => {
+  const final = report('x/y', { latest: rev(sha('b'), ['v2.0.0-rc1', 'v2.0.0', 'v1.9.0']) });
+  assert.equal(draftChangelog([final], [accept(final)]).markdown, `## x/y aaaaaaa → v2.0.0\n\n${NONE}\n`);
+  const candidates = report('x/y', { latest: rev(sha('b'), ['v2.0.0-rc1', 'v2.0.0-rc2']) });
+  assert.equal(draftChangelog([candidates], [accept(candidates)]).markdown, `## x/y aaaaaaa → v2.0.0-rc2\n\n${NONE}\n`);
+});
+
 test('an unpinned source reads as pinned at latest', () => {
   const r = report('x/y', { status: 'unpinned', baseline: undefined, latest: rev(sha('b'), ['v1.0.0']) });
   assert.equal(draftChangelog([r], [accept(r)]).markdown, `## x/y pinned at v1.0.0\n\n${NONE}\n`);

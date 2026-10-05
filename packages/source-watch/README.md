@@ -24,6 +24,16 @@ the loser reports `unreachable`. git runs without a timeout and `GIT_TERMINAL_PR
 ssh prompting on a tty, so a stalled transport stalls that source. Local checkouts are only read,
 never fetched.
 
+Sources are TypeScript run directly by Node 22.18+, so there is no build step. Tests build git
+fixtures in a temporary directory and allow only `file://` transport, so they never reach the
+network. Type-checking follows the profile engine's imports, so install both packages first.
+
+```sh
+npm ci && (cd ../profile-engine && npm ci)
+npm test
+npm run typecheck
+```
+
 ## Changelog draft
 
 `draftChangelog(reports, accepted)` turns reports into the Markdown changelog Publish starts
@@ -37,14 +47,4 @@ writes no author names. Design: `docs/superpowers/specs/2026-10-05-source-change
 const { markdown, skipped } = draftChangelog(reports, [
   { source: 'obra/superpowers', revision: reports[0].latest!.sha, ignored: ['writing-plans'] },
 ]);
-```
-
-Sources are TypeScript run directly by Node 22.18+, so there is no build step. Tests build git
-fixtures in a temporary directory and allow only `file://` transport, so they never reach the
-network. Type-checking follows the profile engine's imports, so install both packages first.
-
-```sh
-npm ci && (cd ../profile-engine && npm ci)
-npm test
-npm run typecheck
 ```
