@@ -11,4 +11,5 @@ export type { WatchOptions } from './watch.ts';
 export { DocumentInvalid, IGNORES_FILE, PINS_FILE, WriteFailed, editEntry } from './documents.ts';
 export type { Edited, Field, WriteOptions, Written } from './documents.ts';
 export { pinSource } from './pins.ts';
-export { ignoreRevision } from './ignores.ts';
+export { ignoreRevision, isIgnored, readIgnores } from './ignores.ts';
+export type { Ignores } from './ignores.ts';
