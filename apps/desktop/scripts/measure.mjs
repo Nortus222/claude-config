@@ -3,9 +3,11 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const checkout = resolve(fileURLToPath(new URL('..', import.meta.url)), '../..');
 const [command, ...args] = process.argv.slice(2);
 if (!command) throw new Error('Usage: node scripts/measure.mjs <executable> [args...]');
 const runs = 10;
@@ -15,14 +17,19 @@ const startups = [];
 const rss = [];
 for (let run = 0; run < runs; run++) {
   const session = await mkdtemp(join(tmpdir(), 'nortuscc-measure-'));
+  await mkdir(join(session, '.config', 'nortuscc'), { recursive: true });
+  await writeFile(
+    join(session, '.config', 'nortuscc', 'state.json'),
+    JSON.stringify({ version: 1, repo: checkout, skillsOnly: false, files: {} }),
+  );
   const started = performance.now();
   const child = spawn(command, args, {
     cwd: session,
-    env: { PATH: '', NORTUSCC_FIXTURE_SESSION: session },
+    env: { PATH: '', HOME: session },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   const lines = createInterface({ input: child.stdout });
-  child.stdin.write(JSON.stringify({ version: 1, id: '1', command: 'inspect' }) + '\n');
+  child.stdin.write(JSON.stringify({ version: 2, id: '1', command: 'inspect' }) + '\n');
   const [line] = await once(lines, 'line');
   startups.push(performance.now() - started);
   if (!JSON.parse(line).ok) throw new Error(`Inspect failed: ${line}`);
