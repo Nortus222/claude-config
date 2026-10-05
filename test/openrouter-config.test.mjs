@@ -33,7 +33,12 @@ async function onMachine(fn) {
     codex: process.env.NORTUSCC_CODEX_DIR,
     openrouter: process.env.NORTUSCC_OPENROUTER_CODEX_DIR,
     state: process.env.NORTUSCC_STATE_DIR,
+    claude: process.env.NORTUSCC_CLAUDE_DIR,
+    agents: process.env.NORTUSCC_AGENTS_DIR,
   };
+  // Every machine-side location, so nothing a command reads or writes is the developer's own.
+  process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
+  process.env.NORTUSCC_AGENTS_DIR = join(home, '.agents', 'skills');
   process.env.NORTUSCC_CODEX_DIR = join(home, '.codex');
   process.env.NORTUSCC_OPENROUTER_CODEX_DIR = join(home, '.codex-openrouter');
   process.env.NORTUSCC_STATE_DIR = join(home, 'state');
@@ -50,6 +55,8 @@ async function onMachine(fn) {
       NORTUSCC_CODEX_DIR: saved.codex,
       NORTUSCC_OPENROUTER_CODEX_DIR: saved.openrouter,
       NORTUSCC_STATE_DIR: saved.state,
+      NORTUSCC_CLAUDE_DIR: saved.claude,
+      NORTUSCC_AGENTS_DIR: saved.agents,
     })) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -201,6 +208,9 @@ test('capture never publishes local OpenRouter configuration edits', async () =>
   await onMachine(async ({ config }) => {
     const repo = mkdtempSync(join(tmpdir(), 'nortuscc-openrouter-repo-'));
     const source = join(repo, 'config.toml');
+    // Capture writes to the repo side; point it at the throwaway repo, not the checkout.
+    const savedRepo = process.env.NORTUSCC_REPO_DIR;
+    process.env.NORTUSCC_REPO_DIR = repo;
     mkdirSync(process.env.NORTUSCC_OPENROUTER_CODEX_DIR, { recursive: true });
     writeFileSync(source, EXPECTED);
     writeFileSync(config, `${EXPECTED}\napi_key = "sk-or-secret"\n`);
@@ -219,7 +229,12 @@ test('capture never publishes local OpenRouter configuration edits', async () =>
       assert.ok(!capturedPaths().includes(source));
       assert.ok(!capturedPaths().includes('codex/openrouter-glm/config.toml'));
       assert.ok(!capturedPaths().includes('codex/openrouter-glm/models-static.json'));
+      // Capture also regenerates the skills manifest from the machine's installed skills,
+      // which must never reach the real checkout from a test.
+      assert.ok(!capturedPaths().includes('skills-manifest.txt'));
     } finally {
+      if (savedRepo === undefined) delete process.env.NORTUSCC_REPO_DIR;
+      else process.env.NORTUSCC_REPO_DIR = savedRepo;
       rmSync(repo, { recursive: true, force: true });
     }
   });
