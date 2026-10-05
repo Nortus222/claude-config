@@ -67,7 +67,12 @@ unchanged on Node 24 and on the app's bundled Bun, and avoids `effect`'s unstabl
   - any other command re-execs the checkout recorded in `state.json`, or says to run `setup`.
 
 A global install of a folder links it without installing its dependencies, so the launcher
-runs `npm ci` itself, and `pull` runs it again when `package-lock.json` changed.
+installs the runtime dependencies itself when a checkout has none, and `pull` re-installs them
+when `package-lock.json` changed.
+
+During the migration only TypeScript commands need the handoff: an unported command is plain
+JavaScript and still runs from an `npx` copy, as today. The launcher re-execs the recorded
+checkout for ported commands only. `setup`'s clone-then-hand-off flow arrives with its cutover.
 
 ## `@nortuscc/machine`
 
@@ -109,7 +114,7 @@ and returns a `Plan`:
 - `Selection` holds the run-time choices the engine deliberately does not resolve: targets,
   the `--no-*` categories, picked or excluded keys, and `force` (`--take-repo`).
 - `Plan` is `{ steps, skipped: { key, reason }[] }`.
-- A `Step` is `{ key, action, summary, touches: string[], interruptible: boolean }`. Its
+- A `Step` is `{ key, domain, action, summary, touches: string[], interruptible: boolean }`. Its
   `action` is one of `write-file`, `merge-keys`, `restore`, `remove`, `capture-file`,
   `write-manifest`, `install-integration` or `install-skills`.
 
@@ -137,7 +142,7 @@ shows exactly what will and will not happen.
 
 All are injected. Tests use temporary directories and fake executables.
 
-- `MachinePaths`: `repo`, `claude`, `codex`, `codexOpenRouter`, `agents`, `stateRoot`,
+- `MachinePaths`: `repo`, `claude`, `codex`, `codexOpenRouter`, `agentsSkills`, `stateRoot`,
   `backups`. Only the CLI entry point and the app backend build it, both through
   `MachinePaths.fromEnvironment`, which keeps today's `NORTUSCC_*`, HOME and `state.json`
   `repo` rules. No module below them reads the environment, so a test can no longer write into
@@ -153,8 +158,10 @@ Each domain implements:
 
 ```ts
 type Domain = {
-  inspect: (desired: DesiredConfig) => Effect<Observed[]>
-  steps: (observed: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture') => Step[]
+  name: 'config' | 'integrations' | 'skills'
+  inspect: (desired: DesiredConfig) => Effect<{ items: Observed[]; probeErrors: string[] }>
+  steps: (items: Observed[], selection: Selection, kind: 'apply' | 'uninstall' | 'capture') =>
+    { steps: Step[]; skipped: { key: string; reason: string }[] }
   run: (step: Step) => Effect<StepResult>
 }
 ```
@@ -232,12 +239,12 @@ The migration is a strangler, so `main` keeps working throughout:
 
 | # | Issue | Depends on | Runs |
 | --- | --- | --- | --- |
-| 1 | **Foundation**: workspaces, Node 24 floor, root TypeScript test and typecheck tooling, the bootstrap launcher with `npx` handoff and `npm ci`, the `@nortuscc/machine` skeleton (services, `MachinePaths`, stores and overrides migration, `Backups`, `apply.lock`, the item and plan model, executor with cancellation, the domain interface), and `main.ts` dispatch | — | first |
+| 1 | **Foundation**: workspaces, Node 24 floor, root TypeScript test and typecheck tooling, the bootstrap launcher (checkout detection, runtime-dependency install, re-exec of the recorded checkout for ported commands), the `@nortuscc/machine` skeleton (services, `MachinePaths`, stores and overrides migration, `Backups`, `apply.lock`, the item and plan model, executor with cancellation, the domain interface), `main.ts` dispatch, and `CLAUDE.md` conventions for the new layout (parallel threads read them) | — | first |
 | 2 | **Config domain**: copy, merge-keys, project trust, file states; apply, uninstall and capture-file steps; `SYNC` retired; `uninstall` cut over | 1 | parallel |
 | 3 | **Integrations domain**: hooks, marketplaces, plugins and MCP for Claude and Codex, from the engine's declarations | 1 | parallel |
 | 4 | **Skills domain and undeclared probe**: the skills CLI, links and exposure, updates, `write-manifest` with an explicit repo; `update` cut over | 1 | parallel |
 | 5 | **Desktop real apply**: protocol v2, backend on `@nortuscc/machine`, the PATH probe, the renderer, a real-machine smoke against a temporary HOME | 1; complete once 2–4 land | parallel |
-| 6 | **Cutover**: `apply`, `status`, `capture`, `setup`, `pull`, `push` and the self-update; delete the legacy `.mjs`; update `README.md` and `CLAUDE.md` conventions | 2, 3, 4 | last |
+| 6 | **Cutover**: `apply`, `status`, `capture`, `setup` (with its clone-then-hand-off bootstrap), `pull`, `push` and the self-update; delete the legacy `.mjs`; final `README.md` pass | 2, 3, 4 | last |
 
 Issues 2–5 branch from the Foundation branch once its PR is open, each in its own worktree and
 thread. Their PRs stack on Foundation and retarget to `main` when it merges.
