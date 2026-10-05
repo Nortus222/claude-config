@@ -29,6 +29,12 @@ test('a ported command reaches its TypeScript module through main.ts', () => {
   assert.match(result.stderr, /Re-run with --yes to confirm/);
 });
 
+test('a ported command runs its TypeScript module', () => {
+  const result = run('update', '--check', '--yes');
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--check is mutually exclusive/);
+});
+
 test('an unported command reaches its legacy module through main.ts', () => {
   const state = mkdtempSync(join(tmpdir(), 'nortuscc-main-'));
   const result = spawnSync(process.execPath, [bin, 'apply', '--take-local'], {

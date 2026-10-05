@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectAll, type Observed } from '../src/index.ts';
+import type { DesiredConfig } from '@nortuscc/profile-engine';
+import { configDomain, plan, selectAll, type MachineReport, type Observed } from '../src/index.ts';
 import { CHANGED_SINCE_APPLY, configSteps } from '../src/config/steps.ts';
 
 const DISPOSITION: Record<string, Observed['disposition']> = {
@@ -104,4 +105,17 @@ test('uninstall restores each recorded document once, refusing a changed one unl
     ['config:claude:settings.json', 'restore', 'restore settings.json to its state before nortuscc', ['claude:settings.json']],
     ['config:codex:config.toml', 'restore', 'restore config.toml to its state before nortuscc', ['codex-openrouter:config.toml']],
   ]);
+});
+
+test('an update plan has no config steps, so it never captures into the repo', () => {
+  const desired: DesiredConfig = { files: [], skills: [], integrations: [], allow: {}, issues: [] };
+  const report: MachineReport = {
+    desired,
+    items: [
+      item('config:claude:CLAUDE.md', 'local-ahead', ['recorded', 'local-changed']),
+      item('config:claude:settings.json#theme', 'repo-ahead', ['recorded']),
+    ],
+    probeErrors: [],
+  };
+  assert.deepEqual(plan('update', report, selectAll, [configDomain]), { kind: 'update', steps: [], skipped: [] });
 });

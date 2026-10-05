@@ -78,6 +78,8 @@ const uninstallSteps = (items: ReadonlyArray<Observed>, force: boolean) => {
 
 export const configSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) => {
   if (kind === 'uninstall') return uninstallSteps(items, selection.force);
+  // `update` adopts, refreshes and prunes skills; config has nothing to do, and must not fall through to capture.
+  if (kind === 'update') return { steps: [], skipped: [] };
   const steps: Step[] = [];
   const skipped: Skipped[] = [];
   for (const item of items) {

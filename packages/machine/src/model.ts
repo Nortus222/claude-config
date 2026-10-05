@@ -8,7 +8,8 @@ export type Disposition = 'in-sync' | 'apply' | 'capture' | 'blocked' | 'exclude
 export type Observed = {
   readonly key: string;
   readonly domain: DomainName;
-  readonly target: Target;
+  // Absent for an item no single agent owns, such as a skill in the shared store.
+  readonly target?: Target;
   readonly label: string;
   readonly group: string;
   readonly state: string;
@@ -38,9 +39,10 @@ export type Selection = {
 
 export const selectAll: Selection = { targets: TARGETS, declined: [], exclude: [], force: false };
 
-export type PlanKind = 'apply' | 'uninstall' | 'capture';
+export type PlanKind = 'apply' | 'uninstall' | 'capture' | 'update';
 export type StepAction =
-  | 'write-file' | 'merge-keys' | 'restore' | 'remove' | 'capture-file' | 'write-manifest' | 'install-integration' | 'install-skills';
+  | 'write-file' | 'merge-keys' | 'restore' | 'remove' | 'capture-file' | 'write-manifest' | 'install-integration' | 'install-skills'
+  | 'update-skills';
 
 export type Step = {
   readonly key: string;
@@ -50,6 +52,8 @@ export type Step = {
   readonly touches: ReadonlyArray<string>;
   // false: a unit that always completes once started (file writes); true: cancellable (installers).
   readonly interruptible: boolean;
+  // The agents an installer step acts for, when its domain is shared between agents (skills).
+  readonly targets?: ReadonlyArray<Target>;
 };
 
 export type Skipped = { readonly key: string; readonly reason: string };

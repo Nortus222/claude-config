@@ -1,7 +1,7 @@
 const WIDTH = 16;
 
-// Shared by every report that prints a git SHA: `update.mjs`'s outdated/moved
-// rows and `skill-actions.mjs`'s picker rows both want the same seven-char
+// Shared by every report that prints a git SHA: `src/commands/update.ts`'s
+// outdated/moved and picker rows both want the same seven-char
 // prefix, with the same fallback when a skill was never hashed at all.
 export const short = (sha) => (sha ? sha.slice(0, 7) : 'unknown');
 
