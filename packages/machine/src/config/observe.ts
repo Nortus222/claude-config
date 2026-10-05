@@ -121,6 +121,16 @@ export const readMerge = (file: ResolvedFile, desired: DesiredConfig, baselines:
       const state = fileState({ baseline, repo, local: localHash });
       return { key: itemKey(file.id, key), label: `${file.dest}#${key}`, state, facts: factsFor(baseline, repo, localHash, state), from };
     });
+    // Baselines for keys the repo no longer owns get no item, but uninstall must still restore them
+    // and refuse when they changed: their facts ride on the document's first reading.
+    const dropped = recorded.filter((k) => !Object.hasOwn(keys, k.slice(file.id.length + 1)));
+    if (dropped.length) {
+      const droppedFacts: Fact[] = [
+        'recorded',
+        ...(dropped.some((k) => hashValue(localValue(k.slice(file.id.length + 1))) !== baselines[k]!.hash) ? ['local-changed' as const] : []),
+      ];
+      readings[0] = { ...readings[0]!, facts: [...new Set([...readings[0]!.facts, ...droppedFacts])] };
+    }
     const reading: DocumentReading = { readings, local, repoText };
     return reading;
   });

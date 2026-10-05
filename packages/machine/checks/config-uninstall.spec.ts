@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { CHANGED_SINCE_APPLY } from '../src/index.ts';
+import { hashValue } from '../src/config/file-state.ts';
 import { configMachine } from './config-machine.ts';
 
 test('uninstalling a fresh-machine apply removes every file and baseline', async () => {
@@ -123,4 +124,35 @@ test('the earliest run holds the original when a later run backed the file up ag
   assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# repo v2\n');
   await m.sync('uninstall', { force: true });
   assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# first\n');
+});
+
+// A key recorded at apply time that the repo has since dropped still belongs to uninstall.
+const dropKey = (m: ReturnType<typeof configMachine>, extra: Record<string, string>) =>
+  m.baselines({ ...Object.fromEntries(Object.entries(m.state().files).map(([k, v]) => [k, v.hash])), ...extra });
+
+test('a locally edited key the repo no longer owns refuses uninstall until forced', async () => {
+  const m = configMachine();
+  await m.sync();
+  dropKey(m, { 'claude:settings.json#zzStale': hashValue('applied')! });
+  const settings = join(m.paths.claude, 'settings.json');
+  m.write(settings, JSON.stringify({ ...JSON.parse(m.read(settings)!), zzStale: 'edited' }));
+
+  const refused = m.plan(await m.report(), 'uninstall');
+  assert.deepEqual(refused.skipped, [{ key: 'config:claude:settings.json', reason: CHANGED_SINCE_APPLY }]);
+
+  await m.sync('uninstall', { force: true });
+  assert.equal(existsSync(settings), false);
+  assert.deepEqual(m.state().files, {});
+});
+
+test('a document whose only baseline is a dropped key is still uninstalled', async () => {
+  const m = configMachine();
+  const settings = join(m.paths.claude, 'settings.json');
+  m.write(settings, JSON.stringify({ zzStale: 'applied', mine: 1 }));
+  m.baselines({ 'claude:settings.json#zzStale': hashValue('applied')! });
+
+  const { plan } = await m.sync('uninstall');
+  assert.deepEqual(plan.steps.map((s) => s.key), ['config:claude:settings.json']);
+  assert.deepEqual(JSON.parse(m.read(settings)!), { mine: 1 });
+  assert.deepEqual(m.state().files, {});
 });
