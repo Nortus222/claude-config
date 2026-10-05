@@ -141,3 +141,28 @@ test('issues from every input are carried through', () => {
   assert.deepEqual(config.issues.map((i) => i.layer), ['base', 'pin', 'machine']);
   assert.deepEqual(config.integrations, []);
 });
+
+test('names that match Object.prototype members get no inherited override or pin', () => {
+  const inherited = buildBaseProfile(
+    {
+      skillsManifest: '[constructor]\ntoString\n',
+      integrations: JSON.stringify({
+        version: 1,
+        integrations: [{ id: 'hasOwnProperty', label: 'h', target: 'claude', type: 'plugin', default: true, plugin: 'h@x' }],
+      }),
+    },
+    () => false,
+  );
+  const config = resolveProfile({
+    base: inherited,
+    pins: pinned({}),
+    overrides: machine({ skills: { other: true }, integrations: {} }),
+  });
+  const [skill] = config.skills;
+  assert.equal(skill.install, true);
+  assert.equal(skill.from.layer, 'base');
+  assert.equal('pin' in skill, false);
+  const [integration] = config.integrations;
+  assert.equal(integration.enabled, true);
+  assert.equal(integration.from.layer, 'base');
+});

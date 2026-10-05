@@ -47,8 +47,8 @@ export function resolveProfile({
   const pinOrigin: Origin = { layer: 'pin', source: pins.source };
   const skills = base.skills.flatMap((group) =>
     group.skills.map((name) => {
-      const choice = chosen.skills?.[name];
-      const ref = pins.value[group.source];
+      const choice = own(chosen.skills, name);
+      const ref = own(pins.value, group.source);
       return {
         name,
         source: group.source,
@@ -66,7 +66,7 @@ export function resolveProfile({
     if (!declaredIntegrations.has(id)) complain(`integrations.${id}`, `integration '${id}' is not declared`);
   }
   const integrations = base.integrations.map((declaration) => {
-    const choice = chosen.integrations?.[declaration.id];
+    const choice = own(chosen.integrations, declaration.id);
     return {
       id: declaration.id,
       declaration,
@@ -76,6 +76,11 @@ export function resolveProfile({
   });
 
   return { files, skills, integrations, allow: base.allow, issues };
+}
+
+// Reads an own property only, so names like 'constructor' never resolve to inherited members.
+function own<T>(record: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
 function resolveFile(

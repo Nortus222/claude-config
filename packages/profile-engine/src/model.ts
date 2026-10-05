@@ -12,6 +12,7 @@ export type Category = (typeof CATEGORIES)[number];
 export type LayerName = 'base' | 'pin' | 'machine';
 // Which layer decided a value, and the document (or 'built-in' table) it came from.
 export type Origin = { readonly layer: LayerName; readonly source: string };
+// `path` is display text (dotted, ids may contain '.' or ':'), not a parseable pointer.
 export type Issue = {
   readonly layer: LayerName;
   readonly source: string;
