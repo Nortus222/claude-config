@@ -106,7 +106,7 @@ export class Session {
     this.valid(inspection);
     const keys = new Set(inspection.report.items.map((item) => item.key));
     const unknown = exclude.find((key) => !keys.has(key));
-    if (unknown !== undefined) throw new SessionError('UNKNOWN_KEY', `'${unknown}' is not an item of the last inspection`);
+    if (unknown !== undefined) throw new SessionError('UNKNOWN_KEY', `'${unknown}' is not an item of the last inspection; inspect again`);
     const unique = [...new Set(exclude)];
     this.previewed = { planId: randomUUID(), exclude: unique, plan: this.plan(inspection, unique) };
     return { planId: this.previewed.planId, plan: wirePlan(this.previewed.plan) };

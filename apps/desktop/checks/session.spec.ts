@@ -78,7 +78,7 @@ test('preview checks keys against the last inspection', async (t) => {
   const { session } = machine(t, [{ key: 'config:a', disposition: 'apply' }, { key: 'config:b', disposition: 'apply' }, { key: 'config:c', disposition: 'blocked' }]);
   assert.throws(() => session.preview([]), code('NO_REPORT'));
   await session.inspect();
-  assert.throws(() => session.preview(['config:zzz']), (err) => code('UNKNOWN_KEY')(err) && /config:zzz/.test((err as Error).message));
+  assert.throws(() => session.preview(['config:zzz']), (err) => code('UNKNOWN_KEY')(err) && (err as Error).message === "'config:zzz' is not an item of the last inspection; inspect again");
   const preview = decodePreviewResult(session.preview(['config:b', 'config:b']));
   assert.deepEqual(preview.plan.steps.map((s) => s.key), ['config:a']);
   assert.deepEqual(preview.plan.skipped, [{ key: 'config:b', reason: 'not selected' }, { key: 'config:c', reason: 'blocked' }]);
