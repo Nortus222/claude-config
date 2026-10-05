@@ -103,7 +103,7 @@ function App() {
                           </td>
                           <td>
                             <strong>{item.label}</strong>
-                            <small>{item.group} · {item.target}</small>
+                            <small>{item.group}{item.target === undefined ? '' : ` · ${item.target}`}</small>
                             {item.note ? <small>{item.note}</small> : null}
                           </td>
                           <td>{item.state}</td>

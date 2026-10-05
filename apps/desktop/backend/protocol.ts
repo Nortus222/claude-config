@@ -28,7 +28,8 @@ const Origin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']
 export const ObservedSchema = Schema.Struct({
   key: Schema.String,
   domain: Domain,
-  target: Schema.Literals(['claude', 'codex']),
+  // Absent for an agent-neutral item (a shared skill).
+  target: Schema.optional(Schema.Literals(['claude', 'codex'])),
   label: Schema.String,
   group: Schema.String,
   state: Schema.String,
@@ -43,13 +44,14 @@ export const InspectResultSchema = Schema.Struct({ profile: ProfileSchema, items
 const StepSchema = Schema.Struct({
   key: Schema.String,
   domain: Domain,
-  action: Schema.Literals(['write-file', 'merge-keys', 'restore', 'remove', 'capture-file', 'write-manifest', 'install-integration', 'install-skills']),
+  action: Schema.Literals(['write-file', 'merge-keys', 'restore', 'remove', 'capture-file', 'write-manifest', 'install-integration', 'install-skills', 'update-skills']),
   summary: Schema.String,
   touches: Schema.Array(Schema.String),
   interruptible: Schema.Boolean,
+  targets: Schema.optional(Schema.Array(Schema.Literals(['claude', 'codex']))),
 });
 const PlanSchema = Schema.Struct({
-  kind: Schema.Literals(['apply', 'uninstall', 'capture']),
+  kind: Schema.Literals(['apply', 'uninstall', 'capture', 'update']),
   steps: Schema.Array(StepSchema),
   skipped: Schema.Array(Schema.Struct({ key: Schema.String, reason: Schema.String })),
 });

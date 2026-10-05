@@ -58,7 +58,7 @@ const services = (paths: MachinePathsValue, path: string) =>
   );
 
 const wireItem = (item: MachineReport['items'][number]): WireObserved => ({
-  key: item.key, domain: item.domain, target: item.target, label: item.label, group: item.group, state: item.state,
+  key: item.key, domain: item.domain, ...(item.target === undefined ? {} : { target: item.target }), label: item.label, group: item.group, state: item.state,
   disposition: item.disposition,
   ...(item.note === undefined ? {} : { note: item.note }),
   ...(item.from === undefined ? {} : { from: { layer: item.from.layer, source: item.from.source } }),
@@ -66,6 +66,7 @@ const wireItem = (item: MachineReport['items'][number]): WireObserved => ({
 
 const wireStep = (step: Plan['steps'][number]) => ({
   key: step.key, domain: step.domain, action: step.action, summary: step.summary, touches: [...step.touches], interruptible: step.interruptible,
+  ...(step.targets === undefined ? {} : { targets: [...step.targets] }),
 });
 
 const wirePlan = (p: Plan): WirePlan => ({
