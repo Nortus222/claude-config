@@ -4,6 +4,9 @@ import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
+// moveAside moves a live link as a link. preserve copies what a live link points at, so the backup
+// holds the content at that time rather than a link to the file about to change; a dangling link
+// is copied as a link.
 // moveAside/preserve return the backup path, or undefined when nothing was there. Within a run the
 // first call for a destination decides: a repeat returns that first answer untouched (the pre-run
 // copy, or undefined when the path was absent then), and moveAside still vacates the live path.
@@ -28,6 +31,15 @@ export const backupsForRun = (started = new Date()) =>
       // Remembering absence keeps a later call from saving content this run wrote.
       const first = yield* Ref.make<ReadonlyMap<string, string | undefined>>(new Map());
       const target = (relative: string, agent?: string) => join(folder, ...(agent ? [agent] : []), relative);
+      const copyOf = (path: string, to: string) =>
+        Effect.gen(function* () {
+          if ((yield* fs.stat(path))?.kind === 'symlink') {
+            const followed = yield* fs.copy(path, to, { follow: true }).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false)));
+            if (followed) return;
+            yield* fs.remove(to);
+          }
+          yield* fs.copy(path, to);
+        });
       const keep = (op: 'move' | 'copy') => (path: string, relative: string, agent?: string) =>
         Effect.gen(function* () {
           const to = target(relative, agent);
@@ -37,7 +49,10 @@ export const backupsForRun = (started = new Date()) =>
             return seen.get(to);
           }
           const present = yield* fs.exists(path);
-          if (present) yield* (op === 'move' ? fs.move(path, to) : fs.copy(path, to));
+          if (present) {
+            if (op === 'move') yield* fs.move(path, to);
+            else yield* copyOf(path, to);
+          }
           const answer = present ? to : undefined;
           yield* Ref.update(first, (map) => new Map(map).set(to, answer));
           return answer;
