@@ -2,7 +2,7 @@
 
 Inspects a machine, plans changes against the profile engine's `DesiredConfig`, and executes
 plans with backups, progress and cancellation. The CLI and the desktop app both use it.
-Design: `docs/superpowers/specs/2026-10-05-machine-rebuild-design.md`.
+Decision: `docs/adr/0007-one-machine-core-for-cli-and-desktop.md`.
 
 - `pathsFromEnvironment` is the only reader of the environment; everything else takes
   `MachinePaths`.

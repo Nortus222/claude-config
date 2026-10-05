@@ -13,6 +13,7 @@
     "packages/profile-engine/src/files.json",
     "claude/",
     "codex/",
+    "AGENTS.md",
     "CLAUDE.md",
     "README.md",
     "integrations.json",
