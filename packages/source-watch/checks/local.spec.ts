@@ -89,3 +89,14 @@ test('parseStatus reads -z porcelain, skipping a rename\'s original path', () =>
     { path: 'n/SKILL.md', untracked: true },
   ]);
 });
+
+test('an upstream with unrelated history still reports the checkout', async (t) => {
+  const root = tempDir(t);
+  const { local } = setup(root);
+  gitSync(local, 'checkout', '--quiet', '--orphan', 'other');
+  commitFiles(local, 'unrelated', { 'skills/tdd/SKILL.md': 'tdd other\n' });
+  gitSync(local, 'branch', '--quiet', '-u', 'origin/main');
+  const report = await runGit(watchCheckout(local));
+  assert.notEqual(report.status, 'not-a-repo');
+  assert.equal(report.branch, 'other');
+});

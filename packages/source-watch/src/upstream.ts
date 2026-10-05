@@ -27,7 +27,7 @@ export const watchUpstream = (
   inspect(source, options.cacheDir).pipe(
     Effect.catch((error) =>
       Effect.succeed({
-        source: source.source,
+        source: redact(source.source),
         url: redact(source.url),
         status: 'unreachable',
         reason: error.reason,
@@ -49,7 +49,7 @@ const inspect = (source: WatchedSource, cacheDir: string): Effect.Effect<SourceR
 
     const latest = yield* revision(run, 'HEAD');
     const atLatest = yield* skillsAt(run, latest.sha);
-    const report = { source: source.source, url: redact(source.url), latest, commits: [], added: [] };
+    const report = { source: redact(source.source), url: redact(source.url), latest, commits: [], added: [] };
 
     if (source.baseline === undefined) {
       const skills = source.skills.map((name): SkillChange => {

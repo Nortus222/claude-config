@@ -25,3 +25,8 @@ test('leaves ordinary text alone', () => {
   const text = 'git@github.com:a/b.git, ada@example.com and https://github.com/a/b.git';
   assert.equal(redact(text), text);
 });
+
+test('strips userinfo containing @ or quotes', () => {
+  assert.equal(redact('https://user:p@ss@host/x'), 'https://host/x');
+  assert.equal(redact("https://u:it's@host/x"), 'https://host/x');
+});

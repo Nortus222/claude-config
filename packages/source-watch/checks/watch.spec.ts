@@ -17,13 +17,13 @@ test('watches every source in input order, confining failures and attaching chec
   writeFiles(local, { 'skills/tdd/SKILL.md': 'tdd local\n' });
 
   const sources: WatchedSource[] = [
-    { source: 'ada/private', url: 'https://ada:s3cret@example.invalid/private.git', exact: false, skills: ['x'] },
+    { source: 'https://ada:s3cret@example.invalid/private.git', url: 'https://ada:s3cret@example.invalid/private.git', exact: false, skills: ['x'] },
     { source: 'ada/skills', url: upstream.url, baseline: 'v1', exact: false, skills: ['tdd'], checkout: local },
   ];
   const reports = await runGit(watchSources(sources, { cacheDir: join(root, 'cache') }));
 
   assert.deepEqual(reports.map((r) => [r.source, r.status]), [
-    ['ada/private', 'unreachable'],
+    ['https://example.invalid/private.git', 'unreachable'],
     ['ada/skills', 'ahead'],
   ]);
   assert.equal(reports[0]!.url, 'https://example.invalid/private.git');

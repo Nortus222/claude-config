@@ -22,7 +22,7 @@ export function parseStatus(out: string): Array<{ path: string; untracked: boole
 
 // Edits in the author's checkout not yet pushed: commits ahead of its upstream and uncommitted
 // paths, with each touched skill's SKILL.md diff. Read-only: it never fetches. Edits are
-// measured from the merge base with the upstream, or from HEAD when there is none. A path that
+// measured from the merge base with the upstream, or from HEAD when there is none or it shares no history. A path that
 // is not a git work tree, or any git failure, reads as `not-a-repo`.
 export const watchCheckout = (path: string): Effect.Effect<LocalReport, never, Git> =>
   inspect(path).pipe(
@@ -46,7 +46,12 @@ const inspect = (path: string): Effect.Effect<LocalReport, GitFailed, Git> =>
       Effect.as(true),
       Effect.orElseSucceed(() => false),
     );
-    const since = hasUpstream ? (yield* run(['merge-base', 'HEAD', '@{u}'])).trim() : 'HEAD';
+    const since = hasUpstream
+      ? (yield* run(['merge-base', 'HEAD', '@{u}']).pipe(
+          Effect.map((out) => out.trim()),
+          Effect.orElseSucceed(() => 'HEAD'),
+        ))
+      : 'HEAD';
     const unpushed = hasUpstream ? parseLog(yield* run(['log', LOG_FORMAT, '@{u}..HEAD'])) : [];
 
     const tracked = (yield* run(['diff', '--name-only', '-z', since]).pipe(Effect.orElseSucceed(() => '')))
