@@ -3,14 +3,16 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Effect } from 'effect';
+import { MachinePaths, type Domain } from '@nortuscc/machine';
 import { decodeInspectResult, decodePreviewResult, type RunProgress } from '../backend/protocol.ts';
-import { Session, SessionError } from '../backend/session.ts';
+import { Session, SessionError, type DesktopServices } from '../backend/session.ts';
 import { appliedFile, fakeDomain, writeFakeMachine, type FakeItem } from './support/fake-domains.ts';
 
 const checkout = resolve(import.meta.dirname, '../../..');
 
 // A machine under a temporary HOME whose state.json records this checkout.
-function machine(t: TestContext, items: FakeItem[], record: string | null = checkout) {
+function machine(t: TestContext, items: FakeItem[], record: string | null = checkout, domains: ReadonlyArray<Domain<DesktopServices>> = [fakeDomain]) {
   const home = mkdtempSync(join(tmpdir(), 'nortuscc-session-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stateRoot = join(home, '.config', 'nortuscc');
@@ -20,7 +22,7 @@ function machine(t: TestContext, items: FakeItem[], record: string | null = chec
   const session = new Session({
     environment: { env: { PATH: process.env.PATH }, home, platform: process.platform },
     loginPath: { path: process.env.PATH ?? '' },
-    domains: [fakeDomain],
+    domains,
     tools: [],
   });
   return { home, stateRoot, session };
@@ -136,16 +138,39 @@ test('busy during a run, and cancel interrupts an installer-like step', async (t
   assert.equal(await session.cancel(), false);
 });
 
-test('a live CLI holding apply.lock fails the run before any step', async (t) => {
+test('a live CLI holding apply.lock refuses the apply before re-inspecting', async (t) => {
   const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }]);
   await session.inspect();
+  const { planId } = session.preview([]);
   writeFileSync(join(stateRoot, 'apply.lock'), JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
-  const { events, ended } = await run(session, session.preview([]).planId);
-  await ended;
-  assert.equal(events.length, 1);
-  assert.equal(events[0]!.type, 'failed');
-  assert.match((events[0] as Extract<RunProgress, { type: 'failed' }>).message, new RegExp(`pid ${process.ppid}`));
+  await assert.rejects(session.apply(planId), (err) => code('LOCKED')(err) && new RegExp(`pid ${process.ppid}`).test((err as Error).message));
+  assert.equal(session.running, false);
   assert.equal(existsSync(appliedFile(stateRoot, 'config:a')), false);
+  // The preview survives: once the CLI finishes, the same plan applies.
+  rmSync(join(stateRoot, 'apply.lock'));
+  const { ended } = await run(session, planId);
+  await ended;
+  assert.equal(existsSync(appliedFile(stateRoot, 'config:a')), true);
+});
+
+test('apply holds apply.lock while it re-inspects', async (t) => {
+  const locked: boolean[] = [];
+  const watching: Domain<DesktopServices> = {
+    ...fakeDomain,
+    inspect: (desired) => Effect.andThen(
+      Effect.gen(function* () {
+        const { stateRoot } = yield* MachinePaths;
+        locked.push(existsSync(join(stateRoot, 'apply.lock')));
+      }),
+      fakeDomain.inspect(desired),
+    ),
+  };
+  const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }], checkout, [watching]);
+  await session.inspect();
+  const { ended } = await run(session, session.preview([]).planId, join(stateRoot, 'apply.lock'));
+  await ended;
+  assert.deepEqual(locked, [false, true]);
+  assert.equal(existsSync(join(stateRoot, 'apply.lock')), false);
 });
 
 test('profile issues block preview', async (t) => {
