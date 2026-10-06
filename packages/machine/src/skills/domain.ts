@@ -174,19 +174,24 @@ const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
 
 // Installs at a pin, then verifies the install against the commit: the installer may resolve the sha as a
 // branch or tag of that name. A mismatch is removed again; the backup taken first keeps the previous version.
-// `review` names the bundled scripts of a verified install.
+// `review` names the bundled scripts of a verified install. When the installer fails, the skills whose lock now
+// records the sha are still verified (it may have written them) and a mismatch removed; the rest are left alone.
 const installPinned = (source: string, sha: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
   Effect.gen(function* () {
     yield* preserveAll(names);
     const installed = yield* runInstaller(addCommand({ source: pinnedSource(source, sha), skills: names, targets }));
-    if (!installed.ok) return installed;
-    const { failed, scripts } = yield* verifyPinned({ source, sha, names });
+    const lock = yield* readSkillLock;
+    const written = installed.ok ? names : names.filter((n) => lockRef(lock.skills[n]) === sha);
+    const { failed, scripts } = yield* verifyPinned({ source, sha, names: written });
+    let removal = '';
     if (failed.size > 0) {
       const bad = sortedUnique(failed.keys());
       const removed = yield* runInstaller(removeCommand(bad));
       const problems = bad.map((n) => failed.get(n)![0]).join('; ');
-      return { ok: false, note: `${removed.ok ? 'removed' : 'could not remove'} ${bad.join(', ')}: does not match ${short(sha)} (${problems})` };
+      removal = `${removed.ok ? 'removed' : 'could not remove'} ${bad.join(', ')}: does not match ${short(sha)} (${problems})`;
     }
+    if (!installed.ok) return { ok: false, note: removal ? `${installed.note}; ${removal}` : installed.note };
+    if (removal) return { ok: false, note: removal };
     const review = scripts.size > 0
       ? `bundles scripts, review: ${sortedUnique(scripts.keys()).map((n) => `${n} (${scripts.get(n)!.join(', ')})`).join('; ')}`
       : '';

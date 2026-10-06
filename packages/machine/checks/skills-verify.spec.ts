@@ -152,3 +152,32 @@ test('a verified re-expose still names the scripts it bundles', async () => {
   assert.equal(step.outcome, 'ok');
   assert.equal(step.note, 're-exposed 1 skill(s) to claude-code; o/r: bundles scripts, review: tdd (bin/x)');
 });
+
+test('an installer that fails midway still has what it wrote verified, and a mismatch is removed', async () => {
+  const m = machine();
+  const src = skillSource(m.home);
+  const old = src.commit({ 'skills/tdd/SKILL.md': '# old\n', 'skills/keep/SKILL.md': '# keep old\n' });
+  const sha = src.commit({ 'skills/tdd/SKILL.md': '# pinned\n', 'skills/keep/SKILL.md': '# keep\n' });
+  const trap = src.commit({ 'skills/tdd/SKILL.md': '# hijacked\n', 'skills/keep/SKILL.md': '# keep\n' });
+  src.branch(sha, trap);
+  for (const n of ['tdd', 'keep']) {
+    mkdirSync(join(m.paths.agentsSkills, n), { recursive: true });
+    writeFileSync(join(m.paths.agentsSkills, n, 'SKILL.md'), `# ${n} previous\n`);
+  }
+  const at = (n: string) => ({ source: 'o/r', sourceUrl: src.url, skillPath: `skills/${n}/SKILL.md`, ref: old });
+  writeFileSync(join(m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({ skills: { tdd: at('tdd'), keep: at('keep') } }));
+  const installer = fakeInstaller(m.paths, src, { exit: 1, writes: ['tdd'] });
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const r: MachineReport = {
+    desired: desiredWith([skill('keep', sha), skill('tdd', sha)]), items: [item('keep', 'off-pin'), item('tdd', 'off-pin')], probeErrors: [],
+  };
+  const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const step = events.find((e) => e.type === 'finished') as Extract<Progress, { type: 'finished' }>;
+  assert.equal(step.outcome, 'failed');
+  assert.match(step.note, new RegExp(`^npx exited with 1; removed tdd: does not match ${sha.slice(0, 7)} \\(`));
+  assert.deepEqual(installer.commands.map((c) => c.args.slice(2, 4)), [['add', `o/r#${sha}`], ['remove', 'tdd']]);
+  assert.equal(existsSync(join(m.paths.agentsSkills, 'tdd')), false);
+  assert.equal(readLock(m.paths).keep!.ref, old);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'keep', 'SKILL.md'), 'utf8'), '# keep previous\n');
+});

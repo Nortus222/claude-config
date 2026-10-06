@@ -38,8 +38,13 @@ export const readLock = (paths: MachinePathsValue): Record<string, Record<string
 
 // Simulates `npx -y skills add|remove …` against `source`: `add o/r#<ref>` copies `skills/<name>/` at a
 // branch named `<ref>` when one exists, else at the commit `<ref>` (the installer's `--branch` first rule),
-// and records the lock entry. Every other command runs for real.
-export const fakeInstaller = (paths: MachinePathsValue, source: { dir: string; url: string }) => {
+// and records the lock entry. Every other command runs for real. `partial` makes `add` write only `writes`
+// (default: every named skill) and then exit with `exit`, like an installer that fails midway.
+export const fakeInstaller = (
+  paths: MachinePathsValue,
+  source: { dir: string; url: string },
+  partial?: { readonly exit: number; readonly writes?: ReadonlyArray<string> },
+) => {
   const commands: Command[] = [];
   const fake = (command: Command) => {
     const [, , verb, ...rest] = command.args;
@@ -63,6 +68,7 @@ export const fakeInstaller = (paths: MachinePathsValue, source: { dir: string; u
       let rev = ref;
       try { rev = git(source.dir, 'rev-parse', '--verify', '-q', `refs/heads/${ref}`); } catch { /* not a branch */ }
       for (const n of valuesOf('--skill')) {
+        if (partial?.writes && !partial.writes.includes(n)) continue;
         const out = mkdtempSync(join(tmpdir(), 'fake-installer-'));
         execSync(`git archive ${rev} skills/${n} | tar -x -C '${out}'`, { cwd: source.dir });
         rmSync(join(paths.agentsSkills, n), { recursive: true, force: true });
@@ -76,7 +82,7 @@ export const fakeInstaller = (paths: MachinePathsValue, source: { dir: string; u
     }
     mkdirSync(dirname(lockFile(paths)), { recursive: true });
     writeFileSync(lockFile(paths), JSON.stringify({ skills: lock }));
-    return { code: 0, stdout: '' };
+    return { code: verb === 'add' && partial ? partial.exit : 0, stdout: '' };
   };
   const layer = Layer.effect(Processes, Effect.gen(function* () {
     const real = yield* Processes;
