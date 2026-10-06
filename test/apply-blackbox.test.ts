@@ -218,7 +218,7 @@ test('--no-skills-only records config as managed again and writes it', async () 
   assert.equal(choice.configTargets, undefined);
 });
 
-test('the config choice apply records lives in overrides.json', { todo: 'cutover' }, async () => {
+test('the config choice apply records lives in overrides.json', async () => {
   const m = machine();
   assert.equal((await apply(m, '--skills-only')).code, 0);
   assert.equal(readJson(overridesPath(m)).manageConfig, false);
@@ -228,7 +228,7 @@ test('the config choice apply records lives in overrides.json', { todo: 'cutover
   assert.equal(overrides.configTargets, undefined);
 });
 
-test('a legacy skills-only state.json is honoured and migrated into overrides.json', { todo: 'cutover' }, async () => {
+test('a legacy skills-only state.json is honoured and migrated into overrides.json', async () => {
   const m = machine();
   mkdirSync(m.state, { recursive: true });
   writeFileSync(statePath(m), JSON.stringify({ version: 1, repo: null, skillsOnly: true, files: {} }, null, 2) + '\n');
