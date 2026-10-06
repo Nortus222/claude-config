@@ -242,3 +242,18 @@ test('an npx copy refuses a --dir checkout that is not nortuscc, installing noth
   assert.deepEqual(npx.npm.calls(), []);
   assert.deepEqual(npx.handoffs(), []);
 });
+
+test('an invalid overrides.json refuses setup --yes with exit 1; nothing is recorded or written', async () => {
+  const m = machine();
+  mkdirSync(m.state, { recursive: true });
+  const malformed = '{ "version": 1, "manageConfig": false, }\n';
+  writeFileSync(overridesPath(m), malformed);
+
+  const result = await runCli(m, ['setup', '--yes']);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /overrides\.json: not valid JSON/);
+  assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
+  assert.equal(existsSync(statePath(m)), false);
+  assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
+  assert.equal(read(overridesPath(m)), malformed);
+});

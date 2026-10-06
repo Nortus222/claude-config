@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RUNTIME_INSTALL } from '../bin/launcher.mjs';
 import { git, installerCalls, machine, readJson, runCli, type Machine } from './support/cli.ts';
@@ -179,5 +179,20 @@ test('--target narrows the apply to that agent', async () => {
   const result = await pull(m, ['--target', 'codex']);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(readFileSync(join(m.codex, 'AGENTS.md'), 'utf8'), '# codex\n');
+  assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
+});
+
+test('an invalid overrides.json refuses pull with exit 1 before the repo moves', async () => {
+  const m = machine();
+  upstream(m, { 'claude/CLAUDE.md': '# from another machine\n' });
+  const head = git(m.repo, 'rev-parse', 'HEAD');
+  mkdirSync(m.state, { recursive: true });
+  writeFileSync(join(m.state, 'overrides.json'), '{ "version": 1, "manageConfig": false, }\n');
+
+  const result = await pull(m);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /overrides\.json: not valid JSON/);
+  assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
   assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
 });

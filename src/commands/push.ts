@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 import { parseConfigMode, resolveConfigMode } from '../config-mode.ts';
 import { runGit } from '../git.ts';
-import { openMachine, runCommand } from '../machine.ts';
+import { openMachine, refuseInvalidOverrides, runCommand } from '../machine.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 import { capture } from './capture.ts';
 
@@ -35,6 +35,7 @@ export async function run(args: string[] = []): Promise<number> {
 
   return runCommand((signal) => Effect.gen(function* () {
     const opened = yield* openMachine({ mode });
+    if (refuseInvalidOverrides(opened.overrides)) return 1;
     const { manageConfig } = resolveConfigMode(mode, opened.overrides.value);
     const repo = opened.paths.repo;
 

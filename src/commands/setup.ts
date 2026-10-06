@@ -7,7 +7,7 @@ import { isGitCheckout, OverridesStore, StateStore } from '@nortuscc/machine';
 import { parseConfigMode, persisted, resolveConfigMode } from '../config-mode.ts';
 import { runGit } from '../git.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
-import { cliLayer, openMachine, resolvePaths, runCommand } from '../machine.ts';
+import { cliLayer, openMachine, refuseInvalidOverrides, reportOverrideIssues, resolvePaths, runCommand } from '../machine.ts';
 import { setupPrerequisites, type PrerequisiteDeps } from '../prerequisites.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { select as realSelect, type Choice } from '../select.ts';
@@ -82,6 +82,8 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
     const paths = yield* resolvePaths();
     const layer = cliLayer(paths);
     const overrides = yield* Effect.provide(Effect.gen(function* () { return yield* (yield* OverridesStore).read; }), layer);
+    reportOverrideIssues(overrides);
+    if (refuseInvalidOverrides(overrides)) return 1;
 
     // The picker only asks when no flag already said what to manage.
     let picked: { manageConfig: boolean; configTargets: Target[] } | null = null;
@@ -139,10 +141,6 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
     const next: MachineOverrides | undefined = picked
       ? { ...overrides.value, manageConfig: picked.manageConfig, configTargets: picked.configTargets }
       : persisted(mode, overrides.value);
-    if (next !== undefined && overrides.issues.length > 0) {
-      console.error(`nortuscc: ${overrides.source} is not valid, so the choice was not recorded; fix it by hand.`);
-      return 1;
-    }
     yield* Effect.provide(Effect.gen(function* () {
       yield* (yield* StateStore).update((state) => ({ ...state, repo: root }));
       if (next !== undefined) yield* (yield* OverridesStore).write(next);

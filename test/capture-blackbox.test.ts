@@ -271,3 +271,14 @@ test('a saved Claude-only selection never captures Codex configuration', async (
   assert.doesNotMatch(result.stdout, /AGENTS\.md/);
   assert.deepEqual(changed(m), ['claude/CLAUDE.md']);
 });
+
+test('an invalid overrides.json refuses capture with exit 1 and writes nothing to the repo', async () => {
+  const m = await applied();
+  writeFileSync(join(m.state, 'overrides.json'), '{ "version": 1, "manageConfig": false, }\n');
+  writeFileSync(join(m.claude, 'CLAUDE.md'), '# local edit\n');
+
+  const result = await capture(m);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
+  assert.deepEqual(changed(m), []);
+});

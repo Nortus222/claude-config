@@ -21,7 +21,7 @@ export type CliServices = MachinePaths | Fs | Processes | StateStore | Overrides
 export type Opened = {
   paths: MachinePathsValue;
   layer: Layer.Layer<CliServices>;
-  // As read from overrides.json, issues included; a command that writes overrides refuses an invalid file.
+  // As read from overrides.json, issues included; a command that changes anything refuses an invalid file.
   overrides: Input<MachineOverrides>;
   desired: DesiredConfig;
 };
@@ -37,9 +37,24 @@ export function cliLayer(paths: MachinePathsValue): Layer.Layer<CliServices> {
     .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses())));
 }
 
+// Prints each overrides issue to stderr as `nortuscc: <source>: <message>`.
+export function reportOverrideIssues(overrides: Input<MachineOverrides>): void {
+  for (const issue of overrides.issues) console.error(`nortuscc: ${issue.source}: ${issue.message}`);
+}
+
+// True, after saying so, when the overrides have issues: a command that changes the machine or the
+// repo refuses rather than guess what this machine manages. The issues themselves are printed by
+// reportOverrideIssues (openMachine does so).
+export function refuseInvalidOverrides(overrides: Input<MachineOverrides>): boolean {
+  if (overrides.issues.length === 0) return false;
+  console.error(`nortuscc: ${overrides.source} is not valid, so nothing was changed; fix it by hand and re-run.`);
+  return true;
+}
+
 // Builds this machine's paths (unless given) and services, reads its overrides and loads the desired
 // configuration. With `mode`, the profile is loaded with the run's config-mode choice applied.
-// Override issues are reported to stderr and the run continues.
+// Override issues are reported to stderr and the run continues; commands that change anything then
+// refuse through refuseInvalidOverrides.
 export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}): Effect.Effect<Opened, RepoNotFound | ReadFailed | FsFailed> {
   return Effect.gen(function* () {
     const paths = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
@@ -47,7 +62,7 @@ export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsVa
     const overrides = yield* Effect.gen(function* () {
       return yield* (yield* OverridesStore).read;
     }).pipe(Effect.provide(layer));
-    for (const issue of overrides.issues) console.error(`nortuscc: ${issue.source}: ${issue.message}`);
+    reportOverrideIssues(overrides);
     const value = options.mode ? resolveConfigMode(options.mode, overrides.value).overrides : overrides.value;
     const desired = yield* loadProfile(paths.repo, { overrides: { ...overrides, value } }).pipe(Effect.provide(nodeFiles));
     return { paths, layer, overrides, desired };

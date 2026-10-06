@@ -7,7 +7,7 @@ import {
 } from '@nortuscc/machine';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
 import { CONFLICT_NOTE, fileOutcomes, UNPARSEABLE_NOTE } from '../config-rows.ts';
-import { domainsFor, openMachine, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
+import { domainsFor, openMachine, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 
@@ -166,6 +166,7 @@ export async function run(args: string[] = []): Promise<number> {
 
   return runCommand((signal) => Effect.gen(function* () {
     const opened = yield* openMachine({ mode });
+    if (refuseInvalidOverrides(opened.overrides)) return 1;
     const { manageConfig } = resolveConfigMode(mode, opened.overrides.value);
     const result = yield* capture(opened, { targets, takeLocal, allowShrink: rest.includes('--allow-shrink'), manageConfig, signal })
       .pipe(Effect.provide(opened.layer));

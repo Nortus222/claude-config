@@ -463,3 +463,21 @@ test('replacing an unmanaged OpenRouter config keeps its project tables', async 
   assert.equal(read(localToml(m)), OPENROUTER + '\n' + projects);
   assert.equal(await tomlState(m), 'clean');
 });
+
+// A trailing comma must not silently turn a skills-only machine back into a managed one.
+const MALFORMED_OVERRIDES = '{ "version": 1, "manageConfig": false, }\n';
+
+test('an invalid overrides.json refuses apply with exit 1 and writes nothing', async () => {
+  const m = machine();
+  mkdirSync(m.state, { recursive: true });
+  writeFileSync(overridesPath(m), MALFORMED_OVERRIDES);
+
+  const result = await apply(m);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /overrides\.json: not valid JSON/);
+  assert.equal(result.stderr.match(/not valid JSON/g)?.length, 1, 'the issue is printed once');
+  assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
+  assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
+  assert.equal(existsSync(statePath(m)), false);
+  assert.equal(read(overridesPath(m)), MALFORMED_OVERRIDES);
+});

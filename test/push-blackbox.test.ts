@@ -141,3 +141,17 @@ test('a refused conflict commits and pushes nothing; --take-local resolves it', 
   assert.equal(git(m.repo, 'show', 'HEAD:claude/CLAUDE.md'), '# local');
   assert.equal(subject(origin(m)), 'test: take local');
 });
+
+test('an invalid overrides.json refuses push with exit 1; nothing is staged, committed or pushed', async () => {
+  const m = await applied();
+  writeFileSync(join(m.state, 'overrides.json'), '{ "version": 1, "manageConfig": false, }\n');
+  writeFileSync(join(m.claude, 'CLAUDE.md'), '# local edit\n');
+  const head = git(m.repo, 'rev-parse', 'HEAD');
+
+  const result = await push(m, '-m', 'test: refused');
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(git(m.repo, 'status', '--porcelain'), '');
+  assert.equal(git(origin(m), 'rev-parse', 'main'), head);
+});

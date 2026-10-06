@@ -5,7 +5,7 @@ import { inspect, OverridesStore, plan, selectAll, StateStore } from '@nortuscc/
 import { CONFLICT_NOTE, fileOutcomes, UNPARSEABLE_NOTE } from '../config-rows.ts';
 import { parseConfigMode, persisted, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
-import { domainsFor, openMachine, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
+import { domainsFor, openMachine, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 
@@ -121,9 +121,9 @@ export async function run(args: string[] = []): Promise<number> {
 
   return runCommand((signal) => Effect.gen(function* () {
     const opened = yield* openMachine({ mode });
+    if (refuseInvalidOverrides(opened.overrides)) return 1;
     return yield* Effect.gen(function* () {
-      const recorded = yield* recordChoice(opened, mode);
-      if (recorded !== 0) return recorded;
+      yield* recordChoice(opened, mode);
 
       const { manageConfig } = resolveConfigMode(mode, opened.overrides.value);
       // A refused or unreadable file stops the run before anything is installed.
@@ -142,7 +142,7 @@ export async function run(args: string[] = []): Promise<number> {
 }
 
 // Records --skills-only / --no-skills-only in overrides.json before anything is planned, and moves
-// a never-migrated machine's choice out of state.json. Returns 1 when overrides.json is invalid.
+// a never-migrated machine's choice out of state.json. The caller has refused invalid overrides.
 const recordChoice = (opened: Opened, mode: ReturnType<typeof parseConfigMode>) =>
   Effect.gen(function* () {
     const overridesPath = join(opened.paths.stateRoot, 'overrides.json');
@@ -151,11 +151,5 @@ const recordChoice = (opened: Opened, mode: ReturnType<typeof parseConfigMode>) 
       yield* (yield* StateStore).update((state) => state);
     }
     const next = persisted(mode, opened.overrides.value);
-    if (next === undefined) return 0;
-    if (opened.overrides.issues.length > 0) {
-      console.error(`nortuscc: ${opened.overrides.source} is not valid, so the choice was not recorded; fix it by hand.`);
-      return 1;
-    }
-    yield* (yield* OverridesStore).write(next);
-    return 0;
+    if (next !== undefined) yield* (yield* OverridesStore).write(next);
   });

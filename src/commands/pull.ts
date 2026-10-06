@@ -4,10 +4,10 @@ import { readFileSync } from 'node:fs';
 import { constants, homedir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { pathsFromEnvironment } from '@nortuscc/machine';
+import { OverridesStore, pathsFromEnvironment } from '@nortuscc/machine';
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
 import { runGit } from '../git.ts';
-import { CHECKOUT, openMachine, runCommand } from '../machine.ts';
+import { CHECKOUT, cliLayer, openMachine, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 import { inspectIntegrations } from './status.ts';
@@ -36,6 +36,10 @@ export async function run(args: string[] = []): Promise<number> {
       env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
     });
     const repo = paths.repo;
+    // The child apply would refuse an invalid overrides.json too, but only after the repo had moved.
+    const overrides = yield* Effect.provide(Effect.gen(function* () { return yield* (yield* OverridesStore).read; }), cliLayer(paths));
+    reportOverrideIssues(overrides);
+    if (refuseInvalidOverrides(overrides)) return 1;
 
     const before = lockfileHash(repo);
     if (runGit(repo, ['pull', '--ff-only']).code !== 0) {
