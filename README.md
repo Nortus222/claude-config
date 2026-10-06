@@ -471,13 +471,15 @@ Every skill lands in one of seven states: `current`, `outdated`, `off-pin` (not
 at its pinned commit, or still at a ref after its pin was removed), `gone` (the
 folder no longer exists upstream), `unreachable` (the source repo could not be
 cloned), `local` (hand-authored, with no source anything could update from), and
-`available` (in the manifest but not installed).
+`available` (offered upstream by a source you already use, but not installed).
 
-Outdated and off-pin skills are copied into the backup directory before the
-updater runs, and the closing report is built by re-reading the lock afterwards,
-so it describes what happened rather than what was intended. An off-pin skill is
-reinstalled at its pin and verified against it; if verification fails the skill
-reads `failed`, the run exits 1, and the skill is removed (its backup is kept).
+Outdated skills, and off-pin skills that have a pin, are copied into the backup
+directory before the updater runs, and the closing report is built by re-reading
+the lock afterwards, so it describes what happened rather than what was
+intended. A pinned off-pin skill is reinstalled at its pin and verified against
+it; if verification fails the skill is removed (its backup is kept), its row
+reads `failed`, and the run exits 1. An off-pin skill whose pin was removed is
+reinstalled at upstream latest, which drops the recorded ref.
 
 Without a TTY and without `--yes`, `update` refuses and exits 2 rather than
 blocking a scheduled run on a prompt nothing will answer.
