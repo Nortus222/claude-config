@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git, machine, probeCalls, readJson, runCli, type Machine } from './support/cli.ts';
@@ -20,6 +22,18 @@ async function synced(options: Parameters<typeof machine>[0] = {}, ...args: stri
   const installed = await runCli(m, ['apply', '--install', '--yes', ...args]);
   assert.equal(installed.code, 0, installed.stderr);
   return m;
+}
+
+// Every path under `dir` with its contents (a link's target, a file's bytes), for read-only checks.
+// The fake installers' own call logs are left out.
+function snapshot(m: Machine): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of readdirSync(m.home, { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    if (path.startsWith(m.log)) continue;
+    out[path] = entry.isSymbolicLink() ? `-> ${readlinkSync(path)}` : entry.isFile() ? read(path) : '<dir>';
+  }
+  return out;
 }
 
 function writeIntegrations(m: Machine, document: unknown) {
@@ -53,10 +67,12 @@ test('a fresh machine is reported dirty, and status writes nothing', async () =>
   assert.equal(existsSync(join(m.state, 'backups')), false);
 });
 
-test('a synced machine is in agreement, and status leaves state.json alone', async () => {
+test('a synced machine is in agreement, and status changes nothing in its home', async () => {
   const m = await synced();
   const before = read(statePath(m));
+  const home = snapshot(m);
   const result = await status(m);
+  assert.deepEqual(snapshot(m), home);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /CLAUDE\.md\s+clean/);
   assert.match(result.stdout, /settings\.json\s+clean/);
@@ -179,6 +195,8 @@ test('an unavailable Codex CLI is unknown, not a missing install, and does not f
   // The failed read is surfaced in the inventory rather than read as an empty machine.
   assert.match(result.stdout, /codex\s+unknown/);
   assert.doesNotMatch(result.stdout, AGREEMENT);
+  // A category that could not be read is a finding --strict refuses to forgive.
+  assert.equal((await status(m, '--strict')).code, 1);
 });
 
 test('skills-only reports the configuration as skipped, whether recorded or flagged, and writes nothing', async () => {
@@ -235,6 +253,42 @@ test('undeclared items are reported and forgiven unless --strict', async () => {
   assert.doesNotMatch(result.stdout, AGREEMENT);
 
   assert.equal((await status(m, '--strict')).code, 1);
+});
+
+test('undeclared skips the agents\' own marketplaces and store links, and names what came from elsewhere', async () => {
+  const m = await synced();
+  writeFileSync(join(m.claude, 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'claude-plugins-official': {} }));
+  // A relative link into the store is the store, however it is spelled.
+  mkdirSync(join(m.agents, 'relative-one'), { recursive: true });
+  symlinkSync('../../.agents/skills/relative-one', join(m.claude, 'skills', 'relative-one'));
+  mkdirSync(join(m.claude, 'skills', 'hand-placed'));
+  symlinkSync(join(m.home, 'nowhere'), join(m.claude, 'skills', 'dangling'));
+  mkdirSync(join(m.claude, 'agents', '.internal'), { recursive: true });
+  symlinkSync(join(m.home, 'elsewhere'), join(m.claude, 'agents', 'linked-agents'));
+  // An allow entry for one category never quietens another.
+  mkdirSync(join(m.claude, 'agents', 'dx-devextreme@DevExpress-agent-skills'), { recursive: true });
+  const settings = join(m.claude, 'settings.json');
+  writeFileSync(settings, JSON.stringify({
+    ...readJson(settings),
+    hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node /h/stray.mjs' }] }] },
+  }));
+
+  const result = await status(m);
+  assert.equal(result.code, 0, result.stdout);
+  const undeclared = result.stdout.slice(result.stdout.search(/^undeclared$/m));
+  assert.doesNotMatch(undeclared, /claude-plugins-official|relative-one|\.internal/);
+  assert.match(result.stdout, /skills\s+hand-placed\s+not from the shared store/);
+  assert.match(result.stdout, /skills\s+dangling\s+broken link/);
+  assert.match(result.stdout, /agents\s+linked-agents\s+-> .*elsewhere/);
+  assert.match(result.stdout, /agents\s+dx-devextreme@DevExpress-agent-skills/);
+  // A hook is matched on its command and displayed by its event.
+  assert.match(result.stdout, /hooks\s+SessionStart\s+node \/h\/stray\.mjs/);
+  assert.match(result.stdout, /5 finding\(s\)/);
+
+  // Claude-side categories are not walked for a Codex-only report.
+  const codex = await status(m, '--target', 'codex');
+  assert.doesNotMatch(codex.stdout, /hand-placed|linked-agents|SessionStart/);
+  assert.match(codex.stdout, /all categories\s+declared/);
 });
 
 test('undeclared honours allow, declared hooks and manifest defects together', async () => {

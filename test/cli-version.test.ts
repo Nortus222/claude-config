@@ -3,15 +3,17 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
-import { cliVersion } from '../src/cli-version.mjs';
+import { cliVersion, type CliVersion, type GitRun } from '../src/cli-version.ts';
+import { run, type StatusDeps } from '../src/commands/status.ts';
+import { machine, runCli } from './support/cli.ts';
 
 const TIP = '1111111111111111111111111111111111111111';
 
 // A fake git that answers the four questions cliVersion asks, so the logic is
 // tested without a network or a remote.
-function fakeGit({ branch = 'main', remote = 'origin', tip = TIP, hasTip = true, lsRemoteFails = false }) {
+function fakeGit({ branch = 'main', remote = 'origin', tip = TIP, hasTip = true, lsRemoteFails = false }): GitRun {
   return (args) => {
     const verb = args[2];
     if (verb === 'rev-parse') return branch;
@@ -28,7 +30,7 @@ function fakeGit({ branch = 'main', remote = 'origin', tip = TIP, hasTip = true,
   };
 }
 
-function inCheckout(prefix, fn) {
+function inCheckout(prefix: string, fn: (dir: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), `nortuscc-${prefix}-`));
   mkdirSync(join(dir, '.git'), { recursive: true });
   try {
@@ -58,11 +60,10 @@ test('a checkout that already has the remote tip is current', () => {
 
 test('a checkout missing the remote tip is behind, and names where to look', () => {
   inCheckout('cli-behind', (dir) => {
-    const res = cliVersion({ root: dir, run: fakeGit({ hasTip: false }) });
-    assert.equal(res.state, 'behind');
-    assert.equal(res.sha, TIP.slice(0, 7));
-    assert.equal(res.branch, 'main');
-    assert.equal(res.remote, 'origin');
+    assert.deepEqual(
+      cliVersion({ root: dir, run: fakeGit({ hasTip: false }) }),
+      { state: 'behind', sha: TIP.slice(0, 7), branch: 'main', remote: 'origin' },
+    );
   });
 });
 
@@ -82,7 +83,7 @@ test('an unreachable remote is unknown, not current', () => {
   inCheckout('cli-offline', (dir) => {
     const res = cliVersion({ root: dir, run: fakeGit({ lsRemoteFails: true }) });
     assert.equal(res.state, 'unknown');
-    assert.match(res.note, /could not read/);
+    assert.match(res.state === 'unknown' ? res.note : '', /could not read/);
   });
 });
 
@@ -109,7 +110,7 @@ test('a branch the remote does not publish is unmanaged', () => {
 test('against a real repository, a fetched-behind clone reads as behind', () => {
   const origin = mkdtempSync(join(tmpdir(), 'nortuscc-cli-origin-'));
   const clone = mkdtempSync(join(tmpdir(), 'nortuscc-cli-clone-'));
-  const g = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+  const g = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
   try {
     execFileSync('git', ['init', '--quiet', '-b', 'main', origin]);
     writeFileSync(join(origin, 'a.txt'), 'one\n');
@@ -125,7 +126,7 @@ test('against a real repository, a fetched-behind clone reads as behind', () => 
 
     const res = cliVersion({ root: clone });
     assert.equal(res.state, 'behind', 'a commit on the remote it does not have');
-    assert.equal(res.sha, g(origin, 'rev-parse', 'HEAD').slice(0, 7));
+    assert.equal(res.state === 'behind' ? res.sha : '', g(origin, 'rev-parse', 'HEAD').slice(0, 7));
   } finally {
     rmSync(origin, { recursive: true, force: true });
     rmSync(clone, { recursive: true, force: true });
@@ -134,140 +135,83 @@ test('against a real repository, a fetched-behind clone reads as behind', () => 
 
 // --- what status does with it ------------------------------------------------
 
-const emptyCodex = { plugins: new Set(), marketplaces: new Set(), errors: [] };
+// Status runs in-process here, so the prompt and the pull can be answered without a terminal.
+async function statusWith(deps: StatusDeps): Promise<{ code: number; output: string; pulls: string[][] }> {
+  const m = machine();
+  assert.equal((await runCli(m, ['apply'])).code, 0);
+  assert.equal((await runCli(m, ['apply', '--install', '--yes'])).code, 0);
 
-async function statusWith(deps) {
-  const home = mkdtempSync(join(tmpdir(), 'nortuscc-cli-status-'));
-  const repo = join(home, 'repo');
-  mkdirSync(join(repo, 'claude'), { recursive: true });
-  mkdirSync(join(repo, 'codex'), { recursive: true });
-  mkdirSync(join(repo, 'codex', 'openrouter-glm'), { recursive: true });
-  writeFileSync(join(repo, 'claude', 'CLAUDE.md'), '# r\n');
-  writeFileSync(join(repo, 'codex', 'AGENTS.md'), '# r\n');
-  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'config.toml'), '# OpenRouter\n');
-  writeFileSync(join(repo, 'codex', 'openrouter-glm', 'models-static.json'), '{"models":[]}\n');
-  mkdirSync(join(home, '.claude'), { recursive: true });
-  mkdirSync(join(home, '.codex'), { recursive: true });
-  mkdirSync(join(home, '.codex-openrouter'), { recursive: true });
-
-  const saved = { ...process.env };
-  process.env.NORTUSCC_CLAUDE_DIR = join(home, '.claude');
-  process.env.NORTUSCC_CODEX_DIR = join(home, '.codex');
-  process.env.NORTUSCC_REPO_DIR = repo;
-  process.env.NORTUSCC_STATE_DIR = join(home, 'state');
-  process.env.NORTUSCC_AGENTS_DIR = join(home, '.agents', 'skills');
-
-  // Sync the managed files and record their baselines, so the machine starts
-  // genuinely in agreement. Without this every assertion about the exit code
-  // would pass on config drift instead of on the thing under test.
-  const { SYNC } = await import('../src/manifest.mjs');
-  const { hashFile, readLock, writeLock, setBaseline } = await import('../src/lock.mjs');
-  const { resolveEntry } = await import('../src/resolve.mjs');
-  const { applyMerge } = await import('../src/merge-keys.mjs');
-  const { copyFileSync } = await import('node:fs');
-  const lock = readLock();
-  for (const entry of SYNC) {
-    const { src, dest, mode } = resolveEntry(entry);
-    if (mode === 'copy') {
-      copyFileSync(src, dest);
-      setBaseline(lock, `${entry.target}:${entry.dest}`, hashFile(src));
-    } else if (mode === 'merge-keys') {
-      // A merge-keys entry owns named keys inside its destination rather than
-      // the whole file, and this fixture repo has no settings.keys.json of
-      // its own the way it does claude/CLAUDE.md — write one first so applyMerge
-      // has something to converge the machine from.
-      writeFileSync(src, JSON.stringify({ theme: 'auto' }) + '\n');
-      applyMerge(src, dest, `${entry.target}:${entry.dest}`, lock, { relative: entry.dest, agent: entry.target });
-    }
-  }
-  writeLock(lock);
-
-  const chunks = [];
-  const original = process.stdout.write;
-  process.stdout.write = (c) => { chunks.push(String(c)); return true; };
+  const env: Record<string, string> = {
+    PATH: `${m.bin}${delimiter}${process.env.PATH}`,
+    NORTUSCC_CLAUDE_DIR: m.claude, NORTUSCC_CODEX_DIR: m.codex, NORTUSCC_OPENROUTER_CODEX_DIR: m.openrouter,
+    NORTUSCC_AGENTS_DIR: m.agents, NORTUSCC_STATE_DIR: m.state, NORTUSCC_REPO_DIR: m.repo, NORTUSCC_TEST_LOG: m.log,
+  };
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, env);
+  const chunks: string[] = [];
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: unknown) => { chunks.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  const pulls: string[][] = [];
   try {
-    const { run } = await import('../src/commands/status.mjs');
-    const code = await run([], { codexState: emptyCodex, ...deps });
-    return { code, output: chunks.join('') };
+    const code = await run([], { pull: async (repo, target) => { pulls.push([repo, target]); return 0; }, ...deps });
+    return { code, output: chunks.join(''), pulls };
   } finally {
-    process.stdout.write = original;
-    for (const k of ['NORTUSCC_CLAUDE_DIR', 'NORTUSCC_CODEX_DIR', 'NORTUSCC_REPO_DIR', 'NORTUSCC_STATE_DIR', 'NORTUSCC_AGENTS_DIR']) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
+    process.stdout.write = write;
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
-    rmSync(home, { recursive: true, force: true });
   }
 }
 
-const behind = () => ({ state: 'behind', sha: 'abc1234', branch: 'main', remote: 'origin' });
+const behind = (): CliVersion => ({ state: 'behind', sha: 'abc1234', branch: 'main', remote: 'origin' });
 
 test('accepting the prompt pulls, and stops rather than reporting from stale code', async () => {
-  const pulls = [];
-  const { code, output } = await statusWith({
-    cliState: behind,
-    isTTY: true,
-    confirm: async () => true,
-    pull: async (args) => { pulls.push(args); return 0; },
-  });
-
+  const { code, output, pulls } = await statusWith({ cliState: behind, isTTY: true, confirm: async () => true });
   assert.equal(pulls.length, 1, 'the pull ran');
+  assert.equal(pulls[0]![1], 'all');
   assert.equal(code, 0);
-  assert.match(output, /Re-run/, 'the user is told to re-run rather than shown a stale report');
+  assert.match(output, /nortuscc updated\. Re-run `nortuscc status` to report on the new version\./);
   assert.doesNotMatch(output, /everything is in agreement/, 'no verdict from the old code');
+  assert.doesNotMatch(output, /^config$/m);
+});
+
+test('a failed pull returns its exit code', async () => {
+  const { code } = await statusWith({ cliState: behind, isTTY: true, confirm: async () => true, pull: async () => 3 });
+  assert.equal(code, 3);
 });
 
 test('declining leaves the machine alone and exits non-zero', async () => {
-  const pulls = [];
-  const { code, output } = await statusWith({
-    cliState: behind,
-    isTTY: true,
-    confirm: async () => false,
-    pull: async (args) => { pulls.push(args); return 0; },
-  });
+  const current = await statusWith({ cliState: () => ({ state: 'current' }), isTTY: true });
+  assert.equal(current.code, 0, 'the fixture machine must start genuinely clean');
 
+  const { code, output, pulls } = await statusWith({ cliState: behind, isTTY: true, confirm: async () => false });
   assert.equal(pulls.length, 0, 'nothing was pulled');
-  // The same machine reports 0 with a current CLI, so the 1 is the decline
-  // rather than drift the fixture happened to have.
-  assert.equal((await statusWith({ cliState: () => ({ state: 'current' }), isTTY: true })).code, 0);
   assert.equal(code, 1, 'a declined update is drift');
-  assert.match(output, /nortuscc\s+behind/);
-  assert.match(output, /nortuscc pull/, 'the command is named, since the prompt is gone');
+  assert.match(output, /nortuscc\s+behind\s+origin\/main is at abc1234/);
+  assert.match(output, /nortuscc pull {5}update nortuscc itself/, 'the command is named, since the prompt is gone');
 });
 
-// A scheduled status has nothing to answer a prompt. It must report and exit,
-// never block.
 test('without a terminal it never prompts, and exits non-zero', async () => {
   let asked = false;
-  const { code, output } = await statusWith({
-    cliState: behind,
-    isTTY: false,
-    confirm: async () => { asked = true; return true; },
-    pull: async () => 0,
-  });
-
+  const { code, output } = await statusWith({ cliState: behind, isTTY: false, confirm: async () => { asked = true; return true; } });
   assert.equal(asked, false, 'a run with no terminal is never asked');
   assert.equal(code, 1);
   assert.match(output, /nortuscc\s+behind/);
 });
 
-// Being offline is ordinary and offers nothing to do, unlike an exposure read
-// that failed against local files.
-test('an unreachable remote is reported but does not fail the run', async () => {
-  const clean = await statusWith({ cliState: () => ({ state: 'current' }), isTTY: true });
-  assert.equal(clean.code, 0, 'the fixture machine must start genuinely clean');
-
+test('an unreachable remote is reported, never asked about, and does not fail the run', async () => {
   const { code, output } = await statusWith({
     cliState: () => ({ state: 'unknown', note: 'offline' }),
     isTTY: true,
     confirm: async () => { throw new Error('must not prompt on unknown'); },
   });
-
-  assert.match(output, /nortuscc\s+unknown/);
-  assert.equal(code, 0, 'offline is not drift, and must not be asked about');
+  assert.match(output, /nortuscc\s+unknown\s+offline/);
+  assert.equal(code, 0, 'offline is not drift');
 });
 
 test('a current or unmanaged CLI prints no cli section at all', async () => {
-  for (const state of ['current', 'unmanaged']) {
+  for (const state of ['current', 'unmanaged'] as const) {
     const { output } = await statusWith({ cliState: () => ({ state }), isTTY: true });
     assert.doesNotMatch(output, /^cli$/m, `${state} should be silent`);
   }
