@@ -47,7 +47,7 @@ npm run desktop:build -w apps/desktop
 npm run smoke -w apps/desktop -- "src-tauri/target/release/bundle/macos/Nortuscc.app"
 ```
 
-The second command runs the packaged Rust owner (`--smoke`, no window) on a temporary HOME with an empty PATH from a temporary working directory. The app embeds the backend bundle, an unmodified Bun executable and its license under `Contents/Resources/backend-runtime`; Rust resolves that path through Tauri's resource directory. Resources and outputs are git-ignored; the root `package-lock.json` and the Cargo lockfile are committed. The resource mapping in `tauri.conf.json` names the macOS arm64 target.
+The second command runs the packaged Rust owner (`--smoke <temporary HOME>`, no window; it refuses any HOME outside the system temp dir) on a temporary HOME with an empty PATH from a temporary working directory. The app embeds the backend bundle, an unmodified Bun executable and its license under `Contents/Resources/backend-runtime`; Rust resolves that path through Tauri's resource directory. Resources and outputs are git-ignored; the root `package-lock.json` and the Cargo lockfile are committed. The resource mapping in `tauri.conf.json` names the macOS arm64 target.
 
 ## Protocol v2
 
