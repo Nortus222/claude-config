@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { diffItems, itemValues, parseItemId } from '../src/index.ts';
+import { desiredOfDocuments, diffItems, itemIdOf, itemValues, parseItemId } from '../src/index.ts';
 import { BASE, json, withDocuments } from './support/repo.ts';
 
 test('every kind of item in a setup has a value', () => {
@@ -85,3 +85,23 @@ for (const [id, ref] of ids) {
     assert.deepEqual(parseItemId(id), ref);
   });
 }
+
+test('a change confined to a preserved projects table is no item', () => {
+  const toml = (trust: string) => `model = "glm"\n\n[projects."/a"]\ntrust_level = "${trust}"\n`;
+  const before = withDocuments(BASE, { 'codex/openrouter-glm/config.toml': toml('trusted') });
+  const after = withDocuments(BASE, { 'codex/openrouter-glm/config.toml': toml('untrusted') });
+  assert.deepEqual(diffItems(itemValues(before), itemValues(after)), []);
+  const managed = withDocuments(BASE, { 'codex/openrouter-glm/config.toml': toml('trusted').replace('glm', 'other') });
+  assert.deepEqual(diffItems(itemValues(before), itemValues(managed)).map((c) => c.itemId), ['file:codex:config.toml']);
+});
+
+test('item values are keyed by the ids itemIdOf gives the observed keys', () => {
+  const docs = withDocuments(BASE, { 'codex/openrouter-glm/config.toml': 'model = "glm"\n' });
+  const desired = desiredOfDocuments(docs);
+  const keys = [
+    ...desired.files.flatMap((f) => f.mode === 'copy' ? (docs[f.src] === undefined ? [] : [`config:${f.id}`]) : Object.keys(f.keys ?? {}).map((k) => `config:${f.id}#${k}`)),
+    ...desired.skills.map((s) => `skill:${s.name}`),
+    ...desired.integrations.map((i) => `integration:${i.id}`),
+  ];
+  assert.deepEqual(keys.map((k) => itemIdOf(k, desired)!).sort(), [...itemValues(docs).keys()].sort());
+});

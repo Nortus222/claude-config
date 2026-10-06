@@ -1,4 +1,4 @@
-import { canonical, hashText } from '@nortuscc/machine';
+import { canonical, contentHash } from '@nortuscc/machine';
 import { desiredOfDocuments, documentOf, type Documents } from './documents.ts';
 
 export type ItemKind = 'setting' | 'file' | 'skill' | 'integration';
@@ -51,7 +51,7 @@ export const itemValues = (documents: Documents): ItemValues => {
   for (const file of desired.files) {
     if (file.mode === 'copy') {
       const text = documentOf(documents, file.src);
-      if (text !== undefined) values.set(`file:${file.id}`, hashText(text));
+      if (text !== undefined) values.set(`file:${file.id}`, contentHash(file, text)!);
       continue;
     }
     for (const [key, { value }] of Object.entries(file.keys ?? {})) values.set(`setting:${file.id}#${key}`, canonical(value));
