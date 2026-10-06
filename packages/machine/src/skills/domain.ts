@@ -170,11 +170,19 @@ const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
   for (const name of names) yield* backups.preserve(join(store, name), join('skills', name));
 });
 
-// Re-adds every scoped skill a readable target cannot load. An unreadable target is reported, never repaired.
+// Installs at a pin. Skills already present are backed up first, since a pinned install may replace them.
+const installPinned = (source: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) => Effect.gen(function* () {
+  yield* preserveAll(names);
+  return yield* runInstaller(addCommand({ source, skills: names, targets }));
+});
+
+// Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
+// An unreadable target is reported, never repaired.
 const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () {
   const installed = new Set(yield* installedSkillNames);
   const scope = sortedUnique([...report.desired.skills.map((s) => s.name), ...skillNamesOf(step)]).filter((n) => installed.has(n));
   const lock = yield* readSkillLock;
+  const pins = pinsBySource(report.desired);
   const exposure = yield* readExposure(step.targets ?? TARGETS);
   const readable = (step.targets ?? TARGETS).filter((t) => exposure.list[t] !== undefined);
   const bySource = new Map<string, string[]>();
@@ -188,7 +196,10 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
   const failures: string[] = [];
   for (const source of [...bySource.keys()].sort(byCodePoint)) {
     const skills = bySource.get(source)!;
-    const result = yield* runInstaller(addCommand({ source, skills, targets: readable }));
+    const sha = pins.get(source);
+    const result = sha
+      ? yield* installPinned(pinnedSource(source, sha), skills, readable)
+      : yield* runInstaller(addCommand({ source, skills, targets: readable }));
     if (result.ok) count += skills.length;
     else {
       ok = false;
@@ -220,12 +231,6 @@ const writeManifest = (report: MachineReport) => Effect.gen(function* () {
   if (!outcome.write) return { ok: true, note: `left alone — ${outcome.reason}` };
   yield* fs.writeTextAtomic(join(paths.repo, MANIFEST_FILE), emitManifest(groups));
   return { ok: true, note: `written — ${outcome.reason}` };
-});
-
-// Installs at a pin. Skills already present are backed up first, since a pinned install may replace them.
-const installPinned = (source: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) => Effect.gen(function* () {
-  yield* preserveAll(names);
-  return yield* runInstaller(addCommand({ source, skills: names, targets }));
 });
 
 const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>

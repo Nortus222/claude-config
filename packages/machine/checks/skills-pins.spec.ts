@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, execute, inspectSkills, lockRef, machinePaths, nodeFs, pinnedSource, pinsBySource, plan, planUpdates, Processes,
+  backupsForRun, checkUpdates, execute, inspectSkills, lockRef, machinePaths, nodeFs, pinnedSource, pinsBySource, plan, planUpdates, Processes,
   samePlan, selectAll, skillsDomain, splitPinned, updateItems,
   type Command, type MachinePathsValue, type MachineReport, type Observed, type Plan, type Progress,
 } from '../src/index.ts';
@@ -120,7 +120,30 @@ test('update reinstalls an off-pin skill with add at its pin, never with update'
   ]);
 });
 
+test('apply re-exposes a pinned unlinked skill at its pin', () => {
+  const r = report([{ ...item('a', 'unlinked', 'apply'), key: 'skill-link:claude:a', target: 'claude' }], [skill('a', 'o/r', pin(SHA))]);
+  assert.deepEqual(plan('apply', r, selectAll, [skillsDomain]).steps.map((s) => s.key), [`skills:install:o/r#${SHA}`]);
+});
+
 // ---- update inspection ----
+
+test('checkUpdates never clones a pinned source', async () => {
+  const m = skillsMachine();
+  for (const n of ['p', 'u']) mkdirSync(join(m.paths.agentsSkills, n), { recursive: true });
+  writeLock(m.paths, {
+    p: { source: 'p/p', sourceUrl: 'url-pinned', skillPath: 's/p/SKILL.md', ref: SHA },
+    u: { source: 'u/u', sourceUrl: 'url-free', skillPath: 's/u/SKILL.md' },
+  });
+  const commands: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (c: Command) => Effect.sync(() => (commands.push(c), { code: 1, stdout: '' })) });
+  const desired = desiredWith([skill('p', 'p/p', pin(SHA)), skill('u', 'u/u')]);
+  const result = await Effect.runPromise(checkUpdates(desired).pipe(Effect.provide(Layer.mergeAll(m.layer, processes))));
+  const clones = commands.filter((c) => c.cmd === 'git' && c.args[0] === 'clone');
+  assert.ok(clones.some((c) => c.args.includes('url-free')));
+  assert.ok(!clones.some((c) => c.args.includes('url-pinned')));
+  assert.deepEqual(result.current, [{ name: 'p', source: 'p/p' }]);
+  assert.deepEqual(result.unknown, [{ name: 'u', source: 'u/u' }]);
+});
 
 test('planUpdates classifies pinned skills by their lock ref without a remote tree', () => {
   const entry = { source: 'o/r', sourceUrl: 'u', skillPath: 's/a/SKILL.md', skillFolderHash: 'h' };
@@ -193,5 +216,26 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
   assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
   assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
     [`npx -y skills add o/r#${SHA} --skill a --agent claude-code codex --global --yes`]);
+  assert.equal(readLock(m.paths).a!.ref, SHA);
+});
+
+test('update re-exposes a pinned skill lacking an agent link at its pin, never at upstream HEAD', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
+  writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a\n');
+  writeLock(m.paths, { a: { source: 'o/r', ref: SHA } });
+  const installer = fakeInstaller(m.paths);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  // `stale` makes the plan non-empty, so it carries an expose step; `a` lacks only its claude-code link.
+  const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r', pin(SHA))]);
+  const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
+  const expose: Plan = { kind: 'update', steps: p.steps.filter((s) => s.key === 'skills:expose').map((s) => ({ ...s, touches: [] })), skipped: [] };
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(expose, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
+    [`npx -y skills add o/r#${SHA} --skill a --agent claude-code --global --yes`]);
+  assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
   assert.equal(readLock(m.paths).a!.ref, SHA);
 });

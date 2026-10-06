@@ -8,15 +8,13 @@ import type { Observed } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
 import { Processes, type Command } from '../processes.ts';
 import type { SkillLock } from './manifest.ts';
-import { lockRef, offPinNote, pinsBySource } from './pins.ts';
+import { lockRef, offPinNote, pinsBySource, short } from './pins.ts';
 import { installedSkillNames, readSkillLock } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const str = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
-
-export const short = (sha: string | null | undefined): string => (sha ? sha.slice(0, 7) : 'unknown');
 
 // The lock records the path of a skill's SKILL.md, but the tree SHA that
 // identifies a version belongs to the directory containing it. A SKILL.md at

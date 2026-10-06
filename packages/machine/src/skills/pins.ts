@@ -2,7 +2,9 @@ import { isCommitSha, type DesiredConfig } from '@nortuscc/profile-engine';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
-const short = (sha: string) => sha.slice(0, 7);
+
+// A sha as the reports print it: its first seven characters.
+export const short = (sha: string | null | undefined): string => (sha ? sha.slice(0, 7) : 'unknown');
 
 // The ref the installer recorded for a skill, or null when it recorded none.
 export const lockRef = (meta: unknown): string | null =>
