@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
@@ -63,3 +63,35 @@ for (const [what, text] of invalid) {
     assert.equal(readFileSync(m.path, 'utf8'), text);
   });
 }
+
+test('write over an invalid sync.json fails and leaves it byte-identical', async () => {
+  const m = machine();
+  m.write('{ nope');
+  const res = await m.run((s) => s.write({ [EFFORT]: COMMIT }));
+  assert.ok(res._tag === 'Failure');
+  assert.equal(res.failure._tag, 'SyncStateInvalid');
+  assert.equal(readFileSync(m.path, 'utf8'), '{ nope');
+});
+
+test('write refuses invalid holds without creating a file', async () => {
+  for (const held of ([{ bogus: 'main' }, { [EFFORT]: 'main' }, { [EFFORT]: 5 as unknown as string }] as Array<Record<string, string>>)) {
+    const m = machine();
+    const res = await m.run((s) => s.write(held));
+    assert.ok(res._tag === 'Failure');
+    assert.equal(res.failure._tag, 'SyncStateInvalid');
+    assert.equal(existsSync(m.path), false);
+  }
+});
+
+test('commit validation: 64-hex accepted; 39-char, uppercase, non-string rejected', async () => {
+  const m = machine();
+  const ok = await m.run((s) => s.write({ [EFFORT]: 'a'.repeat(64) }));
+  assert.ok(ok._tag === 'Success');
+  for (const bad of ['a'.repeat(39), 'A'.repeat(40), 7]) {
+    const n = machine();
+    n.write(JSON.stringify({ version: 1, held: { [EFFORT]: bad } }));
+    const read = await n.run((s) => s.read);
+    assert.ok(read._tag === 'Failure');
+    assert.equal(read.failure._tag, 'SyncStateInvalid');
+  }
+});
