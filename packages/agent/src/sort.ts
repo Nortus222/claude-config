@@ -56,15 +56,19 @@ export const entryOf = (itemId: string, snapshot: Snapshot): Effect.Effect<Entry
 const sameEntry = (a: Entry | undefined, b: Entry | undefined): boolean =>
   a === undefined || b === undefined ? a === b : canonical(a) === canonical(b);
 
-// Pending: a setup item whose desired value changed between the applied revision and the effective
+// Pending: an item the machine is behind on (`apply`) whose desired value changed between the applied revision and the effective
 // configuration, because a person accepted the change. Drift: every other differing item, including
-// machine-local keys with no item id. Only pending items are ever auto-applied.
+// machine-local keys with no item id and every `capture` item, since a local edit may be deliberate. Only pending items are ever auto-applied.
 export const sortItems = (report: MachineReport, applied: Snapshot, effective: Snapshot): Effect.Effect<Sorted, FsFailed, Fs> =>
   Effect.gen(function* () {
     const pending: Pending[] = [];
     const drift: string[] = [];
     for (const item of report.items) {
       if (!differs(item)) continue;
+      if (item.disposition === 'capture') {
+        drift.push(item.key);
+        continue;
+      }
       const itemId = itemIdOf(item.key, effective.desired);
       if (itemId === undefined) {
         drift.push(item.key);

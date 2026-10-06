@@ -76,3 +76,22 @@ test('items in sync, blocked or excluded are neither pending nor drift', async (
   const items = [observed(EFFORT_KEY, 'in-sync'), observed('config:claude:CLAUDE.md', 'blocked'), observed('integration:hk', 'excluded', 'integrations')];
   assert.deepEqual(await sort(items, snap(desiredOf()), snap(desiredOf({ settings: { effortLevel: 'high' } }))), { pending: [], drift: [] });
 });
+
+test('a locally edited (capture) item is drift even when its desired value changed', async () => {
+  const sorted = await sort([observed(EFFORT_KEY, 'capture')], snap(desiredOf({ settings: { effortLevel: 'low' } })), snap(desiredOf({ settings: { effortLevel: 'high' } })));
+  assert.deepEqual(sorted, { pending: [], drift: [EFFORT_KEY] });
+});
+
+test('an integration whose declaration keys are only reordered is drift', async () => {
+  const a = hook('hk');
+  const b = { ...a, declaration: Object.fromEntries(Object.entries(a.declaration).reverse()) as typeof a.declaration };
+  const sorted = await sort([observed('integration:hk', 'apply', 'integrations')], snap(desiredOf({ integrations: [a] })), snap(desiredOf({ integrations: [b] })));
+  assert.deepEqual(sorted, { pending: [], drift: ['integration:hk'] });
+});
+
+test('a settings key removed from the effective configuration is pending and held', async () => {
+  const sorted = await sort([observed(EFFORT_KEY)], snap(desiredOf({ settings: { effortLevel: 'low' } })), snap(desiredOf({ settings: {} })));
+  assert.equal(sorted.pending.length, 1);
+  assert.notEqual(sorted.pending[0]!.verdict.kind, 'inert');
+  assert.deepEqual(sorted.drift, []);
+});
