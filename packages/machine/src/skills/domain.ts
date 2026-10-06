@@ -126,7 +126,8 @@ const applySteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: 
 };
 
 // Prune, refresh, adopt or move to a pin, then re-expose; the manifest is rewritten only when the skill set changed.
-// An off-pin skill is reinstalled with `add`: `update` reinstalls at the lock's recorded ref, never at a new pin.
+// An off-pin skill is reinstalled with `add`: `update` reinstalls at the lock's recorded ref, never at a new pin,
+// and an unpinned off-pin skill's ref-less `add` installs upstream latest and drops the recorded ref.
 const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: ReadonlyMap<string, string>) => {
   const named = (state: string) => items.filter((i) => i.state === state).map((i) => i.label);
   const gone = named('gone');

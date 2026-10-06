@@ -209,3 +209,53 @@ test('update re-exposes a pinned skill lacking an agent link at its pin, never a
   assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
   assert.equal(readLock(m.paths).a!.ref, sha);
 });
+
+// ---- unpinning ----
+
+test('planUpdates puts an unpinned skill whose lock records a ref off-pin, reachable or not', () => {
+  const entry = { source: 'o/r', sourceUrl: 'u', skillPath: 's/a/SKILL.md', skillFolderHash: 'h', ref: SHA };
+  for (const remoteTrees of [new Map(), new Map([['u', new Map([['s/a', 'other']])]])]) {
+    const result = planUpdates({ lock: { skills: { a: entry } }, installed: ['a'], remoteTrees, pins: new Map() });
+    assert.deepEqual([result.outdated, result.unknown, result.current], [[], [], []]);
+    assert.deepEqual(result.offPin, [{ name: 'a', source: 'o/r', from: SHA, to: null }]);
+    const items = updateItems({ ...result, available: [] }, desiredWith([skill('a', 'o/r')]));
+    assert.deepEqual(items.map((i) => [i.key, i.state, i.disposition, i.note]),
+      [['skill:a', 'off-pin', 'apply', 'installed at aaaaaaa, unpinned']]);
+  }
+  const unpinnedWithoutPins = planUpdates({ lock: { skills: { a: entry } }, installed: ['a'], remoteTrees: new Map() });
+  assert.deepEqual(unpinnedWithoutPins.offPin, [{ name: 'a', source: 'o/r', from: SHA, to: null }]);
+});
+
+test('update reinstalls an unpinned skill stuck at a ref with add at upstream latest, never with update', () => {
+  const r = report([item('a', 'off-pin', 'apply')], [skill('a', 'o/r')]);
+  const p = plan('update', r, selectAll, [skillsDomain]);
+  assert.deepEqual(p.steps.map((s) => [s.key, s.touches]), [
+    ['skills:install:o/r', ['skills/a']],
+    ['skills:expose', []],
+  ]);
+  assert.ok(!p.steps.some((s) => s.key === 'skills:update'));
+});
+
+test('removing a pin reinstalls the skill without a ref', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  const src = skillSource(m.home);
+  const old = src.commit({ 'skills/a/SKILL.md': '# a old\n' });
+  src.commit({ 'skills/a/SKILL.md': '# a latest\n' });
+  mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
+  writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a old\n');
+  writeLock(m.paths, { a: { source: 'o/r', sourceUrl: src.url, skillPath: 'skills/a/SKILL.md', ref: old } });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const desired = desiredWith([skill('a', 'o/r')]);
+  const plan0 = await Effect.runPromise(checkUpdates(desired).pipe(Effect.provide(layer)));
+  const r = report(updateItems(plan0, desired), desired.skills);
+  const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.deepEqual([done.type, done.failed], ['done', 0]);
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
+    ['npx -y skills add o/r --skill a --agent claude-code --global --yes']);
+  assert.equal(readLock(m.paths).a!.ref, undefined);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a latest\n');
+});

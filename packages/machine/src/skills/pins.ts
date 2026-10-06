@@ -24,6 +24,6 @@ export const splitPinned = (value: string): { source: string; sha?: string } => 
   return at >= 0 && isCommitSha(sha) ? { source: value.slice(0, at), sha } : { source: value };
 };
 
-// The note on a skill installed at a ref other than its pin.
-export const offPinNote = (from: string | null, to: string): string =>
-  `installed at ${from ? short(from) : 'no pin'}, pinned to ${short(to)}`;
+// The note on a skill installed at a ref other than its pin; `to: null` means the source is no longer pinned.
+export const offPinNote = (from: string | null, to: string | null): string =>
+  `installed at ${from ? short(from) : 'no pin'}, ${to ? `pinned to ${short(to)}` : 'unpinned'}`;

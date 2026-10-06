@@ -98,12 +98,14 @@ export type UpdatePlan = {
   unknown: { name: string; source: string }[];
   local: string[];
   available: { name: string; source: string }[];
-  // Pinned skills whose lock records another ref; present only when planUpdates was given pins.
-  offPin?: { name: string; source: string; from: string | null; to: string }[];
+  // Skills whose lock ref disagrees with the pin: a pinned skill at another ref (or none), or an unpinned
+  // skill still at a ref (`to: null`). Present when planUpdates was given pins or found such a skill.
+  offPin?: { name: string; source: string; from: string | null; to: string | null }[];
 };
 
 // A skill whose lock source is pinned is judged by its recorded ref against the pin, never against
-// upstream HEAD, so it needs no remote tree and is never `unknown`.
+// upstream HEAD, so it needs no remote tree and is never `unknown`. An unpinned skill whose lock still
+// records a ref is off-pin too: `update` would reinstall that ref forever, so only a ref-less `add` repairs it.
 export function planUpdates(input: {
   lock: SkillLock;
   installed: ReadonlyArray<string>;
@@ -130,6 +132,11 @@ export function planUpdates(input: {
       else offPin.push({ name: entry.name, source: entry.source, from: recorded, to: pin });
       continue;
     }
+    const stuck = lockRef(input.lock.skills[entry.name]);
+    if (stuck !== null) {
+      offPin.push({ name: entry.name, source: entry.source, from: stuck, to: null });
+      continue;
+    }
     const trees = input.remoteTrees.get(entry.sourceUrl);
     if (!trees) {
       // The source could not be reached at all. Saying "current" here would be
@@ -150,7 +157,7 @@ export function planUpdates(input: {
     // installed, and re-fetching is exactly what repairs that.
     plan.outdated.push({ name: entry.name, source: entry.source, from: entry.hash, to: remote });
   }
-  return input.pins ? { ...plan, offPin } : plan;
+  return input.pins || offPin.length ? { ...plan, offPin } : plan;
 }
 
 // Every SKILL.md in a source repo, reduced to the skills it would install as.
