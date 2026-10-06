@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeFakeBin } from './support/cli.ts';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -145,14 +146,13 @@ if (agent === 'claude') {
 `;
 
   for (const name of ['claude', 'codex', 'npx']) {
-    const path = join(dir, name);
-    writeFileSync(
-      path,
+    writeFakeBin(
+      dir,
+      name,
       name === 'codex' && codexUnavailable
         ? '#!/usr/bin/env node\nprocess.stderr.write("codex unavailable\\n"); process.exit(127);\n'
         : script(name),
     );
-    chmodSync(path, 0o755);
   }
   return dir;
 }

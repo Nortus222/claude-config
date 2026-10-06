@@ -11,6 +11,14 @@ import { fileURLToPath } from 'node:url';
 export const REPO = fileURLToPath(new URL('../..', import.meta.url));
 export const BIN = join(REPO, 'bin', 'nortuscc.mjs');
 
+// Writes a fake executable that runs `script` with node. Windows cannot run a shebang script, so it
+// also gets a .cmd shim there; without one the real tool later on PATH would run against the real home.
+export function writeFakeBin(dir: string, name: string, script: string): void {
+  writeFileSync(join(dir, name), script);
+  chmodSync(join(dir, name), 0o755);
+  if (process.platform === 'win32') writeFileSync(join(dir, `${name}.cmd`), `@"${process.execPath}" "%~dp0${name}" %*\r\n`);
+}
+
 export type Machine = {
   home: string; claude: string; codex: string; openrouter: string; agents: string; state: string;
   /** NORTUSCC_REPO_DIR. */
@@ -204,14 +212,13 @@ if (agent === 'claude') {
 `;
 
   for (const name of ['claude', 'codex', 'npx']) {
-    const path = join(dir, name);
-    writeFileSync(
-      path,
+    writeFakeBin(
+      dir,
+      name,
       name === 'codex' && codexUnavailable
         ? '#!/usr/bin/env node\nprocess.stderr.write("codex unavailable\\n"); process.exit(127);\n'
         : script(name),
     );
-    chmodSync(path, 0o755);
   }
   return dir;
 }

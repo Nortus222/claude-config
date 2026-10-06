@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { writeFakeBin } from './support/cli.ts';
 
 const exec = promisify(execFile);
 const REPO = fileURLToPath(new URL('..', import.meta.url));
@@ -87,8 +88,7 @@ function machine(options: { installed: Record<string, string>; manifest: string;
   writeFileSync(upstreamFile, JSON.stringify(Object.fromEntries(
     Object.entries(up.trees).map(([name, hash]) => [name, entry(name, hash)]),
   )));
-  writeFileSync(join(m.bin, 'npx'), FAKE_NPX);
-  chmodSync(join(m.bin, 'npx'), 0o755);
+  writeFakeBin(m.bin, 'npx', FAKE_NPX);
   const env = {
     ...process.env,
     PATH: `${m.bin}${delimiter}${process.env.PATH}`,
