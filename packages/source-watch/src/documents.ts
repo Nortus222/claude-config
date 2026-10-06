@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { parsePins } from '@nortuscc/profile-engine';
 import { Data, Effect } from 'effect';
 import { redact } from './redact.ts';
 
@@ -25,8 +26,13 @@ const isObject = (value: unknown): value is Json =>
 const invalid = (field: Field, problem: string) =>
   new DocumentInvalid({ reason: redact(`${FILES[field]} ${problem}`) });
 
-// The whole document, checked the way the profile engine reads skill-pins.json.
+// The whole document. `pins` is checked by the profile engine's own parser, so an edit never leaves
+// a file the engine would ignore; `ignored` (source-ignores.json, not an engine document) is checked here.
 function parse(text: string, field: Field): Json {
+  if (field === 'pins') {
+    const [issue] = parsePins(text).issues;
+    if (issue !== undefined) throw invalid(field, issue.message);
+  }
   let document: unknown;
   try {
     document = JSON.parse(text);
@@ -71,6 +77,7 @@ export function editEntry(text: string | undefined, field: Field, source: string
   let next = JSON.stringify({ ...document, [field]: entries }, null, indent);
   if (eol === '\r\n') next = next.replace(/\n/g, '\r\n');
   if (/\r?\n$/.test(original)) next += eol;
+  parse(next, field); // the edited document must still be valid, e.g. a pin that is not a commit sha
   return edited(next);
 }
 

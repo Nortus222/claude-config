@@ -8,6 +8,10 @@ import { pinSource } from '../src/pins.ts';
 import { tempDir } from './fixtures.ts';
 
 const SHA = 'a'.repeat(40);
+const V1 = SHA;
+const V2 = 'b'.repeat(40);
+const V3 = 'c'.repeat(40);
+const V9 = 'd'.repeat(40);
 const pins = (entries: object) => JSON.stringify({ version: 1, pins: entries }, null, 2) + '\n';
 const ignored = (entries: object) => JSON.stringify({ version: 1, ignored: entries }, null, 2) + '\n';
 
@@ -23,49 +27,49 @@ const failure = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.
 
 test('pinning in a repo without a pin file creates it, with no backup', async (t) => {
   const { repo, options } = setup(t);
-  assert.deepEqual(await Effect.runPromise(pinSource(repo, 'ada/skills', 'v1', options)), {});
-  assert.equal(read(repo), pins({ 'ada/skills': 'v1' }));
+  assert.deepEqual(await Effect.runPromise(pinSource(repo, 'ada/skills', V1, options)), {});
+  assert.equal(read(repo), pins({ 'ada/skills': V1 }));
   assert.equal(existsSync(options.backupDir), false);
   assert.deepEqual(readdirSync(repo), ['skill-pins.json']);
 });
 
 test('changing a pin backs up the old file first and reports the previous ref', async (t) => {
-  const original = pins({ 'ada/skills': 'v1', 'bob/tools': 'v3' });
+  const original = pins({ 'ada/skills': V1, 'bob/tools': V3 });
   const { repo, options } = setup(t, original);
-  const written = await Effect.runPromise(pinSource(repo, 'ada/skills', 'v2', options));
-  assert.equal(written.previous, 'v1');
+  const written = await Effect.runPromise(pinSource(repo, 'ada/skills', V2, options));
+  assert.equal(written.previous, V1);
   assert.match(written.backup!, /skill-pins\.json\.\d{8}T\d{9}Z(-\d+)?$/);
   assert.ok(written.backup!.startsWith(options.backupDir));
   assert.equal(readFileSync(written.backup!, 'utf8'), original);
-  assert.equal(read(repo), pins({ 'ada/skills': 'v2', 'bob/tools': 'v3' }));
+  assert.equal(read(repo), pins({ 'ada/skills': V2, 'bob/tools': V3 }));
   assert.deepEqual(readdirSync(repo), ['skill-pins.json']);
 });
 
 test('calling again with the previous value undoes a change and a first pin', async (t) => {
-  const original = pins({ 'ada/skills': 'v1', 'bob/tools': 'v3' });
+  const original = pins({ 'ada/skills': V1, 'bob/tools': V3 });
   const { repo, options } = setup(t, original);
-  const changed = await Effect.runPromise(pinSource(repo, 'ada/skills', 'v2', options));
+  const changed = await Effect.runPromise(pinSource(repo, 'ada/skills', V2, options));
   await Effect.runPromise(pinSource(repo, 'ada/skills', changed.previous, options));
   assert.equal(read(repo), original);
 
-  const first = await Effect.runPromise(pinSource(repo, 'new/source', 'v9', options));
+  const first = await Effect.runPromise(pinSource(repo, 'new/source', V9, options));
   assert.equal(first.previous, undefined);
   await Effect.runPromise(pinSource(repo, 'new/source', first.previous, options));
   assert.equal(read(repo), original);
 });
 
 test('two changes in a row keep two distinct backups', async (t) => {
-  const { repo, options } = setup(t, pins({ a: 'v1' }));
-  const one = await Effect.runPromise(pinSource(repo, 'a', 'v2', options));
-  const two = await Effect.runPromise(pinSource(repo, 'a', 'v3', options));
+  const { repo, options } = setup(t, pins({ a: V1 }));
+  const one = await Effect.runPromise(pinSource(repo, 'a', V2, options));
+  const two = await Effect.runPromise(pinSource(repo, 'a', V3, options));
   assert.notEqual(one.backup, two.backup);
   assert.equal(readdirSync(options.backupDir).length, 2);
-  assert.equal(readFileSync(two.backup!, 'utf8'), pins({ a: 'v2' }));
+  assert.equal(readFileSync(two.backup!, 'utf8'), pins({ a: V2 }));
 });
 
 test('an unchanged pin, or removing a pin from a repo without a pin file, writes nothing', async (t) => {
-  const { repo, options } = setup(t, pins({ a: 'v1' }));
-  assert.deepEqual(await Effect.runPromise(pinSource(repo, 'a', 'v1', options)), { previous: 'v1' });
+  const { repo, options } = setup(t, pins({ a: V1 }));
+  assert.deepEqual(await Effect.runPromise(pinSource(repo, 'a', V1, options)), { previous: V1 });
   assert.equal(existsSync(options.backupDir), false);
 
   const empty = setup(t);
@@ -76,15 +80,15 @@ test('an unchanged pin, or removing a pin from a repo without a pin file, writes
 test('an invalid pin file is left untouched and not backed up', async (t) => {
   const broken = '{"version":2,"pins":{"a":"v1"}}';
   const { repo, options } = setup(t, broken);
-  const error = await failure(pinSource(repo, 'a', 'v2', options));
+  const error = await failure(pinSource(repo, 'a', V2, options));
   assert.equal(error._tag, 'DocumentInvalid');
   assert.equal(read(repo), broken);
   assert.equal(existsSync(options.backupDir), false);
 });
 
-test('empty sources and refs that are empty or read as options are refused', async (t) => {
+test('empty sources and refs that are not full commit shas are refused', async (t) => {
   const { repo, options } = setup(t);
-  for (const [source, ref] of [['a', ''], ['a', '--upload-pack=x'], ['', 'v1']] as const) {
+  for (const [source, ref] of [['a', ''], ['a', '--upload-pack=x'], ['', V1], ['a', 'main'], ['a', 'v1'], ['a', SHA.slice(0, 7)], ['a', SHA.toUpperCase()]] as const) {
     const error = await failure(pinSource(repo, source, ref, options));
     assert.equal(error._tag, 'DocumentInvalid');
   }
@@ -93,7 +97,7 @@ test('empty sources and refs that are empty or read as options are refused', asy
 
 test('a write that cannot happen is a WriteFailed', async (t) => {
   const { root, options } = setup(t);
-  const error = await failure(pinSource(join(root, 'missing'), 'a', 'v1', options));
+  const error = await failure(pinSource(join(root, 'missing'), 'a', V1, options));
   assert.equal(error._tag, 'WriteFailed');
 });
 
@@ -120,10 +124,10 @@ test('only full commit shas can be ignored', async (t) => {
 });
 
 test('the backup path is absolute even when the backup directory is relative', async (t) => {
-  const original = pins({ a: 'v1' });
+  const original = pins({ a: V1 });
   const { repo, options } = setup(t, original);
   const relativeDir = relative(process.cwd(), options.backupDir);
-  const written = await Effect.runPromise(pinSource(repo, 'a', 'v2', { backupDir: relativeDir }));
+  const written = await Effect.runPromise(pinSource(repo, 'a', V2, { backupDir: relativeDir }));
   assert.ok(isAbsolute(written.backup!));
   assert.equal(readFileSync(written.backup!, 'utf8'), original);
 });
