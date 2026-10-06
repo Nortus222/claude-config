@@ -193,7 +193,7 @@ async function runCli(args, { env, fixtureBinDir }) {
 function expectedDefaultInstallCalls() {
   return [
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
-    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated'] },
+    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated-remote'] },
   ];
 }
 

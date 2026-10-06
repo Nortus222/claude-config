@@ -10,4 +10,6 @@ a pin could never be enforced.
 
 - Removing an entry stops new machines being offered it; it uninstalls nothing. Record the
   uninstall commands where the removal is explained.
-- `claude-plugins-official` is treated as built in, because Claude Code adds it itself.
+- `claude-plugins-official`, `openai-curated` and `openai-curated-remote` are treated as built in, because
+  the agents provide them. Inspect still blocks a Codex plugin whose marketplace Codex does not offer on
+  that machine.

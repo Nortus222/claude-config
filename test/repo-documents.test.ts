@@ -17,14 +17,15 @@ test('the committed documents resolve without issues', () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-// Superpowers ships from official marketplaces both agents already know, so no marketplace and no
+// Superpowers ships from official marketplaces both agents already offer (Codex's is the remote
+// catalog it serves itself), so no marketplace and no
 // hook is declared (context-mode and claude-mem were dropped after a hook-latency audit).
 test('superpowers is the only declared plugin, once per agent, with no marketplace or hook', () => {
   assert.deepEqual(
     declared.filter((d) => d.type === 'plugin').map((d) => [d.id, d.target, d.plugin]),
     [
       ['superpowers-claude', 'claude', 'superpowers@claude-plugins-official'],
-      ['superpowers-codex', 'codex', 'superpowers@openai-curated'],
+      ['superpowers-codex', 'codex', 'superpowers@openai-curated-remote'],
     ],
   );
   assert.deepEqual(declared.filter((d) => d.type === 'marketplace' || d.type === 'hook'), []);
@@ -48,8 +49,8 @@ test('dx-devextreme and the plugins Codex bundles are allowed, never declared', 
   for (const marketplace of ['DevExpress-agent-skills', 'openai-primary-runtime', 'openai-bundled']) {
     assert.ok(marketplaces.includes(marketplace), `${marketplace} must be allowed`);
   }
-  // superpowers is declared from openai-curated; allowing it too would hide a failed install.
-  assert.ok(!marketplaces.includes('openai-curated'));
+  // superpowers is declared from openai-curated-remote; allowing it too would hide a failed install.
+  assert.ok(!marketplaces.includes('openai-curated-remote'));
   const text = (value: unknown) => (typeof value === 'string' ? value : '');
   const extras = declared.filter((d) =>
     text(d.plugin).startsWith('dx-devextreme') || text(d.marketplace).includes('DevExpress')

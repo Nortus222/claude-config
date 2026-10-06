@@ -5,9 +5,10 @@ import { Fs } from '../fs.ts';
 import type { Observed } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
 
-// Marketplaces the agents register on their own behalf, never the user: Claude Code adds
-// `claude-plugins-official` on first start, and Codex reserves `openai-curated`.
-export const BUILTIN_MARKETPLACES: ReadonlySet<string> = new Set(['claude-plugins-official', 'openai-curated']);
+// Marketplaces the agents provide on their own behalf, never the user: Claude Code adds
+// `claude-plugins-official` on first start; Codex reserves `openai-curated` and serves
+// `openai-curated-remote` as its remote catalog.
+export const BUILTIN_MARKETPLACES: ReadonlySet<string> = new Set(['claude-plugins-official', 'openai-curated', 'openai-curated-remote']);
 
 // The marketplace half of `plugin@marketplace`; null when there is none to check.
 export const marketplaceOf = (plugin: string): string | null => {

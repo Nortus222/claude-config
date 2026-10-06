@@ -42,7 +42,7 @@ test('declaredIds collects plugins, marketplaces and hook commands', () => {
 });
 
 test('both agents built-in marketplaces count as declared', () => {
-  for (const name of ['claude-plugins-official', 'openai-curated']) {
+  for (const name of ['claude-plugins-official', 'openai-curated', 'openai-curated-remote']) {
     assert.ok(BUILTIN_MARKETPLACES.has(name));
     assert.ok(declaredIds([], []).marketplaces.has(name));
   }
