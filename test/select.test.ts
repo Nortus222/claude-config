@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { initialState, reduce, selectedKeys, groupOf } from '../src/select.mjs';
+import { initialState, reduce, selectedKeys, groupOf, type SelectState } from '../src/select.ts';
 
 const ITEMS = [
   { key: 'u:a', group: 'update', label: 'a', note: '', checked: true },
@@ -9,7 +9,7 @@ const ITEMS = [
   { key: 'a:d', group: 'add', label: 'd', note: '', checked: false },
 ];
 
-const press = (state, ...keys) => keys.reduce((s, k) => reduce(s, k).state, state);
+const press = (state: SelectState, ...keys: string[]) => keys.reduce((s, k) => reduce(s, k).state, state);
 
 test('initialState starts on the first item', () => {
   assert.equal(initialState(ITEMS).cursor, 0);

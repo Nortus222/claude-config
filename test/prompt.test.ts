@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
-import { interpret, confirm } from '../src/prompt.mjs';
+import { interpret, confirm } from '../src/prompt.ts';
 
 const sink = () => new Writable({ write(_c, _e, cb) { cb(); } });
 

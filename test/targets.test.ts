@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TARGETS, parseTarget, selectedTargets, entriesForTarget } from '../src/targets.mjs';
+import { TARGETS, parseTarget, selectedTargets, entriesForTarget } from '../src/targets.ts';
 
 test('target defaults to all and is removed from remaining args', () => {
   assert.deepEqual(parseTarget(['--skills']), { target: 'all', rest: ['--skills'], error: null });
@@ -12,9 +12,9 @@ test('target accepts both supported agents', () => {
 });
 
 test('target rejects missing, unknown, and repeated values', () => {
-  assert.match(parseTarget(['--target']).error, /requires/);
-  assert.match(parseTarget(['--target', 'cursor']).error, /claude\|codex\|all/);
-  assert.match(parseTarget(['--target', 'claude', '--target', 'codex']).error, /once/);
+  assert.match(parseTarget(['--target']).error!, /requires/);
+  assert.match(parseTarget(['--target', 'cursor']).error!, /claude\|codex\|all/);
+  assert.match(parseTarget(['--target', 'claude', '--target', 'codex']).error!, /once/);
 });
 
 test('entriesForTarget includes both entries for all', () => {
@@ -43,7 +43,7 @@ test('selectedTargets narrows to the one named agent', () => {
 // every later caller's answer.
 test('selectedTargets never hands back the shared TARGETS array', () => {
   const first = selectedTargets('all');
-  first.push('cursor');
+  (first as string[]).push('cursor');
   assert.deepEqual(selectedTargets('all'), ['claude', 'codex']);
   assert.deepEqual([...TARGETS].sort(), ['claude', 'codex']);
 });
@@ -52,7 +52,7 @@ test('selectedTargets never hands back the shared TARGETS array', () => {
 // swallowing the next flag would drop it from `rest` and silently disable it.
 test('a following flag is a missing --target value, not the value itself', () => {
   const result = parseTarget(['--target', '--skills']);
-  assert.match(result.error, /requires/);
+  assert.match(result.error!, /requires/);
 });
 
 test('args before and after --target both survive into rest', () => {
@@ -67,7 +67,7 @@ test('args before and after --target both survive into rest', () => {
 // --target claude` would mean the "only once" rule is really an "only one
 // distinct value" rule, and the next reader would have to guess which.
 test('--target is rejected on the second occurrence even when the values agree', () => {
-  assert.match(parseTarget(['--target', 'claude', '--target', 'claude']).error, /once/);
+  assert.match(parseTarget(['--target', 'claude', '--target', 'claude']).error!, /once/);
 });
 
 // An error is a refusal, and a refusal must not also look like an answer:

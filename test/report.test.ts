@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatRow, section, labelWidth } from '../src/report.mjs';
+import { formatRow, section, labelWidth } from '../src/report.ts';
 
 // The state column starts wherever the label column ends, so a label longer
 // than the pad width shunts every following column right. Callers with

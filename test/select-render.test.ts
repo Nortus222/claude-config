@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
-import { initialState, render, keyName, select } from '../src/select.mjs';
+import { initialState, render, keyName, select } from '../src/select.ts';
 
 const ITEMS = [
   { key: 'u:a', group: 'update', label: 'ask-matt', note: 'c7d5778 -> c9c83b1', checked: true },
@@ -18,10 +18,11 @@ const sink = () => new Writable({ write(_c, _e, cb) { cb(); } });
 // it silently, which is exactly why nothing before this proved the restore
 // really happens.
 function fakeInput() {
-  const input = Readable.from([]);
-  const rawModeCalls = [];
-  input.isRaw = false;
-  input.setRawMode = (val) => { rawModeCalls.push(val); input.isRaw = val; return input; };
+  const rawModeCalls: boolean[] = [];
+  const input = Object.assign(Readable.from([]), {
+    isRaw: false,
+    setRawMode(val: boolean) { rawModeCalls.push(val); this.isRaw = val; return this; },
+  });
   return { input, rawModeCalls };
 }
 
@@ -29,15 +30,15 @@ function fakeInput() {
 // (`\x1b[?25l`) can be proven matched by a cursor-show escape (`\x1b[?25h`)
 // on every exit path, not just inferred from the code not crashing.
 function fakeOutput() {
-  const writes = [];
+  const writes: string[] = [];
   const output = sink();
-  output.write = (chunk) => { writes.push(String(chunk)); return true; };
+  output.write = ((chunk: unknown) => { writes.push(String(chunk)); return true; }) as typeof output.write;
   return { output, writes };
 }
 
 const HIDE = '\x1b[?25l';
 const SHOW = '\x1b[?25h';
-const countOf = (writes, esc) => writes.filter((w) => w.includes(esc)).length;
+const countOf = (writes: string[], esc: string) => writes.filter((w) => w.includes(esc)).length;
 
 test('render marks checked and unchecked items differently', () => {
   const out = render(initialState(ITEMS), { title: 't' }).join('\n');
@@ -66,7 +67,7 @@ test('render counts the items in each group header', () => {
 
 test('render aligns notes past the longest label', () => {
   const lines = render(initialState(ITEMS), { title: 't' }).filter((l) => / -> |gone/.test(l));
-  const columns = lines.map((l) => l.indexOf(l.match(/(c7d5778|634cf9b|gone)/)[0]));
+  const columns = lines.map((l) => l.indexOf(l.match(/(c7d5778|634cf9b|gone)/)![0]));
   assert.equal(new Set(columns).size, 1, 'every note must start at the same column');
 });
 
@@ -151,12 +152,12 @@ test('a throw while processing a keypress still restores raw mode and the cursor
   const { output, writes } = fakeOutput();
   let calls = 0;
   const rawWrite = output.write;
-  output.write = (chunk) => {
+  output.write = ((chunk: unknown) => {
     calls += 1;
-    rawWrite(chunk);
+    rawWrite(chunk as string);
     if (calls === 3) throw new Error('boom');
     return true;
-  };
+  }) as typeof output.write;
 
   const promise = select(ITEMS, { title: 't', input, output, isTTY: true });
   input.emit('keypress', '', { name: 'down' });
@@ -215,14 +216,14 @@ test('a successful confirm resolves with the toggled selection and removes the k
 
   const keys = await promise;
 
-  assert.deepEqual([...keys].sort(), ['r:c', 'u:a', 'u:b'].sort());
+  assert.deepEqual([...keys!].sort(), ['r:c', 'u:a', 'u:b'].sort());
   assert.equal(input.listenerCount('keypress'), before, 'the keypress listener must be removed once resolved');
 });
 
 // A single group of many short, uniquely-labelled items — long enough that
 // no reasonable maxRows fits it all, and plain enough that the window edges
 // and the cursor's row are easy to pick out by label.
-const manyItems = (count) => Array.from({ length: count }, (_, i) => ({
+const manyItems = (count: number) => Array.from({ length: count }, (_, i) => ({
   key: `k:${i}`, group: 'g', label: `item-${i}`, note: 'note', checked: false,
 }));
 

@@ -6,8 +6,8 @@ import {
   backupsForRun, CHANGED_SINCE_APPLY, configDomain, configFileId, execute, inspect, machinePaths, nodeFs,
   OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, StateStore, stateStore,
 } from '@nortuscc/machine';
-import { formatRow, section } from '../report.mjs';
-import { parseTarget } from '../targets.mjs';
+import { formatRow, section } from '../report.ts';
+import { parseTarget } from '../targets.ts';
 
 const CHECKOUT = fileURLToPath(new URL('../..', import.meta.url));
 
