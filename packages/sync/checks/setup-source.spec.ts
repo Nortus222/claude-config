@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect } from 'effect';
 import type { Decision, MachinePathsValue } from '@nortuscc/machine';
@@ -57,6 +57,7 @@ test('fetch moves only the tracked remote ref: never HEAD or the working tree', 
 
 test('load refuses a commit that is not on the tracked branch', async () => {
   const s = setup();
+  s.trust(normalizeRepoUrl(s.origin));
   s.inCheckout('checkout', '-q', '-b', 'side');
   writeFileSync(join(s.checkout, 'claude/CLAUDE.md'), '# side\n');
   s.inCheckout('commit', '-qam', 'side');
@@ -69,6 +70,7 @@ test('load refuses a commit that is not on the tracked branch', async () => {
 
 test('load of a missing object is RevisionUnavailable', async () => {
   const s = setup();
+  s.trust(normalizeRepoUrl(s.origin));
   const loaded = await s.source((source) => source.load('f'.repeat(40)));
   assert.ok(loaded._tag === 'Failure');
   assert.equal(loaded.failure._tag, 'RevisionUnavailable');
@@ -112,4 +114,60 @@ test('effective without a recorded applied commit measures from the checkout HEA
   assert.ok(resolved._tag === 'Success');
   assert.equal(resolved.success.applied.revision, s.first);
   assert.equal(readFileSync(join(resolved.success.effective.repo, 'claude/CLAUDE.md'), 'utf8'), '# rules\n');
+});
+
+const failsUnavailable = (result: { readonly _tag: string; readonly failure?: { readonly _tag: string } }) => {
+  assert.equal(result._tag, 'Failure');
+  assert.equal(result.failure?._tag, 'RevisionUnavailable');
+};
+
+test('fetch refuses a setup that is not trusted, or trusts no repository', async () => {
+  const s = setup();
+  s.push({ 'claude/CLAUDE.md': '# newer\n' });
+  failsUnavailable(await s.source((source) => source.fetch));
+  s.trust(null);
+  failsUnavailable(await s.source((source) => source.fetch));
+  assert.equal(s.tracked(), s.first);
+});
+
+test('fetch refuses a branch that tracks a remote other than origin', async () => {
+  const s = setup();
+  s.trust(normalizeRepoUrl(s.origin));
+  s.inCheckout('remote', 'add', 'mirror', s.origin);
+  s.inCheckout('fetch', '-q', 'mirror');
+  s.inCheckout('branch', '-q', '--set-upstream-to=mirror/main');
+  failsUnavailable(await s.source((source) => source.fetch));
+});
+
+test('load refuses a local commit that was never pushed', async () => {
+  const s = setup();
+  s.trust(normalizeRepoUrl(s.origin));
+  writeFileSync(join(s.checkout, 'claude/CLAUDE.md'), '# local\n');
+  s.inCheckout('commit', '-qam', 'local');
+  const loaded = await s.source((source) => source.load(s.inCheckout('rev-parse', 'HEAD')));
+  assert.ok(loaded._tag === 'Failure');
+  assert.equal(loaded.failure._tag, 'RevisionMismatch');
+});
+
+test('effective refuses an origin that is not the trusted repository, even with a fetched ref', async () => {
+  const s = setup();
+  s.push({ 'claude/CLAUDE.md': '# newer\n' });
+  s.inCheckout('fetch', '-q', 'origin');
+  s.trust('github.com/someone/else');
+  failsUnavailable(await s.source((source) => source.effective([])));
+  s.trust(null);
+  failsUnavailable(await s.source((source) => source.effective([])));
+});
+
+test('effective reads state.json without writing, and fails on one it cannot parse', async () => {
+  const s = setup();
+  s.trust(normalizeRepoUrl(s.origin));
+  const legacy = json({ version: 1, repo: null, files: { 'settings.json': { hash: 'x', appliedAt: '2026-10-07T00:00:00.000Z' } } });
+  s.write(join(s.root, '.claude', '.nortuscc-lock.json'), legacy);
+  const resolved = await s.source((source) => source.effective([]));
+  assert.ok(resolved._tag === 'Success');
+  assert.equal(existsSync(join(s.stateRoot, 'state.json')), false);
+  s.write(join(s.stateRoot, 'state.json'), '{ not json');
+  await assert.rejects(s.source((source) => source.effective([])));
+  assert.equal(readFileSync(join(s.stateRoot, 'state.json'), 'utf8'), '{ not json');
 });

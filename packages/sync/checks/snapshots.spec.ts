@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pruneSnapshots, snapshotFor, SNAPSHOTS_KEPT } from '../src/index.ts';
+import { pruneSnapshots, SNAPSHOT_FORMAT, snapshotFor, snapshotKey, SNAPSHOTS_KEPT } from '../src/index.ts';
 import { runSync, tempRepo } from './support/repo.ts';
 
 const NONE = { value: {}, source: 'overrides.json', issues: [] };
@@ -40,4 +40,13 @@ test(`pruning keeps the ${SNAPSHOTS_KEPT} most recently used, the ones in use, a
   const left = readdirSync(join(stateRoot, 'snapshots')).sort();
   assert.deepEqual(left, [repos[0]!, ...repos.slice(2)].map((r) => r.split(/[\\/]/).pop()!).concat('not-a-snapshot').sort());
   assert.equal(existsSync(join(stateRoot, 'snapshots', '.staging-crashed')), false);
+});
+
+test('the snapshot key covers the composition format, so a new format never reuses old folders', async () => {
+  const repo = tempRepo();
+  const stateRoot = join(repo.root, 'state');
+  const key = { commit: repo.first, held: {} };
+  const snapshot = await runSync(snapshotFor({ ...key, repo: repo.dir, stateRoot, overrides: NONE, now: new Date() }));
+  assert.equal(snapshot.repo, join(stateRoot, 'snapshots', snapshotKey(key)));
+  assert.notEqual(snapshotKey(key, SNAPSHOT_FORMAT + 1), snapshotKey(key));
 });

@@ -14,10 +14,19 @@ const STAGING = '.staging-';
 // A folder snapshotFor names: the first 32 hex digits of its key's sha256.
 const KEY = /^[0-9a-f]{32}$/;
 
+// Bumped whenever composition changes what a snapshot folder holds, so a new format never reuses
+// folders an older one wrote.
+export const SNAPSHOT_FORMAT = 1;
+
 const snapshotsDir = (stateRoot: string) => join(stateRoot, 'snapshots');
 
+// The folder name of a commit with holds: the first 32 hex digits of a sha256 over the format,
+// the commit and the holds.
+export const snapshotKey = (input: { readonly commit: string; readonly held: Holds }, format: number = SNAPSHOT_FORMAT): string =>
+  createHash('sha256').update(canonical({ format, commit: input.commit, held: input.held })).digest('hex').slice(0, 32);
+
 // A commit with holds, composed from git objects only into <stateRoot>/snapshots/<key>/ (ADR 0016)
-// and resolved with `overrides`. Keyed by (commit, holds) and reused; a fresh one is staged and
+// and resolved with `overrides`. Keyed by (format, commit, holds) and reused; a fresh one is staged and
 // moved into place whole, so a reader never sees half a snapshot.
 export const snapshotFor = (input: {
   readonly repo: string;
@@ -30,7 +39,7 @@ export const snapshotFor = (input: {
   Effect.gen(function* () {
     const fs = yield* Fs;
     const root = snapshotsDir(input.stateRoot);
-    const key = createHash('sha256').update(canonical({ commit: input.commit, held: input.held })).digest('hex').slice(0, 32);
+    const key = snapshotKey(input);
     const dir = join(root, key);
     const marker = JSON.stringify({ commit: input.commit, held: input.held, usedAt: input.now.toISOString() }, null, 2) + '\n';
     if ((yield* fs.readText(join(dir, MARKER))) === undefined) {
