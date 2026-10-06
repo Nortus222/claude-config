@@ -338,22 +338,26 @@ mod tests {
             if (command === 'shutdown') process.exit(0);
         });
     "#;
-    fn spawn_fake(dirs: &Arc<Mutex<Vec<PathBuf>>>) -> Result<Backend, String> {
-        let (backend, dir) = host::lifecycle_tests::fake_backend(IDLE, Arc::new(|_| {}));
+    type Events = Arc<Mutex<Vec<Value>>>;
+    fn spawn_fake(dirs: &Arc<Mutex<Vec<PathBuf>>>, events: &Events) -> Result<Backend, String> {
+        let events = events.clone();
+        let (backend, dir) = host::lifecycle_tests::fake_backend(IDLE, Arc::new(move |event| events.lock().unwrap().push(event)));
         dirs.lock().unwrap().push(dir);
         Ok(backend)
     }
     #[test]
     fn a_restart_does_not_hold_the_session_lock_while_spawning() {
         let dirs = Arc::new(Mutex::new(Vec::new()));
-        let session = Arc::new(Mutex::new(Session { backend: None, generation: 3 }));
-        let (restarting, d) = (session.clone(), dirs.clone());
+        let events: Events = Arc::default();
+        let installed = spawn_fake(&dirs, &events).unwrap();
+        let session = Arc::new(Mutex::new(Session { backend: Some(Arc::new(installed)), generation: 3 }));
+        let (restarting, d, e) = (session.clone(), dirs.clone(), events.clone());
         let slow = std::thread::spawn(move || {
-            restart(&restarting, |_| { std::thread::sleep(Duration::from_millis(800)); spawn_fake(&d) })
+            restart(&restarting, |_| { std::thread::sleep(Duration::from_millis(800)); spawn_fake(&d, &e) })
         });
         std::thread::sleep(Duration::from_millis(200));
         let started = Instant::now();
-        assert!(generation(&session).is_err(), "no backend while spawning");
+        assert!(generation(&session).is_err(), "the old backend is gone while the new one spawns");
         assert!(started.elapsed() < Duration::from_millis(100));
         assert_eq!(slow.join().unwrap().unwrap()["generation"], 4);
         assert_eq!(generation(&session).unwrap()["generation"], 4);
@@ -363,15 +367,18 @@ mod tests {
     #[test]
     fn a_superseded_restart_shuts_its_backend_down() {
         let dirs = Arc::new(Mutex::new(Vec::new()));
+        let (superseded, current): (Events, Events) = (Arc::default(), Arc::default());
         let session = Arc::new(Mutex::new(Session { backend: None, generation: 0 }));
-        let (s1, d1) = (session.clone(), dirs.clone());
+        let (s1, d1, e1) = (session.clone(), dirs.clone(), superseded.clone());
         let older = std::thread::spawn(move || {
-            restart(&s1, |_| { std::thread::sleep(Duration::from_millis(600)); spawn_fake(&d1) })
+            restart(&s1, |_| { std::thread::sleep(Duration::from_millis(600)); spawn_fake(&d1, &e1) })
         });
         std::thread::sleep(Duration::from_millis(100));
-        let newer = restart(&session, |_| spawn_fake(&dirs)).unwrap();
+        let newer = restart(&session, |_| spawn_fake(&dirs, &current)).unwrap();
         assert_eq!(newer["generation"], 2);
         assert!(older.join().unwrap().unwrap_err().contains("Superseded"));
+        assert!(superseded.lock().unwrap().iter().any(|e| e["event"] == "disconnected"), "the superseded backend was stopped");
+        assert!(current.lock().unwrap().is_empty(), "the newest backend is still running");
         assert_eq!(generation(&session).unwrap()["generation"], 2);
         drop(session);
         for dir in dirs.lock().unwrap().drain(..) { std::fs::remove_dir_all(dir).unwrap(); }
