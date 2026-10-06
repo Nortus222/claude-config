@@ -15,4 +15,4 @@ before the next runs. All filesystem, process and path access goes through servi
 
 - The state root is `~/.config/nortuscc` (`%APPDATA%\nortuscc` on Windows).
 - A lock left by a dead process is taken over.
-- Commands move from `.mjs` to TypeScript one at a time until #59.
+- Every CLI command is TypeScript over this core; the `.mjs` commands it replaced are gone (#59).

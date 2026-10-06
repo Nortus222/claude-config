@@ -7,9 +7,9 @@ import {
   selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
   type Fs, type Observed, type Processes, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
-import { formatRow, labelWidth, section } from '../report.mjs';
-import { select } from '../select.mjs';
-import { parseTarget, selectedTargets } from '../targets.mjs';
+import { formatRow, labelWidth, section } from '../report.ts';
+import { select } from '../select.ts';
+import { parseTarget, selectedTargets } from '../targets.ts';
 
 const NEEDS_NAMES = '--add needs a comma-separated list of skill names';
 

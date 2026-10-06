@@ -10,7 +10,7 @@ import {
   MachinePaths, machinePaths, nodeFs, nodeProcesses, Processes, updateItems,
   type Command, type Completed, type MachinePathsValue, type Observed,
 } from '@nortuscc/machine';
-import { select as realSelect } from '../src/select.mjs';
+import { select as realSelect } from '../src/select.ts';
 import { choices, exitCode, parseFlags, reportLines, runUpdate, seedKeys, type UpdateDeps } from '../src/commands/update.ts';
 
 // ---- pure ----
@@ -513,7 +513,7 @@ test('the picker drives what gets executed', async () => {
 
 test('--add and --prune pre-tick their rows in the picker, not just under --yes', async () => {
   const m = machine({ upstream: ['fresh', 'wizard', 'gizmo'] });
-  let rows: { key: string; group: string; checked: boolean }[] = [];
+  let rows: readonly { key: string; group: string; checked: boolean }[] = [];
   let title = '';
   await go(['--add', 'wizard', '--prune'], m.deps({
     select: async (offered: typeof rows, options: { title: string }) => { rows = offered; title = options.title; return []; },

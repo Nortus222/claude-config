@@ -15,7 +15,8 @@ machine trusts is stored on that machine and changed only by a person there.
 
 - Holding back only integrations: `hooks`, `env`, `statusLine` and `apiKeyHelper` can run code,
   and skills can bundle scripts.
-- Trusting pinned skills: a pin can be a moving ref, and the installer ignores pins today (#88).
+- Trusting pinned skills: pins are verified commits (ADR 0014), but a skill can still bundle scripts,
+  so it still waits for a person.
 
 ## Consequences
 

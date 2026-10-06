@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -63,7 +64,7 @@ test('uninstall removes configuration created on a fresh machine and stops manag
   assert.equal(existsSync(join(env.openrouter, 'models-static.json')), false);
 
   const state = JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8'));
-  assert.equal(state.skillsOnly, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')), { version: 1, manageConfig: false });
   assert.deepEqual(state.files, {});
 
   const reapplied = await runCli(['apply'], env);
@@ -137,8 +138,7 @@ test('uninstall refuses changed managed configuration unless forced', async () =
   assert.ok(backup, 'the forced uninstall must report where it preserved the changed file');
   assert.equal(readFileSync(backup, 'utf8'), '# changed after setup\n');
 
-  const state = readFileSync(join(env.state, 'state.json'), 'utf8');
-  assert.match(state, /"skillsOnly": true/);
+  assert.equal(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')).manageConfig, false);
 });
 
 test('uninstall rejects a narrow target without changing either agent', async () => {
@@ -238,13 +238,13 @@ test('uninstall restores a pre-existing instruction-file symlink', {
   assert.equal(readFileSync(restored, 'utf8'), '# mine\n');
 });
 
-test('uninstall records skills-only in overrides.json as well as state.json', async () => {
+test('uninstall records skills-only in overrides.json only', async () => {
   const env = fixture();
   assert.equal((await runCli(['apply'], env)).code, 0);
   const result = await runCli(['uninstall', '--yes'], env);
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')), { version: 1, manageConfig: false });
-  assert.equal(JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')).skillsOnly, true);
+  assert.equal('skillsOnly' in JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')), false);
 });
 
 test('uninstall leaves a malformed overrides.json alone and says so', async () => {
@@ -255,8 +255,8 @@ test('uninstall leaves a malformed overrides.json alone and says so', async () =
   assert.equal(result.code, 1);
   assert.match(result.stderr, /overrides\.json is not valid/);
   assert.equal(readFileSync(join(env.state, 'overrides.json'), 'utf8'), '{');
-  assert.equal(existsSync(join(env.claude, 'CLAUDE.md')), false);
-  assert.equal(JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')).skillsOnly, true);
+  assert.ok(existsSync(join(env.claude, 'CLAUDE.md')), 'nothing is restored while the choice cannot be recorded');
+  assert.equal('skillsOnly' in JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')), false);
 });
 
 test('uninstall changes nothing when machine state cannot be read', async () => {
@@ -269,4 +269,32 @@ test('uninstall changes nothing when machine state cannot be read', async () => 
   assert.match(result.stderr, /state\.json/);
   assert.ok(existsSync(join(env.claude, 'CLAUDE.md')));
   assert.ok(existsSync(join(env.codex, 'AGENTS.md')));
+});
+
+test('uninstall records skills-only before a refused restore, and a re-run refuses the same way (#71, #76)', {
+  skip: process.platform === 'win32' ? 'creating symlinks may require elevation on Windows' : false,
+}, async () => {
+  const env = fixture();
+  mkdirSync(env.claude, { recursive: true });
+  const settingsPath = join(env.claude, 'settings.json');
+  writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }) + '\n');
+  assert.equal((await runCli(['apply'], env)).code, 0);
+
+  const runs = join(env.state, 'backups');
+  const backup = readdirSync(runs).sort()
+    .map((run) => join(runs, run, 'claude', 'settings.json'))
+    .find((path) => existsSync(path));
+  assert.ok(backup, 'apply must have backed up the pre-existing settings.json');
+  rmSync(backup);
+  symlinkSync(settingsPath, backup);
+  const before = readFileSync(settingsPath, 'utf8');
+
+  for (const args of [['uninstall', '--yes'], ['uninstall', '--yes', '--force']]) {
+    const result = await runCli(args, env);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout + result.stderr, /is a link/);
+    assert.match(result.stderr, /uninstall did not finish/);
+    assert.equal(readFileSync(settingsPath, 'utf8'), before);
+    assert.equal(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')).manageConfig, false);
+  }
 });

@@ -6,7 +6,7 @@ export type { BaseTexts } from './base.ts';
 export { resolveProfile } from './resolve.ts';
 export { FILES, FILES_SOURCE } from './files.ts';
 export { SKILLS_SOURCE, parseSkillsManifest } from './skills.ts';
-export { PINS_SOURCE, parsePins } from './pins.ts';
+export { PINS_SOURCE, isCommitSha, parsePins } from './pins.ts';
 export { INTEGRATIONS_SOURCE, parseIntegrations, referencedFiles } from './integrations.ts';
 export { parseSettingsKeys } from './settings.ts';
 export { LEGACY_STATE_SOURCE, decodeOverrides, overridesFromLegacyState } from './overrides.ts';

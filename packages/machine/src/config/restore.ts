@@ -63,10 +63,14 @@ const restoreProjects = (file: ResolvedFile, dest: string, origin: string | unde
   });
 
 // Each recorded key goes back to its original value, or away; every other key stays as it is now.
+// A backup that is a link holds no copy of the settings before nortuscc, so nothing is changed.
 const restoreMerged = (file: ResolvedFile, dest: string, origin: string | undefined, recorded: ReadonlyArray<string>, relative: string) =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const backups = yield* Backups;
+    if (origin && (yield* fs.stat(origin))?.kind === 'symlink') {
+      return failed(`the backup ${origin} is a link, not a copy: the settings before nortuscc cannot be recovered from it. Edit ${dest} by hand, or delete the backup.`);
+    }
     const current = parseDocument(yield* fs.readText(dest));
     if (current.kind !== 'object') {
       const backedUp = current.kind === 'corrupt' ? yield* backups.moveAside(dest, relative, file.target) : undefined;

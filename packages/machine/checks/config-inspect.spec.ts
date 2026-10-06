@@ -79,6 +79,10 @@ test('an invalid, absent or locally unparseable settings document is one blocked
   broken.write(join(broken.paths.claude, 'settings.json'), '{ broken');
   const items = (await broken.observe()).items.filter((i) => i.key.startsWith('config:claude:settings.json'));
   assert.deepEqual(items.map((i) => [i.key, i.state, i.disposition]), [['config:claude:settings.json', 'unparseable-local', 'blocked']]);
+
+  // Valid JSON that is not an object is just as unusable.
+  broken.write(join(broken.paths.claude, 'settings.json'), '["theme"]');
+  assert.equal(find((await broken.observe()).items, 'config:claude:settings.json').state, 'unparseable-local');
 });
 
 test('a skills-only machine still reads every file but excludes it', async () => {

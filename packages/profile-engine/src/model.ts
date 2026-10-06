@@ -5,7 +5,7 @@ export type Target = (typeof TARGETS)[number];
 // The agent home a file lands in. Usually its target; the OpenRouter Codex home is separate.
 export type Home = Target | 'codex-openrouter';
 
-// The categories an `allow` list may name, matching the CLI's OBSERVED_CATEGORIES.
+// The categories an `allow` list may name: the categories the undeclared report observes.
 export const CATEGORIES = ['agents', 'plugins', 'marketplaces', 'hooks', 'skills'] as const;
 export type Category = (typeof CATEGORIES)[number];
 

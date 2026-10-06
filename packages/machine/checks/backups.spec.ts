@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
@@ -103,4 +103,23 @@ test('preserve of a dangling link copies the link', async () => {
   symlinkSync(join(home, 'nowhere'), join(home, 'settings.json'));
   const kept = await run((b) => b.preserve(join(home, 'settings.json'), 'settings.json', 'claude'));
   assert.equal(lstatSync(kept!).isSymbolicLink(), true);
+});
+
+// One --target all run can displace same-named files from both agents; a skill belongs to neither.
+test('the agent segment keeps two agents apart, and a folder without one sits under the run folder', async () => {
+  const { home, paths, run } = setup();
+  writeFileSync(join(home, 'NOTES.md'), 'notes');
+  mkdirSync(join(home, 'tdd'));
+  writeFileSync(join(home, 'tdd', 'SKILL.md'), '# tdd\n');
+  const [claude, codex, skill] = await run((b) => Effect.all([
+    b.preserve(join(home, 'NOTES.md'), 'NOTES.md', 'claude'),
+    b.preserve(join(home, 'NOTES.md'), 'NOTES.md', 'codex'),
+    b.preserve(join(home, 'tdd'), join('skills', 'tdd')),
+  ]));
+  const folder = join(paths.backups, 'nortuscc-2026-10-05T12-34-56-789Z');
+  assert.equal(claude, join(folder, 'claude', 'NOTES.md'));
+  assert.equal(codex, join(folder, 'codex', 'NOTES.md'));
+  assert.equal(skill, join(folder, 'skills', 'tdd'));
+  assert.equal(readFileSync(join(skill!, 'SKILL.md'), 'utf8'), '# tdd\n');
+  assert.ok(existsSync(join(home, 'tdd', 'SKILL.md')));
 });

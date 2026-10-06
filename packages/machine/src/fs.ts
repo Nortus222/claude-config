@@ -71,7 +71,7 @@ export const nodeFs = Layer.succeed(Fs, {
         throw err;
       })),
   // A reader sees the old file or the whole new one, never half of it. A symlink stays a link (its
-  // target is replaced) and an existing file keeps its mode, as the legacy in-place writes did.
+  // target is replaced) and an existing file keeps its mode.
   writeTextAtomic: (path, text) =>
     attempt('write', path, async () => {
       const target = await writeTarget(path);

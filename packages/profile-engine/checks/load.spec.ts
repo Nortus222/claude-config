@@ -8,6 +8,7 @@ import {
   ProfileFiles, ReadFailed, decodeOverrides, loadProfile, memoryFiles, nodeFiles, requireValid,
 } from '../src/index.ts';
 
+const PIN = '0123456789abcdef0123456789abcdef01234567';
 const hookDoc = JSON.stringify({
   version: 1,
   integrations: [{ id: 'h', label: 'h', target: 'claude', type: 'hook', default: true, event: 'Stop', file: 'hooks/h.sh' }],
@@ -17,7 +18,7 @@ const repo = {
   '/repo/integrations.json': hookDoc,
   '/repo/hooks/h.sh': '#!/bin/sh\n',
   '/repo/claude/settings.keys.json': '{"effortLevel":"high"}',
-  '/repo/skill-pins.json': JSON.stringify({ version: 1, pins: { 'a/core': 'abc' } }),
+  '/repo/skill-pins.json': JSON.stringify({ version: 1, pins: { 'a/core': PIN } }),
 };
 const run = <A, E>(effect: Effect.Effect<A, E, ProfileFiles>, layer = memoryFiles(repo)) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer)));
@@ -25,7 +26,7 @@ const run = <A, E>(effect: Effect.Effect<A, E, ProfileFiles>, layer = memoryFile
 test('loads every layer from the repo directory', async () => {
   const config = await run(loadProfile('/repo', { overrides: decodeOverrides({ version: 1, skills: { tdd: false } }, 'o.json') }));
   assert.deepEqual(config.issues, []);
-  assert.deepEqual(config.skills.map((s) => [s.name, s.install, s.from.layer, s.pin?.ref]), [['tdd', false, 'machine', 'abc']]);
+  assert.deepEqual(config.skills.map((s) => [s.name, s.install, s.from.layer, s.pin?.ref]), [['tdd', false, 'machine', PIN]]);
   assert.deepEqual(config.integrations.map((i) => i.id), ['h']);
   assert.equal(config.files.find((f) => f.id === 'claude:settings.json')!.keys!.effortLevel!.value, 'high');
 });

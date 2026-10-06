@@ -60,6 +60,7 @@ export const inspectHook = (claudeDir: string, d: Declaration): Effect.Effect<In
   }).pipe(Effect.catchTag('FsFailed', (err) => Effect.succeed<Inspected>({ state: 'blocked', note: err.message })));
 
 // Adds only the declared registration, only when absent; never replaces the document or removes another hook.
+// An existing, different hook file is backed up before it is replaced.
 // The file lands first, so a registration never points at a hook that is not there yet.
 export const installHook = (
   paths: { readonly repo: string; readonly claude: string },
@@ -71,7 +72,13 @@ export const installHook = (
     const read = yield* readSettings(path);
     if ('corrupt' in read) return { ok: false, note: `${CORRUPT}; left it untouched (${path})` };
 
-    yield* fs.copy(join(paths.repo, d.file!), installed);
+    const body = yield* fs.readText(join(paths.repo, d.file!));
+    if (body === undefined) return { ok: false, note: `hook source ${d.file} is missing from the repo` };
+    const current = yield* fs.readText(installed);
+    if (current !== body) {
+      if (current !== undefined) yield* (yield* Backups).preserve(installed, join('hooks', basename(installed)), 'claude');
+      yield* fs.writeTextAtomic(installed, body);
+    }
     const command = hookCommand(paths.claude, d);
     if (registered(read.settings, d.event!, command)) return { ok: true, note: 'already registered' };
 

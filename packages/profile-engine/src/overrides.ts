@@ -23,10 +23,10 @@ export function decodeOverrides(value: unknown, source: string): Input<MachineOv
 
 export const LEGACY_STATE_SOURCE = 'state.json';
 
-// The two machine choices the CLI already records in state.json, read with parseState's rules
-// (src/lock.mjs): only a literal `skillsOnly: true` stops configuration being managed, and
-// `configTargets` counts only as a list of known targets. A missing, corrupt or misshapen
-// record decides nothing, exactly as the CLI treats it as a first run.
+// The two machine choices older CLIs recorded in state.json, before overrides.json held them:
+// only a literal `skillsOnly: true` stops configuration being managed, and `configTargets`
+// counts only as a list of known targets. A missing, corrupt or misshapen record (no `files`
+// object) decides nothing, as on a first run.
 export function overridesFromLegacyState(text: string | undefined, source = LEGACY_STATE_SOURCE): Input<MachineOverrides> {
   const none: Input<MachineOverrides> = { value: {}, source, issues: [] };
   if (text === undefined) return none;

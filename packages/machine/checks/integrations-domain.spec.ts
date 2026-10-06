@@ -259,6 +259,14 @@ test('an MCP prerequisite unset after planning fails before spawning anything', 
   assert.equal(finished?.type === 'finished' && finished.outcome, 'failed');
   assert.match(finished?.type === 'finished' ? finished.note : '', /set KEY before installing srv/);
   assert.deepEqual(m.fake.calls(), ['codex mcp list --json']);
+
+  // With the variable still set, the same plan reaches the installer.
+  const ran = await Effect.runPromise(
+    Stream.runCollect(execute(chosen, report, [m.domain])).pipe(Effect.map((c) => [...c]), Effect.provide(m.layer)),
+  );
+  const installed = ran.find((e) => e.type === 'finished');
+  assert.equal(installed?.type === 'finished' && installed.outcome, 'ok');
+  assert.deepEqual(m.fake.calls(), ['codex mcp list --json', 'codex mcp add srv -- srv']);
 });
 
 test('the hook step backs settings.json up into the run folder', async () => {

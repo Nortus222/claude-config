@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
-import { TARGETS, type Target } from '@nortuscc/profile-engine';
+import { overridesFromLegacyState } from '@nortuscc/profile-engine';
 import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
@@ -9,12 +9,10 @@ export type Baseline = { readonly hash: string; readonly appliedAt: string };
 export type MachineState = {
   readonly version: 1;
   readonly repo: string | null;
-  readonly skillsOnly: boolean;
-  readonly configTargets?: ReadonlyArray<Target>;
   readonly files: Readonly<Record<string, Baseline>>;
 };
 
-export const emptyState: MachineState = { version: 1, repo: null, skillsOnly: false, files: {} };
+export const emptyState: MachineState = { version: 1, repo: null, files: {} };
 
 // The one legacy key worth carrying forward from the pre-Codex lock.
 const LEGACY_KEYS: Record<string, string> = { 'CLAUDE.md': 'claude:CLAUDE.md' };
@@ -22,7 +20,8 @@ const LEGACY_KEYS: Record<string, string> = { 'CLAUDE.md': 'claude:CLAUDE.md' };
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-// A record that is not the expected shape is treated as absent rather than trusted halfway.
+// A record that is not the expected shape is treated as absent rather than trusted halfway. The
+// legacy machine choices (skillsOnly, configTargets) are not state: they live in overrides.json.
 export const parseState = (text: string): MachineState | undefined => {
   let parsed: unknown;
   try {
@@ -31,13 +30,9 @@ export const parseState = (text: string): MachineState | undefined => {
     return undefined;
   }
   if (!isRecord(parsed) || !isRecord(parsed.files)) return undefined;
-  const targets = parsed.configTargets;
-  const validTargets = Array.isArray(targets) && targets.every((t) => (TARGETS as readonly unknown[]).includes(t));
   return {
     version: 1,
     repo: typeof parsed.repo === 'string' ? parsed.repo : null,
-    skillsOnly: parsed.skillsOnly === true,
-    ...(validTargets ? { configTargets: [...new Set(targets as Target[])] } : {}),
     files: parsed.files as Record<string, Baseline>,
   };
 };
@@ -61,16 +56,30 @@ export class StateStore extends Context.Service<
   }
 >()('machine/StateStore') {}
 
-// state.json: nortuscc's own bookkeeping, in the legacy CLI's exact format.
+// state.json: nortuscc's own bookkeeping (the repo and per-file baselines), in the format earlier
+// releases wrote.
 export const stateStore = Layer.effect(
   StateStore,
   Effect.gen(function* () {
     const paths = yield* MachinePaths;
     const fs = yield* Fs;
     const statePath = join(paths.stateRoot, 'state.json');
+    const overridesPath = join(paths.stateRoot, 'overrides.json');
     const legacyPath = join(paths.claude, '.nortuscc-lock.json');
 
-    const write = (state: MachineState) => fs.writeTextAtomic(statePath, JSON.stringify(state, null, 2) + '\n');
+    // The first state write migrates the legacy machine choices from the on-disk state.json into
+    // overrides.json, unless that file already exists; reads never write it. state.json is then
+    // written without them.
+    const write = (state: MachineState) => Effect.gen(function* () {
+      if ((yield* fs.readText(overridesPath)) === undefined) {
+        const legacy = overridesFromLegacyState(yield* fs.readText(statePath)).value;
+        if (Object.keys(legacy).length > 0) {
+          yield* fs.writeTextAtomic(overridesPath, JSON.stringify({ version: 1, ...legacy }, null, 2) + '\n');
+        }
+      }
+      const { version, repo, files } = state;
+      yield* fs.writeTextAtomic(statePath, JSON.stringify({ version, repo, files }, null, 2) + '\n');
+    });
 
     // Migrates the pre-Codex lock only when no state file exists; the old lock is left untouched.
     const read = Effect.gen(function* () {

@@ -156,3 +156,26 @@ test('a document whose only baseline is a dropped key is still uninstalled', asy
   assert.deepEqual(JSON.parse(m.read(settings)!), { mine: 1 });
   assert.deepEqual(m.state().files, {});
 });
+
+// An old run could back a symlinked settings file up as the link itself: it points at the live file.
+for (const force of [false, true]) {
+  test(`a link backup of a settings file is refused, changing nothing${force ? ', even forced' : ''}`, async () => {
+    const m = configMachine();
+    await m.sync();
+    const settings = join(m.paths.claude, 'settings.json');
+    const before = m.read(settings);
+    const baselines = m.state().files;
+    const backup = join(m.paths.backups, 'nortuscc-0000-old', 'claude', 'settings.json');
+    mkdirSync(join(backup, '..'), { recursive: true });
+    symlinkSync(settings, backup);
+
+    const { notes } = await m.sync('uninstall', { force });
+    assert.match(notes['config:claude:settings.json']!, /^failed: .*is a link/);
+    assert.equal(m.read(settings), before);
+    assert.ok(lstatSync(backup).isSymbolicLink());
+    assert.deepEqual(
+      Object.keys(m.state().files).filter((k) => k.startsWith('claude:settings.json#')),
+      Object.keys(baselines).filter((k) => k.startsWith('claude:settings.json#')),
+    );
+  });
+}

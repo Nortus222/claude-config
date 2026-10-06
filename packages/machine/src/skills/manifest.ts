@@ -13,7 +13,7 @@ const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 export const sourceOf = (meta: unknown): string | null =>
   isRecord(meta) && typeof meta.source === 'string' && meta.source ? meta.source : null;
 
-// The manifest text, byte-identical to the legacy writer so a capture produces no spurious diff.
+// The manifest text, in the committed manifest's exact format so a capture produces no spurious diff.
 export function emitManifest(groups: ReadonlyArray<SkillGroup>): string {
   const head = '# Shared and optional skills, grouped by the repo they install from.\n'
     + '# Regenerate with: nortuscc capture\n'

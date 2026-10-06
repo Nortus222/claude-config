@@ -9,8 +9,6 @@
     "bin/",
     "setup.sh",
     "setup.ps1",
-    "src/",
-    "packages/profile-engine/src/files.json",
     "claude/",
     "codex/",
     "AGENTS.md",
