@@ -25,7 +25,8 @@ test('a command that cannot launch fails with LaunchFailed', async () => {
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LaunchFailed'));
 });
 
-test('the path option replaces PATH for the child', async () => {
+// A POSIX shell script; the .cmd shim tests cover PATH lookup on Windows.
+test('the path option replaces PATH for the child', { skip: process.platform === 'win32' }, async () => {
   const bin = mkdtempSync(join(tmpdir(), 'machine-bin-'));
   writeFileSync(join(bin, 'faketool'), '#!/bin/sh\necho fake\n');
   chmodSync(join(bin, 'faketool'), 0o755);
@@ -111,4 +112,38 @@ test('inherit: stderr sends an inherit command\'s output to stderr and gives it 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /noise stdin=""/);
+});
+
+// An npm-style .cmd shim on PATH that hands its arguments to a node script.
+const windowsShim = (name: string, script: string) => {
+  const bin = mkdtempSync(join(tmpdir(), 'machine-shim-'));
+  writeFileSync(join(bin, `${name}.js`), script);
+  writeFileSync(join(bin, `${name}.cmd`), `@echo off\r\n"${node}" "%~dp0${name}.js" %*\r\n`);
+  return { bin, path: `${bin};${process.env.SystemRoot ?? 'C:\\Windows'}\\System32` };
+};
+
+test('a .cmd shim on PATH runs by bare name with its arguments verbatim', { skip: process.platform !== 'win32' }, async () => {
+  const { path } = windowsShim('fakeshim', 'process.stdout.write(JSON.stringify(process.argv.slice(2)))');
+  const args = ['plain', 'with space', 'a"quote', 'amp&echo pwned', 'caret^', '%PATH%', 'bang!', 'pipe|more', 'trail\\','"', ''];
+  const exit = await run(Processes.use((p) => p.run({ cmd: 'fakeshim', args, output: 'capture' })), path);
+  assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
+  assert.deepEqual(Exit.isSuccess(exit) && JSON.parse(exit.value.stdout), args);
+});
+
+test('a .cmd shim refuses a line break it cannot pass, naming the command', { skip: process.platform !== 'win32' }, async () => {
+  const { path } = windowsShim('fakeshim', 'console.log("ran")');
+  const exit = await run(Processes.use((p) => p.run({ cmd: 'fakeshim', args: ['one\ntwo'], output: 'capture' })), path);
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LaunchFailed') && String(exit.cause).includes('fakeshim'));
+});
+
+test('interrupting a .cmd shim run kills the program the shim started', { skip: process.platform !== 'win32' }, async () => {
+  const pidFile = join(mkdtempSync(join(tmpdir(), 'machine-proc-')), 'pid');
+  const { path } = windowsShim('sleepshim', `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`);
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(Processes.use((p) => p.run({ cmd: 'sleepshim', args: [], output: 'capture' })));
+    for (let i = 0; i < 250 && !existsSync(pidFile); i++) yield* Effect.promise(() => sleep(20));
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses({ path }))));
+  await sleep(200);
+  assert.equal(pidAlive(Number(readFileSync(pidFile, 'utf8'))), false);
 });
