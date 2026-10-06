@@ -313,11 +313,31 @@ test('writeLock still writes state.json when overrides.json cannot be replaced',
   mkdirSync(blocker);
   try {
     writeLock({ version: 1, repo: null, skillsOnly: true, files: {} });
-    assert.equal(readLock().skillsOnly, true);
+    assert.equal(JSON.parse(readFileSync(statePath(), 'utf8')).skillsOnly, true);
     assert.deepEqual(JSON.parse(readFileSync(overridesPath, 'utf8')), { version: 1 });
     assert.deepEqual(readdirSync(stateRoot()).filter((n) => /^\.(overrides|state)\.json\..*\.tmp$/.test(n) && n !== basename(blocker)), []);
   } finally {
     rmSync(blocker, { recursive: true, force: true });
+    rmSync(overridesPath, { force: true });
+  }
+});
+
+test('readLock takes the machine choices from overrides.json when it parses, else from state.json', () => {
+  clearState();
+  const overridesPath = join(stateRoot(), 'overrides.json');
+  mkdirSync(stateRoot(), { recursive: true });
+  writeFileSync(statePath(), JSON.stringify({ version: 1, repo: null, skillsOnly: false, configTargets: ['claude'], files: {} }));
+  try {
+    writeFileSync(overridesPath, JSON.stringify({ version: 1, manageConfig: false, configTargets: ['codex', 'codex'] }));
+    assert.deepEqual(readLock(), { version: 1, repo: null, skillsOnly: true, configTargets: ['codex'], files: {} });
+    writeFileSync(overridesPath, JSON.stringify({ version: 1, configTargets: ['nope'] }));
+    assert.deepEqual(readLock(), { version: 1, repo: null, skillsOnly: false, files: {} });
+    writeFileSync(overridesPath, '{');
+    assert.deepEqual(readLock(), { version: 1, repo: null, skillsOnly: false, configTargets: ['claude'], files: {} });
+    rmSync(overridesPath);
+    writeFileSync(statePath(), JSON.stringify({ version: 1, repo: null, skillsOnly: true, files: {} }));
+    assert.equal(readLock().skillsOnly, true);
+  } finally {
     rmSync(overridesPath, { force: true });
   }
 });

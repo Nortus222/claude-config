@@ -5,9 +5,9 @@ import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
-// Migration rule until cutover (#59): anything that writes overrides.json must also write
-// state.json's skillsOnly/configTargets, and the legacy writeLock mirrors state.json into an
-// existing overrides.json.
+// overrides.json is the only record of this machine's choices. A machine whose choices are still
+// in state.json's legacy skillsOnly/configTargets has them moved here by the first state write
+// (StateStore.write); until then they are read from state.json.
 export class OverridesStore extends Context.Service<
   OverridesStore,
   {
@@ -16,8 +16,8 @@ export class OverridesStore extends Context.Service<
   }
 >()('machine/OverridesStore') {}
 
-// overrides.json: this machine's choices. Until cutover (#59) the legacy state.json fields
-// are read when the file is absent, and writing never removes them.
+// overrides.json: this machine's choices. When the file is absent the legacy state.json fields
+// are read in its place, so a never-migrated machine reports its choices without a write.
 export const overridesStore = Layer.effect(
   OverridesStore,
   Effect.gen(function* () {

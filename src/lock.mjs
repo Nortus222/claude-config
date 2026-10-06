@@ -91,6 +91,10 @@ export function migrateLegacyState() {
 // error: every managed file then reads as 'unmanaged', which backs up before
 // writing instead of overwriting blind.
 export function readLock() {
+  return withOverrides(readStateOnly());
+}
+
+function readStateOnly() {
   const state = readStateFile(statePath());
   if (state) return state;
   // No usable neutral state: this may be a machine that still has the old
@@ -98,6 +102,27 @@ export function readLock() {
   // every managed file as never synced.
   if (existsSync(statePath())) return emptyLock();
   return migrateLegacyState().state;
+}
+
+// Transitional until the legacy CLI is removed (#59): the TypeScript commands keep the machine's
+// choices only in overrides.json and drop them from state.json, so when overrides.json exists and
+// parses as an object its choices replace state.json's. Otherwise state.json's fields stand.
+function withOverrides(lock) {
+  let overrides;
+  try {
+    overrides = JSON.parse(readFileSync(join(stateRoot(), 'overrides.json'), 'utf8'));
+  } catch {
+    return lock;
+  }
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return lock;
+  const { configTargets: _stateTargets, ...rest } = lock;
+  const targets = overrides.configTargets;
+  return {
+    ...rest,
+    skillsOnly: overrides.manageConfig === false,
+    ...(Array.isArray(targets) && targets.every((target) => ['claude', 'codex'].includes(target))
+      ? { configTargets: [...new Set(targets)] } : {}),
+  };
 }
 
 // Written to a sibling and renamed into place. A half-written state file

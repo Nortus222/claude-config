@@ -63,7 +63,7 @@ test('uninstall removes configuration created on a fresh machine and stops manag
   assert.equal(existsSync(join(env.openrouter, 'models-static.json')), false);
 
   const state = JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8'));
-  assert.equal(state.skillsOnly, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')), { version: 1, manageConfig: false });
   assert.deepEqual(state.files, {});
 
   const reapplied = await runCli(['apply'], env);
@@ -137,8 +137,7 @@ test('uninstall refuses changed managed configuration unless forced', async () =
   assert.ok(backup, 'the forced uninstall must report where it preserved the changed file');
   assert.equal(readFileSync(backup, 'utf8'), '# changed after setup\n');
 
-  const state = readFileSync(join(env.state, 'state.json'), 'utf8');
-  assert.match(state, /"skillsOnly": true/);
+  assert.equal(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')).manageConfig, false);
 });
 
 test('uninstall rejects a narrow target without changing either agent', async () => {
@@ -238,13 +237,13 @@ test('uninstall restores a pre-existing instruction-file symlink', {
   assert.equal(readFileSync(restored, 'utf8'), '# mine\n');
 });
 
-test('uninstall records skills-only in overrides.json as well as state.json', async () => {
+test('uninstall records skills-only in overrides.json only', async () => {
   const env = fixture();
   assert.equal((await runCli(['apply'], env)).code, 0);
   const result = await runCli(['uninstall', '--yes'], env);
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')), { version: 1, manageConfig: false });
-  assert.equal(JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')).skillsOnly, true);
+  assert.equal('skillsOnly' in JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')), false);
 });
 
 test('uninstall leaves a malformed overrides.json alone and says so', async () => {
@@ -256,7 +255,7 @@ test('uninstall leaves a malformed overrides.json alone and says so', async () =
   assert.match(result.stderr, /overrides\.json is not valid/);
   assert.equal(readFileSync(join(env.state, 'overrides.json'), 'utf8'), '{');
   assert.equal(existsSync(join(env.claude, 'CLAUDE.md')), false);
-  assert.equal(JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')).skillsOnly, true);
+  assert.equal('skillsOnly' in JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8')), false);
 });
 
 test('uninstall changes nothing when machine state cannot be read', async () => {

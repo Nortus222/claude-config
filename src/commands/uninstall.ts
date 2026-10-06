@@ -4,7 +4,7 @@ import { Cause, Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import {
   backupsForRun, CHANGED_SINCE_APPLY, configDomain, configFileId, execute, inspect, machinePaths, nodeFs,
-  OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, StateStore, stateStore,
+  OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, stateStore,
 } from '@nortuscc/machine';
 import { formatRow, section } from '../report.ts';
 import { parseTarget } from '../targets.ts';
@@ -57,9 +57,8 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
       process.stdout.write('\n' + section('uninstall', lines));
       if (!run.complete) return 1;
 
-      // overrides.json holds the choice; state.json keeps the legacy copy until cutover (#59).
+      // overrides.json is the only record of the choice.
       const overrides = yield* overridesFile.read;
-      yield* (yield* StateStore).update((state) => ({ ...state, skillsOnly: true }));
       if (overrides.issues.length > 0) {
         console.error(`nortuscc: ${overrides.source} is not valid, so it was left as it is; set "manageConfig": false there by hand.`);
         return 1;
