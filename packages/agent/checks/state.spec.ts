@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { AgentStateStore, DEFAULT_STATE } from '../src/index.ts';
+import { Effect } from 'effect';
+import { AgentStateStore, changePolicy, DEFAULT_STATE, pause } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 
 const agentJsonPath = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoot, 'agent', 'agent.json');
@@ -41,4 +42,15 @@ test('a corrupt agent.json reads as the default', async () => {
   const m = agentMachine();
   m.write(agentJsonPath(m), '{ broken');
   assert.deepEqual(await m.run(AgentStateStore.use((s) => s.read)), DEFAULT_STATE);
+});
+
+test('a pause survives a concurrent policy change', async () => {
+  const m = agentMachine();
+  for (let i = 0; i < 20; i++) {
+    await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, policy: 'notify', policySource: 'default', paused: null }))));
+    await m.run(Effect.all([pause(`run ${i}`), changePolicy(i % 2 ? 'auto-apply' : 'manual', 'cli')], { concurrency: 'unbounded' }));
+    const state = await m.run(AgentStateStore.use((s) => s.read));
+    assert.equal(state.paused?.reason, `run ${i}`);
+    assert.equal(state.policy, i % 2 ? 'auto-apply' : 'manual');
+  }
 });

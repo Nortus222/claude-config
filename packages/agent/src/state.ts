@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, Layer, Semaphore } from 'effect';
 import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
 
 export type Policy = 'auto-apply' | 'notify' | 'manual';
@@ -43,13 +43,15 @@ export class AgentStateStore extends Context.Service<
 >()('agent/AgentStateStore') {}
 
 // <stateRoot>/agent/agent.json. A corrupt file reads as the default, as state.json does. Writes keep
-// the fields other parts own (installedBy and agentVersion, written by the installer).
+// the fields other parts own (installedBy and agentVersion, written by the installer). Updates run
+// one at a time, so the job's pause and a caller's policy change never overwrite each other.
 export const agentStateStore = Layer.effect(
   AgentStateStore,
   Effect.gen(function* () {
     const paths = yield* MachinePaths;
     const fs = yield* Fs;
     const path = join(paths.stateRoot, 'agent', 'agent.json');
+    const lock = yield* Semaphore.make(1);
     const raw = Effect.map(fs.readText(path), (text): Readonly<Record<string, unknown>> => {
       if (text === undefined) return {};
       try {
@@ -67,7 +69,7 @@ export const agentStateStore = Layer.effect(
           const next = f(decode(before));
           yield* fs.writeTextAtomic(path, JSON.stringify({ ...before, ...next }, null, 2) + '\n');
           return next;
-        }),
+        }).pipe(lock.withPermit),
     };
   }),
 );
