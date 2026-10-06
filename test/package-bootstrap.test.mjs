@@ -62,6 +62,7 @@ test('an npx copy hands a ported verb to the recorded checkout', { skip: !npmCli
     "export const VERBS = ['status'];",
     "export const USAGE = '';",
     "export const PORTED = ['status'];",
+    "export const LOCKED = [];",
   ].join('\n')}\n`);
 
   const state = join(stage, 'state');

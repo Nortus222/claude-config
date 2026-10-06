@@ -57,3 +57,7 @@ can change is nortuscc itself, and only after you say yes.`;
 // Commands whose implementation is TypeScript (src/commands/<verb>.ts). An npx copy cannot
 // run TypeScript from node_modules, so it hands these to the recorded checkout.
 export const PORTED = ['uninstall', 'update'];
+
+// Legacy verbs that read state.json and rewrite it whole. They hold <stateRoot>/apply.lock for
+// the whole command; a ported verb takes it through @nortuscc/machine's executor instead.
+export const LOCKED = ['apply', 'capture', 'pull', 'push', 'setup'];

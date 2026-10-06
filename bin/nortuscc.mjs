@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { constants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PORTED, USAGE, VERBS } from './commands.mjs';
+import { LOCKED, PORTED, USAGE, VERBS } from './commands.mjs';
 import { INSTALL_STDIO, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
 
 const [major] = process.versions.node.split('.').map(Number);
@@ -59,7 +59,8 @@ if (isCheckout(root)) {
 // commands run from the checkout.
 if (!PORTED.includes(verb)) {
   const { run } = await import(`../src/commands/${verb}.mjs`);
-  process.exit(await run(rest));
+  const { withApplyLock } = await import('../src/lock.mjs');
+  process.exit(await (LOCKED.includes(verb) ? withApplyLock(() => run(rest)) : run(rest)));
 }
 const checkout = recordedCheckout(process.env, homedir(), process.platform);
 if (!checkout) {

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
-use host::Backend;
+use host::{Backend, Request};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
@@ -8,8 +8,9 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
+const UNAVAILABLE: &str = "Backend unavailable; restart explicitly";
 struct Session {
-    backend: Option<Backend>,
+    backend: Option<Arc<Backend>>,
     generation: u64,
 }
 struct Owner {
@@ -22,46 +23,66 @@ impl Owner {
         let app = self.app.clone();
         Backend::spawn(
             &self.resources,
+            None,
             Arc::new(move |mut event| {
                 event["generation"] = json!(generation);
-                let _ = app.emit("fixture-backend", event);
+                let _ = app.emit("machine-backend", event);
             }),
         )
     }
-    fn request(&self, command: &str) -> Result<Value, String> {
-        let session = self.session.lock().unwrap();
-        let data = session
-            .backend
-            .as_ref()
-            .ok_or("Backend unavailable; restart explicitly")?
-            .request(command)?;
-        Ok(json!({"generation":session.generation,"data":data}))
+}
+// Sends one request to the current backend, holding the session lock only to read it, so a slow
+// request never delays a restart, a generation read or quitting.
+fn request(session: &Mutex<Session>, request: Request) -> Result<Value, String> {
+    let (backend, generation) = {
+        let session = session.lock().unwrap();
+        (session.backend.clone().ok_or(UNAVAILABLE)?, session.generation)
+    };
+    let data = backend.request(request)?;
+    Ok(json!({"generation": generation, "data": data}))
+}
+// The current backend's generation, or an error when none is running.
+fn generation(session: &Mutex<Session>) -> Result<Value, String> {
+    let session = session.lock().unwrap();
+    if session.backend.is_none() {
+        return Err(UNAVAILABLE.into());
     }
+    Ok(json!({"generation": session.generation, "data": null}))
 }
 async fn dispatch(
     owner: tauri::State<'_, Arc<Owner>>,
-    command: &'static str,
+    command: Request,
 ) -> Result<Value, String> {
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || owner.request(command))
+    tauri::async_runtime::spawn_blocking(move || request(&owner.session, command))
         .await
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-async fn inspect_fixture(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, "inspect").await
+async fn backend_generation(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
+    generation(&owner.session)
 }
 #[tauri::command]
-async fn start_fixture(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, "start").await
+async fn inspect_machine(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
+    dispatch(owner, Request::Inspect).await
 }
 #[tauri::command]
-async fn cancel_fixture(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, "cancel").await
+async fn preview_plan(
+    owner: tauri::State<'_, Arc<Owner>>,
+    exclude: Vec<String>,
+) -> Result<Value, String> {
+    dispatch(owner, Request::Preview { exclude }).await
 }
 #[tauri::command]
-async fn crash_probe(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, "crash").await
+async fn apply_plan(
+    owner: tauri::State<'_, Arc<Owner>>,
+    plan_id: String,
+) -> Result<Value, String> {
+    dispatch(owner, Request::Apply { plan_id }).await
+}
+#[tauri::command]
+async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
+    dispatch(owner, Request::Cancel).await
 }
 #[tauri::command]
 async fn restart_backend(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
@@ -72,60 +93,66 @@ async fn restart_backend(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, S
             old.shutdown();
         }
         session.generation += 1;
-        session.backend = Some(owner.spawn(session.generation)?);
-        let data = session.backend.as_ref().unwrap().request("inspect")?;
-        Ok(json!({"generation":session.generation,"data":data}))
+        session.backend = Some(Arc::new(owner.spawn(session.generation)?));
+        Ok(json!({"generation":session.generation,"data":null}))
     })
     .await
     .map_err(|e| e.to_string())?
 }
+// Exercises the packaged owner against the machine at $HOME (the smoke script passes a temporary one).
 fn smoke(resources: PathBuf) -> Result<(), String> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     let backend = Backend::spawn(
         &resources,
+        None,
         Arc::new(move |event| captured.lock().unwrap().push(event)),
     )?;
-    if backend.request("inspect")?["diff"].as_array().map(Vec::len) != Some(2) {
-        return Err("Unexpected initial fixture".into());
+    let inspected = backend.request(Request::Inspect)?;
+    if !inspected["items"].is_array() || !inspected["profile"]["repo"].is_string() {
+        return Err(format!("Unexpected inspect result {inspected}"));
     }
-    backend.request("start")?;
-    if !backend.request("start").unwrap_err().starts_with("BUSY") {
-        return Err("Expected busy rejection".into());
+    let preview = backend.request(Request::Preview { exclude: vec![] })?;
+    let plan_id = preview["planId"]
+        .as_str()
+        .ok_or("Missing plan id")?
+        .to_string();
+    let applied = backend.request(Request::Apply { plan_id })?;
+    if applied["status"] != "started" {
+        return Err(format!("Unexpected apply result {applied}"));
     }
-    backend.request("cancel")?;
-    if !events
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|event| event["state"] == "cancelled")
-    {
-        return Err("Missing cancellation event".into());
-    }
-    backend.request("crash")?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    if backend.request("inspect").is_ok() {
-        return Err("Crashed backend accepted a request".into());
-    }
-    drop(backend);
-    let fresh = Backend::spawn(&resources, Arc::new(|_| {}))?;
-    if fresh.request("inspect")?["diff"].as_array().map(Vec::len) != Some(2) {
-        return Err("Restart retained mutation state".into());
-    }
-    fresh.request("start")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if fresh.request("inspect")?["diff"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
-        {
-            fresh.shutdown();
-            println!("Packaged Rust owner smoke passed");
-            return Ok(());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let end = events.lock().unwrap().iter().find_map(|e| {
+            let kind = e["progress"]["type"].as_str()?;
+            ["done", "cancelled", "failed"]
+                .contains(&kind)
+                .then(|| e.clone())
+        });
+        if let Some(end) = end {
+            if end["progress"]["type"] != "done" {
+                return Err(format!("Apply did not complete: {end}"));
+            }
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("Apply did not finish".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Err("Fixture did not complete".into())
+    if !backend
+        .request(Request::Preview {
+            exclude: vec!["not-an-item".into()],
+        })
+        .unwrap_err()
+        .starts_with("UNKNOWN_KEY")
+    {
+        return Err("Expected an unknown key to be refused".into());
+    }
+    backend.request(Request::Cancel)?;
+    backend.shutdown();
+    println!("Packaged Rust owner smoke passed");
+    Ok(())
 }
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--smoke") {
@@ -137,7 +164,7 @@ fn main() {
                 executable
                     .parent()
                     .unwrap()
-                    .join("../Resources/fixture-runtime")
+                    .join("../Resources/backend-runtime")
             });
         if let Err(error) = smoke(resources) {
             eprintln!("Smoke failed: {error}");
@@ -147,7 +174,7 @@ fn main() {
     }
     tauri::Builder::default()
         .setup(|app| {
-            let resources = app.path().resource_dir()?.join("fixture-runtime");
+            let resources = app.path().resource_dir()?.join("backend-runtime");
             #[cfg(debug_assertions)]
             let resources = if resources.is_dir() {
                 resources
@@ -163,31 +190,69 @@ fn main() {
                 app: app.handle().clone(),
             });
             match owner.spawn(1) {
-                Ok(backend) => owner.session.lock().unwrap().backend = Some(backend),
+                Ok(backend) => owner.session.lock().unwrap().backend = Some(Arc::new(backend)),
                 Err(error) => eprintln!("Backend startup failed: {error}"),
             }
             app.manage(owner);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            inspect_fixture,
-            start_fixture,
-            cancel_fixture,
-            restart_backend,
-            crash_probe
+            backend_generation,
+            inspect_machine,
+            preview_plan,
+            apply_plan,
+            cancel_apply,
+            restart_backend
         ])
         .build(tauri::generate_context!())
-        .expect("Unable to build fixture app")
+        .expect("Unable to build the app")
         .run(|app, event| {
             if matches!(
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 if let Some(owner) = app.try_state::<Arc<Owner>>() {
-                    if let Some(backend) = owner.session.lock().unwrap().backend.take() {
+                    let backend = owner.session.lock().unwrap().backend.take();
+                    if let Some(backend) = backend {
                         backend.shutdown();
                     }
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn a_request_in_flight_does_not_block_reading_the_generation() {
+        // Answers inspect after a second and shutdown at once.
+        let source = r#"
+            import { createInterface } from 'node:readline';
+            createInterface({ input: process.stdin }).on('line', (line) => {
+                const { id, command } = JSON.parse(line);
+                const reply = () => process.stdout.write(JSON.stringify({ version: 2, id, ok: true, result: { command } }) + '\n');
+                if (command === 'shutdown') { reply(); process.exit(0); }
+                setTimeout(reply, 1000);
+            });
+        "#;
+        let (backend, directory) = host::lifecycle_tests::fake_backend(source, Arc::new(|_| {}));
+        let session = Arc::new(Mutex::new(Session {
+            backend: Some(Arc::new(backend)),
+            generation: 7,
+        }));
+        let inflight = session.clone();
+        let slow = std::thread::spawn(move || request(&inflight, Request::Inspect));
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        assert_eq!(generation(&session).unwrap()["generation"], 7);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(!slow.is_finished(), "the inspect should still be in flight");
+        let reply = slow.join().unwrap().unwrap();
+        assert_eq!(reply["generation"], 7);
+        assert_eq!(reply["data"]["command"], "inspect");
+        drop(session);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
