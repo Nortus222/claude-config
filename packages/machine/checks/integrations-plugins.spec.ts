@@ -34,7 +34,7 @@ test('Claude commands are argv arrays', () => {
 test('Codex commands use plugin add and plugin marketplace add', () => {
   assert.deepEqual(codexPluginCommand(CODEX_PLUGIN), { cmd: 'codex', args: ['plugin', 'add', 'context-mode@context-mode'] });
   assert.deepEqual(codexMarketplaceCommand(CODEX_MARKETPLACE), { cmd: 'codex', args: ['plugin', 'marketplace', 'add', 'mksglu/context-mode'] });
-  assert.deepEqual(codexPluginListCommand(), { cmd: 'codex', args: ['plugin', 'list', '--json'] });
+  assert.deepEqual(codexPluginListCommand(), { cmd: 'codex', args: ['plugin', 'list', '--json', '--available'] });
   assert.deepEqual(codexMarketplaceListCommand(), { cmd: 'codex', args: ['plugin', 'marketplace', 'list', '--json'] });
 });
 
@@ -102,12 +102,12 @@ test('Codex state is read through its --json output', async () => {
   const state = await codexState(fake.path);
   assert.equal(inspectPlugin(CODEX_PLUGIN, state).state, 'installed');
   assert.equal(inspectPlugin(CODEX_MARKETPLACE, state).state, 'installed');
-  assert.deepEqual(fake.calls(), ['codex plugin list --json', 'codex plugin marketplace list --json']);
+  assert.deepEqual(fake.calls(), ['codex plugin list --json --available', 'codex plugin marketplace list --json']);
 });
 
 test('absent Codex entries read as missing', async () => {
   const fake = fakeBin();
-  fake.codex({ installed: [], available: [] }, { marketplaces: [] });
+  fake.codex({ installed: [], available: [{ pluginId: 'x@context-mode', marketplaceName: 'context-mode' }] }, { marketplaces: [] });
   const state = await codexState(fake.path);
   assert.equal(inspectPlugin(CODEX_PLUGIN, state).state, 'missing');
   assert.equal(inspectPlugin(CODEX_MARKETPLACE, state).state, 'missing');
@@ -145,4 +145,49 @@ test('a marketplace probe failure does not erase a successful plugin result', as
   const state = await codexState(fake.path);
   assert.equal(inspectPlugin(CODEX_PLUGIN, state).state, 'installed');
   assert.equal(inspectPlugin(CODEX_MARKETPLACE, state).state, 'unknown');
+});
+
+test('catalogs come from the plugin list\'s marketplaceName and the registered marketplaces', async () => {
+  const fake = fakeBin();
+  fake.codex(
+    {
+      installed: [{ pluginId: 'a@local', marketplaceName: 'local' }],
+      available: [{ pluginId: 'superpowers@openai-curated-remote', marketplaceName: 'openai-curated-remote' }],
+    },
+    { marketplaces: [{ name: 'empty' }] },
+  );
+  const state = await codexState(fake.path);
+  assert.deepEqual(state.catalogs, new Set(['local', 'openai-curated-remote', 'empty']));
+  assert.deepEqual(state.marketplaces, new Set(['empty']));
+});
+
+test('a missing Codex plugin from a marketplace Codex does not offer is blocked with a fix hint', () => {
+  const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['openai-bundled']) };
+  const inspected = inspectPlugin({ ...CODEX_PLUGIN, plugin: 'x@acme' }, state);
+  assert.equal(inspected.state, 'blocked');
+  assert.match(inspected.note, /Codex marketplace 'acme' is not configured/);
+  assert.match(inspected.note, /codex plugin marketplace add/);
+});
+
+test('a declared marketplace unblocks its plugin', () => {
+  const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['openai-bundled']) };
+  assert.equal(inspectPlugin(CODEX_PLUGIN, state, new Set(['context-mode'])).state, 'missing');
+});
+
+test('an offered marketplace leaves the plugin missing', () => {
+  const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['context-mode']) };
+  assert.equal(inspectPlugin(CODEX_PLUGIN, state).state, 'missing');
+});
+
+test('Claude plugins are never catalog-checked', () => {
+  assert.equal(inspectPlugin(CLAUDE_PLUGIN, { plugins: new Set(), marketplaces: new Set() }).state, 'missing');
+});
+
+// Codex drops its remote catalog when offline or signed out; the built-in name cannot be added or declared.
+test('a built-in marketplace Codex withholds is blocked with a sign-in hint, not a marketplace-add hint', () => {
+  const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['openai-bundled']) };
+  const inspected = inspectPlugin({ ...CODEX_PLUGIN, plugin: 'superpowers@openai-curated-remote' }, state);
+  assert.equal(inspected.state, 'blocked');
+  assert.match(inspected.note, /built-in 'openai-curated-remote' catalog/);
+  assert.doesNotMatch(inspected.note, /marketplace add/);
 });

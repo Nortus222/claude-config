@@ -51,8 +51,8 @@
       "target": "codex",
       "type": "plugin",
       "default": true,
-      "plugin": "superpowers@openai-curated",
-      "note": "Ships from Codex's configured openai-curated marketplace."
+      "plugin": "superpowers@openai-curated-remote",
+      "note": "Ships from openai-curated-remote, the official catalog Codex serves itself."
     }
   ]
 }

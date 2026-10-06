@@ -269,7 +269,7 @@ test('apply --install --yes on a fresh machine installs the declared defaults', 
   const calls = installerCalls(m);
   assert.deepEqual(calls.filter((c) => c.cmd !== 'npx'), [
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
-    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated'] },
+    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated-remote'] },
   ]);
   const adds = calls.filter((c) => c.cmd === 'npx');
   assert.ok(adds.length > 0);

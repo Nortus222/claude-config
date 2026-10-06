@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 import type { Processes } from '../processes.ts';
 import type { Declaration, Inspected, Installer } from './declaration.ts';
-import { listNames } from './plugins.ts';
+import { listJson } from './plugins.ts';
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
@@ -38,6 +38,9 @@ export const codexMcpListCommand = (): Installer => ({ cmd: 'codex', args: ['mcp
 export type McpState = { readonly servers: ReadonlySet<string>; readonly error?: string };
 
 // Only each server's name is read: the listing also carries its environment, values included.
-export const readCodexMcp: Effect.Effect<McpState, never, Processes> = listNames(codexMcpListCommand(), 'MCP server', null, 'name').pipe(
-  Effect.map((listed) => ('names' in listed ? { servers: listed.names } : { servers: new Set<string>(), error: listed.error })),
+export const readCodexMcp: Effect.Effect<McpState, never, Processes> = listJson(codexMcpListCommand(), 'MCP server', (parsed) => {
+  if (!Array.isArray(parsed)) throw new Error('not a list');
+  return new Set(parsed.flatMap((e) => (e !== null && typeof e === 'object' && typeof e.name === 'string' ? [e.name as string] : [])));
+}).pipe(
+  Effect.map((listed) => ('value' in listed ? { servers: listed.value } : { servers: new Set<string>(), error: listed.error })),
 );

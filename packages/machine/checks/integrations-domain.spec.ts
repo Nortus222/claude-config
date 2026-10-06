@@ -335,3 +335,23 @@ test('the package root exports the integrations domain', async () => {
   assert.ok(typeof root.readCodexState === 'object' || Effect.isEffect(root.readCodexState));
   assert.equal(typeof root.userScopeInstalls, 'function');
 });
+
+// Issue #101: `codex plugin add` fails outright for a marketplace Codex does not offer.
+test('inspect blocks a Codex plugin whose marketplace is missing, and apply skips it', async () => {
+  const m = machine();
+  m.fake.codex({ installed: [], available: [] }, { marketplaces: [{ name: 'openai-bundled' }] });
+  const report = await m.inspect(desiredOf([{ ...CODEX_PLUGIN, plugin: 'superpowers@openai-curated' }]));
+  const item = report.items[0]!;
+  assert.deepEqual([item.state, item.disposition], ['blocked', 'blocked']);
+  assert.match(item.note ?? '', /built-in 'openai-curated' catalog/);
+  const planned = plan('apply', report, selectAll, [m.domain]);
+  assert.deepEqual(planned.steps, []);
+  assert.match(planned.skipped[0]!.reason, /built-in 'openai-curated' catalog/);
+});
+
+test('a plugin whose Codex marketplace is declared still plans after it', async () => {
+  const m = machine();
+  m.fake.codex({ installed: [], available: [] }, { marketplaces: [] });
+  const report = await m.inspect(desiredOf([CODEX_MARKETPLACE, CODEX_PLUGIN]));
+  assert.deepEqual(report.items.map((i) => i.disposition), ['apply', 'apply']);
+});

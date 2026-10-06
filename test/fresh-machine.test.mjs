@@ -31,7 +31,7 @@ function emptyHomeFixture() {
 // stands in for — they are not interchangeable:
 //
 //   claude  keeps plugin state in ~/.claude/plugins/*.json, which nortuscc reads
-//   codex   has no such file; it answers `plugin list --json` and installs with
+//   codex   has no such file; it answers `plugin list --json --available` and installs with
 //           `plugin add` (there is no `plugin install`)
 //   npx     drives the shared skill store
 //
@@ -104,8 +104,9 @@ if (agent === 'claude') {
   } else if (argv[0] === 'plugin' && argv[1] === 'list') {
     const state = codexRead();
     process.stdout.write(JSON.stringify({
-      installed: state.plugins.map((pluginId) => ({ pluginId, installed: true })),
-      available: [],
+      installed: state.plugins.map((pluginId) => ({ pluginId, marketplaceName: pluginId.slice(pluginId.lastIndexOf('@') + 1), installed: true })),
+      // Codex's own remote catalog, which every signed-in Codex offers.
+      available: [{ pluginId: 'superpowers@openai-curated-remote', marketplaceName: 'openai-curated-remote', installed: false }],
     }));
   } else if (argv[0] === 'plugin' && argv[1] === 'install') {
     // The real CLI has no such subcommand; failing loudly here is what keeps
@@ -189,11 +190,12 @@ async function runCli(args, { env, fixtureBinDir }) {
 // where it belongs.
 // Since 2026-08-20 the manifest declares Superpowers for both agents and no
 // marketplace: context-mode and claude-mem were dropped after a cost audit,
-// and each agent uses its configured official marketplace.
+// and Claude uses its official marketplace while Codex uses its own
+// `openai-curated-remote` catalog.
 function expectedDefaultInstallCalls() {
   return [
     { cmd: 'claude', args: ['plugin', 'install', 'superpowers@claude-plugins-official'] },
-    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated'] },
+    { cmd: 'codex', args: ['plugin', 'add', 'superpowers@openai-curated-remote'] },
   ];
 }
 

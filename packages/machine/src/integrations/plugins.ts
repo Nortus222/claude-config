@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { Effect } from 'effect';
 import { Fs } from '../fs.ts';
 import { Processes } from '../processes.ts';
+import { BUILTIN_MARKETPLACES, marketplaceOf } from '../undeclared/probe.ts';
 import type { Declaration, Inspected, Installer } from './declaration.ts';
 
 // Each agent owns where its plugins land and how they update; nortuscc only asks it to install them.
@@ -10,7 +11,7 @@ export const pluginCommand = (d: Declaration): Installer => ({ cmd: 'claude', ar
 // Codex has no `plugin install`; `add` takes the PLUGIN@MARKETPLACE selector the manifest already spells.
 export const codexMarketplaceCommand = (d: Declaration): Installer => ({ cmd: 'codex', args: ['plugin', 'marketplace', 'add', d.marketplace!] });
 export const codexPluginCommand = (d: Declaration): Installer => ({ cmd: 'codex', args: ['plugin', 'add', d.plugin!] });
-export const codexPluginListCommand = (): Installer => ({ cmd: 'codex', args: ['plugin', 'list', '--json'] });
+export const codexPluginListCommand = (): Installer => ({ cmd: 'codex', args: ['plugin', 'list', '--json', '--available'] });
 export const codexMarketplaceListCommand = (): Installer => ({ cmd: 'codex', args: ['plugin', 'marketplace', 'list', '--json'] });
 
 // The installer for a plugin or marketplace, chosen by target so a Codex item never reaches claude.
@@ -23,6 +24,8 @@ export const installCommand = (d: Declaration): Installer =>
 export type PluginState = {
   readonly plugins: ReadonlySet<string>;
   readonly marketplaces: ReadonlySet<string>;
+  // The marketplaces Codex can install from: registered ones plus catalogs it serves itself. Only Codex sets it.
+  readonly catalogs?: ReadonlySet<string>;
   readonly pluginError?: string;
   readonly marketplaceError?: string;
 };
@@ -78,44 +81,74 @@ export const claudePluginState = (claudeDir: string): Effect.Effect<PluginState,
     Effect.map(([plugins, marketplaces]) => ({ plugins: new Set(Object.keys(plugins)), marketplaces: new Set(Object.keys(marketplaces)) })),
   );
 
-type Listed = { readonly names: ReadonlySet<string> } | { readonly error: string };
+type Listed<A> = { readonly value: A } | { readonly error: string };
 
-// One `--json` list: the `field` of each entry in `parsed[list]`, or in `parsed` itself when `list` is null. A launch failure, a non-zero exit or
-// output of another shape becomes an error, never a failure. An absent list reads as empty, as before.
-export const listNames = (installer: Installer, noun: string, list: string | null, field: string): Effect.Effect<Listed, never, Processes> =>
+// One `--json` list, parsed by `read`, which throws on a bad shape. A launch failure, a non-zero exit or
+// output of another shape becomes an error, never a failure.
+export const listJson = <A>(installer: Installer, noun: string, read: (parsed: unknown) => A): Effect.Effect<Listed<A>, never, Processes> =>
   Processes.use((p) => p.run({ cmd: installer.cmd, args: installer.args, output: 'capture' })).pipe(
-    Effect.map(({ code, stdout }): Listed => {
+    Effect.map(({ code, stdout }): Listed<A> => {
       if (code !== 0) return { error: `could not list Codex ${noun}s: exited ${code}` };
       try {
-        const parsed: unknown = JSON.parse(stdout);
-        const entries = list === null ? parsed : isPlainObject(parsed) ? parsed[list] ?? [] : undefined;
-        if (!Array.isArray(entries)) throw new Error(list === null ? 'not a list' : isPlainObject(parsed) ? `'${list}' is not a list` : 'unexpected output');
-        return { names: new Set(entries.flatMap((e) => (isPlainObject(e) && typeof e[field] === 'string' ? [e[field]] : []))) };
+        return { value: read(JSON.parse(stdout)) };
       } catch (err) {
         return { error: `could not read the Codex ${noun} list: ${err instanceof Error ? err.message : String(err)}` };
       }
     }),
-    Effect.catchTag('LaunchFailed', (err) => Effect.succeed<Listed>({ error: `could not list Codex ${noun}s: ${err.message}` })),
+    Effect.catchTag('LaunchFailed', (err) => Effect.succeed<Listed<A>>({ error: `could not list Codex ${noun}s: ${err.message}` })),
   );
+
+// The entries of `parsed[list]`; an absent list reads as empty.
+const entriesOf = (parsed: unknown, list: string): Record<string, unknown>[] => {
+  if (!isPlainObject(parsed)) throw new Error('unexpected output');
+  const entries = parsed[list] ?? [];
+  if (!Array.isArray(entries)) throw new Error(`'${list}' is not a list`);
+  return entries.filter(isPlainObject);
+};
+
+const stringsOf = (entries: Record<string, unknown>[], field: string): string[] =>
+  entries.flatMap((e) => (typeof e[field] === 'string' ? [e[field]] : []));
+
+// Installed plugin ids, and every marketplace the plugin list mentions (`--available` adds Codex's remote catalog).
+const readPlugins = (parsed: unknown) => {
+  const installed = entriesOf(parsed, 'installed');
+  const available = entriesOf(parsed, 'available');
+  return { plugins: new Set(stringsOf(installed, 'pluginId')), offered: new Set(stringsOf([...installed, ...available], 'marketplaceName')) };
+};
+
+const readMarketplaces = (parsed: unknown) => new Set(stringsOf(entriesOf(parsed, 'marketplaces'), 'name'));
 
 // Codex keeps no readable state files; its CLI's --json output is the supported answer. Read once per inspect.
 export const readCodexState: Effect.Effect<PluginState, never, Processes> = Effect.gen(function* () {
-  const plugins = yield* listNames(codexPluginListCommand(), 'plugin', 'installed', 'pluginId');
-  const marketplaces = yield* listNames(codexMarketplaceListCommand(), 'marketplace', 'marketplaces', 'name');
+  const plugins = yield* listJson(codexPluginListCommand(), 'plugin', readPlugins);
+  const marketplaces = yield* listJson(codexMarketplaceListCommand(), 'marketplace', readMarketplaces);
+  const registered = 'value' in marketplaces ? marketplaces.value : new Set<string>();
+  const offered = 'value' in plugins ? plugins.value.offered : new Set<string>();
   return {
-    plugins: 'names' in plugins ? plugins.names : new Set<string>(),
-    marketplaces: 'names' in marketplaces ? marketplaces.names : new Set<string>(),
+    plugins: 'value' in plugins ? plugins.value.plugins : new Set<string>(),
+    marketplaces: registered,
+    catalogs: new Set([...offered, ...registered]),
     ...('error' in plugins ? { pluginError: plugins.error } : {}),
     ...('error' in marketplaces ? { marketplaceError: marketplaces.error } : {}),
   };
 });
 
-// A marketplace matches by the name it registers as, which the manifest declares.
-export const inspectPlugin = (d: Declaration, state: PluginState): Inspected => {
+// A marketplace matches by the name it registers as, which the manifest declares. A Codex plugin whose
+// marketplace Codex neither offers nor will get from a declaration is blocked: `codex plugin add` would fail.
+export const inspectPlugin = (d: Declaration, state: PluginState, declaredMarketplaces: ReadonlySet<string> = new Set()): Inspected => {
   if (d.type === 'marketplace') {
     if (state.marketplaceError) return { state: 'unknown', note: state.marketplaceError };
     return state.marketplaces.has(d.name!) ? { state: 'installed', note: 'already added' } : { state: 'missing', note: '' };
   }
   if (state.pluginError) return { state: 'unknown', note: state.pluginError };
-  return state.plugins.has(d.plugin!) ? { state: 'installed', note: 'already installed' } : { state: 'missing', note: '' };
+  if (state.plugins.has(d.plugin!)) return { state: 'installed', note: 'already installed' };
+  const marketplace = marketplaceOf(d.plugin!);
+  if (state.catalogs && marketplace && !state.catalogs.has(marketplace) && !declaredMarketplaces.has(marketplace)) {
+    // Codex reserves its built-in names: they are never added or declared, only offered once signed in and online.
+    const note = BUILTIN_MARKETPLACES.has(marketplace)
+      ? `Codex is not offering its built-in '${marketplace}' catalog: sign in to Codex and check its network access`
+      : `Codex marketplace '${marketplace}' is not configured: add it with codex plugin marketplace add <source>, or declare it in integrations.json`;
+    return { state: 'blocked', note };
+  }
+  return { state: 'missing', note: '' };
 };
