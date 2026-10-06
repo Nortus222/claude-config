@@ -66,14 +66,26 @@ export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { reado
     return handle;
   });
 
+// Completes when `signal` aborts; never without one.
+const untilAborted = (signal?: AbortSignal): Effect.Effect<void> =>
+  signal === undefined
+    ? Effect.never
+    : Effect.callback<void>((resume) => {
+      if (signal.aborted) return resume(Effect.void);
+      const onAbort = () => resume(Effect.void);
+      signal.addEventListener('abort', onAbort, { once: true });
+      return Effect.sync(() => signal.removeEventListener('abort', onAbort));
+    });
+
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
-// interrupted. The caller builds `domains` and `source` at the same boundary as `paths`.
+// interrupted or `signal` aborts; either closes the agent, cancelling an in-flight auto-apply.
+// The caller builds `domains` and `source` at the same boundary as `paths`.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
   readonly domains: ReadonlyArray<AgentDomain>;
   readonly source: Layer.Layer<SetupSource>;
   readonly signal?: AbortSignal;
 }) =>
-  Effect.scoped(Effect.andThen(startAgent(input.domains, { signal: input.signal }), Effect.never)).pipe(
+  Effect.scoped(Effect.andThen(startAgent(input.domains, { signal: input.signal }), untilAborted(input.signal))).pipe(
     Effect.provide(Layer.merge(agentLayer(input.paths), input.source)),
   );

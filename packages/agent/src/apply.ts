@@ -46,7 +46,8 @@ const runUnderLock = (planned: Plan, report: MachineReport, domains: ReadonlyArr
 
 // Applies the given inert item keys. Never builds an uninstall, capture or update plan. A refused
 // plan or a failed step pauses auto-apply; a cancelled run does not; a held apply.lock (the CLI is
-// applying) skips until the next trigger. The caller provides a fresh Backups for the run.
+// applying) skips until the next trigger; an aborted signal starts no run. The caller provides a
+// fresh Backups for the run.
 export const autoApply = (
   report: MachineReport,
   keys: ReadonlyArray<string>,
@@ -54,6 +55,8 @@ export const autoApply = (
   options: { readonly signal?: AbortSignal } = {},
 ) =>
   Effect.gen(function* () {
+    // A shutdown already under way starts nothing: no lock, no History.
+    if (options.signal?.aborted) return NOTHING;
     const planned = plan('apply', report, { ...selectAll, only: keys }, domains);
     if (planned.steps.length === 0) return NOTHING;
     const refused = planned.steps.find((s) => !AUTO_ACTIONS.has(s.action));

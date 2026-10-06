@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,7 +11,7 @@ const NO_SOURCE = () => Effect.die(new Error('this test has no setup source'));
 // For tests that never refresh or resolve.
 const noSource = Layer.succeed(SetupSource, { fetch: NO_SOURCE(), load: NO_SOURCE, effective: NO_SOURCE });
 
-// A temporary HOME, checkout and state root, with the agent's services over them.
+// A temporary HOME, git checkout and state root, with the agent's services over them.
 export const agentMachine = () => {
   const root = mkdtempSync(join(tmpdir(), 'agent-'));
   const home = join(root, 'home');
@@ -20,6 +21,10 @@ export const agentMachine = () => {
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
     stateRoot, backups: join(stateRoot, 'backups'),
   };
+  // The checkout is a git repo with an origin, as a real one is, so trusting it runs git cleanly.
+  mkdirSync(paths.repo, { recursive: true });
+  spawnSync('git', ['init', '-q', paths.repo]);
+  spawnSync('git', ['-C', paths.repo, 'remote', 'add', 'origin', 'https://github.com/example/setup.git']);
   const write = (path: string, text: string) => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text);

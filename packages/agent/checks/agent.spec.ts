@@ -97,9 +97,11 @@ test('runAgent builds its services from paths and runs until interrupted', async
   assert.ok((await m.kinds()).includes('revision-verified'));
 });
 
-test('closing the agent cancels an in-flight auto-apply, which records cancelled', async () => {
+const MODEL = 'setting:claude:settings.json#model';
+
+// A trusted auto-apply machine with two accepted inert keys, so a run has two steps.
+const autoApplyMachine = async () => {
   const m = agentMachine();
-  const MODEL = 'setting:claude:settings.json#model';
   const fixture = setupFixture(join(m.root, 'setup'), {
     headFiles: { 'claude/settings.keys.json': JSON.stringify({ theme: 'dark', effortLevel: 'high', model: 'opus' }) + '\n' },
   });
@@ -107,6 +109,11 @@ test('closing the agent cancels an in-flight auto-apply, which records cancelled
   await m.trust();
   await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, policy: 'auto-apply', policySource: 'person' }))));
   for (const itemId of [EFFORT, MODEL]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
+  return { m, fixture };
+};
+
+test('closing the agent cancels an in-flight auto-apply, which records cancelled', async () => {
+  const { m, fixture } = await autoApplyMachine();
   // The first step waits until the test lets it finish, so the agent shuts down mid-run.
   const started = Deferred.makeUnsafe<void>();
   const release = Deferred.makeUnsafe<void>();
@@ -134,4 +141,37 @@ test('closing the agent cancels an in-flight auto-apply, which records cancelled
   assert.equal(finished[0].steps.length, 1);
   assert.equal(steps, 1);
   assert.ok(!(await m.kinds()).includes('paused'));
+});
+
+test('an aborted signal ends the agent, and no later job runs', async () => {
+  const { m, fixture } = await autoApplyMachine();
+  const controller = new AbortController();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source, signal: controller.signal }));
+  for (let i = 0; i < 200 && !(await m.kinds()).includes('apply-finished'); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  controller.abort();
+  const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('2 seconds')));
+  if (ended._tag === 'None') await Effect.runPromise(Fiber.interrupt(fiber));
+  assert.equal(ended._tag, 'Some', 'the agent kept running after its signal aborted');
+  assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value));
+  const before = await m.kinds();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(await m.kinds(), before);
+  const runs = (await m.events()).filter((e) => e.kind === 'apply-finished');
+  assert.equal(runs.length, 1);
+  assert.ok(runs.every((e) => e.kind === 'apply-finished' && e.steps.length > 0 && e.result === 'done'));
+});
+
+test('a request after the agent closed fails promptly', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const exit = await m.run(Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const agent = yield* startAgent(m.domains).pipe(Scope.provide(scope));
+    yield* agent.request('inspect');
+    yield* Scope.close(scope, Exit.void);
+    return yield* Effect.exit(agent.request('inspect').pipe(Effect.timeoutOption('1 second')));
+  }), fixture.source);
+  assert.ok(Exit.isFailure(exit), 'the request hung or answered after close');
 });

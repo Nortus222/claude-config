@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { Effect, Layer } from 'effect';
+import { Processes } from '@nortuscc/machine';
 import { join } from 'node:path';
 import { ensureOwnSetup, normalizeRepoUrl, SetupsStore } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -26,9 +27,7 @@ const setupsJson = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoo
 
 test('the own checkout is trusted once, by its normalized origin URL', async () => {
   const m = agentMachine();
-  mkdirSync(m.paths.repo, { recursive: true });
-  spawnSync('git', ['init', '-q', m.paths.repo]);
-  spawnSync('git', ['-C', m.paths.repo, 'remote', 'add', 'origin', 'git@github.com:Nortus222/Claude-Config.git']);
+  spawnSync('git', ['-C', m.paths.repo, 'remote', 'set-url', 'origin', 'git@github.com:Nortus222/Claude-Config.git']);
   const first = await m.run(ensureOwnSetup('cli'));
   const second = await m.run(ensureOwnSetup('cli'));
   assert.deepEqual(second, first);
@@ -44,7 +43,9 @@ test('the own checkout is trusted once, by its normalized origin URL', async () 
 
 test('a checkout with no origin is trusted with repoUrl null', async () => {
   const m = agentMachine();
-  const own = await m.run(ensureOwnSetup('agent'));
+  // git's answer for a checkout with no origin, without its message on the test's stderr.
+  const noOrigin = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 2, stdout: '' }) });
+  const own = await m.run(ensureOwnSetup('agent').pipe(Effect.provide(noOrigin)));
   assert.equal(own?.repoUrl, null);
   assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [own]);
 });

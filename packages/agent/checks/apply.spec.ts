@@ -75,12 +75,26 @@ test('a failed step pauses auto-apply, naming the run', async () => {
 test('a cancelled run is recorded and does not pause', async () => {
   const m = agentMachine();
   const controller = new AbortController();
-  controller.abort();
-  const outcome = await applyWith(m, reportOf(item('config:a')), ['config:a'], [fakeDomain('config', 'write-file')], controller.signal);
+  // The first step aborts, so the run stops before the second.
+  const aborting: AgentDomain = { ...fakeDomain('config', 'write-file'), run: () => Effect.sync(() => { controller.abort(); return { ok: true }; }) };
+  const outcome = await applyWith(m, reportOf(item('config:a'), item('config:b')), ['config:a', 'config:b'], [aborting], controller.signal);
   assert.ok(outcome.kind === 'ran');
   assert.equal(outcome.result, 'cancelled');
   assert.deepEqual(await m.kinds(), ['apply-started', 'apply-finished']);
+  const [finished] = (await m.events()).filter((e) => e.kind === 'apply-finished');
+  assert.ok(finished?.kind === 'apply-finished');
+  assert.deepEqual(finished.steps.map((s) => s.key), ['config:a']);
   assert.equal(m.agentJson().paused ?? null, null);
+});
+
+test('an already-aborted signal starts no run: no lock, no History', async () => {
+  const m = agentMachine();
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await applyWith(m, reportOf(item('config:a')), ['config:a'], [fakeDomain('config', 'write-file')], controller.signal);
+  assert.deepEqual(outcome, { kind: 'nothing' });
+  assert.deepEqual(await m.kinds(), []);
+  assert.equal(existsSync(join(m.paths.stateRoot, 'apply.lock')), false);
 });
 
 test('a held apply.lock skips the run without pausing or recording anything', async () => {

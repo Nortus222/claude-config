@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Deferred, Effect, Exit, Fiber, Layer } from 'effect';
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from 'effect';
 import { AgentClock, jittered, makeScheduler, PERIOD_MS, tickKind, timerLoop, type Trigger } from '../src/index.ts';
 
 test('the timer waits the period ±10%', () => {
@@ -84,4 +84,41 @@ test('the timer offers timer ticks, and a wake after the wall clock jumped', asy
   assert.ok(Exit.isFailure(exit));
   assert.deepEqual(offered, ['timer', 'wake']);
   assert.deepEqual(sleeps, [3_240_000, 3_960_000, 3_600_000]);
+});
+
+// A request that hangs fails the test after a second instead of hanging the suite.
+const promptly = <A>(effect: Effect.Effect<A>) =>
+  Effect.exit(effect.pipe(Effect.timeoutOption('1 second'), Effect.map((answer) => {
+    if (answer._tag === 'None') throw new Error('the request hung');
+    return answer.value;
+  })));
+
+test('a request after the scheduler stopped fails promptly', async () => {
+  const exit = await Effect.runPromise(Effect.gen(function* () {
+    const scheduler = yield* makeScheduler(() => Effect.succeed(1));
+    const loop = yield* Effect.forkChild(scheduler.run);
+    yield* scheduler.request('inspect');
+    yield* Fiber.interrupt(loop);
+    return yield* promptly(scheduler.request('inspect'));
+  }));
+  assert.ok(Exit.isFailure(exit));
+  assert.ok(Cause.hasInterruptsOnly(exit.cause));
+});
+
+test('a request whose job is cut off by the stop fails promptly', async () => {
+  const exit = await Effect.runPromise(Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const scheduler = yield* makeScheduler(() => Effect.andThen(Deferred.succeed(started, undefined), Effect.never));
+    const loop = yield* Effect.forkChild(scheduler.run);
+    const asked = yield* Effect.forkChild(promptly(scheduler.request('inspect')));
+    yield* Deferred.await(started);
+    const queued = yield* Effect.forkChild(promptly(scheduler.request('decide')));
+    yield* Effect.yieldNow;
+    yield* Fiber.interrupt(loop);
+    return [yield* Fiber.join(asked), yield* Fiber.join(queued)] as const;
+  }));
+  for (const e of exit) {
+    assert.ok(Exit.isFailure(e));
+    assert.ok(Cause.hasInterruptsOnly(e.cause));
+  }
 });
