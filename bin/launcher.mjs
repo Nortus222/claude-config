@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 
@@ -23,6 +24,19 @@ export function npmCommand({ args, node = process.execPath, npmExecPath = proces
   if (cli) return { cmd: node, args: [cli, ...args] };
   if (platform === 'win32') throw new Error('could not locate npm-cli.js');
   return { cmd: 'npm', args };
+}
+
+// Installs the runtime dependencies in `root`; returns why it failed, or null on success.
+export function installRuntime(root) {
+  try {
+    const npm = npmCommand({ args: RUNTIME_INSTALL });
+    const installed = spawnSync(npm.cmd, npm.args, { cwd: root, stdio: INSTALL_STDIO });
+    if (installed.error) return installed.error.message;
+    if (installed.status !== 0) return installed.signal ? `npm was killed by ${installed.signal}` : `npm exited with ${installed.status}`;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 // Node will not strip TypeScript under node_modules, so only a real checkout may load src/main.ts.

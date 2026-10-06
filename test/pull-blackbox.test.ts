@@ -61,7 +61,7 @@ test('a diverged origin exits 1 with the two-line message, no stack trace, and n
   assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false, 'apply must never run after a failed pull');
 });
 
-test('a changed package-lock.json reinstalls the runtime in the repo before applying', { todo: 'the TypeScript pull reinstalls the runtime' }, async () => {
+test('a changed package-lock.json reinstalls the runtime in the repo before applying', async () => {
   const m = machine();
   const npm = fakeNpm(m);
   const lock = readJson(join(m.repo, 'package-lock.json'));
@@ -81,7 +81,7 @@ test('a changed package-lock.json reinstalls the runtime in the repo before appl
   assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), '# with a new lockfile\n');
 });
 
-test('a failed runtime reinstall exits 1 naming the command, and never applies', { todo: 'the TypeScript pull reinstalls the runtime' }, async () => {
+test('a failed runtime reinstall exits 1 naming the command, and never applies', async () => {
   const m = machine();
   const cli = join(m.home, 'npm-fails.js');
   writeFileSync(cli, 'process.exit(3);\n');

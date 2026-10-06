@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import type { DesiredConfig, ResolvedFile } from '@nortuscc/profile-engine';
+import type { DesiredConfig, ResolvedFile, Target } from '@nortuscc/profile-engine';
 import {
   configFileId, hookCommand, inspect, knownMarketplaces, probeUndeclared, readCodexState, readExposure, SKILL_AGENTS,
   skillExposure, userScopeInstalls, type InstalledIntegrations, type Observed,
@@ -82,6 +82,19 @@ function fileRows(file: ResolvedFile, items: ReadonlyArray<Observed>, desired: D
   return mine.filter((i) => i.state !== 'clean').map((i) => ({ dest: i.label, state: i.state }));
 }
 
+// The selected agents' declared integrations and their observed states; nothing is inspected when
+// integrations.json is invalid, and its complaints are returned instead.
+export function inspectIntegrations(opened: Opened, targets: ReadonlyArray<Target>): Effect.Effect<{
+  selected: DesiredConfig; manifestErrors: string[]; planned: ReadonlyArray<Observed>;
+}, unknown, CliServices> {
+  return Effect.gen(function* () {
+    const selected = forTargets(opened.desired, targets);
+    const manifestErrors = opened.desired.issues.filter((i) => i.source === 'integrations.json').map((i) => i.message);
+    const planned = manifestErrors.length ? [] : (yield* inspect(selected, [domainsFor(opened.paths).integrations])).items;
+    return { selected, manifestErrors, planned };
+  });
+}
+
 // The cli, config, integrations, skills and undeclared sections, then advice. Returns 1 when the
 // machine is out of agreement (or, with --strict, has undeclared findings), else 0.
 function report(opened: Opened, input: {
@@ -138,9 +151,7 @@ function report(opened: Opened, input: {
 
     // integrations: inspected, never installed. Unknown means the agent's CLI could not answer, which
     // re-running apply cannot repair, so it is reported without being called pending.
-    const selected = forTargets(desired, targets);
-    const manifestErrors = desired.issues.filter((i) => i.source === 'integrations.json').map((i) => i.message);
-    const planned = manifestErrors.length ? [] : (yield* inspect(selected, [domains.integrations])).items;
+    const { selected, manifestErrors, planned } = yield* inspectIntegrations(opened, targets);
     const unresolved = planned.filter((i) => i.state !== 'installed');
     const pending = unresolved.filter((i) => i.state !== 'unknown');
 

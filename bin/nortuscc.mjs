@@ -4,7 +4,7 @@ import { constants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOCKED, PORTED, USAGE, VERBS } from './commands.mjs';
-import { INSTALL_STDIO, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
+import { installRuntime, isCheckout, missingRuntime, onInstallFailure, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
 
 const [major] = process.versions.node.split('.').map(Number);
 if (major < 24) {
@@ -25,24 +25,11 @@ if (!VERBS.includes(verb)) {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// Spawns npm to install the runtime; returns why it failed, or null on success.
-function installRuntime() {
-  try {
-    const npm = npmCommand({ args: RUNTIME_INSTALL });
-    const installed = spawnSync(npm.cmd, npm.args, { cwd: root, stdio: INSTALL_STDIO });
-    if (installed.error) return installed.error.message;
-    if (installed.status !== 0) return installed.signal ? `npm was killed by ${installed.signal}` : `npm exited with ${installed.status}`;
-    return null;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
 if (isCheckout(root)) {
   let runtime = true;
   if (missingRuntime(root)) {
     console.error(`nortuscc: installing runtime dependencies in ${root}`);
-    const failure = installRuntime();
+    const failure = installRuntime(root);
     if (failure) {
       console.error(`nortuscc: could not install dependencies (${failure}); run 'npm ${RUNTIME_INSTALL.join(' ')}' in ${root}`);
       if (onInstallFailure(verb, PORTED) === 'exit') process.exit(1);

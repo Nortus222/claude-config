@@ -36,7 +36,7 @@ test('a legacy state writer is refused while another live run holds apply.lock',
   const lock = join(stateDir, 'apply.lock');
   writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   try {
-    const result = run('pull', '--target', 'bogus');
+    const result = run('setup', '--target', 'bogus');
     assert.equal(result.status, 1);
     assert.match(result.stderr, new RegExp(`another nortuscc run \\(pid ${process.pid}\\) holds`));
     assert.equal(JSON.parse(readFileSync(lock, 'utf8')).pid, process.pid);
@@ -48,8 +48,8 @@ test('a legacy state writer is refused while another live run holds apply.lock',
 test('a legacy state writer takes over a dead holder and releases the lock', () => {
   const lock = join(stateDir, 'apply.lock');
   writeFileSync(lock, JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: '2026-01-01T00:00:00.000Z' }));
-  const result = run('pull', '--target', 'bogus');
-  assert.equal(result.status, 2); // pull with an invalid target is a usage error, reached only once the lock is held
+  const result = run('setup', '--target', 'bogus');
+  assert.equal(result.status, 2); // setup with an invalid target is a usage error, reached only once the lock is held
   assert.equal(existsSync(lock), false);
 });
 
