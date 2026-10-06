@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { overridesFromLegacyState, type MachineOverrides } from '@nortuscc/profile-engine';
@@ -322,4 +323,143 @@ test('an unknown --no-* opt-out exits 2 and names the valid ones', async () => {
   assert.equal(result.code, 2);
   assert.match(result.stderr, /unknown option --no-foo \(expected one of --no-hooks, --no-mcp, --no-plugins, --no-skills\)/);
   assert.deepEqual(installerCalls(m), []);
+});
+
+// The OpenRouter Codex home: a restricted provider configuration whose local project trust
+// tables are the machine's own and never count as drift.
+const OPENROUTER = `model = "z-ai/glm-5.3-flash"
+model_provider = "openrouter"
+model_catalog_json = "models-static.json"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+
+[model_providers.openrouter.auth]
+command = "node"
+args = ["-e", "process.stdout.write(process.env.OPENROUTER_API_KEY || '')"]
+`;
+const repoToml = (m: Machine) => join(m.repo, 'codex', 'openrouter-glm', 'config.toml');
+const localToml = (m: Machine) => join(m.openrouter, 'config.toml');
+// The config.toml row of `status --target codex`.
+const tomlState = async (m: Machine) =>
+  (await runCli(m, ['status', '--target', 'codex'])).stdout.match(/^ {2}config\.toml\s+(\S+)/m)?.[1];
+const hashText = (text: string) => 'sha256:' + createHash('sha256').update(text, 'utf8').digest('hex');
+
+test('apply --target codex installs the restricted OpenRouter home without a secret', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(m)), OPENROUTER);
+  assert.doesNotMatch(read(localToml(m)), /sk-or-/);
+  const models = readJson(join(m.openrouter, 'models-static.json')).models;
+  assert.deepEqual(
+    models.map(({ slug }: { slug: string }) => slug).sort(),
+    ['meta/muse-spark-1.3-contributor', 'stealth/union-alpha', 'z-ai/glm-5.3-flash'].sort(),
+  );
+  assert.ok(models.every((model: { base_instructions: string }) => model.base_instructions.length > 0));
+  assert.ok(models.every((model: { supports_parallel_tool_calls: boolean }) => model.supports_parallel_tool_calls === true));
+});
+
+test('skills-only skips the OpenRouter home; --with-config installs it without changing the mode', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex', '--skills-only')).code, 0);
+  assert.ok(isEmpty(m.openrouter));
+  assert.equal((await apply(m, '--target', 'codex', '--with-config')).code, 0);
+  assert.equal(read(localToml(m)), OPENROUTER);
+  assert.ok(existsSync(join(m.openrouter, 'models-static.json')));
+  assert.equal(recordedChoice(m).manageConfig, false);
+});
+
+test('local project trust is not drift, and apply leaves it alone', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  const local = `${OPENROUTER}\n[projects."/work/example"]\ntrust_level = "trusted"\n`;
+  writeFileSync(localToml(m), local);
+  assert.equal(await tomlState(m), 'clean');
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(m)), local);
+});
+
+test('a repo update to the OpenRouter config keeps local project tables and backs up the whole file', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  const projects = `[projects.'/work/one'] # local trust\ntrust_level = 'trusted'\n\n["projects"."/work/two"]\ntrust_level = "untrusted"\n`;
+  const local = OPENROUTER.replace('[model_providers.openrouter]', `${projects}\n[model_providers.openrouter]`);
+  writeFileSync(localToml(m), local);
+  const updated = OPENROUTER.replace('z-ai/glm-5.3-flash', 'next-model');
+  writeFileSync(repoToml(m), updated);
+  assert.equal(await tomlState(m), 'repo-ahead');
+
+  const result = await apply(m, '--target', 'codex');
+  assert.equal(result.code, 0, result.stderr);
+  const backup = result.stdout.match(/config\.toml\s+copied\s+backed up -> (\S+)/);
+  assert.ok(backup, result.stdout);
+  assert.equal(read(backup[1]!), local);
+  const after = read(localToml(m));
+  assert.ok(after.startsWith(updated));
+  assert.ok(after.includes(projects));
+  assert.equal(await tomlState(m), 'clean');
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(m)), after);
+});
+
+test('managed OpenRouter edits still conflict, and --take-repo keeps local trust', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  const projects = '\n[projects."/work/example"]\ntrust_level = "trusted"\n';
+  const local = OPENROUTER.replace('z-ai/glm-5.3-flash', 'local-model') + projects;
+  writeFileSync(localToml(m), local);
+  assert.equal(await tomlState(m), 'local-ahead');
+  writeFileSync(repoToml(m), OPENROUTER.replace('z-ai/glm-5.3-flash', 'repo-model'));
+  assert.equal(await tomlState(m), 'conflict');
+  assert.equal((await apply(m, '--target', 'codex')).code, 1);
+  assert.equal(read(localToml(m)), local);
+  assert.equal((await apply(m, '--target', 'codex', '--take-repo')).code, 0);
+  assert.equal(read(localToml(m)), read(repoToml(m)) + projects);
+  assert.equal(await tomlState(m), 'clean');
+});
+
+test('project-like headers inside multiline strings and arrays remain managed', async () => {
+  const m = machine();
+  for (const delimiter of ['"""', "'''"]) {
+    const repo = `instructions = ${delimiter}\n[projects."example"]\noriginal text\n${delimiter}\n` + OPENROUTER;
+    writeFileSync(repoToml(m), repo);
+    assert.equal((await apply(m, '--target', 'codex', '--take-repo')).code, 0);
+    writeFileSync(localToml(m), repo.replace('original text', 'local text'));
+    assert.equal(await tomlState(m), 'local-ahead');
+  }
+
+  const arrays = machine();
+  const repo = 'values = [\n ["projects"],\n ["original"]\n]\n' + OPENROUTER;
+  writeFileSync(repoToml(arrays), repo);
+  assert.equal((await apply(arrays, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(arrays)), repo);
+  writeFileSync(localToml(arrays), repo.replace('original', 'local'));
+  assert.equal(await tomlState(arrays), 'local-ahead');
+});
+
+test('a whole-file OpenRouter baseline converges without rewriting local project tables', async () => {
+  const m = machine();
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  const local = `${OPENROUTER}\n[projects."/work/example"]\ntrust_level = "trusted"\n`;
+  writeFileSync(localToml(m), local);
+  const state = readJson(statePath(m));
+  state.files['codex:config.toml'] = { ...state.files['codex:config.toml'], hash: hashText('old whole-file content') };
+  writeFileSync(statePath(m), JSON.stringify(state, null, 2) + '\n');
+
+  assert.equal(await tomlState(m), 'clean');
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(m)), local);
+  assert.equal(readJson(statePath(m)).files['codex:config.toml'].hash, hashText(OPENROUTER));
+});
+
+test('replacing an unmanaged OpenRouter config keeps its project tables', async () => {
+  const m = machine();
+  mkdirSync(m.openrouter, { recursive: true });
+  const projects = '[projects]\n"/work/example" = { trust_level = "trusted" }\n';
+  writeFileSync(localToml(m), 'model = "old-model"\n\n' + projects);
+  assert.equal((await apply(m, '--target', 'codex')).code, 0);
+  assert.equal(read(localToml(m)), OPENROUTER + '\n' + projects);
+  assert.equal(await tomlState(m), 'clean');
 });
