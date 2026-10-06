@@ -10,24 +10,37 @@ export type Command = {
 };
 export type Completed = { readonly code: number; readonly stdout: string };
 
+export type ProcessesOptions = {
+  // The child's whole environment; defaults to this process's.
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  // Replaces PATH in that environment.
+  readonly path?: string;
+  // Where an `inherit` command's output goes. 'stderr' keeps it off a stdout that carries a protocol
+  // and gives the child no stdin, so it cannot read that protocol either.
+  readonly inherit?: 'stdio' | 'stderr';
+};
+
 export class Processes extends Context.Service<
   Processes,
   { readonly run: (command: Command) => Effect.Effect<Completed, LaunchFailed> }
 >()('machine/Processes') {}
 
 // argv only, never a shell: names and commands come from manifests.
-export const nodeProcesses = (options: { readonly path?: string } = {}) =>
+export const nodeProcesses = (options: ProcessesOptions = {}) =>
   Layer.succeed(Processes, {
     run: (command) =>
       Effect.callback<Completed, LaunchFailed>((resume) => {
-        const env = options.path === undefined ? process.env : { ...process.env, PATH: options.path };
+        const base = options.env ?? process.env;
+        const env = options.path === undefined ? base : { ...base, PATH: options.path };
         const child = spawn(command.cmd, [...command.args], {
           cwd: command.cwd,
           env,
           shell: false,
           // Its own process group, so cancelling reaches the installer's own children too.
           detached: process.platform !== 'win32',
-          stdio: command.output === 'capture' ? ['ignore', 'pipe', 'inherit'] : 'inherit',
+          stdio: command.output === 'capture' ? ['ignore', 'pipe', 'inherit']
+            : options.inherit === 'stderr' ? ['ignore', 2, 2]
+            : 'inherit',
         });
         let stdout = '';
         let closed = false;
