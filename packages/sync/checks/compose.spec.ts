@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Effect } from 'effect';
+import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import { commitDocuments, desiredFor, desiredOfDocuments } from '../src/index.ts';
 import { BASE, failureOf, json, load, runSync, tempRepo } from './support/repo.ts';
 
@@ -57,4 +59,31 @@ test('a hold on a commit the checkout lacks is RevisionUnavailable', async () =>
     repo: repo.dir, head: { kind: 'worktree' }, held: { [EFFORT]: 'f'.repeat(40) }, into: join(repo.root, 'into'),
   }));
   assert.equal(failure._tag, 'RevisionUnavailable');
+});
+
+test('two items held in one document both survive, whatever order the holds are in', async () => {
+  const repo = tempRepo();
+  repo.commit({
+    'claude/settings.keys.json': json({ theme: 'light', effortLevel: 'medium' }),
+    'skills-manifest.txt': '[mattpocock/skills] optional\ntdd\ndiagnose\n\n[anthropics/skills] optional\npdf\n',
+  });
+  const TDD = 'skill:mattpocock/skills/tdd';
+  const DIAGNOSE = 'skill:mattpocock/skills/diagnose';
+  const THEME = 'setting:claude:settings.json#theme';
+  for (const [n, ids] of [[THEME, EFFORT, TDD, DIAGNOSE], [DIAGNOSE, TDD, EFFORT, THEME]].entries()) {
+    const held = Object.fromEntries(ids.map((id) => [id, repo.first]));
+    const snapshot = await runSync(desiredFor({ repo: repo.dir, head: { kind: 'worktree' }, held, into: join(repo.root, `into-${n}`) }));
+    assert.equal(keysOf(snapshot).theme!.value, 'auto');
+    assert.equal(keysOf(snapshot).effortLevel!.value, 'high');
+    const optional = Object.fromEntries(snapshot.desired.skills.map((s: { name: string; optional: boolean }) => [s.name, s.optional]));
+    assert.deepEqual(optional, { tdd: false, diagnose: false, pdf: true });
+  }
+});
+
+test('with nothing held, overrides resolve exactly as loadProfile with the same overrides', async () => {
+  const repo = tempRepo();
+  const overrides = { value: { settings: { 'claude:settings.json': { effortLevel: 'low' } }, skills: { pdf: true } }, source: 'overrides.json', issues: [] };
+  const snapshot = await runSync(desiredFor({ repo: repo.dir, head: { kind: 'worktree' }, held: {}, into: join(repo.root, 'into'), overrides }));
+  assert.deepEqual(snapshot.desired, await Effect.runPromise(loadProfile(repo.dir, { overrides }).pipe(Effect.provide(nodeFiles))));
+  assert.equal(keysOf(snapshot).effortLevel!.value, 'low');
 });

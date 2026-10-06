@@ -8,3 +8,4 @@ export * from './items.ts';
 export * from './patch.ts';
 export * from './store.ts';
 export * from './compose.ts';
+export * from './plan.ts';
