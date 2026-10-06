@@ -6,6 +6,7 @@
 
 [Nortus222/agent-skills] optional
 deploy-mobile-apps
+emws-api
 explain
 share-artifacts
 
