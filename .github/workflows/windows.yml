@@ -1,0 +1,20 @@
+# The suites do not pass on Windows yet, so this runs the files that do and that guard Windows
+# process launching: .cmd shims through Processes, and a fresh setup through the fake installers.
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  processes:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: node --test packages/machine/checks/processes.spec.ts
+      - run: node --test --test-timeout=60000 test/fresh-machine.test.mjs

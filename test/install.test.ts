@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { Effect } from 'effect';
@@ -9,7 +9,7 @@ import type { MachineReport, Observed, Step } from '@nortuscc/machine';
 import { installChoices, parseInstallFlags, reviewLines, runInstall, type InstallFlags } from '../src/install.ts';
 import { openMachine } from '../src/machine.ts';
 import type { Choice } from '../src/select.ts';
-import { installerCalls, machine, probeCalls, type Machine } from './support/cli.ts';
+import { installerCalls, machine, probeCalls, writeFakeBin, type Machine } from './support/cli.ts';
 
 // --- flags -------------------------------------------------------------------
 
@@ -252,8 +252,7 @@ test('--no-plugins keeps plugins out of the picker, and --no-skills keeps skills
 test('a failing installer is reported per item and fails the run', async () => {
   const m = machine();
   const failing = mkdtempSync(join(tmpdir(), 'nortuscc-failing-npx-'));
-  writeFileSync(join(failing, 'npx'), '#!/bin/sh\nexit 3\n');
-  chmodSync(join(failing, 'npx'), 0o755);
+  writeFakeBin(failing, 'npx', '#!/usr/bin/env node\nprocess.exit(3);\n');
   const result = await install(m, parseInstallFlags(['--yes', '--no-plugins']), { path: failing });
   assert.equal(result.code, 1);
   assert.match(result.out, /show-me\s+failed\s+humanlayer\/skills — npx exited with 3/);
