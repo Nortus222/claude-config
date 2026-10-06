@@ -1,15 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setupPrerequisites, PREREQUISITES, prerequisiteCommand, executableAvailable, refreshPrerequisitePath } from '../src/prerequisites.mjs';
+import { setupPrerequisites, PREREQUISITES, prerequisiteCommand, executableAvailable, refreshPrerequisitePath } from '../src/prerequisites.ts';
+import type { Command, PrerequisiteDeps } from '../src/prerequisites.ts';
 
-function harness({ present = [], answers = [], platform = 'darwin', installWorks = true, refresh = true } = {}) {
+function harness({ present = [] as string[], answers = [] as boolean[], platform = 'darwin' as NodeJS.Platform, installWorks = true, refresh = true } = {}) {
   const available = new Set(present);
-  const questions = [];
-  const commands = [];
-  const messages = [];
-  return {
-    available, questions, commands, messages,
-    options: {
+  const questions: string[] = [];
+  const commands: Command[] = [];
+  const messages: string[] = [];
+  const options: PrerequisiteDeps = {
       isTTY: true, platform, refreshPath: async () => {},
       check: async (command) => available.has(command),
       confirm: async (question) => { questions.push(question); return answers.shift() ?? false; },
@@ -26,14 +25,14 @@ function harness({ present = [], answers = [], platform = 'darwin', installWorks
         }
         return { ok: true };
       },
-    },
   };
+  return { available, questions, commands, messages, options };
 }
 
 const all = PREREQUISITES.flatMap((tool) => tool.executables);
 
 test('noninteractive prerequisites do not probe, prompt, or install', async () => {
-  const unexpected = () => { throw new Error('should not run'); };
+  const unexpected = (): never => { throw new Error('should not run'); };
   assert.equal(await setupPrerequisites({ isTTY: false, check: unexpected, confirm: unexpected, run: unexpected }), 0);
 });
 
@@ -67,7 +66,7 @@ test('Windows uses exact official WinGet package IDs without shell interpolation
   assert.equal(h.commands.length, PREREQUISITES.length);
   for (let i = 0; i < PREREQUISITES.length; i++) {
     assert.deepEqual(h.commands[i], {
-      cmd: 'winget', args: ['install', '--id', PREREQUISITES[i].winget, '--exact', '--source', 'winget'],
+      cmd: 'winget', args: ['install', '--id', PREREQUISITES[i]!.winget, '--exact', '--source', 'winget'],
     });
   }
 });
@@ -96,14 +95,14 @@ test('an installed tool absent from PATH reports restart guidance and skips setu
   const h = harness({ present: ['winget', ...all.filter((name) => name !== 'gh')], platform: 'win32', answers: [true, true], refresh: false });
   assert.equal(await setupPrerequisites(h.options), 1);
   assert.equal(h.commands.length, 2); // gh install, then setup for present Claude Code
-  assert.equal(h.commands[1].cmd, 'claude');
+  assert.equal(h.commands[1]!.cmd, 'claude');
   assert.match(h.messages.join(''), /Restart.*terminal.*PATH/);
   assert.ok(!h.questions.some((question) => question.startsWith('Set up GitHub')));
 });
 
 test('selected setup failures and runner exceptions report errors without stopping other tools', async () => {
   const h = harness({ present: all, answers: [true, true] });
-  h.options.run = async ({ cmd }) => { if (cmd === 'gh') throw new Error('login failed'); return { ok: false, note: 'setup failed' }; };
+  h.options.run = async ({ cmd }: Command) => { if (cmd === 'gh') throw new Error('login failed'); return { ok: false, note: 'setup failed' }; };
   assert.equal(await setupPrerequisites(h.options), 1);
   assert.match(h.messages.join(''), /login failed/);
   assert.match(h.messages.join(''), /setup failed/);
@@ -128,7 +127,7 @@ test('PATH detection recognizes Windows command shims and rejects directories', 
   try {
     await writeFile(path.join(root, 'npm.CMD'), '@echo off');
     await mkdir(path.join(root, 'npx.CMD'));
-    const options = { platform: 'win32', env: { PATH: `"${root}"`, PATHEXT: '.EXE;.CMD' } };
+    const options = { platform: 'win32' as const, env: { PATH: `"${root}"`, PATHEXT: '.EXE;.CMD' } };
     assert.equal(await executableAvailable('npm', options), true);
     assert.equal(await executableAvailable('npx', options), false);
     assert.equal(await executableAvailable('missing', options), false);
@@ -139,7 +138,7 @@ test('PATH detection recognizes Windows command shims and rejects directories', 
 
 test('unsupported platforms provide manual guidance only after installation is accepted', async () => {
   const h = harness({ platform: 'linux', answers: [true] });
-  assert.equal(await setupPrerequisites({ ...h.options, tools: [PREREQUISITES[0]] }), 1);
+  assert.equal(await setupPrerequisites({ ...h.options, tools: [PREREQUISITES[0]!] }), 1);
   assert.deepEqual(h.commands, []);
   assert.match(h.messages.join(''), /Install Git manually.*https:\/\/git-scm.com/);
 });
@@ -149,28 +148,28 @@ test('Windows refreshes installer PATH before rechecking and offering login', as
   const h = harness({ platform: 'win32', present: ['winget'], answers: [true, true], refresh: false });
   let refreshes = 0;
   h.options.refreshPath = async () => { refreshes++; h.available.add('gh'); };
-  assert.equal(await setupPrerequisites({ ...h.options, tools: [PREREQUISITES.find((tool) => tool.id === 'gh')] }), 0);
+  assert.equal(await setupPrerequisites({ ...h.options, tools: [PREREQUISITES.find((tool) => tool.id === 'gh')!] }), 0);
   assert.equal(refreshes, 1);
   assert.deepEqual(h.commands[1], { cmd: 'gh', args: ['auth', 'login'] });
 });
 
 test('Windows PATH refresh preserves session paths and adds machine and user paths', async () => {
-  const env = { Path: 'C:\\session;C:\\existing' };
-  const commands = [];
+  const env: Record<string, string | undefined> = { Path: 'C:\\session;C:\\existing' };
+  const commands: Command[] = [];
   assert.equal(await refreshPrerequisitePath({ platform: 'win32', env, capture: async (command) => {
     commands.push(command);
     return { ok: true, stdout: 'C:\\machine;C:\\existing;C:\\user\r\n' };
   } }), true);
   assert.equal(env.Path, 'C:\\session;C:\\existing;C:\\machine;C:\\user');
-  assert.equal(commands[0].cmd, 'powershell.exe');
-  assert.match(commands[0].args[2], /GetEnvironmentVariable\('Path', 'Machine'\)/);
-  assert.match(commands[0].args[2], /GetEnvironmentVariable\('Path', 'User'\)/);
+  assert.equal(commands[0]!.cmd, 'powershell.exe');
+  assert.match(commands[0]!.args[2]!, /GetEnvironmentVariable\('Path', 'Machine'\)/);
+  assert.match(commands[0]!.args[2]!, /GetEnvironmentVariable\('Path', 'User'\)/);
 });
 
 test('PATH refresh does nothing on macOS and preserves PATH when registry reading fails', async () => {
-  const unexpected = () => { throw new Error('should not run'); };
+  const unexpected = (): never => { throw new Error('should not run'); };
   assert.equal(await refreshPrerequisitePath({ platform: 'darwin', capture: unexpected }), true);
-  const env = { PATH: 'original' };
+  const env: Record<string, string | undefined> = { PATH: 'original' };
   assert.equal(await refreshPrerequisitePath({ platform: 'win32', env, capture: async () => ({ ok: false }) }), false);
   assert.equal(env.PATH, 'original');
 });

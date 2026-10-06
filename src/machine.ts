@@ -26,16 +26,24 @@ export type Opened = {
   desired: DesiredConfig;
 };
 
-// Builds this machine's paths and services, reads its overrides and loads the desired configuration.
-// With `mode`, the profile is loaded with the run's config-mode choice applied. Override issues are
-// reported to stderr and the run continues.
-export function openMachine(options: { mode?: ConfigMode } = {}): Effect.Effect<Opened, RepoNotFound | ReadFailed | FsFailed> {
+// This machine's paths from the environment. `warn` hears about a recorded repo that is no longer a checkout.
+export function resolvePaths(warn?: (message: string) => void): Effect.Effect<MachinePathsValue, RepoNotFound> {
+  return pathsFromEnvironment({ env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, ...(warn ? { warn } : {}) });
+}
+
+// The CLI's services over `paths`.
+export function cliLayer(paths: MachinePathsValue): Layer.Layer<CliServices> {
+  return Layer.mergeAll(stateStore, overridesStore, backupsForRun())
+    .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses())));
+}
+
+// Builds this machine's paths (unless given) and services, reads its overrides and loads the desired
+// configuration. With `mode`, the profile is loaded with the run's config-mode choice applied.
+// Override issues are reported to stderr and the run continues.
+export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}): Effect.Effect<Opened, RepoNotFound | ReadFailed | FsFailed> {
   return Effect.gen(function* () {
-    const paths = yield* pathsFromEnvironment({
-      env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
-    });
-    const layer: Layer.Layer<CliServices> = Layer.mergeAll(stateStore, overridesStore, backupsForRun())
-      .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses())));
+    const paths = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
+    const layer = cliLayer(paths);
     const overrides = yield* Effect.gen(function* () {
       return yield* (yield* OverridesStore).read;
     }).pipe(Effect.provide(layer));

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { INSTALL_STDIO, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout } from '../bin/launcher.mjs';
+import { INSTALL_STDIO, installGlobalCommand, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout, setupFromCopy } from '../bin/launcher.mjs';
 import { PORTED, VERBS } from '../bin/commands.mjs';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'nortuscc-launcher-'));
@@ -89,4 +89,36 @@ test('a failed runtime install falls back to legacy for unported verbs and exits
 
 test('npm output goes to stderr so it never mixes with a command report', () => {
   assert.deepEqual(INSTALL_STDIO, ['ignore', 2, 2]);
+});
+
+test('the Windows bootstrap runs npm through Node instead of a blocked PowerShell script', () => {
+  const calls = [];
+  const npmCli = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+  const root = 'C:\\Users\\Ravi Cheema\\claude-config';
+
+  installGlobalCommand(root, {
+    platform: 'win32',
+    node: 'C:\\Program Files\\nodejs\\node.exe',
+    npmExecPath: npmCli,
+    run: (cmd, args) => calls.push({ cmd, args }),
+  });
+
+  assert.deepEqual(calls, [{
+    cmd: 'C:\\Program Files\\nodejs\\node.exe',
+    args: [npmCli, 'install', '--global', '--no-audit', '--no-fund', root],
+  }]);
+});
+
+test('setup from an npx copy refuses before cloning when there is no terminal and no --yes', () => {
+  const home = scratch();
+  const error = console.error;
+  let said = '';
+  console.error = (message) => { said += message; };
+  try {
+    assert.equal(setupFromCopy([], { env: {}, home, platform: 'darwin', isTTY: false }), 2);
+  } finally {
+    console.error = error;
+  }
+  assert.match(said, /--yes/);
+  assert.equal(existsSync(join(home, 'claude-config')), false);
 });

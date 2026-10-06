@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { overridesFromLegacyState, type MachineOverrides } from '@nortuscc/profile-engine';
 import { RUNTIME_INSTALL } from '../bin/launcher.mjs';
 import { git, machine, readJson, REPO, runCli, type Machine } from './support/cli.ts';
 
@@ -51,16 +50,6 @@ function fakeNpm(m: Machine): { env: Record<string, string>; calls: () => Array<
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
 `);
   return { env: { npm_execpath: cli }, calls: () => lines(log) };
-}
-
-// The machine's recorded config choice, wherever it is kept: overrides.json, else state.json's
-// legacy fields (how the TypeScript commands read it).
-function recordedChoice(m: Machine): MachineOverrides {
-  if (existsSync(overridesPath(m))) {
-    const { version: _version, ...value } = readJson(overridesPath(m));
-    return value;
-  }
-  return overridesFromLegacyState(existsSync(statePath(m)) ? read(statePath(m)) : undefined).value;
 }
 
 const realpath = (p: string) => p.replace(/^\/private/, '');
@@ -151,7 +140,9 @@ test('setup --skills-only records the choice, writes no configuration and skips 
   assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
   assert.equal(existsSync(join(m.codex, 'AGENTS.md')), false);
   assert.equal(existsSync(join(m.openrouter, 'config.toml')), false);
-  assert.equal(recordedChoice(m).manageConfig, false);
+  // The choice lives in overrides.json alone; state.json keeps the repo and baselines.
+  assert.equal(readJson(overridesPath(m)).manageConfig, false);
+  assert.equal('skillsOnly' in readJson(statePath(m)), false);
 });
 
 test('without a terminal and without --yes, setup refuses and changes nothing', async () => {
@@ -165,14 +156,13 @@ test('without a terminal and without --yes, setup refuses and changes nothing', 
 
 // An npx copy runs from npm's cache under node_modules: it clones a durable checkout, installs its
 // runtime and the global command from it, then hands the run to that checkout's own CLI.
-test('an npx copy clones, installs the runtime and the command, then hands off to the checkout', { todo: 'lands with the launcher change' }, async () => {
-  const m = machine();
+function npxCopy(m: Machine) {
   const copy = join(mkdtempSync(join(tmpdir(), 'nortuscc-npx-')), 'node_modules', 'nortuscc');
   mkdirSync(copy, { recursive: true });
   cpSync(join(REPO, 'bin'), join(copy, 'bin'), { recursive: true });
   cpSync(join(REPO, 'package.json'), join(copy, 'package.json'));
 
-  // The repo the fake clone copies: the harness repo, its CLI a stub that records its argv.
+  // The repo a clone yields: the harness repo, its CLI a stub that records its argv.
   const source = join(m.home, 'source');
   cpSync(m.repo, source, { recursive: true });
   const handoffLog = join(m.home, 'handoff.log');
@@ -183,20 +173,72 @@ appendFileSync(${JSON.stringify(handoffLog)}, JSON.stringify(process.argv.slice(
   git(source, 'add', '.');
   git(source, 'commit', '-qm', 'stub cli');
 
-  const dest = join(m.home, 'claude-config');
   const fake = fakeGit(m, source);
   const npm = fakeNpm(m);
-  const result = await runCli(m, ['setup', '--yes', '--dir', dest, '--repo', 'https://example.invalid/claude-config.git'], {
-    bin: join(copy, 'bin', 'nortuscc.mjs'),
-    env: { ...fake.env, ...npm.env, NORTUSCC_REPO_DIR: '' },
-  });
+  return {
+    source,
+    git: fake,
+    npm,
+    handoffs: () => lines(handoffLog),
+    run: (args: string[]) => runCli(m, ['setup', '--yes', ...args], {
+      bin: join(copy, 'bin', 'nortuscc.mjs'),
+      env: { ...fake.env, ...npm.env, NORTUSCC_REPO_DIR: '' },
+    }),
+  };
+}
+
+test('an npx copy clones, installs the runtime and the command, then hands off to the checkout', async () => {
+  const m = machine();
+  const npx = npxCopy(m);
+  const dest = join(m.home, 'elsewhere');
+  const result = await npx.run(['--dir', dest, '--repo', 'https://example.invalid/claude-config.git']);
   assert.equal(result.code, 0, result.stderr + result.stdout);
 
-  assert.deepEqual(fake.calls().filter((argv) => argv[0] === 'clone'), [['clone', 'https://example.invalid/claude-config.git', dest]]);
-  const calls = npm.calls();
+  assert.deepEqual(npx.git.calls().filter((argv) => argv[0] === 'clone'), [['clone', 'https://example.invalid/claude-config.git', dest]]);
+  const calls = npx.npm.calls();
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0]!.args, RUNTIME_INSTALL);
   assert.equal(realpath(calls[0]!.cwd), realpath(dest));
   assert.deepEqual(calls[1]!.args, ['install', '--global', '--no-audit', '--no-fund', dest]);
-  assert.deepEqual(lines(handoffLog), [['setup', '--dir', dest, '--yes']]);
+  assert.deepEqual(npx.handoffs(), [['setup', '--dir', dest, '--yes']]);
+});
+
+test('an npx copy with nothing recorded clones the default repo into ~/claude-config', async () => {
+  const m = machine();
+  const npx = npxCopy(m);
+  const result = await npx.run(['--target', 'claude']);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  const dest = join(m.home, 'claude-config');
+  assert.deepEqual(npx.git.calls().filter((argv) => argv[0] === 'clone'), [['clone', 'https://github.com/Nortus222/claude-config.git', dest]]);
+  assert.deepEqual(npx.handoffs(), [['setup', '--dir', dest, '--yes', '--target', 'claude']]);
+});
+
+test('an npx copy reuses the recorded checkout: no clone, and no runtime install when it has one', async () => {
+  const m = machine();
+  const npx = npxCopy(m);
+  mkdirSync(join(npx.source, 'node_modules', 'effect'), { recursive: true });
+  writeFileSync(join(npx.source, 'node_modules', 'effect', 'package.json'), '{}');
+  mkdirSync(m.state, { recursive: true });
+  writeFileSync(statePath(m), JSON.stringify({ version: 1, repo: npx.source, files: {} }));
+
+  const result = await npx.run([]);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  assert.deepEqual(npx.git.calls().filter((argv) => argv[0] === 'clone'), []);
+  assert.deepEqual(npx.npm.calls().map((c) => c.args), [['install', '--global', '--no-audit', '--no-fund', npx.source]]);
+  assert.deepEqual(npx.handoffs(), [['setup', '--dir', npx.source, '--yes']]);
+});
+
+test('an npx copy refuses a --dir checkout that is not nortuscc, installing nothing', async () => {
+  const m = machine();
+  const npx = npxCopy(m);
+  const unrelated = join(m.home, 'unrelated');
+  mkdirSync(unrelated);
+  writeFileSync(join(unrelated, 'package.json'), JSON.stringify({ name: 'different-package' }));
+  git(unrelated, 'init', '-q');
+
+  const result = await npx.run(['--dir', unrelated]);
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /is a git checkout but not a nortuscc checkout/);
+  assert.deepEqual(npx.npm.calls(), []);
+  assert.deepEqual(npx.handoffs(), []);
 });

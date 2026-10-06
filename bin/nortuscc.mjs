@@ -4,7 +4,7 @@ import { constants, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOCKED, PORTED, USAGE, VERBS } from './commands.mjs';
-import { installRuntime, isCheckout, missingRuntime, onInstallFailure, recordedCheckout, RUNTIME_INSTALL } from './launcher.mjs';
+import { installRuntime, isCheckout, missingRuntime, onInstallFailure, recordedCheckout, RUNTIME_INSTALL, setupFromCopy } from './launcher.mjs';
 
 const [major] = process.versions.node.split('.').map(Number);
 if (major < 24) {
@@ -42,8 +42,9 @@ if (isCheckout(root)) {
   }
 }
 
-// An npx copy, or a checkout without its runtime: legacy JavaScript still runs here; TypeScript
-// commands run from the checkout.
+// An npx copy, or a checkout without its runtime. setup clones a checkout and hands off to it;
+// other TypeScript commands run from the recorded checkout; legacy JavaScript still runs here.
+if (verb === 'setup' && !isCheckout(root)) process.exit(setupFromCopy(rest));
 if (!PORTED.includes(verb)) {
   const { run } = await import(`../src/commands/${verb}.mjs`);
   const { withApplyLock } = await import('../src/lock.mjs');
