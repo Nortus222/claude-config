@@ -187,6 +187,11 @@ test('choices labels rows with the bare skill name', () => {
   assert.deepEqual(choices(PICK, new Set()).map((r) => r.label), ['tdd', 'to-issues', 'wizard']);
 });
 
+test('choices offers an off-pin skill as a checked update row with its note', () => {
+  const rows = choices(items({ offPin: [{ name: 'p', from: B, to: A }] }), new Set());
+  assert.deepEqual(rows, [{ key: 'skill:p', group: 'update', label: 'p', note: 'installed at bbbbbbb, pinned to aaaaaaa  o/r', checked: true }]);
+});
+
 test('choices on items with nothing actionable is empty', () => {
   assert.deepEqual(choices(items({ current: ['a'], local: ['b'] }), new Set()), []);
 });

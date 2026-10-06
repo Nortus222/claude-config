@@ -105,7 +105,7 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
   // A count row alone leaves a `gone` skill with no next step, and `Run:
   // nortuscc update` excludes `gone` skills by construction. The footer names
   // its skills rather than saying "them": it prints directly below the
-  // outdated detail rows, so a pronoun would read as referring to those. It
+  // outdated and off-pin detail rows, so a pronoun would read as referring to those. It
   // points at `update --prune` (backed up, manifest kept in step), not a
   // manual remove followed by `capture`, whose shrink guard would refuse.
   // `--check` mode still needs it, since no picker opens there.
@@ -121,14 +121,16 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
 
 export type Choice = { key: string; group: 'update' | 'remove' | 'add'; label: string; note: string; checked: boolean };
 
-// Picker rows keyed by item key. Outdated is checked by default: refreshing what
-// you already have is what the command is for. Removing and adopting are opt-in.
+// Picker rows keyed by item key. Outdated and off-pin are checked by default: refreshing
+// what you already have, or putting it back at its pin, is what the command is for.
+// Removing and adopting are opt-in.
 export function choices(items: ReadonlyArray<Observed>, seeded: ReadonlySet<string>): Choice[] {
   const row = (item: Observed, group: Choice['group'], checked: boolean): Choice => ({
     key: item.key, group, label: item.label, note: `${item.note}  ${item.group}`, checked: checked || seeded.has(item.key),
   });
   return [
     ...inState(items, 'outdated').map((i) => row(i, 'update', true)),
+    ...inState(items, 'off-pin').map((i) => row(i, 'update', true)),
     ...inState(items, 'gone').map((i) => row(i, 'remove', false)),
     ...inState(items, 'available').map((i) => row(i, 'add', false)),
   ];
@@ -244,7 +246,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     let keys: string[];
     if (flags.yes) {
       // Scripted: take the defaults the picker would have shown, which is every
-      // outdated skill plus whatever the flags seeded.
+      // outdated and off-pin skill plus whatever the flags seeded.
       keys = rows.filter((r) => r.checked).map((r) => r.key);
     } else {
       const picked = yield* Effect.promise(() => deps.select(rows, { title: 'choose what to adopt, refresh and prune', isTTY: deps.isTTY }));
@@ -325,12 +327,18 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     const removed = removeStep && ran(removeStep.key) ? skillNamesOf(removeStep) : [];
     const removeOk = removeStep !== undefined && outcomes.get(removeStep.key) === 'ok';
     // Each source is its own installer call, so an add fails only for the source that failed.
-    const addRows = p.steps.filter((s) => s.key.startsWith(SKILL_STEP.install) && ran(s.key)).flatMap((s) => {
+    // An off-pin skill was already installed, so its successful install reads `reinstalled`.
+    const offPinNames = new Set(inState(items, 'off-pin').map((i) => i.label));
+    const installSteps = p.steps.filter((s) => s.key.startsWith(SKILL_STEP.install) && ran(s.key));
+    const addRows = installSteps.flatMap((s) => {
       const source = s.key.slice(SKILL_STEP.install.length);
       const ok = outcomes.get(s.key) === 'ok';
       return skillNamesOf(s).map((name) =>
-        (ok ? formatRow(name, 'added', source) : formatRow(name, 'failed', `${source} — install failed, see output above`)));
+        (ok ? formatRow(name, offPinNames.has(name) ? 'reinstalled' : 'added', source)
+          : formatRow(name, 'failed', `${source} — install failed, see output above`)));
     });
+    const repinned = installSteps.filter((s) => outcomes.get(s.key) === 'ok')
+      .flatMap((s) => skillNamesOf(s)).filter((name) => offPinNames.has(name));
 
     write('\n' + section('done', [
       ...moved.map((m) => formatRow(m.name, 'updated', `${short(m.from)} -> ${short(m.to)}`, width)),
@@ -345,7 +353,10 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
         : '\nSomething failed above. No backup was made — nothing existed to preserve.\n');
     }
 
-    return exitCode({ items, failed: anyFailed || addFailed || cancelled, prunedNames: removeOk ? removed : [] });
+    // Gone skills count as handled only once removed, off-pin ones only once reinstalled at their pin.
+    return exitCode({
+      items, failed: anyFailed || addFailed || cancelled, prunedNames: removeOk ? removed : [], repinnedNames: repinned,
+    });
   });
 
   return Effect.runPromise(program.pipe(
