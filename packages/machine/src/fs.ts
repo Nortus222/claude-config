@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
 import { FsFailed } from './errors.ts';
@@ -11,6 +11,8 @@ export class Fs extends Context.Service<
   {
     readonly readText: (path: string) => Effect.Effect<string | undefined, FsFailed>;
     readonly writeTextAtomic: (path: string, text: string) => Effect.Effect<void, FsFailed>;
+    // Appends `text` in one write, creating the file and its parents.
+    readonly appendText: (path: string, text: string) => Effect.Effect<void, FsFailed>;
     readonly exists: (path: string) => Effect.Effect<boolean>;
     // A link is copied as a link unless `follow`, which copies what it points at.
     readonly copy: (from: string, to: string, options?: { readonly follow?: boolean }) => Effect.Effect<void, FsFailed>;
@@ -103,6 +105,11 @@ export const nodeFs = Layer.succeed(Fs, {
         await copyTree(from, to)();
         await rm(from, { recursive: true, force: true });
       }
+    }),
+  appendText: (path, text) =>
+    attempt('append', path, async () => {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, text, 'utf8');
     }),
   remove: (path) => attempt('remove', path, () => rm(path, { recursive: true, force: true })),
   list: (dir) =>
