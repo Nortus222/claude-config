@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Effect } from 'effect';
 import { pathsFromEnvironment } from '@nortuscc/machine';
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
+import { runGit } from '../git.ts';
 import { CHECKOUT, openMachine, runCommand } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
@@ -36,16 +37,15 @@ export async function run(args: string[] = []): Promise<number> {
     });
     const repo = paths.repo;
 
-    // Spawned directly, in this terminal's foreground, so git can still ask for credentials.
     const before = lockfileHash(repo);
-    const pulled = spawnSync('git', ['-C', repo, 'pull', '--ff-only'], { stdio: 'inherit' });
-    if (pulled.error || pulled.status !== 0) {
+    if (runGit(repo, ['pull', '--ff-only']).code !== 0) {
       console.error('\nnortuscc: git pull --ff-only failed.');
       console.error('The remote has diverged; resolve it in the repo before applying.');
       return 1;
     }
 
     if (lockfileHash(repo) !== before) {
+      // In the tree whose lockfile changed; in normal use the recorded repo is this checkout.
       console.error('nortuscc: package-lock.json changed; reinstalling runtime dependencies');
       const failure = installRuntime(repo);
       if (failure) {

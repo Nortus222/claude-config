@@ -1,6 +1,6 @@
 import { Effect } from 'effect';
-import { Processes } from '@nortuscc/machine';
 import { parseConfigMode, resolveConfigMode } from '../config-mode.ts';
+import { runGit } from '../git.ts';
 import { openMachine, runCommand } from '../machine.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 import { capture } from './capture.ts';
@@ -42,14 +42,13 @@ export async function run(args: string[] = []): Promise<number> {
       .pipe(Effect.provide(opened.layer));
     if (result.code !== 0) return result.code;
 
-    const processes = yield* Processes.pipe(Effect.provide(opened.layer));
-    const git = (output: 'inherit' | 'capture', ...gitArgs: string[]) =>
-      processes.run({ cmd: 'git', args: ['-C', repo, ...gitArgs], output });
+    // In the terminal's foreground, so `git push` can prompt for credentials.
+    const git = (output: 'inherit' | 'capture', ...gitArgs: string[]) => runGit(repo, gitArgs, output);
     const paths = result.captured;
 
     // No upstream (rev-list fails) means "ahead" is not a meaningful question. Real git state decides
     // the no-op: a commit left unpushed by an earlier rejected push must be retried, not forgotten.
-    const counted = yield* git('capture', 'rev-list', '--count', '@{u}..HEAD').pipe(Effect.orElseSucceed(() => ({ code: 1, stdout: '' })));
+    const counted = git('capture', 'rev-list', '--count', '@{u}..HEAD');
     const ahead = counted.code === 0 ? Number.parseInt(counted.stdout.trim(), 10) : 0;
     if (paths.length === 0 && !(ahead > 0)) {
       console.log('\nnothing captured; nothing to push');
@@ -63,7 +62,7 @@ export async function run(args: string[] = []): Promise<number> {
     steps.push(['push']);
     for (const step of steps) {
       if (step[0] === 'diff') console.log('\nstaged:');
-      const done = yield* git('inherit', ...step).pipe(Effect.orElseSucceed(() => ({ code: 1, stdout: '' })));
+      const done = git('inherit', ...step);
       if (done.code !== 0) {
         console.error('\nnortuscc: git add/commit/push failed.');
         console.error('Resolve the git error above, then try again.');

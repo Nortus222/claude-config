@@ -140,6 +140,9 @@ test('an invalid integrations.json upstream is reported as an invalid manifest a
   });
 
   const result = await pull(m);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^apply$/m);
+  assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), readFileSync(join(m.repo, 'claude', 'CLAUDE.md'), 'utf8'));
   assert.match(result.stdout, /^integrations$/m);
   assert.match(result.stdout, /manifest\s+invalid/);
   assert.doesNotMatch(result.stdout, /nortuscc apply --install/);

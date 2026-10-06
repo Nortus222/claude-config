@@ -8,7 +8,7 @@ import {
 } from '@nortuscc/machine';
 import { cliVersion, type CliVersion } from '../cli-version.ts';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
-import { domainsFor, forTargets, openMachine, runCommand, type CliServices, type Opened } from '../machine.ts';
+import { CHECKOUT, domainsFor, forTargets, openMachine, runCommand, type CliServices, type Opened } from '../machine.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { parseTarget, selectedTargets, type TargetChoice } from '../targets.ts';
@@ -19,7 +19,7 @@ import { parseTarget, selectedTargets, type TargetChoice } from '../targets.ts';
 export type StatusDeps = {
   cliState?: (root: string) => CliVersion;
   confirm?: (question: string, options: { isTTY?: boolean }) => Promise<boolean | null>;
-  // Updates the checkout at `repo` and returns the exit code.
+  // Updates the repo at `repo` (and the CLI, when they are the same checkout); returns the exit code.
   pull?: (repo: string, target: TargetChoice) => Promise<number>;
   isTTY?: boolean;
 };
@@ -31,10 +31,11 @@ const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode', 'unparseabl
 
 type ConfigRow = { dest: string; state: string; note?: string };
 
-// Runs the checkout's own CLI in a child, so the update never runs on the modules this process loaded.
-const spawnPull = (repo: string, target: TargetChoice): Promise<number> =>
+// Runs this checkout's CLI in a child, so the update never runs on the modules this process loaded.
+// The child resolves the same repo from the inherited environment; in normal use it is this checkout.
+const spawnPull = (_repo: string, target: TargetChoice): Promise<number> =>
   new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(repo, 'bin', 'nortuscc.mjs'), 'pull', '--target', target], { stdio: 'inherit' });
+    const child = spawn(process.execPath, [join(CHECKOUT, 'bin', 'nortuscc.mjs'), 'pull', '--target', target], { stdio: 'inherit', env: process.env });
     child.on('close', (code) => resolve(code ?? 1));
     child.on('error', () => resolve(1));
   });
