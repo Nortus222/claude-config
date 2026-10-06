@@ -10,8 +10,9 @@ import { splitProjectTrust } from './project-trust.ts';
 
 // What `steps` needs beyond `state`. recorded: nortuscc holds a baseline. local-changed: the machine
 // side differs from it (uninstall's "changed since apply"). local-absent: nothing on the machine
-// side. baseline-stale: both sides agree, but on content newer than the baseline.
-export type Fact = 'recorded' | 'local-changed' | 'local-absent' | 'baseline-stale';
+// side. baseline-stale: both sides agree, but on content newer than the baseline. baseline-dropped:
+// the document holds baselines for keys the repo no longer owns (on its first reading only).
+export type Fact = 'recorded' | 'local-changed' | 'local-absent' | 'baseline-stale' | 'baseline-dropped';
 
 // One copied file or settings key as it stands now.
 export type Reading = {
@@ -127,6 +128,7 @@ export const readMerge = (file: ResolvedFile, desired: DesiredConfig, baselines:
     if (dropped.length) {
       const droppedFacts: Fact[] = [
         'recorded',
+        'baseline-dropped',
         ...(dropped.some((k) => hashValue(localValue(k.slice(file.id.length + 1))) !== baselines[k]!.hash) ? ['local-changed' as const] : []),
       ];
       readings[0] = { ...readings[0]!, facts: [...new Set([...readings[0]!.facts, ...droppedFacts])] };

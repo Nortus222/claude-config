@@ -34,6 +34,21 @@ test('a clean item is no step, unless its baseline is stale', () => {
   assert.deepEqual(stale.steps.map((s) => [s.action, s.summary]), [['write-file', 'record CLAUDE.md as in sync']]);
 });
 
+test('a clean settings key that carries dropped baselines is recorded, pruning them; a write already prunes', () => {
+  const dropped = configSteps([
+    item('config:claude:settings.json#theme', 'clean', ['recorded', 'baseline-dropped']),
+    item('config:claude:settings.json#model', 'clean', ['recorded']),
+  ], selectAll, 'apply', desired);
+  assert.deepEqual(dropped.steps.map((s) => [s.key, s.action, s.summary]), [
+    ['config:claude:settings.json#theme', 'merge-keys', 'forget dropped keys of settings.json'],
+  ]);
+  const ahead = configSteps([
+    item('config:claude:settings.json#theme', 'repo-ahead', ['recorded', 'baseline-dropped']),
+    item('config:claude:settings.json#model', 'clean', ['recorded']),
+  ], selectAll, 'apply', desired);
+  assert.deepEqual(ahead.steps.map((s) => [s.key, s.summary]), [['config:claude:settings.json#theme', 'set settings.json#theme from the repo']]);
+});
+
 test('conflicts and local edits are skipped; force takes the repo for files, never for local-ahead keys', () => {
   const items = [
     item('config:claude:CLAUDE.md', 'conflict', ['recorded', 'local-changed']),

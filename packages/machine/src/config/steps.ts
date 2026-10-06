@@ -29,8 +29,11 @@ const applyDecision = (item: Observed, file: ResolvedFile, force: boolean): Deci
     case 'repo-ahead':
     case 'unmanaged':
       return write();
+    // Recording a clean settings key also prunes the document's dropped-key baselines.
     case 'clean':
-      return has(item, 'baseline-stale') ? step(item.key, action, `record ${item.label} as in sync`, machineSide(file)) : undefined;
+      return has(item, 'baseline-stale') ? step(item.key, action, `record ${item.label} as in sync`, machineSide(file))
+        : has(item, 'baseline-dropped') ? step(item.key, action, `forget dropped keys of ${file.dest}`, machineSide(file))
+        : undefined;
     case 'local-ahead':
       return force && file.mode === 'copy' ? write() : skip(item, 'changed on this machine; capture keeps it');
     case 'conflict':
