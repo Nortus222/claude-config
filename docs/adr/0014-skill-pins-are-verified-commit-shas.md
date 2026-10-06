@@ -8,7 +8,9 @@ that commit by id into a temporary blobless repo, checks that `FETCH_HEAD` is th
 compares Git blob hashes of the installed files with the pinned skill folder. A mismatch removes
 the skill after it was backed up. A changed pin (lock `ref` differs from the pin) reads as
 `off-pin` and reinstalls with `add`, never `skills update`, which reinstalls the lock's recorded
-ref. Pinned sources are not compared against upstream `HEAD` by `update`.
+ref. Pinned sources are not compared against upstream `HEAD` by `update`. Removing a pin leaves the
+lock's `ref` behind, so an unpinned skill that still records one is `off-pin` too and reinstalls
+the latest with a ref-less `add`, which drops the recorded ref.
 
 ## Considered options
 
@@ -19,7 +21,8 @@ ref. Pinned sources are not compared against upstream `HEAD` by `update`.
 
 ## Consequences
 
-- Each pinned source costs one extra blobless fetch per apply.
+- Each pinned install step costs one extra blobless fetch; pinned skills already at their pin cost
+  nothing.
 - SHA-256 repositories cannot be pinned.
 - The skills CLI is still `npx -y skills` at latest; verification is what makes that tolerable.
 - Skills that bundle scripts (executable, script extension, or under `scripts/` or `bin/`) are

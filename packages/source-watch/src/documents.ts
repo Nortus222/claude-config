@@ -6,7 +6,7 @@ import { parsePins } from '@nortuscc/profile-engine';
 import { Data, Effect } from 'effect';
 import { redact } from './redact.ts';
 
-// The author's decisions about sources, as repo documents: `pins` in skill-pins.json (source → ref)
+// The author's decisions about sources, as repo documents: `pins` in skill-pins.json (source → full commit sha)
 // and `ignored` in source-ignores.json (source → sha).
 export type Field = 'pins' | 'ignored';
 export type Edited = { readonly text: string; readonly previous?: string }; // previous: the entry's old value
