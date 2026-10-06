@@ -44,12 +44,21 @@ test('the legacy lock migrates once, carrying repo and the CLAUDE.md baseline on
   const { paths, run } = machine();
   mkdirSync(paths.claude, { recursive: true });
   const baseline = { hash: 'sha256:1', appliedAt: '2026-01-01T00:00:00.000Z' };
-  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), JSON.stringify({ repo: '/r', files: { 'CLAUDE.md': baseline, 'settings.json': baseline } }));
+  const lockText = JSON.stringify({ repo: '/r', files: { 'CLAUDE.md': baseline, 'settings.json': baseline } });
+  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), lockText);
   const state = await run((s) => s.read);
   assert.equal(state.repo, '/r');
   assert.deepEqual(state.files, { 'claude:CLAUDE.md': baseline });
   assert.ok(existsSync(join(paths.stateRoot, 'state.json')));
-  assert.ok(existsSync(join(paths.claude, '.nortuscc-lock.json')));
+  assert.equal(readFileSync(join(paths.claude, '.nortuscc-lock.json'), 'utf8'), lockText);
+});
+
+test('a corrupt legacy lock is skipped: empty state, nothing written', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.claude, { recursive: true });
+  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), '{ broken');
+  assert.deepEqual(await run((s) => s.read), emptyState);
+  assert.equal(existsSync(join(paths.stateRoot, 'state.json')), false);
 });
 
 test('parseState drops the legacy machine choices', () => {

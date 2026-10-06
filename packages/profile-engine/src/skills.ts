@@ -4,7 +4,7 @@ export const SKILLS_SOURCE = 'skills-manifest.txt';
 
 const HEADER = /^\[([^\]]+)\]\s*(.*?)\s*$/;
 
-// Reads the source-grouped manifest with the CLI's meaning: `exact` limits a source to the
+// Reads the source-grouped manifest: `exact` limits a source to the
 // skills listed under it, `optional` offers them unchecked, unknown markers are ignored, and a
 // name before any header has no source and is dropped.
 export function parseSkillsManifest(text: string | undefined): SkillGroup[] {

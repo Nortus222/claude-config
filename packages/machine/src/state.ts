@@ -56,7 +56,8 @@ export class StateStore extends Context.Service<
   }
 >()('machine/StateStore') {}
 
-// state.json: nortuscc's own bookkeeping, in the legacy CLI's exact format.
+// state.json: nortuscc's own bookkeeping (the repo and per-file baselines), in the format earlier
+// releases wrote.
 export const stateStore = Layer.effect(
   StateStore,
   Effect.gen(function* () {

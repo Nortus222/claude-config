@@ -114,13 +114,15 @@ test('a clean apply prunes the baseline of a key the repo no longer owns', async
   const m = configMachine();
   await m.sync();
   const files = Object.fromEntries(Object.entries(m.state().files).map(([k, v]) => [k, v.hash]));
-  m.baselines({ ...files, 'claude:settings.json#gone': hashValue(1)! });
+  // A whole-document baseline only shares the key prefix; pruning leaves it alone.
+  const kept = { ...files, 'claude:settings.json': 'sha256:whole' };
+  m.baselines({ ...kept, 'claude:settings.json#gone': hashValue(1)! });
   const { plan, notes } = await m.sync();
   assert.deepEqual(plan.steps.map((s) => [s.key, s.action, s.summary]), [
     ['config:claude:settings.json#theme', 'merge-keys', 'forget dropped keys of settings.json'],
   ]);
   assert.equal(notes['config:claude:settings.json#theme']?.startsWith('ok:'), true);
-  assert.deepEqual(Object.keys(m.state().files).sort(), Object.keys(files).sort());
+  assert.deepEqual(Object.keys(m.state().files).sort(), Object.keys(kept).sort());
   assert.deepEqual(JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!), { theme: 'dark', model: 'opus' });
   assert.deepEqual((await m.sync()).plan.steps, []);
 });

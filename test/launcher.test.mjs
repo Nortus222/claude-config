@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { INSTALL_STDIO, installGlobalCommand, isCheckout, missingRuntime, npmCommand, onInstallFailure, recordedCheckout, setupFromCopy } from '../bin/launcher.mjs';
-import { PORTED, VERBS } from '../bin/commands.mjs';
+import { fileURLToPath } from 'node:url';
+import { INSTALL_STDIO, installGlobalCommand, isCheckout, missingRuntime, npmCommand, recordedCheckout, setupFromCopy } from '../bin/launcher.mjs';
+import { VERBS } from '../bin/commands.mjs';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'nortuscc-launcher-'));
 const nortuscc = (dir) => {
@@ -46,11 +48,6 @@ test('recordedCheckout accepts only an existing nortuscc checkout', () => {
   assert.equal(recordedCheckout({ NORTUSCC_STATE_DIR: join(home, 'elsewhere') }, home, 'darwin'), null);
 });
 
-test('PORTED is a subset of VERBS', () => {
-  assert.ok(PORTED.every((verb) => VERBS.includes(verb)));
-  assert.ok(PORTED.includes('update'));
-});
-
 test('recordedCheckout rejects a checkout recorded under node_modules', () => {
   const home = scratch();
   const state = join(home, '.config', 'nortuscc');
@@ -80,11 +77,21 @@ test('npmCommand prefers npm_execpath, then the bundled npm-cli.js, then plain n
   assert.throws(() => npmCommand({ args, node, npmExecPath: '', platform: 'win32', exists: () => false }));
 });
 
-test('a failed runtime install falls back to legacy for unported verbs and exits for ported ones', () => {
-  assert.equal(onInstallFailure('status', ['apply']), 'legacy');
-  assert.equal(onInstallFailure('apply', ['apply']), 'exit');
-  const legacy = VERBS.find((verb) => !PORTED.includes(verb));
-  if (legacy) assert.equal(onInstallFailure(legacy, PORTED), 'legacy');
+// A checkout without its runtime cannot run any command, so a failed install exits 1 whatever the verb.
+test('a checkout whose runtime install fails exits 1 for every verb', () => {
+  const dir = join(scratch(), 'claude-config');
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  cpSync(fileURLToPath(new URL('../bin', import.meta.url)), join(dir, 'bin'), { recursive: true });
+  const failingNpm = join(dir, 'npm-cli.js');
+  writeFileSync(failingNpm, 'process.exit(3);\n');
+  for (const verb of VERBS) {
+    const result = spawnSync(process.execPath, [join(dir, 'bin', 'nortuscc.mjs'), verb], {
+      encoding: 'utf8',
+      env: { ...process.env, npm_execpath: failingNpm, NORTUSCC_STATE_DIR: join(dir, 'state') },
+    });
+    assert.equal(result.status, 1, verb);
+    assert.match(result.stderr, /could not install dependencies \(npm exited with 3\)/, verb);
+  }
 });
 
 test('npm output goes to stderr so it never mixes with a command report', () => {

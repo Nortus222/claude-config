@@ -32,6 +32,8 @@ test('a clean item is no step, unless its baseline is stale', () => {
   assert.deepEqual(configSteps([item('config:claude:CLAUDE.md', 'clean', ['recorded'])], selectAll, 'apply', desired), { steps: [], skipped: [] });
   const stale = configSteps([item('config:claude:CLAUDE.md', 'clean', ['recorded', 'local-changed', 'baseline-stale'])], selectAll, 'apply', desired);
   assert.deepEqual(stale.steps.map((s) => [s.action, s.summary]), [['write-file', 'record CLAUDE.md as in sync']]);
+  const captured = configSteps([item('config:claude:CLAUDE.md', 'clean', ['recorded', 'local-changed', 'baseline-stale'])], selectAll, 'capture', desired);
+  assert.deepEqual(captured.steps.map((s) => [s.action, s.summary]), [['capture-file', 'record CLAUDE.md as in sync']]);
 });
 
 test('a clean settings key that carries dropped baselines is recorded, pruning them; a write already prunes', () => {

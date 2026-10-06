@@ -21,7 +21,7 @@ const blocked = (item: Observed): Skipped => skip(item,
     : `nothing to do for ${item.state}`);
 
 // repo -> machine. A local-only change is capture's; force (--take-repo) discards it for a whole
-// file but never for a settings key, as the legacy merge never did.
+// file but never for a settings key.
 const applyDecision = (item: Observed, file: ResolvedFile, force: boolean): Decision => {
   const action: StepAction = file.mode === 'copy' ? 'write-file' : 'merge-keys';
   const write = () => step(item.key, action, `${file.mode === 'copy' ? 'copy' : 'set'} ${item.label} from the repo`, machineSide(file));

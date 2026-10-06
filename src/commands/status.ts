@@ -24,7 +24,7 @@ export type StatusDeps = {
   isTTY?: boolean;
 };
 
-// Config states that need a command to resolve them, as the legacy state machine names them.
+// Config states that need a command to resolve them.
 const NEEDS_APPLY = new Set(['repo-ahead', 'unmanaged', 'missing']);
 const NEEDS_CAPTURE = new Set(['local-ahead']);
 const BLOCKED = new Set(['conflict', 'missing-repo', 'unknown-mode', 'unparseable-local', 'invalid']);

@@ -53,12 +53,3 @@ PowerShell: use nortuscc.cmd when script execution is disabled.
 
 Run 'nortuscc status' first. It writes nothing on its own; the one thing it
 can change is nortuscc itself, and only after you say yes.`;
-
-// Commands whose implementation is TypeScript (src/commands/<verb>.ts). An npx copy cannot
-// run TypeScript from node_modules, so it hands these to the recorded checkout; for setup it
-// first clones one (bin/launcher.mjs).
-export const PORTED = ['apply', 'capture', 'pull', 'push', 'setup', 'status', 'uninstall', 'update'];
-
-// Legacy verbs that read state.json and rewrite it whole would hold <stateRoot>/apply.lock for
-// the whole command; none remain. A ported verb takes the lock through @nortuscc/machine's executor.
-export const LOCKED = [];

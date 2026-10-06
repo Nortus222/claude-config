@@ -5,7 +5,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOCKED, PORTED, VERBS } from '../bin/commands.mjs';
 
 const bin = fileURLToPath(new URL('../bin/nortuscc.mjs', import.meta.url));
 const stateDir = mkdtempSync(join(tmpdir(), 'nortuscc-main-'));
@@ -24,16 +23,10 @@ test('an unknown command exits 2 with usage', () => {
   assert.match(result.stderr, /unknown command 'frobnicate'/);
 });
 
-test('a ported command reaches its TypeScript module through main.ts', () => {
-  assert.ok(PORTED.includes('uninstall'));
+test('a command reaches its TypeScript module through main.ts', () => {
   const result = run('uninstall', '--target', 'all');
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Re-run with --yes to confirm/);
-});
-
-test('no verb is routed through the legacy whole-command lock', () => {
-  assert.deepEqual(LOCKED, []);
-  assert.ok(VERBS.every((verb) => PORTED.includes(verb)));
 });
 
 // setup takes apply.lock only through the executor, per phase, so a live holder cannot stop it
@@ -52,13 +45,13 @@ test('setup holds no lock of its own while another live run holds apply.lock', (
   }
 });
 
-test('a ported command runs its TypeScript module', () => {
+test('update runs its TypeScript module', () => {
   const result = run('update', '--check', '--yes');
   assert.equal(result.status, 2);
   assert.match(result.stderr, /--check is mutually exclusive/);
 });
 
-test('an unported command reaches its legacy module through main.ts', () => {
+test('apply runs its TypeScript module', () => {
   const state = mkdtempSync(join(tmpdir(), 'nortuscc-main-'));
   const result = spawnSync(process.execPath, [bin, 'apply', '--take-local'], {
     encoding: 'utf8',
