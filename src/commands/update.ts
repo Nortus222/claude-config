@@ -56,24 +56,28 @@ export function parseFlags(args: string[]): UpdateFlags {
 const inState = (items: ReadonlyArray<Observed>, state: string) => items.filter((i) => i.state === state);
 const labels = (items: ReadonlyArray<Observed>) => items.map((i) => i.label).join(', ');
 
-// 1 when the run failed, the machine could not be read, a gone skill was left in place, or a source
-// could not be checked.
+// 1 when the run failed, the machine could not be read, a gone skill was left in place, a skill was
+// left off its pin, or a source could not be checked.
 export function exitCode(input: {
   items: ReadonlyArray<Observed>; failed: boolean; prunedNames?: ReadonlyArray<string>; probeErrors?: ReadonlyArray<string>;
+  repinnedNames?: ReadonlyArray<string>;
 }): 0 | 1 {
   if (input.failed || (input.probeErrors?.length ?? 0) > 0) return 1;
   const pruned = new Set(input.prunedNames ?? []);
   const goneLeft = inState(input.items, 'gone').filter((i) => !pruned.has(i.label));
-  if (goneLeft.length > 0 || inState(input.items, 'unknown').length > 0) return 1;
+  const repinned = new Set(input.repinnedNames ?? []);
+  const offPinLeft = inState(input.items, 'off-pin').filter((i) => !repinned.has(i.label));
+  if (goneLeft.length > 0 || offPinLeft.length > 0 || inState(input.items, 'unknown').length > 0) return 1;
   return 0;
 }
 
 // Counts first, in the aggregate style status.mjs uses, then a detail line per
-// outdated skill — listing 24 up-to-date skills individually would bury the
+// outdated or off-pin skill — listing 24 up-to-date skills individually would bury the
 // two that matter.
 export function reportLines(items: ReadonlyArray<Observed>): string[] {
   const current = inState(items, 'current');
   const outdated = inState(items, 'outdated');
+  const offPin = inState(items, 'off-pin');
   const gone = inState(items, 'gone');
   const unknown = inState(items, 'unknown');
   const local = inState(items, 'local');
@@ -82,19 +86,21 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
   const lines: string[] = [];
   if (current.length) lines.push(formatRow('current', String(current.length), ''));
   if (outdated.length) lines.push(formatRow('outdated', String(outdated.length), labels(outdated)));
+  if (offPin.length) lines.push(formatRow('off-pin', String(offPin.length), labels(offPin)));
   if (gone.length) lines.push(formatRow('gone', String(gone.length), labels(gone)));
   if (unknown.length) lines.push(formatRow('unreachable', String(unknown.length), labels(unknown)));
   if (local.length) lines.push(formatRow('local', String(local.length), labels(local)));
   if (available.length) lines.push(formatRow('available', String(available.length), labels(available)));
   if (!lines.length) lines.push(formatRow('skills', 'none', 'nothing installed to check'));
 
-  if (outdated.length) {
+  const detailed = [...outdated, ...offPin];
+  if (detailed.length) {
     lines.push('');
     // Skill names are arbitrary, so the column has to be sized to the batch —
     // `setup-matt-pocock-skills` is 24 characters and would otherwise push its
     // own state column eight past everyone else's.
-    const width = labelWidth(outdated.map((o) => o.label));
-    for (const o of outdated) lines.push(formatRow(o.label, 'outdated', `${o.note}  ${o.group}`, width));
+    const width = labelWidth(detailed.map((o) => o.label));
+    for (const o of detailed) lines.push(formatRow(o.label, o.state, `${o.note}  ${o.group}`, width));
   }
   // A count row alone leaves a `gone` skill with no next step, and `Run:
   // nortuscc update` excludes `gone` skills by construction. The footer names
@@ -228,7 +234,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     const addFailed = unmatchedAdd.length > 0;
 
     if (flags.check) {
-      if (inState(items, 'outdated').length) write('\nRun: nortuscc update\n');
+      if (inState(items, 'outdated').length || inState(items, 'off-pin').length) write('\nRun: nortuscc update\n');
       return exitCode({ items, failed: false, probeErrors });
     }
 

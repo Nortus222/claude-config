@@ -25,6 +25,7 @@ const items = (spec: {
   unknown?: string[];
   local?: string[];
   available?: string[];
+  offPin?: { name: string; from: string | null; to: string | null }[];
 }): Observed[] => updateItems({
   current: (spec.current ?? []).map((name) => ({ name, source: 'o/r' })),
   outdated: (spec.outdated ?? []).map((o) => ({ source: 'o/r', ...o })),
@@ -32,7 +33,26 @@ const items = (spec: {
   unknown: (spec.unknown ?? []).map((name) => ({ name, source: 'o/r' })),
   local: spec.local ?? [],
   available: (spec.available ?? []).map((name) => ({ name, source: 'o/r' })),
+  offPin: (spec.offPin ?? []).map((o) => ({ source: 'o/r', ...o })),
 }, EMPTY);
+
+const A = 'a'.repeat(40);
+const B = 'b'.repeat(40);
+
+test('exitCode is 1 for an off-pin skill left in place', () => {
+  assert.equal(exitCode({ items: items({ offPin: [{ name: 'p', from: B, to: A }] }), failed: false }), 1);
+});
+
+test('exitCode does not count an off-pin skill named in repinnedNames', () => {
+  assert.equal(exitCode({ items: items({ offPin: [{ name: 'p', from: B, to: A }] }), failed: false, repinnedNames: ['p'] }), 0);
+});
+
+test('reportLines counts off-pin skills and details each with the status note', () => {
+  const lines = reportLines(items({ offPin: [{ name: 'p', from: B, to: A }, { name: 'q', from: B, to: null }] }));
+  assert.match(lines.join('\n'), /off-pin\s+2\s+p, q/);
+  assert.ok(lines.some((l) => /^\s+p\s+off-pin\s+installed at bbbbbbb, pinned to aaaaaaa  o\/r$/.test(l)));
+  assert.ok(lines.some((l) => /^\s+q\s+off-pin\s+installed at bbbbbbb, unpinned  o\/r$/.test(l)));
+});
 
 test('exitCode is 0 when everything is current', () => {
   assert.equal(exitCode({ items: items({ current: ['a'] }), failed: false }), 0);
