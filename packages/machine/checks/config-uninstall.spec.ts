@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { CHANGED_SINCE_APPLY } from '../src/index.ts';
+import { CHANGED_SINCE_APPLY, splitOutcome } from '../src/index.ts';
 import { hashValue } from '../src/config/file-state.ts';
 import { configMachine } from './config-machine.ts';
 
@@ -126,6 +126,33 @@ test('the earliest run holds the original when a later run backed the file up ag
   assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# first\n');
 });
 
+// Issue #72, hard cutoff: before #67 a capture backed the repo copy up where an original goes, so a backup
+// from before then is never restored; the file is removed and that backup is named instead.
+test('a file whose earliest backup predates the cutoff is removed, naming that backup', async () => {
+  const m = configMachine();
+  const old = join(m.paths.backups, 'nortuscc-2026-10-05T12-00-00-000Z', 'claude', 'CLAUDE.md');
+  m.write(old, '# repo copy from an old capture\n');
+  m.write(join(m.paths.claude, 'CLAUDE.md'), '# mine\n');
+  await m.sync();
+  const { notes } = await m.sync('uninstall');
+  assert.equal(existsSync(join(m.paths.claude, 'CLAUDE.md')), false);
+  const outcome = splitOutcome(notes['config:claude:CLAUDE.md']!.replace(/^ok: /, ''));
+  assert.equal(outcome.action, 'removed');
+  assert.equal(outcome.older, old);
+  assert.equal(m.read(old), '# repo copy from an old capture\n');
+  assert.equal(m.read(outcome.backedUp!), '# repo claude\n');
+});
+
+test('a file first backed up after the cutoff still gets its original back', async () => {
+  const m = configMachine();
+  m.write(join(m.paths.backups, 'nortuscc-2026-10-05T12-00-00-000Z', 'codex', 'AGENTS.md'), '# unrelated\n');
+  m.write(join(m.paths.claude, 'CLAUDE.md'), '# mine\n');
+  await m.sync();
+  const { notes } = await m.sync('uninstall');
+  assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# mine\n');
+  assert.equal(splitOutcome(notes['config:claude:CLAUDE.md']!.replace(/^ok: /, '')).older, undefined);
+});
+
 // A key recorded at apply time that the repo has since dropped still belongs to uninstall.
 const dropKey = (m: ReturnType<typeof configMachine>, extra: Record<string, string>) =>
   m.baselines({ ...Object.fromEntries(Object.entries(m.state().files).map(([k, v]) => [k, v.hash])), ...extra });
@@ -165,7 +192,7 @@ for (const force of [false, true]) {
     const settings = join(m.paths.claude, 'settings.json');
     const before = m.read(settings);
     const baselines = m.state().files;
-    const backup = join(m.paths.backups, 'nortuscc-0000-old', 'claude', 'settings.json');
+    const backup = join(m.paths.backups, 'nortuscc-2026-10-06T00-00-00-000Z', 'claude', 'settings.json');
     mkdirSync(join(backup, '..'), { recursive: true });
     symlinkSync(settings, backup);
 

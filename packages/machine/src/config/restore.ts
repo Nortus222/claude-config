@@ -15,7 +15,12 @@ type Restored = { readonly action: 'restored' | 'removed' | 'preserved'; readonl
 const restored = (action: 'restored' | 'removed' | 'preserved', backedUp?: string): Restored => ({ action, backedUp });
 const failed = (note: string): Restored => ({ failed: note });
 
-// The earliest run's backup of a file: what was there before nortuscc first replaced it.
+// Before #67 (merged 2026-10-05T23:27:15Z), capture backed the repo copy up where an original goes, so a
+// backup from an earlier run cannot be told from an original. Hard cutoff (#72): no earlier run is trusted.
+export const TRUSTED_ORIGINALS_FROM = 'nortuscc-2026-10-05T23-27-15-000Z';
+
+// The earliest run's backup of a file: what was there before nortuscc first replaced it. When that run
+// predates the cutoff, there is no trusted original, and the old backup is returned as `older` to name.
 const originalBackup = (file: ResolvedFile) =>
   Effect.gen(function* () {
     const fs = yield* Fs;
@@ -23,9 +28,9 @@ const originalBackup = (file: ResolvedFile) =>
     for (const run of (yield* fs.list(backups)) ?? []) {
       if (!run.startsWith('nortuscc-') || (yield* fs.stat(join(backups, run)))?.kind !== 'directory') continue;
       const candidate = join(backups, run, file.target, file.dest);
-      if (yield* fs.stat(candidate)) return candidate;
+      if (yield* fs.stat(candidate)) return run < TRUSTED_ORIGINALS_FROM ? { older: candidate } : { origin: candidate };
     }
-    return undefined;
+    return {};
   });
 
 // A link is restored as the same link, anything else as a copy.
@@ -100,7 +105,7 @@ export const restoreFile = (step: Step, report: MachineReport) =>
     const store = yield* StateStore;
     const recorded = Object.keys((yield* store.read).files).filter((k) => k === file.id || k.startsWith(`${file.id}#`));
     if (recorded.length === 0) return { ok: true, note: 'nothing recorded' } satisfies StepResult;
-    const origin = yield* originalBackup(file);
+    const { origin, older } = yield* originalBackup(file);
     const { dest } = filePaths(yield* MachinePaths, file);
     const relative = join('uninstall', file.dest);
     const result = file.mode === 'merge-keys' ? yield* restoreMerged(file, dest, origin, recorded, relative)
@@ -108,5 +113,5 @@ export const restoreFile = (step: Step, report: MachineReport) =>
       : yield* restoreCopy(file, dest, origin, relative);
     if ('failed' in result) return { ok: false, note: result.failed } satisfies StepResult;
     yield* store.update((s) => recorded.reduce(withoutBaseline, s));
-    return { ok: true, note: outcomeNote(result.action, result.backedUp) } satisfies StepResult;
+    return { ok: true, note: outcomeNote(result.action, result.backedUp, older) } satisfies StepResult;
   });
