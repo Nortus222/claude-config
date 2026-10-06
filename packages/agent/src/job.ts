@@ -51,15 +51,19 @@ const batchKey = (items: ReadonlyArray<ItemReason>) => items.map((i) => `${i.ite
 
 // Appends a `held` or `ready` batch only when it differs from the last one of its kind, so an
 // unchanged batch is recorded once (History's stand-in for "notified once" until the Notifier).
+// An empty batch after a non-empty one is recorded as a reset, so the same set recurring later is
+// recorded again; an empty batch after an empty one (or none) records nothing.
 const recordBatch = (events: ReadonlyArray<HistoryEvent>, kind: 'held' | 'ready', items: ReadonlyArray<ItemReason>) =>
   Effect.gen(function* () {
-    if (items.length === 0) return;
-    let last: ReadonlyArray<ItemReason> | undefined;
-    for (let i = events.length - 1; i >= 0 && last === undefined; i--) {
+    let last: ReadonlyArray<ItemReason> = [];
+    for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i]!;
-      if ((e.kind === 'held' || e.kind === 'ready') && e.kind === kind) last = e.items;
+      if (e.kind === kind) {
+        last = e.items;
+        break;
+      }
     }
-    if (last !== undefined && batchKey(last) === batchKey(items)) return;
+    if (batchKey(last) === batchKey(items)) return;
     yield* (yield* HistoryStore).append({ kind, actor: 'agent', items });
   });
 
@@ -85,11 +89,13 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
       }));
 
     // 1. Refresh: verify the tracked branch's head once. A mismatch blocks only that revision; an
-    // unreachable one is retried by the next job.
-    const head = yield* source.fetch.pipe(
-      Effect.map((fetched): Revision | undefined => fetched.head),
-      Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)),
-    );
+    // unreachable one is retried by the next job. An untrusted setup is never fetched or verified.
+    const head = trusted
+      ? yield* source.fetch.pipe(
+        Effect.map((fetched): Revision | undefined => fetched.head),
+        Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)),
+      )
+      : undefined;
     if (head !== undefined && !(yield* history.read).some((e) => isVerdictOn(e, head))) {
       yield* source.load(head).pipe(
         Effect.andThen(history.append({ kind: 'revision-verified', actor: 'agent', setupId: LOCAL_SETUP, revision: head })),
@@ -123,8 +129,13 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
       const sorted = yield* sortItems(report, resolved.applied, resolved.effective);
       const inert = sorted.pending.filter((p) => p.verdict.kind === 'inert');
       const held = sorted.pending.filter((p) => p.verdict.kind === 'held');
-      if (state.policy !== 'manual') yield* recordBatch(events, 'held', held.map(reasonOf));
-      if (state.policy === 'notify') yield* recordBatch(events, 'ready', inert.map(reasonOf));
+      // A paused auto-apply machine leaves inert items to a person, as notify does. An unpaused one
+      // applies them, so nothing stays ready and a stale ready batch is reset.
+      const notifies = state.policy === 'notify' || (state.policy === 'auto-apply' && state.paused !== null);
+      if (state.policy !== 'manual') {
+        yield* recordBatch(events, 'held', held.map(reasonOf));
+        yield* recordBatch(events, 'ready', notifies ? inert.map(reasonOf) : []);
+      }
       let applied: AutoApplyOutcome | undefined;
       if (state.policy === 'auto-apply' && state.paused === null && inert.length > 0) {
         applied = yield* autoApply(report, inert.map((p) => p.key), domains, options);

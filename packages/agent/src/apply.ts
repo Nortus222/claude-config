@@ -65,6 +65,8 @@ export const autoApply = (
     const outcome = yield* Effect.scoped(runUnderLock(planned, report, domains, options.signal)).pipe(
       Effect.catchTag('LockHeld', () => Effect.succeed(LOCK_HELD)),
     );
-    if (outcome.kind === 'ran') yield* pruneBackups(yield* (yield* AgentClock).now, 'agent');
+    // The run is already in History; a pruning failure must not hide it. Old backups are retried
+    // after the next run.
+    if (outcome.kind === 'ran') yield* pruneBackups(yield* (yield* AgentClock).now, 'agent').pipe(Effect.ignore);
     return outcome;
   });

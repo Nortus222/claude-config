@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonical, DecisionsStore, hashText, HistoryStore } from '@nortuscc/machine';
 import { AgentStateStore, runJob, type Policy } from '../src/index.ts';
@@ -35,7 +36,7 @@ const scenario = async (options: Scenario) => {
   }
   const job = () => m.run(runJob(m.domains), fixture.source);
   const settings = () => JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!);
-  return { m, job, settings };
+  return { m, job, settings, fixture };
 };
 
 test('auto-apply applies the accepted inert key, holds the hook, and only reports drift', async () => {
@@ -71,13 +72,16 @@ test('manual shows pending items in status only', async () => {
   assert.deepEqual(status.drift, [THEME_KEY]);
 });
 
-test('a paused auto-apply machine applies nothing but still records held items', async () => {
+test('a paused auto-apply machine applies nothing and records its items as a notify machine would', async () => {
   const { m, job, settings } = await scenario({ policy: 'auto-apply', paused: true });
   const status = await job();
   assert.deepEqual(settings(), { theme: 'light' });
   assert.equal(status.autoApply, undefined);
   assert.equal(status.paused?.reason, 'test pause');
-  assert.deepEqual(await m.kinds(), ['revision-verified', 'held']);
+  assert.deepEqual(await m.kinds(), ['revision-verified', 'held', 'ready']);
+  const [ready] = (await m.events()).filter((e) => e.kind === 'ready');
+  assert.ok(ready?.kind === 'ready');
+  assert.deepEqual(ready.items, [{ itemId: EFFORT, reason: 'inert' }]);
 });
 
 test('an invalid profile makes the job inspect-only and report PROFILE_INVALID', async () => {
@@ -106,12 +110,13 @@ test('a rejected revision is recorded once and its decisions are not used', asyn
   assert.equal(events[0].error, 'RevisionMismatch');
 });
 
-test('nothing applies from a setup this machine does not trust', async () => {
-  const { job, settings } = await scenario({ policy: 'auto-apply', trusted: false });
+test('nothing is verified or applied from a setup this machine does not trust', async () => {
+  const { m, job, settings } = await scenario({ policy: 'auto-apply', trusted: false });
   const status = await job();
   assert.equal(status.trusted, false);
   assert.deepEqual(status.pending, []);
   assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), []);
 });
 
 test('an interrupted run pauses once and stops auto-apply', async () => {
@@ -147,4 +152,55 @@ test('a key changed on both sides is not auto-applied', async () => {
   assert.equal(settings().effortLevel, 'low');
   assert.equal(status.autoApply, undefined);
   assert.ok(!status.pending.some((p) => p.itemId === EFFORT));
+});
+
+test('an item set that clears and recurs is recorded again', async () => {
+  const { m, job } = await scenario({ policy: 'notify' });
+  await job();
+  // The machine catches up, as an apply would leave it: nothing is ready, and the ready batch is reset.
+  const statePath = join(m.paths.stateRoot, 'state.json');
+  m.write(join(m.paths.claude, 'settings.json'), JSON.stringify({ theme: 'light', effortLevel: 'high' }) + '\n');
+  m.write(statePath, JSON.stringify({
+    version: 1, repo: null,
+    files: { 'claude:settings.json#effortLevel': { hash: hashText(canonical('high')), appliedAt: '2026-10-06T00:00:00.000Z' } },
+  }));
+  assert.deepEqual((await job()).pending.map((p) => p.itemId), [HOOK]);
+  await job();
+  // The same item falls behind again.
+  rmSync(statePath);
+  m.write(join(m.paths.claude, 'settings.json'), JSON.stringify({ theme: 'light' }) + '\n');
+  await job();
+  const ready = (await m.events()).flatMap((e) => (e.kind === 'ready' ? [e.items.map((i) => i.itemId)] : []));
+  assert.deepEqual(ready, [[EFFORT], [], [EFFORT]]);
+  assert.equal((await m.kinds()).filter((k) => k === 'held').length, 1);
+});
+
+test('an unreachable fetch verifies nothing and applies nothing', async () => {
+  const { m, job, settings } = await scenario({ policy: 'auto-apply', fixture: { unavailable: ['fetch'] } });
+  const status = await job();
+  assert.equal(status.error, undefined);
+  assert.deepEqual(status.pending, []);
+  assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), []);
+});
+
+test('a revision that cannot be loaded records nothing and is verified by a later job', async () => {
+  const { m, job, settings, fixture } = await scenario({ policy: 'auto-apply', fixture: { unavailable: ['load'] } });
+  const status = await job();
+  assert.deepEqual(status.pending, []);
+  assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), []);
+  fixture.unavailable.delete('load');
+  await job();
+  assert.deepEqual(await m.kinds(), ['revision-verified', 'held', 'apply-started', 'apply-finished']);
+  assert.deepEqual(settings(), { theme: 'light', effortLevel: 'high' });
+});
+
+test('an unavailable effective configuration reports REVISION_UNAVAILABLE and applies nothing', async () => {
+  const { m, job, settings } = await scenario({ policy: 'auto-apply', fixture: { unavailable: ['effective'] } });
+  const status = await job();
+  assert.equal(status.error, 'REVISION_UNAVAILABLE');
+  assert.deepEqual(status.pending, []);
+  assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), ['revision-verified']);
 });

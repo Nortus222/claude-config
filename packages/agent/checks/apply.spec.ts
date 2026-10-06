@@ -99,3 +99,13 @@ test('nothing to do runs nothing', async () => {
   assert.deepEqual(outcome, { kind: 'nothing' });
   assert.deepEqual(await m.kinds(), []);
 });
+
+test('a pruning failure after a run still answers the run', async () => {
+  const m = agentMachine();
+  // A file where the backups folder belongs: listing it for pruning fails.
+  m.write(m.paths.backups, 'not a folder');
+  const outcome = await applyWith(m, reportOf(item('config:a')), ['config:a'], [fakeDomain('config', 'write-file')]);
+  assert.ok(outcome.kind === 'ran');
+  assert.equal(outcome.result, 'done');
+  assert.deepEqual(await m.kinds(), ['apply-started', 'apply-finished']);
+});

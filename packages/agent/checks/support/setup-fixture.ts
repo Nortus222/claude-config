@@ -28,7 +28,13 @@ export const accept = (itemId: string, commit = HEAD): Decision => ({
   decidedAt: '2026-10-06T00:00:00.000Z', machineId: null, source: 'local',
 });
 
-export type FixtureOptions = { readonly headFiles?: Readonly<Record<string, string>>; readonly rejectHead?: boolean };
+export type SourceCall = 'fetch' | 'load' | 'effective';
+export type FixtureOptions = {
+  readonly headFiles?: Readonly<Record<string, string>>;
+  readonly rejectHead?: boolean;
+  // Calls that fail with RevisionUnavailable; the returned `unavailable` set can change between jobs.
+  readonly unavailable?: ReadonlyArray<SourceCall>;
+};
 
 // Two commits of a setup repo as directories, and a fake #43 SetupSource over them. Until #43
 // composes effective configurations item by item, the fake takes the whole head commit once any
@@ -46,6 +52,9 @@ export const setupFixture = (root: string, options: FixtureOptions = {}) => {
       writeFileSync(path, text);
     }
   }
+  const unavailable = new Set<SourceCall>(options.unavailable);
+  const down = (call: SourceCall, revision: string) =>
+    Effect.fail(new RevisionUnavailable({ revision, reason: `${call} is unavailable` }));
   const snapshot = (revision: string) =>
     loadProfile(dirs[revision]!).pipe(
       Effect.provide(nodeFiles),
@@ -53,19 +62,22 @@ export const setupFixture = (root: string, options: FixtureOptions = {}) => {
       Effect.map((desired): Snapshot => ({ desired, repo: dirs[revision]! })),
     );
   const service: SetupSource['Service'] = {
-    fetch: Effect.succeed({ head: HEAD }),
+    fetch: Effect.suspend(() => (unavailable.has('fetch') ? down('fetch', HEAD) : Effect.succeed({ head: HEAD }))),
     load: (revision) =>
-      options.rejectHead && revision === HEAD
-        ? Effect.fail(new RevisionMismatch({ revision, reason: 'not on the tracked branch' }))
-        : dirs[revision] !== undefined
-          ? snapshot(revision)
-          : Effect.fail(new RevisionUnavailable({ revision, reason: 'unknown commit' })),
+      unavailable.has('load')
+        ? down('load', revision)
+        : options.rejectHead && revision === HEAD
+          ? Effect.fail(new RevisionMismatch({ revision, reason: 'not on the tracked branch' }))
+          : dirs[revision] !== undefined
+            ? snapshot(revision)
+            : Effect.fail(new RevisionUnavailable({ revision, reason: 'unknown commit' })),
     effective: (decisions) =>
       Effect.gen(function* () {
+        if (unavailable.has('effective')) return yield* down('effective', HEAD);
         const applied = yield* snapshot(APPLIED);
         const accepted = decisions.some((d) => d.commit === HEAD && d.decision === 'accept');
         return { applied: { ...applied, revision: APPLIED }, effective: accepted ? yield* snapshot(HEAD) : applied, conflicts: [] };
       }),
   };
-  return { dirs, service, source: Layer.succeed(SetupSource, service) };
+  return { dirs, service, unavailable, source: Layer.succeed(SetupSource, service) };
 };
