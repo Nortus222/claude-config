@@ -8,12 +8,14 @@ import { MachinePaths } from '../paths.ts';
 import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
 import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
+import { lockRef, offPinNote, pinnedSource, pinsBySource, splitPinned } from './pins.ts';
 import { installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
 
 // What the machine holds for the skills domain: declared skills, installed-but-undeclared ones,
-// and a per-agent item for each installed skill an agent cannot load.
+// and a per-agent item for each installed skill an agent cannot load. A pinned skill whose lock
+// records another ref (or none) is `off-pin`; an unpinned skill's recorded ref is ignored.
 export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   { items: Observed[]; probeErrors: string[] },
   never,
@@ -39,7 +41,12 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
       items.push({ ...base, state: 'unknown', disposition: 'blocked', note: STORE_UNREADABLE });
     } else if (present.has(skill.name)) {
       okSkills.push({ name: skill.name, source: skill.source });
-      items.push({ ...base, state: 'ok', disposition: 'in-sync' });
+      const recorded = lockRef(lock.skills[skill.name]);
+      if (skill.pin && recorded !== skill.pin.ref) {
+        items.push({ ...base, state: 'off-pin', disposition: 'apply', note: offPinNote(recorded, skill.pin.ref) });
+      } else {
+        items.push({ ...base, state: 'ok', disposition: 'in-sync' });
+      }
     } else if (skill.install) {
       items.push({ ...base, state: 'missing', disposition: 'apply' });
     } else {
@@ -82,7 +89,7 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
 const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const sortedUnique = (names: Iterable<string>) => [...new Set(names)].sort(byCodePoint);
 const touchesOf = (names: Iterable<string>) => sortedUnique(names).map((n) => `skills/${n}`);
-// Skills step keys; an install step's key is `install` followed by its source.
+// Skills step keys; an install step's key is `install` followed by its installer source, `o/r#<sha>` when pinned.
 export const SKILL_STEP = {
   remove: 'skills:remove', update: 'skills:update', install: 'skills:install:', expose: 'skills:expose', manifest: 'skills:manifest',
 } as const;
@@ -91,34 +98,35 @@ export const SKILL_STEP = {
 export const skillNamesOf = (step: Step): string[] =>
   step.touches.filter((t) => t.startsWith('skills/')).map((t) => t.slice('skills/'.length));
 
-// One install step per source, sources in code-point order.
-const installSteps = (items: ReadonlyArray<Observed>, targets: ReadonlyArray<Target>): Step[] => {
+// One install step per source, sources in code-point order; a pinned source installs at its pin.
+const installSteps = (items: ReadonlyArray<Observed>, targets: ReadonlyArray<Target>, pins: ReadonlyMap<string, string>): Step[] => {
   const bySource = new Map<string, string[]>();
   for (const item of items) bySource.set(item.group, [...(bySource.get(item.group) ?? []), item.label]);
   return [...bySource.keys()].sort(byCodePoint).map((source) => {
     const touches = touchesOf(bySource.get(source)!);
     return {
-      key: `${SKILL_STEP.install}${source}`, domain: 'skills', action: 'install-skills',
+      key: `${SKILL_STEP.install}${pinnedSource(source, pins.get(source))}`, domain: 'skills', action: 'install-skills',
       summary: `installing ${touches.length} skill(s) from ${source}`, touches, interruptible: true, targets,
     };
   });
 };
 
-const applySteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
+const applySteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: ReadonlyMap<string, string>) => {
   if (selection.declined.includes('skills')) {
     return { steps: [], skipped: items.filter((i) => i.disposition === 'apply').map((i) => ({ key: i.key, reason: 'skills declined' })) };
   }
-  const wanted = items.filter((i) => (i.state === 'missing' && i.disposition === 'apply')
+  const wanted = items.filter((i) => ((i.state === 'missing' || i.state === 'off-pin') && i.disposition === 'apply')
     || (i.state === 'unlinked' && i.target !== undefined && selection.targets.includes(i.target)));
   const skipped: Skipped[] = [
     ...items.filter((i) => i.state === 'missing' && i.disposition === 'excluded').map((i) => ({ key: i.key, reason: 'optional, not chosen' })),
     ...items.filter((i) => i.disposition === 'blocked').map((i) => ({ key: i.key, reason: STORE_UNREADABLE })),
   ];
-  return { steps: installSteps(wanted, selection.targets), skipped };
+  return { steps: installSteps(wanted, selection.targets, pins), skipped };
 };
 
-// Prune, refresh, adopt, then re-expose; the manifest is rewritten only when the skill set changed.
-const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
+// Prune, refresh, adopt or move to a pin, then re-expose; the manifest is rewritten only when the skill set changed.
+// An off-pin skill is reinstalled with `add`: `update` reinstalls at the lock's recorded ref, never at a new pin.
+const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: ReadonlyMap<string, string>) => {
   const named = (state: string) => items.filter((i) => i.state === state).map((i) => i.label);
   const gone = named('gone');
   const outdated = named('outdated');
@@ -131,8 +139,8 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
     const touches = touchesOf(outdated);
     steps.push({ key: SKILL_STEP.update, domain: 'skills', action: 'update-skills', summary: `updating ${touches.length} skill(s)`, touches, interruptible: true });
   }
-  const installs = installSteps(items.filter((i) => i.state === 'available'), selection.targets);
-  steps.push(...installs);
+  const adopted = items.filter((i) => i.state === 'available');
+  steps.push(...installSteps([...adopted, ...items.filter((i) => i.state === 'off-pin')], selection.targets, pins));
   if (steps.length) {
     steps.push({
       key: SKILL_STEP.expose, domain: 'skills', action: 'install-skills',
@@ -140,7 +148,7 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
       touches: touchesOf(outdated), interruptible: true, targets: selection.targets,
     });
   }
-  if (gone.length || installs.length) {
+  if (gone.length || adopted.length) {
     steps.push({
       key: SKILL_STEP.manifest, domain: 'skills', action: 'write-manifest', summary: `write ${MANIFEST_FILE}`,
       touches: [MANIFEST_FILE], interruptible: false,
@@ -150,9 +158,9 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection) => {
   return { steps, skipped };
 };
 
-const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind) =>
-  kind === 'apply' ? applySteps(items, selection)
-  : kind === 'update' ? updateSteps(items, selection)
+const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) =>
+  kind === 'apply' ? applySteps(items, selection, pinsBySource(desired))
+  : kind === 'update' ? updateSteps(items, selection, pinsBySource(desired))
   : { steps: [], skipped: [] };
 
 // Copies each named store folder to the run's backups before the installer touches it.
@@ -214,6 +222,12 @@ const writeManifest = (report: MachineReport) => Effect.gen(function* () {
   return { ok: true, note: `written — ${outcome.reason}` };
 });
 
+// Installs at a pin. Skills already present are backed up first, since a pinned install may replace them.
+const installPinned = (source: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) => Effect.gen(function* () {
+  yield* preserveAll(names);
+  return yield* runInstaller(addCommand({ source, skills: names, targets }));
+});
+
 const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>
   Effect.gen(function* () {
     const names = skillNamesOf(step);
@@ -227,7 +241,10 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
       case 'install-skills':
         if (step.key === SKILL_STEP.expose) return yield* reExpose(step, report);
         if (step.key.startsWith(SKILL_STEP.install)) {
-          return yield* runInstaller(addCommand({ source: step.key.slice(SKILL_STEP.install.length), skills: names, targets: step.targets ?? TARGETS }));
+          const source = step.key.slice(SKILL_STEP.install.length);
+          const targets = step.targets ?? TARGETS;
+          if (splitPinned(source).sha) return yield* installPinned(source, names, targets);
+          return yield* runInstaller(addCommand({ source, skills: names, targets }));
         }
         break;
       case 'write-manifest':

@@ -8,6 +8,7 @@ import type { Observed } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
 import { Processes, type Command } from '../processes.ts';
 import type { SkillLock } from './manifest.ts';
+import { lockRef, offPinNote, pinsBySource } from './pins.ts';
 import { installedSkillNames, readSkillLock } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -99,12 +100,17 @@ export type UpdatePlan = {
   unknown: { name: string; source: string }[];
   local: string[];
   available: { name: string; source: string }[];
+  // Pinned skills whose lock records another ref; present only when planUpdates was given pins.
+  offPin?: { name: string; source: string; from: string | null; to: string }[];
 };
 
+// A skill whose lock source is pinned is judged by its recorded ref against the pin, never against
+// upstream HEAD, so it needs no remote tree and is never `unknown`.
 export function planUpdates(input: {
   lock: SkillLock;
   installed: ReadonlyArray<string>;
   remoteTrees: Map<string, Map<string, string | null>>;
+  pins?: ReadonlyMap<string, string>;
 }): Omit<UpdatePlan, 'available'> {
   const names = [...input.installed].sort();
   const entries = updatableSkills(input.lock, names);
@@ -117,7 +123,15 @@ export function planUpdates(input: {
   // deciding what may be written to the manifest.
   for (const name of names) if (!updatable.has(name)) plan.local.push(name);
 
+  const offPin: NonNullable<UpdatePlan['offPin']> = [];
   for (const entry of entries) {
+    const pin = input.pins?.get(entry.source);
+    if (pin !== undefined) {
+      const recorded = lockRef(input.lock.skills[entry.name]);
+      if (recorded === pin) plan.current.push({ name: entry.name, source: entry.source });
+      else offPin.push({ name: entry.name, source: entry.source, from: recorded, to: pin });
+      continue;
+    }
     const trees = input.remoteTrees.get(entry.sourceUrl);
     if (!trees) {
       // The source could not be reached at all. Saying "current" here would be
@@ -138,7 +152,7 @@ export function planUpdates(input: {
     // installed, and re-fetching is exactly what repairs that.
     plan.outdated.push({ name: entry.name, source: entry.source, from: entry.hash, to: remote });
   }
-  return plan;
+  return input.pins ? { ...plan, offPin } : plan;
 }
 
 // Every SKILL.md in a source repo, reduced to the skills it would install as.
@@ -232,20 +246,22 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
   });
 
 // Sources are checked one after another: each clone is a network round trip git already parallelises.
+// A pinned source is never cloned: its skills are judged against the pin, and it offers nothing to adopt.
 export const checkUpdates = (desired: DesiredConfig): Effect.Effect<UpdatePlan, FsFailed, Processes | Fs | MachinePaths> =>
   Effect.gen(function* () {
     const lock = yield* readSkillLock;
     const installed = yield* installedSkillNames;
     const exact = new Set(desired.skills.filter((s) => s.exact).map((s) => s.source));
+    const pins = pinsBySource(desired);
     const remoteTrees = new Map<string, Map<string, string | null>>();
     const upstreamBySource = new Map<string, { path: string; name: string }[]>();
-    for (const check of sourcesOf(updatableSkills(lock, installed), exact)) {
+    for (const check of sourcesOf(updatableSkills(lock, installed).filter((e) => !pins.has(e.source)), exact)) {
       const found = yield* inspectSource(check.sourceUrl, check.paths, !check.exact);
       if (!found) continue;
       remoteTrees.set(check.sourceUrl, found.trees);
       upstreamBySource.set(check.source, upstreamSkills(found.skillPaths));
     }
-    return { ...planUpdates({ lock, installed, remoteTrees }), available: availableSkills({ upstreamBySource, installed }) };
+    return { ...planUpdates({ lock, installed, remoteTrees, pins }), available: availableSkills({ upstreamBySource, installed }) };
   });
 
 // Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names.
@@ -264,6 +280,7 @@ export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[
   return [
     ...plan.current.map((s) => item(s.name, s.source, 'current', 'in-sync')),
     ...plan.outdated.map((s) => item(s.name, s.source, 'outdated', 'apply', `${short(s.from)} -> ${short(s.to)}`)),
+    ...(plan.offPin ?? []).map((s) => item(s.name, s.source, 'off-pin', 'apply', offPinNote(s.from, s.to))),
     ...plan.gone.map((s) => item(s.name, s.source, 'gone', 'apply', 'gone upstream')),
     ...plan.unknown.map((s) => item(s.name, s.source, 'unknown', 'blocked', 'source unreachable')),
     ...plan.local.map((name) => item(name, '', 'local', 'excluded', 'no recorded source')),
