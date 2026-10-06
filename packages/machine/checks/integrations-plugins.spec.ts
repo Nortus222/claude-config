@@ -163,9 +163,9 @@ test('catalogs come from the plugin list\'s marketplaceName and the registered m
 
 test('a missing Codex plugin from a marketplace Codex does not offer is blocked with a fix hint', () => {
   const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['openai-bundled']) };
-  const inspected = inspectPlugin({ ...CODEX_PLUGIN, plugin: 'superpowers@openai-curated' }, state);
+  const inspected = inspectPlugin({ ...CODEX_PLUGIN, plugin: 'x@acme' }, state);
   assert.equal(inspected.state, 'blocked');
-  assert.match(inspected.note, /Codex marketplace 'openai-curated' is not configured/);
+  assert.match(inspected.note, /Codex marketplace 'acme' is not configured/);
   assert.match(inspected.note, /codex plugin marketplace add/);
 });
 
@@ -181,4 +181,13 @@ test('an offered marketplace leaves the plugin missing', () => {
 
 test('Claude plugins are never catalog-checked', () => {
   assert.equal(inspectPlugin(CLAUDE_PLUGIN, { plugins: new Set(), marketplaces: new Set() }).state, 'missing');
+});
+
+// Codex drops its remote catalog when offline or signed out; the built-in name cannot be added or declared.
+test('a built-in marketplace Codex withholds is blocked with a sign-in hint, not a marketplace-add hint', () => {
+  const state: PluginState = { plugins: new Set(), marketplaces: new Set(), catalogs: new Set(['openai-bundled']) };
+  const inspected = inspectPlugin({ ...CODEX_PLUGIN, plugin: 'superpowers@openai-curated-remote' }, state);
+  assert.equal(inspected.state, 'blocked');
+  assert.match(inspected.note, /built-in 'openai-curated-remote' catalog/);
+  assert.doesNotMatch(inspected.note, /marketplace add/);
 });

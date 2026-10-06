@@ -343,10 +343,10 @@ test('inspect blocks a Codex plugin whose marketplace is missing, and apply skip
   const report = await m.inspect(desiredOf([{ ...CODEX_PLUGIN, plugin: 'superpowers@openai-curated' }]));
   const item = report.items[0]!;
   assert.deepEqual([item.state, item.disposition], ['blocked', 'blocked']);
-  assert.match(item.note ?? '', /not configured/);
+  assert.match(item.note ?? '', /built-in 'openai-curated' catalog/);
   const planned = plan('apply', report, selectAll, [m.domain]);
   assert.deepEqual(planned.steps, []);
-  assert.match(planned.skipped[0]!.reason, /not configured/);
+  assert.match(planned.skipped[0]!.reason, /built-in 'openai-curated' catalog/);
 });
 
 test('a plugin whose Codex marketplace is declared still plans after it', async () => {

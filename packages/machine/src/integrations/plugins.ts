@@ -2,8 +2,8 @@ import { join } from 'node:path';
 import { Effect } from 'effect';
 import { Fs } from '../fs.ts';
 import { Processes } from '../processes.ts';
+import { BUILTIN_MARKETPLACES, marketplaceOf } from '../undeclared/probe.ts';
 import type { Declaration, Inspected, Installer } from './declaration.ts';
-import { marketplaceOf } from '../undeclared/probe.ts';
 
 // Each agent owns where its plugins land and how they update; nortuscc only asks it to install them.
 export const marketplaceCommand = (d: Declaration): Installer => ({ cmd: 'claude', args: ['plugin', 'marketplace', 'add', d.marketplace!] });
@@ -144,7 +144,11 @@ export const inspectPlugin = (d: Declaration, state: PluginState, declaredMarket
   if (state.plugins.has(d.plugin!)) return { state: 'installed', note: 'already installed' };
   const marketplace = marketplaceOf(d.plugin!);
   if (state.catalogs && marketplace && !state.catalogs.has(marketplace) && !declaredMarketplaces.has(marketplace)) {
-    return { state: 'blocked', note: `Codex marketplace '${marketplace}' is not configured: add it with codex plugin marketplace add <source>, or declare it in integrations.json` };
+    // Codex reserves its built-in names: they are never added or declared, only offered once signed in and online.
+    const note = BUILTIN_MARKETPLACES.has(marketplace)
+      ? `Codex is not offering its built-in '${marketplace}' catalog: sign in to Codex and check its network access`
+      : `Codex marketplace '${marketplace}' is not configured: add it with codex plugin marketplace add <source>, or declare it in integrations.json`;
+    return { state: 'blocked', note };
   }
   return { state: 'missing', note: '' };
 };

@@ -86,7 +86,6 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
         const claude = wants('claude') ? yield* claudePluginState(paths.claude) : EMPTY_PLUGIN_STATE;
         const codex = wants('codex') ? yield* readCodexState : EMPTY_PLUGIN_STATE;
         const codexMcp = entries.some(({ d }) => d.target === 'codex' && d.type === 'mcp') ? yield* readCodexMcp : NO_MCP;
-
         const codexMarketplaces = new Set(entries.flatMap(({ d }) => (d.target === 'codex' && d.type === 'marketplace' ? [d.name!] : [])));
 
         const items: Observed[] = [];
