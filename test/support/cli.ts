@@ -227,10 +227,11 @@ export function probeCalls(m: Machine): Array<Call & { readOnly: true }> {
   return readJsonl<Call & { readOnly: true }>(m.log + '.probe');
 }
 
+// Runs the CLI against `m`. `bin` launches another copy of bin/nortuscc.mjs, such as an npx copy.
 export function runCli(
   m: Machine,
   args: string[],
-  options: { env?: Record<string, string>; input?: string } = {},
+  options: { env?: Record<string, string>; input?: string; bin?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const env = {
     ...process.env,
@@ -248,7 +249,7 @@ export function runCli(
     ...options.env,
   };
   return new Promise((resolve) => {
-    const child = execFile(process.execPath, [BIN, ...args], { env }, (err, stdout, stderr) => {
+    const child = execFile(process.execPath, [options.bin ?? BIN, ...args], { env }, (err, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
       resolve({ code, stdout, stderr });
     });
