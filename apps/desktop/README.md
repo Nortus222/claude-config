@@ -38,7 +38,7 @@ npm test
 - `cargo test` covers the Rust envelope, the 1 MiB record bound, timeouts and the backend lifecycle on the bundled runtime.
 - `npm run smoke` runs the bundled backend on a temporary HOME whose `state.json` records this checkout, with an empty PATH: inspect, preview, apply to `done`, an unknown-key refusal, shutdown, and no leftover `apply.lock`.
 
-The legacy suite has a known flaky failure named `fresh machine setup installs selected defaults for both agents` in `test/fresh-machine.test.mjs`. The root suite can also rewrite `skills-manifest.txt`; restore it after a run.
+The CLI suite has a known flaky test named `fresh machine setup installs selected defaults for both agents` in `test/fresh-machine.test.mjs`. The root suite can also rewrite `skills-manifest.txt`; restore it after a run.
 
 ## Release package
 
