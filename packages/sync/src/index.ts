@@ -6,3 +6,4 @@ export * from './documents.ts';
 export * from './git.ts';
 export * from './items.ts';
 export * from './patch.ts';
+export * from './store.ts';
