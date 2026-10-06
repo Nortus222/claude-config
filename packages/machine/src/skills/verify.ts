@@ -59,7 +59,8 @@ export const compareInstall = (pinned: ReadonlyArray<TreeEntry>, installed: Read
   return problems.sort((a, b) => byCodePoint(a[0], b[0])).map(([, problem]) => problem);
 };
 
-// Fetches `sha` from `url` by id into a temporary blobless repo and lists each folder's tree ('.' is the whole tree).
+// Fetches `sha` from `url` by id into a temporary blobless repo and lists each folder's tree, the folder taken
+// literally, never as a glob ('.' is the whole tree).
 // null: the commit could not be fetched or is not `sha`.
 export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<string>): Effect.Effect<
   Map<string, TreeEntry[]> | null, never, Fs | Processes | MachinePaths
@@ -75,7 +76,7 @@ export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<str
     if (fetched.code !== 0 || fetched.stdout.trim() !== sha) return null;
     const trees = new Map<string, TreeEntry[]>();
     for (const folder of new Set(folders)) {
-      const listed = yield* git('-C', dir, 'ls-tree', '-r', '-z', sha, ...(folder === '.' ? [] : ['--', `${folder}/`]));
+      const listed = yield* git('-C', dir, '--literal-pathspecs', 'ls-tree', '-r', '-z', sha, ...(folder === '.' ? [] : ['--', `${folder}/`]));
       if (listed.code !== 0) return null;
       const entries: TreeEntry[] = [];
       for (const record of listed.stdout.split('\0').filter(Boolean)) {
