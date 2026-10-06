@@ -1,8 +1,7 @@
 import { homedir } from 'node:os';
-import type { Domain } from '@nortuscc/machine';
 import { probeLoginEnvironment } from './login-environment.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
-import { Session, SessionError, type DesktopServices } from './session.ts';
+import { Session, SessionError, type SessionOptions } from './session.ts';
 import { truncate } from './text.ts';
 
 const MAX_NOTE_LENGTH = 4096;
@@ -114,16 +113,15 @@ export function serve(session: Session): void {
   process.on('SIGINT', shutdown);
 }
 
-// Reads the login PATH once, then serves a session over `domains` for this user's machine.
+// Reads the login environment once, then serves a session over `domains` for this user's machine.
 export async function startBackend(
-  domains: ReadonlyArray<Domain<DesktopServices>>,
+  domains: SessionOptions['domains'],
   options: { readonly tools?: ReadonlyArray<string> } = {},
 ): Promise<void> {
   const login = await probeLoginEnvironment({ env: process.env });
-  const loginPath = { path: login.env.PATH ?? '', ...(login.error ? { error: login.error } : {}) };
   serve(new Session({
-    environment: { env: process.env, home: homedir(), platform: process.platform },
-    loginPath,
+    environment: { env: login.env, home: homedir(), platform: process.platform },
+    ...(login.error ? { loginError: login.error } : {}),
     domains,
     ...(options.tools ? { tools: options.tools } : {}),
   }));

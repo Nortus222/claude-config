@@ -22,12 +22,16 @@ export class SessionError extends Error {
   }
 }
 
-export type LoginPath = { readonly path: string; readonly error?: string };
+// What a domain is built from: the machine an inspect resolved and the login shell's environment.
+export type DomainContext = { readonly paths: MachinePathsValue; readonly env: Readonly<Record<string, string | undefined>> };
 
 export type SessionOptions = {
+  // The login shell's environment: paths, installers, MCP prerequisites and the tool check all read it, as in a terminal.
   readonly environment: Pick<PathsEnvironment, 'env' | 'home' | 'platform'>;
-  readonly loginPath: LoginPath;
-  readonly domains: ReadonlyArray<Domain<DesktopServices>>;
+  // Why the login environment could not be read; reported as a probe error.
+  readonly loginError?: string;
+  // The domains to inspect and apply, in run order, built for each inspection.
+  readonly domains: (context: DomainContext) => ReadonlyArray<Domain<DesktopServices>>;
   readonly tools?: ReadonlyArray<string>;
 };
 
@@ -38,7 +42,10 @@ export type Prepared = {
   readonly start?: (emit: (runId: string, progress: RunProgress) => void) => void;
 };
 
-type Inspection = { readonly paths: MachinePathsValue; readonly report: MachineReport; readonly result: InspectResult };
+type Inspection = {
+  readonly paths: MachinePathsValue;
+  readonly domains: ReadonlyArray<Domain<DesktopServices>>;
+  readonly report: MachineReport; readonly result: InspectResult };
 type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan };
 
 const describe = (error: unknown): string => {
@@ -53,10 +60,11 @@ const settle = async <A>(effect: Effect.Effect<A, unknown>): Promise<A> => {
   throw Cause.squash(exit.cause);
 };
 
-// Every service a domain may need, built for one machine; a fresh Backups folder per call.
-const services = (paths: MachinePathsValue, path: string) =>
+// Every service a domain may need, built for one machine. Children get the login environment, and
+// inherited installer output goes to stderr: stdout is the protocol channel. A fresh Backups folder per call.
+const services = (paths: MachinePathsValue, env: Readonly<Record<string, string | undefined>>) =>
   Layer.mergeAll(stateStore, overridesStore, backupsForRun()).pipe(
-    Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses({ path }))),
+    Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses({ env, inherit: 'stderr' }))),
   );
 
 const wireItem = (item: MachineReport['items'][number]): WireObserved => ({
@@ -192,7 +200,7 @@ export class Session {
   }
 
   private plan(inspection: Inspection, exclude: ReadonlyArray<string>): Plan {
-    return plan('apply', inspection.report, { ...selectAll, exclude }, this.options.domains);
+    return plan('apply', inspection.report, { ...selectAll, exclude }, inspection.domains);
   }
 
   private async resolvePaths(): Promise<MachinePathsValue> {
@@ -205,7 +213,8 @@ export class Session {
   }
 
   private async observe(paths: MachinePathsValue): Promise<Inspection> {
-    const { domains, loginPath } = this.options;
+    const env = this.options.environment.env;
+    const domains = this.options.domains({ paths, env });
     const observed = await settle(
       Effect.gen(function* () {
         const overrides = yield* (yield* OverridesStore).read;
@@ -214,13 +223,14 @@ export class Session {
         const head = yield* Effect.exit((yield* Processes).run({ cmd: 'git', args: ['-C', paths.repo, 'rev-parse', 'HEAD'], output: 'capture' }));
         const revision = Exit.isSuccess(head) && head.value.code === 0 ? head.value.stdout.trim() || null : null;
         return { report, revision };
-      }).pipe(Effect.provide(services(paths, loginPath.path))),
+      }).pipe(Effect.provide(services(paths, env))),
     ).catch((err: unknown) => {
       throw new SessionError('INSPECT_FAILED', describe(err));
     });
     const { report, revision } = observed;
     return {
       paths,
+      domains,
       report,
       result: {
         profile: {
@@ -231,8 +241,8 @@ export class Session {
         },
         items: report.items.map(wireItem),
         probeErrors: [
-          ...(loginPath.error ? [loginPath.error] : []),
-          ...missingTools(this.options.tools ?? DEFAULT_TOOLS, loginPath.path),
+          ...(this.options.loginError ? [this.options.loginError] : []),
+          ...missingTools(this.options.tools ?? DEFAULT_TOOLS, env.PATH ?? ''),
           ...report.probeErrors,
         ],
       },
@@ -245,14 +255,14 @@ export class Session {
     let terminal: RunProgress | undefined;
     try {
       const exit = await Effect.runPromiseExit(
-        execute(p, inspection.report, this.options.domains, { signal, lockHeld: true }).pipe(
+        execute(p, inspection.report, inspection.domains, { signal, lockHeld: true }).pipe(
           Stream.runForEach((progress) =>
             Effect.sync(() => {
               const wire = wireProgress(progress);
               if (wire.type === 'done' || wire.type === 'cancelled') terminal = wire;
               else emit(wire);
             })),
-          Effect.provide(services(inspection.paths, this.options.loginPath.path)),
+          Effect.provide(services(inspection.paths, this.options.environment.env)),
         ),
       );
       if (Exit.isFailure(exit)) terminal = { type: 'failed', message: describe(Cause.squash(exit.cause)) };

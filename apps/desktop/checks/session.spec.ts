@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { Effect } from 'effect';
 import { MachinePaths, type Domain } from '@nortuscc/machine';
 import { decodeInspectResult, decodePreviewResult, type RunProgress } from '../backend/protocol.ts';
-import { Session, SessionError, type DesktopServices } from '../backend/session.ts';
+import { Session, SessionError, type DesktopServices, type DomainContext } from '../backend/session.ts';
 import { appliedFile, fakeDomain, writeFakeMachine, type FakeItem } from './support/fake-domains.ts';
 
 const checkout = resolve(import.meta.dirname, '../../..');
@@ -19,13 +19,13 @@ function machine(t: TestContext, items: FakeItem[], record: string | null = chec
   mkdirSync(stateRoot, { recursive: true });
   if (record !== null) writeFileSync(join(stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: record, skillsOnly: false, files: {} }));
   writeFakeMachine(stateRoot, items);
+  const contexts: DomainContext[] = [];
   const session = new Session({
-    environment: { env: { PATH: process.env.PATH }, home, platform: process.platform },
-    loginPath: { path: process.env.PATH ?? '' },
-    domains,
+    environment: { env: { PATH: process.env.PATH, LOGIN_ONLY: 'yes' }, home, platform: process.platform },
+    domains: (context) => { contexts.push(context); return domains; },
     tools: [],
   });
-  return { home, stateRoot, session };
+  return { home, stateRoot, session, contexts };
 }
 
 async function run(session: Session, planId: string, lock?: string) {
@@ -62,12 +62,21 @@ test('a missing or stale checkout record names the path and the fix', async (t) 
     code('REPO_NOT_FOUND')(err) && /\/nonexistent\/claude-config/.test((err as Error).message) && /nortuscc setup --dir/.test((err as Error).message));
 });
 
+test('domains are built per inspection from its paths and the login environment', async (t) => {
+  const { stateRoot, session, contexts } = machine(t, [{ key: 'config:a', disposition: 'apply' }]);
+  await session.inspect();
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0]!.paths.stateRoot, stateRoot);
+  assert.equal(contexts[0]!.paths.repo, checkout);
+  assert.equal(contexts[0]!.env.LOGIN_ONLY, 'yes');
+});
+
 test('login-path and missing-tool failures are probe errors', async (t) => {
   const { home } = machine(t, []);
   const session = new Session({
-    environment: { env: {}, home, platform: process.platform },
-    loginPath: { path: '/nonexistent', error: 'could not read PATH from login shell /bin/zsh: timed out after 5000 ms' },
-    domains: [fakeDomain],
+    environment: { env: { PATH: '/nonexistent' }, home, platform: process.platform },
+    loginError: 'could not read PATH from login shell /bin/zsh: timed out after 5000 ms',
+    domains: () => [fakeDomain],
     tools: ['claude'],
   });
   assert.deepEqual((await session.inspect()).probeErrors, [
