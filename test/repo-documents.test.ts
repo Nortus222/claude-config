@@ -18,8 +18,8 @@ test('the committed documents resolve without issues', () => {
 });
 
 // Superpowers ships from official marketplaces both agents already offer (Codex's is the remote
-// catalog it serves itself), so no marketplace and no
-// hook is declared (context-mode and claude-mem were dropped after a hook-latency audit).
+// catalog it serves itself), so no marketplace and no hook is declared (context-mode and
+// claude-mem were dropped after a hook-latency audit).
 test('superpowers is the only declared plugin, once per agent, with no marketplace or hook', () => {
   assert.deepEqual(
     declared.filter((d) => d.type === 'plugin').map((d) => [d.id, d.target, d.plugin]),

@@ -22,7 +22,7 @@ export const fakeBin = () => {
     writeFileSync(join(dir, 'marketplaces.json'), JSON.stringify(marketplaces));
     tool('codex', [
       'case "$*" in',
-      `  "plugin list --json") cat '${join(dir, 'plugins.json')}' ;;`,
+      `  "plugin list --json --available") cat '${join(dir, 'plugins.json')}' ;;`,
       `  "plugin marketplace list --json") cat '${join(dir, 'marketplaces.json')}' ;;`,
       `  "mcp list --json") cat '${join(dir, 'mcp.json')}' ;;`,
       `  *) ${installBody} ;;`,

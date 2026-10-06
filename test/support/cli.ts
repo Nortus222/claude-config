@@ -72,7 +72,7 @@ export function machine(options: { repo?: 'checkout' | 'copy'; codexUnavailable?
 // stands in for — they are not interchangeable:
 //
 //   claude  keeps plugin state in ~/.claude/plugins/*.json, which nortuscc reads
-//   codex   has no such file; it answers `plugin list --json` and installs with
+//   codex   has no such file; it answers `plugin list --json --available` and installs with
 //           `plugin add` (there is no `plugin install`)
 //   npx     drives the shared skill store
 //
@@ -150,8 +150,9 @@ if (agent === 'claude') {
   } else if (argv[0] === 'plugin' && argv[1] === 'list') {
     const state = codexRead();
     process.stdout.write(JSON.stringify({
-      installed: state.plugins.map((pluginId) => ({ pluginId, installed: true })),
-      available: [],
+      installed: state.plugins.map((pluginId) => ({ pluginId, marketplaceName: pluginId.slice(pluginId.lastIndexOf('@') + 1), installed: true })),
+      // Codex's own remote catalog, which every signed-in Codex offers.
+      available: [{ pluginId: 'superpowers@openai-curated-remote', marketplaceName: 'openai-curated-remote', installed: false }],
     }));
   } else if (argv[0] === 'plugin' && argv[1] === 'install') {
     // The real CLI has no such subcommand; failing loudly here is what keeps
