@@ -1,5 +1,5 @@
 ---
-status: accepted (designed in #50, not built)
+status: accepted (core built in #77; login service not built, #79)
 ---
 
 # A per-user login service keeps each machine on its policy; the CLI stays standalone

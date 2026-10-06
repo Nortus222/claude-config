@@ -7,6 +7,9 @@ export * from './state.ts';
 export * from './overrides.ts';
 export * from './backups.ts';
 export * from './apply-lock.ts';
+export * from './history.ts';
+export * from './decisions.ts';
+export * from './prune.ts';
 export * from './model.ts';
 export * from './run.ts';
 export {
@@ -23,5 +26,6 @@ export {
 export { CHANGED_SINCE_APPLY, configDomain } from './config/domain.ts';
 export { splitOutcome } from './config/outcome.ts';
 export { configFileId } from './config/observe.ts';
+export { canonical } from './config/file-state.ts';
 export * from './skills/index.ts';
 export * from './undeclared/probe.ts';

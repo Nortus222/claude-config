@@ -134,3 +134,10 @@ test('realPath follows links and reads a dangling or absent path as undefined', 
   assert.equal(await real(join(dir, 'dangling')), undefined);
   assert.equal(await real(join(dir, 'absent')), undefined);
 });
+
+test('appendText creates parents and appends in order', async () => {
+  const dir = scratch();
+  const target = join(dir, 'h', 'log.jsonl');
+  await run(Fs.use((fs) => Effect.andThen(fs.appendText(target, 'a\n'), fs.appendText(target, 'b\n'))));
+  assert.equal(readFileSync(target, 'utf8'), 'a\nb\n');
+});

@@ -32,6 +32,10 @@ Decision: `docs/adr/0007-one-machine-core-for-cli-and-desktop.md`.
   emits no further events.
 - The config domain (`configDomain`) owns copied files and settings keys from `DesiredConfig.files`. Its items carry `facts` that only its `steps` reads (`recorded`, `local-changed`, `local-absent`, `baseline-stale`). A step re-reads its file and fails, writing nothing, if the file's state moved since the report. Uninstall restores the earliest run's backup of each recorded file.
 - Migration rule until cutover (#59): anything that writes `overrides.json` must also write `state.json`'s `skillsOnly`/`configTargets`, and the legacy `writeLock` mirrors `state.json` into an existing `overrides.json`.
+- `HistoryStore` appends one JSON line per event to `<stateRoot>/history/<YYYY-MM>.jsonl` and skips
+  torn lines; `DecisionsStore` keeps the current accept or skip per setup and item in
+  `decisions.json`; `pruneBackups` removes run folders older than 90 days outside the newest 20,
+  never the latest one History references, and History then reads those applies as `backup: 'pruned'`.
 
 Node 24+ runs the sources directly; Node will not strip types under `node_modules`, so consume
 the package through the workspace.
