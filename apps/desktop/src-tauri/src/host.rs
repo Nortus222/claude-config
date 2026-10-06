@@ -201,9 +201,12 @@ impl Inner {
 pub struct Backend {
     inner: Arc<Inner>,
 }
+// A HOME-isolated backend must not reach the real configuration through these.
+const ISOLATED_CONFIG_VARS: [&str; 4] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "ZDOTDIR"];
 impl Backend {
     /// Starts the bundled backend. `home`, when given, makes the child a self-contained machine at
-    /// that HOME (tests and smoke): it sets HOME and drops any inherited NORTUSCC_* overrides.
+    /// that HOME (tests and smoke): it sets HOME and drops every
+    /// inherited NORTUSCC_* override and config-location variable (`ISOLATED_CONFIG_VARS`).
     pub fn spawn(resources: &Path, home: Option<&Path>, emit: Emit) -> Result<Self, String> {
         let bun = resources.join(if cfg!(windows) { "bun.exe" } else { "bun" });
         let script = resources.join("backend.mjs");
@@ -225,6 +228,9 @@ impl Backend {
             .stderr(Stdio::piped());
         if let Some(home) = home {
             command.env("HOME", home);
+            for key in ISOLATED_CONFIG_VARS {
+                command.env_remove(key);
+            }
             for (key, _) in std::env::vars_os() {
                 if key.to_string_lossy().starts_with("NORTUSCC_") {
                     command.env_remove(key);
@@ -504,6 +510,44 @@ pub(crate) mod lifecycle_tests {
         std::os::unix::fs::symlink(runtime, directory.join("bun")).unwrap();
         std::fs::write(directory.join("backend.mjs"), source).unwrap();
         (Backend::spawn(&directory, None, emit).unwrap(), directory)
+    }
+    #[test]
+    fn home_isolated_backend_drops_config_location_overrides() {
+        let directory = std::env::temp_dir().join(format!("nortuscc-host-env-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64/bun");
+        std::os::unix::fs::symlink(runtime, directory.join("bun")).unwrap();
+        let out = directory.join("env.json");
+        let names = format!("{:?}", ISOLATED_CONFIG_VARS);
+        std::fs::write(
+            directory.join("backend.mjs"),
+            format!(
+                "const names = {names}; require('node:fs').writeFileSync({out:?}, JSON.stringify({{ home: process.env.HOME, vars: names.map(n => process.env[n] ?? null) }})); setInterval(() => {{}}, 1000)"
+            ),
+        )
+        .unwrap();
+        // Only this test sets these; other tests spawn with a HOME (variables dropped) or ignore them.
+        for key in ISOLATED_CONFIG_VARS {
+            unsafe { std::env::set_var(key, "/real/config") };
+        }
+        let home = directory.join("home");
+        let backend = Backend::spawn(&directory, Some(&home), Arc::new(|_| {})).unwrap();
+        for key in ISOLATED_CONFIG_VARS {
+            unsafe { std::env::remove_var(key) };
+        }
+        let mut seen = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                seen = Some(text);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(backend);
+        let seen: Value = serde_json::from_str(&seen.expect("backend wrote its environment")).unwrap();
+        assert_eq!(seen["home"], home.to_string_lossy().as_ref());
+        assert_eq!(seen["vars"], serde_json::json!([null, null, null, null]));
+        std::fs::remove_dir_all(directory).unwrap();
     }
     const IDLE: &str = "process.stdin.resume(); setInterval(() => {}, 1000)";
     #[test]
