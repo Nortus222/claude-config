@@ -80,17 +80,16 @@ export const claudePluginState = (claudeDir: string): Effect.Effect<PluginState,
 
 type Listed = { readonly names: ReadonlySet<string> } | { readonly error: string };
 
-// One `--json` list: the `field` of each entry in `parsed[list]`. A launch failure, a non-zero exit or
+// One `--json` list: the `field` of each entry in `parsed[list]`, or in `parsed` itself when `list` is null. A launch failure, a non-zero exit or
 // output of another shape becomes an error, never a failure. An absent list reads as empty, as before.
-const listNames = (installer: Installer, noun: string, list: string, field: string): Effect.Effect<Listed, never, Processes> =>
+export const listNames = (installer: Installer, noun: string, list: string | null, field: string): Effect.Effect<Listed, never, Processes> =>
   Processes.use((p) => p.run({ cmd: installer.cmd, args: installer.args, output: 'capture' })).pipe(
     Effect.map(({ code, stdout }): Listed => {
       if (code !== 0) return { error: `could not list Codex ${noun}s: exited ${code}` };
       try {
         const parsed: unknown = JSON.parse(stdout);
-        if (!isPlainObject(parsed)) throw new Error('unexpected output');
-        const entries = parsed[list] ?? [];
-        if (!Array.isArray(entries)) throw new Error(`'${list}' is not a list`);
+        const entries = list === null ? parsed : isPlainObject(parsed) ? parsed[list] ?? [] : undefined;
+        if (!Array.isArray(entries)) throw new Error(list === null ? 'not a list' : isPlainObject(parsed) ? `'${list}' is not a list` : 'unexpected output');
         return { names: new Set(entries.flatMap((e) => (isPlainObject(e) && typeof e[field] === 'string' ? [e[field]] : []))) };
       } catch (err) {
         return { error: `could not read the Codex ${noun} list: ${err instanceof Error ? err.message : String(err)}` };
