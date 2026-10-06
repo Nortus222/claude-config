@@ -8,9 +8,10 @@ export const DEFAULT_TOOLS = ['npx', 'claude', 'codex'] as const;
 const MARK = '__NORTUSCC_ENV__';
 const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 // Fixed: the shell runs only this, so rc-file output around the markers is ignored. The backend's own
-// runtime prints what the shell exported, as JSON, so any value survives intact.
+// runtime prints what the shell exported, as JSON, so any value survives intact. It runs from `/`
+// because Bun loads `.env` and `bunfig.toml` from its cwd, and an rc file may have `cd`ed into a project.
 const script = (runtime: string) =>
-  `printf '${MARK}'; ${quote(runtime)} -e 'process.stdout.write(JSON.stringify(process.env))'; printf '${MARK}'`;
+  `printf '${MARK}'; cd / && ${quote(runtime)} -e 'process.stdout.write(JSON.stringify(process.env))'; printf '${MARK}'`;
 
 const FOUND = new RegExp(`${MARK}(.*?)${MARK}`, 's');
 

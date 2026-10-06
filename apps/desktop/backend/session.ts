@@ -156,8 +156,11 @@ export class Session {
       const fresh = this.plan(inspection, previewed.exclude);
       if (!samePlan(previewed.plan, fresh)) {
         this.previewed = { planId: randomUUID(), exclude: previewed.exclude, plan: fresh };
-        await unlock();
-        release();
+        try {
+          await unlock();
+        } finally {
+          release();
+        }
         return { result: { status: 'stale', planId: this.previewed.planId, plan: wirePlan(fresh) } };
       }
       this.previewed = undefined;
@@ -167,14 +170,22 @@ export class Session {
         result: { status: 'started', runId },
         start: (emit) => {
           void this.execute(inspection, fresh, abort.signal, (progress) => emit(runId, progress), async () => {
-            await held();
-            release();
+            try {
+              await held();
+            } finally {
+              release();
+            }
           });
         },
       };
     } catch (err) {
-      await unlock?.();
-      release();
+      try {
+        await unlock?.();
+      } catch (unlockErr) {
+        process.stderr.write(`could not release apply.lock: ${describe(unlockErr)}\n`);
+      } finally {
+        release();
+      }
       throw err;
     }
   }
@@ -267,7 +278,14 @@ export class Session {
       );
       if (Exit.isFailure(exit)) terminal = { type: 'failed', message: describe(Cause.squash(exit.cause)) };
     } finally {
-      await release();
+      // Busy is cleared even when unlocking fails; the failure is noted on stderr (stdout is the protocol)
+      // and, if the run had no outcome of its own, reported as the run's failure.
+      try {
+        await release();
+      } catch (err) {
+        process.stderr.write(`could not release apply.lock: ${describe(err)}\n`);
+        terminal ??= { type: 'failed', message: `could not release apply.lock: ${describe(err)}` };
+      }
     }
     if (terminal) emit(terminal);
   }

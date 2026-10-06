@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { missingTools, probeLoginEnvironment } from '../backend/login-environment.ts';
@@ -22,6 +22,17 @@ test('reads the login environment despite login banners', async () => {
   assert.equal(result.env.PATH, '/opt/tools/bin:/usr/bin');
   assert.equal(result.env.API_TOKEN, 'secret');
   assert.equal(result.env.MULTI, 'a\nb');
+});
+
+test('a runtime path with a space and a quote is quoted for the shell', async () => {
+  const odd = join(dir, "a b's");
+  mkdirSync(odd);
+  const runtime = join(odd, 'node');
+  symlinkSync(process.execPath, runtime);
+  const shell = script('quoted', 'QUOTED_OK=yes\nexport QUOTED_OK\n/bin/sh -c "$2"');
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' }, runtime });
+  assert.equal(result.error, undefined);
+  assert.equal(result.env.QUOTED_OK, 'yes');
 });
 
 test('a hanging shell times out and falls back to the inherited PATH', async () => {

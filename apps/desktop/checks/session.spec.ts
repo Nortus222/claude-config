@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Effect } from 'effect';
@@ -71,16 +71,16 @@ test('domains are built per inspection from its paths and the login environment'
   assert.equal(contexts[0]!.env.LOGIN_ONLY, 'yes');
 });
 
-test('login-path and missing-tool failures are probe errors', async (t) => {
+test('login-environment and missing-tool failures are probe errors', async (t) => {
   const { home } = machine(t, []);
   const session = new Session({
     environment: { env: { PATH: '/nonexistent' }, home, platform: process.platform },
-    loginError: 'could not read PATH from login shell /bin/zsh: timed out after 5000 ms',
+    loginError: 'could not read the environment from login shell /bin/zsh: timed out after 5000 ms',
     domains: () => [fakeDomain],
     tools: ['claude'],
   });
   assert.deepEqual((await session.inspect()).probeErrors, [
-    'could not read PATH from login shell /bin/zsh: timed out after 5000 ms',
+    'could not read the environment from login shell /bin/zsh: timed out after 5000 ms',
     "'claude' was not found on the login shell's PATH",
   ]);
 });
@@ -112,6 +112,30 @@ test('apply runs the previewed plan, backs up, and releases the lock', async (t)
   assert.equal(session.running, false);
   // The preview is consumed: it cannot be applied twice.
   await assert.rejects(session.apply('anything'), code('UNKNOWN_PLAN'));
+});
+
+test('a lock release that fails still clears busy and ends the run with a terminal event', async (t) => {
+  let stateRootOf = '';
+  // After its step, the domain makes the state folder read-only, so removing apply.lock fails with EACCES.
+  const locking: Domain<DesktopServices> = {
+    ...fakeDomain,
+    run: (step, report) => Effect.tap(fakeDomain.run(step, report), () =>
+      Effect.gen(function* () {
+        stateRootOf = (yield* MachinePaths).stateRoot;
+        chmodSync(stateRootOf, 0o500);
+      })),
+  };
+  const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }], checkout, [locking]);
+  await session.inspect();
+  const { events, ended } = await run(session, session.preview([]).planId);
+  try {
+    await ended;
+  } finally {
+    chmodSync(stateRoot, 0o700); // so the machine's cleanup can remove it
+  }
+  assert.equal(session.running, false);
+  assert.equal(events.at(-1)?.type === 'done' || events.at(-1)?.type === 'failed', true);
+  assert.equal(stateRootOf, stateRoot);
 });
 
 test('apply refuses a stale preview and returns the new one', async (t) => {

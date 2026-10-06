@@ -101,7 +101,7 @@ test('concurrent takeovers of a dead lock admit exactly one run', async () => {
   writeFileSync(lock, JSON.stringify({ pid: dead, startedAt: 'then' }));
   const contender = join(import.meta.dirname, 'support', 'lock-contender.ts');
   const outcomes = await Promise.all(Array.from({ length: 8 }, () => new Promise<string>((resolve, reject) => {
-    const child = spawn(process.execPath, [contender, dirname(lock), '1500'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const child = spawn(process.execPath, [contender, dirname(lock), '5000'], { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = '';
     child.stdout.on('data', (chunk) => { out += chunk; });
     child.on('error', reject);
