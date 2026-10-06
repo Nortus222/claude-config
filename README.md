@@ -296,8 +296,10 @@ targets, missing referenced files, and fields that look like secret values are
 all refused.
 
 **This file is public.** It may name an environment variable; it may never
-carry the value. An MCP server whose `requiresEnv` is unset is reported as
-blocked, with the variable named, before any child process starts.
+carry the value. MCP servers are Codex's, so each must target `codex`. One whose
+`requiresEnv` is unset is reported as blocked, with the variable named, and its
+installer never runs. A server Codex already lists in `codex mcp list` is
+reported as installed; only its name is read, never its environment values.
 
 Installation order is hooks, marketplaces, plugins, then MCP servers, so
 prerequisites land first. Each item's failure is its own — the rest of the run
