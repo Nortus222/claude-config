@@ -359,6 +359,29 @@ test('a skill one agent cannot load is partial and pointed at update', async () 
   assert.doesNotMatch(result.stdout, AGREEMENT);
 });
 
+// Pins tdd's source (mattpocock/skills in skills-manifest.txt). The fake npx writes no lock, so every
+// skill from it reads off-pin: "installed at no pin, pinned to aaaaaaa".
+const pinSourceOf = (m: Machine, _skill: 'tdd') =>
+  writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: { 'mattpocock/skills': 'a'.repeat(40) } }));
+
+test('a skill installed off its pin is reported and pointed at update', async () => {
+  const m = await synced();
+  pinSourceOf(m, 'tdd');
+  const result = await status(m);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /off-pin\s+\d+\s+.*tdd \(installed at no pin, pinned to aaaaaaa\)/);
+  assert.match(result.stdout, /^ {2}nortuscc update$/m);
+  assert.doesNotMatch(result.stdout, AGREEMENT);
+});
+
+test('off-pin and partial together point at update once', async () => {
+  const m = await synced();
+  pinSourceOf(m, 'tdd');
+  rmSync(join(m.claude, 'skills', 'show-me'));
+  const result = await status(m);
+  assert.equal(result.stdout.match(/^ {2}nortuscc update$/gm)?.length, 1);
+});
+
 test('a skill no selected agent can load is unlinked', async () => {
   const m = await synced();
   rmSync(join(m.claude, 'skills', 'tdd'));

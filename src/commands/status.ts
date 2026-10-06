@@ -203,6 +203,7 @@ function report(opened: Opened, input: {
     const extra = named((i) => i.state === 'extra');
     const local = named((i) => i.state === 'local');
     const ok = named((i) => i.state === 'ok');
+    const offPin = skills.items.filter((i) => i.key.startsWith('skill:') && i.state === 'off-pin');
     // An unlistable store is a failed read, reported as such rather than as nothing installed.
     const storeErrors = skills.items.some((i) => i.state === 'unknown') ? skills.probeErrors : [];
     const skillLines: string[] = [];
@@ -213,6 +214,9 @@ function report(opened: Opened, input: {
     countRow('optional', optionalMissing);
     countRow('extra', extra);
     countRow('local', local);
+    if (offPin.length) {
+      skillLines.push(formatRow('off-pin', String(offPin.length), offPin.map((i) => `${i.label} (${i.note})`).join(', ')));
+    }
     // Nothing canonical means nothing to ask the agents about.
     const exposureRead = ok.length > 0 ? yield* readExposure(targets) : { list: {}, errors: [] };
     const exposure = skillExposure({ names: ok, targets, list: exposureRead.list });
@@ -225,10 +229,11 @@ function report(opened: Opened, input: {
     for (const message of exposureRead.errors) skillLines.push(formatRow('exposure', 'unknown', message));
     for (const message of storeErrors) skillLines.push(formatRow('store', 'unknown', message));
     if (!skillLines.length) skillLines.push(formatRow('manifest', 'satisfied', ''));
-    // Each gap names the command that can close it: install fills the store, update re-places a skill.
+    // Each gap names the command that can close it: install fills the store, update re-places a skill
+    // and puts an off-pin one back at its pin.
     const repairs: string[] = [];
     if (requiredMissing.length) repairs.push('  nortuscc apply --install');
-    if (exposure.partial.length || exposure.missing.length) repairs.push('  nortuscc update');
+    if (offPin.length || exposure.partial.length || exposure.missing.length) repairs.push('  nortuscc update');
     if (repairs.length) skillLines.push('', ...repairs);
     process.stdout.write(section('skills', skillLines));
 
@@ -273,6 +278,7 @@ function report(opened: Opened, input: {
       || manifestErrors.length > 0
       || pending.length > 0
       || requiredMissing.length > 0
+      || offPin.length > 0
       || exposure.partial.length > 0
       || exposure.missing.length > 0
       || exposureRead.errors.length > 0
