@@ -105,9 +105,10 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
   // A count row alone leaves a `gone` skill with no next step, and `Run:
   // nortuscc update` excludes `gone` skills by construction. The footer names
   // its skills rather than saying "them": it prints directly below the
-  // outdated and off-pin detail rows, so a pronoun would read as referring to those. It
-  // points at `update --prune` (backed up, manifest kept in step), not a
-  // manual remove followed by `capture`, whose shrink guard would refuse.
+  // outdated and off-pin detail rows, so a pronoun would read as referring
+  // to those. It points at `update --prune` (backed up, manifest kept in
+  // step), not a manual remove followed by `capture`, whose shrink guard
+  // would refuse.
   // `--check` mode still needs it, since no picker opens there.
   if (gone.length) {
     lines.push(

@@ -7,7 +7,7 @@ import { git, installerCalls, machine, runCli, type Machine } from './support/cl
 
 // A machine with `pinme` installed from a local upstream repo. `lockRef` is the ref the installer
 // recorded: 'pin' the pinned commit, null none, anything else verbatim. `pin` writes the pin itself.
-export function pinnedMachine(options: { lockRef: string | null | 'pin'; pin: boolean }): { m: Machine; sha: string; upstream: string } {
+function pinnedMachine(options: { lockRef: string | null | 'pin'; pin: boolean }): { m: Machine; sha: string; upstream: string } {
   const m = machine();
   const upstream = mkdtempSync(join(tmpdir(), 'nortuscc-offpin-upstream-'));
   git(upstream, 'init', '-q');
@@ -108,4 +108,21 @@ test('update --yes reinstalls an off-pin skill at its pin and exits 0', async ()
   assert.equal(add.args[3], `o/r#${sha}`);
   assert.match(result.stdout, /pinme\s+reinstalled\s+o\/r#/);
   assert.doesNotMatch(result.stdout, /pinme\s+added/);
+});
+
+test('update --yes reports failed and exits 1 when the reinstall cannot verify at the pin', async () => {
+  const { m } = pinnedMachine({ lockRef: 'b'.repeat(40), pin: true });
+  const result = await runCli(m, ['update', '--yes']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /pinme\s+failed/);
+  assert.doesNotMatch(result.stdout, /pinme\s+reinstalled/);
+});
+
+test('update --check reports a ref-installed skill whose pin was removed as off-pin', async () => {
+  const { m } = pinnedMachine({ lockRef: 'b'.repeat(40), pin: false });
+  const result = await runCli(m, ['update', '--check']);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /pinme\s+off-pin\s+installed at bbbbbbb, unpinned/);
+  assert.match(result.stdout, /Run: nortuscc update/);
+  assert.deepEqual(installerCalls(m), []);
 });

@@ -463,17 +463,21 @@ agent exposure and asks the installer to re-expose anything a selected agent
 cannot see. It never creates symlinks by hand.
 
 ```bash
-nortuscc update --check   # report only; exits non-zero only if a skill is gone or unreachable
+nortuscc update --check   # report only; exits non-zero if a skill is gone, unreachable or off-pin
 nortuscc update           # report, confirm, back up, then update
 ```
 
-Every skill lands in one of five states: `current`, `outdated`, `gone` (the
+Every skill lands in one of seven states: `current`, `outdated`, `off-pin` (not
+at its pinned commit, or still at a ref after its pin was removed), `gone` (the
 folder no longer exists upstream), `unreachable` (the source repo could not be
-cloned), and `local` (hand-authored, with no source anything could update from).
+cloned), `local` (hand-authored, with no source anything could update from), and
+`available` (in the manifest but not installed).
 
-Outdated skills are copied into the backup directory before the updater runs,
-and the closing report is built by re-reading the lock afterwards, so it
-describes what happened rather than what was intended.
+Outdated and off-pin skills are copied into the backup directory before the
+updater runs, and the closing report is built by re-reading the lock afterwards,
+so it describes what happened rather than what was intended. An off-pin skill is
+reinstalled at its pin and verified against it; if verification fails the skill
+reads `failed`, the run exits 1, and the skill is removed (its backup is kept).
 
 Without a TTY and without `--yes`, `update` refuses and exits 2 rather than
 blocking a scheduled run on a prompt nothing will answer.
@@ -495,7 +499,7 @@ decision:
   enter confirm · esc cancel
 ```
 
-Outdated skills start ticked; removing and adopting are opt-in. `--add
+Outdated and off-pin skills start ticked; removing and adopting are opt-in. `--add
 wizard,wait-what` pre-ticks those rows; with `--yes` it acts on them without
 asking. There is deliberately no flag that adopts a whole repo. `--prune`
 pre-ticks every skill deleted upstream.
