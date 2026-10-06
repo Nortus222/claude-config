@@ -129,3 +129,25 @@ test('the registered command points at the installed copy, not the repo', () => 
   assert.equal(command, `node ${join(fx.claude, 'hooks', 'nortuscc-hook.mjs')}`);
   assert.ok(!command.includes(fx.repo));
 });
+
+test('an existing hook file with other content is backed up, then replaced', async () => {
+  const fx = fixture();
+  mkdirSync(join(fx.claude, 'hooks'), { recursive: true });
+  writeFileSync(join(fx.claude, 'hooks', 'nortuscc-hook.mjs'), '// my own hook\n');
+  await fx.install();
+  assert.equal(readFileSync(join(fx.claude, 'hooks', 'nortuscc-hook.mjs'), 'utf8'), '// hook body\n');
+  const run = fx.backups();
+  assert.equal(run.length, 1);
+  const found = readdirSync(join(fx.paths.backups, run[0]!), { recursive: true }).map(String).filter((p) => p.endsWith('nortuscc-hook.mjs'));
+  assert.equal(found.length, 1);
+  assert.equal(readFileSync(join(fx.paths.backups, run[0]!, found[0]!), 'utf8'), '// my own hook\n');
+});
+
+test('an identical installed hook is left alone, with nothing backed up', async () => {
+  const fx = fixture();
+  await fx.install();
+  // First install on a bare machine displaces nothing, so no backup exists yet.
+  assert.deepEqual(fx.backups(), []);
+  await fx.install();
+  assert.deepEqual(fx.backups(), []);
+});

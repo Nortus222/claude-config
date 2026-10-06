@@ -22,7 +22,7 @@ const env = { PATH: '', HOME: home };
 let child;
 try {
   if (app) {
-    child = spawn(join(app, 'Contents/MacOS/nortuscc-desktop-validation'), ['--smoke'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(join(app, 'Contents/MacOS/nortuscc-desktop-validation'), ['--smoke', home], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
