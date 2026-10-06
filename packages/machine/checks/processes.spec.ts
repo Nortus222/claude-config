@@ -147,3 +147,10 @@ test('interrupting a .cmd shim run kills the program the shim started', { skip: 
   await sleep(200);
   assert.equal(pidAlive(Number(readFileSync(pidFile, 'utf8'))), false);
 });
+
+// One ASCII byte first, so two-byte characters straddle the pipe's even-sized chunk boundaries.
+test('captured output keeps multi-byte characters that straddle chunk boundaries', async () => {
+  const exit = await run(exec(['-e', 'process.stdout.write("a" + "é".repeat(200000))']));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(Exit.isSuccess(exit) && exit.value.stdout, 'a' + 'é'.repeat(200000));
+});
