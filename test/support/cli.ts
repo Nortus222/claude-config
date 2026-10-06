@@ -225,6 +225,9 @@ export function runCli(
   const env = {
     ...process.env,
     PATH: `${m.bin}${delimiter}${process.env.PATH}`,
+    // Nothing may fall back to the developer's real home.
+    HOME: m.home,
+    USERPROFILE: m.home,
     NORTUSCC_CLAUDE_DIR: m.claude,
     NORTUSCC_CODEX_DIR: m.codex,
     NORTUSCC_OPENROUTER_CODEX_DIR: m.openrouter,
