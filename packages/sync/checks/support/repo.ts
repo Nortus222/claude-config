@@ -80,3 +80,22 @@ export const failureOf = async <A, E>(effect: Effect.Effect<A, E, Fs | Processes
 };
 
 export const load = (dir: string) => Effect.runPromise(loadProfile(dir).pipe(Effect.provide(nodeFiles)));
+
+// A bare origin, the other machine's clone that pushes to it, and this machine's checkout, which
+// tracks origin/main.
+export const tempSetup = () => {
+  const other = tempRepo();
+  const origin = join(other.root, 'origin.git');
+  const checkout = join(other.root, 'checkout');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  other.git('remote', 'add', 'origin', origin);
+  other.git('push', '-q', '-u', 'origin', 'main');
+  execFileSync('git', ['clone', '-q', origin, checkout]);
+  const inCheckout = (...args: string[]) => execFileSync('git', [...IDENTITY, ...args], { cwd: checkout, encoding: 'utf8' }).trim();
+  const push = (changes: Readonly<Record<string, string | null>>) => {
+    const sha = other.commit(changes);
+    other.git('push', '-q', 'origin', 'main');
+    return sha;
+  };
+  return { root: other.root, origin, checkout, first: other.first, push, inCheckout };
+};

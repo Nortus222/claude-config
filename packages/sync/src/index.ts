@@ -9,3 +9,5 @@ export * from './patch.ts';
 export * from './store.ts';
 export * from './compose.ts';
 export * from './plan.ts';
+export * from './snapshots.ts';
+export * from './setup-source.ts';
