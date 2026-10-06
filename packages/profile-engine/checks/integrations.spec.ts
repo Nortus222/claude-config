@@ -33,6 +33,7 @@ test('any refusal yields no integrations and no allow list', () => {
     ['marketplace without source', doc([{ id: 'm', label: 'm', target: 'claude', type: 'marketplace', default: true, name: 'm' }])],
     ['marketplace without name', doc([{ id: 'm', label: 'm', target: 'claude', type: 'marketplace', default: true, marketplace: 'o/r' }])],
     ['mcp without command', doc([{ id: 'c', label: 'c', target: 'codex', type: 'mcp', default: true }])],
+    ['mcp for claude', doc([{ id: 'c', label: 'c', target: 'claude', type: 'mcp', default: true, command: 'c' }])],
     ['hook without event', doc([{ ...hook, event: '' }])],
     ['hook without file', doc([{ ...hook, file: '' }])],
     ['hook file not in repo', doc([hook])],

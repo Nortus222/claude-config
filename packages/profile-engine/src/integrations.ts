@@ -61,7 +61,11 @@ function validateOne(item: unknown, index: number, seen: Set<string>, hookFileEx
       errors.push(`${where}: a marketplace needs the 'name' it registers as (not derivable from the source)`);
     }
   }
-  if (item.type === 'mcp' && !isText(item.command)) errors.push(`${where}: an mcp server needs a 'command'`);
+  if (item.type === 'mcp') {
+    if (!isText(item.command)) errors.push(`${where}: an mcp server needs a 'command'`);
+    // Installed with `codex mcp add` and checked against `codex mcp list`; nothing installs one for Claude.
+    if (item.target !== 'codex') errors.push(`${where}: an mcp server must target 'codex'`);
+  }
   if (item.type === 'hook') {
     if (!isText(item.event)) errors.push(`${where}: a hook needs an 'event'`);
     if (!isText(item.file)) errors.push(`${where}: a hook needs a 'file' this repo ships`);
