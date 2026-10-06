@@ -280,6 +280,8 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
             const { ok, note } = yield* installPinned(pinned.source, pinned.sha, names, targets);
             return { ok, note };
           }
+          // Every install that may replace a store folder backs it up first; installPinned does so itself.
+          yield* preserveAll(names);
           return yield* runInstaller(addCommand({ source, skills: names, targets }));
         }
         break;

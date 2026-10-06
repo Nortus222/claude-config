@@ -187,6 +187,42 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
   assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
 });
 
+const runUnpinnedAdd = async (opts: { installed: boolean; state: string }) => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  if (opts.installed) {
+    mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
+    writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a\n');
+    writeLock(m.paths, { a: { source: 'o/r', ref: NEXT } });
+  }
+  const src = skillSource(m.home);
+  src.commit({ 'skills/a/SKILL.md': '# a latest\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const r = report([item('a', opts.state, 'apply')], [skill('a', 'o/r')]);
+  const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  return { m, done, installer };
+};
+
+test('an unpinned reinstall backs up the installed folder before adding at upstream latest', async () => {
+  const { done, installer } = await runUnpinnedAdd({ installed: true, state: 'off-pin' });
+  assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
+  assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
+    ['npx -y skills add o/r --skill a --agent claude-code codex --global --yes']);
+});
+
+test('adopting a skill that is not installed makes no backup', async () => {
+  const { m, done, installer } = await runUnpinnedAdd({ installed: false, state: 'missing' });
+  assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
+  assert.equal(done.backups, undefined);
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
+    ['npx -y skills add o/r --skill a --agent claude-code codex --global --yes']);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a latest\n');
+});
+
 test('update re-exposes a pinned skill lacking an agent link at its pin, never at upstream HEAD', async () => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
