@@ -654,9 +654,10 @@ test('cancelling mid-update stops before the manifest and exits non-zero', async
   const m = machine({ upstream: WITH_WIZARD, manifest });
   const controller = new AbortController();
   let poll: ReturnType<typeof setInterval> | undefined;
-  const result = await go(['--yes', '--add', 'wizard'], m.deps({ behaviour: { block: 'add' }, signal: controller.signal }), (out) => {
+  // Cancelled once the installer itself is running: the step backs up the skill folders before it launches.
+  const result = await go(['--yes', '--add', 'wizard'], m.deps({ behaviour: { block: 'add' }, signal: controller.signal }), () => {
     poll = setInterval(() => {
-      if (out.join('').includes('installing')) {
+      if (m.npx().some((a) => a[0] === 'add')) {
         clearInterval(poll);
         controller.abort();
       }

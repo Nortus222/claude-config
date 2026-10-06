@@ -280,6 +280,8 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
             const { ok, note } = yield* installPinned(pinned.source, pinned.sha, names, targets);
             return { ok, note };
           }
+          // A ref-less `add` also reinstalls an off-pin skill, replacing its folder.
+          yield* preserveAll(names);
           return yield* runInstaller(addCommand({ source, skills: names, targets }));
         }
         break;
