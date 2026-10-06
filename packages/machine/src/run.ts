@@ -81,16 +81,17 @@ export const samePlan = (a: Plan, b: Plan): boolean =>
   && a.skipped.every((s, i) => s.key === b.skipped[i]!.key && s.reason === b.skipped[i]!.reason);
 
 // The only executor. Holds the apply lock, runs steps in order, passing each `run` the report the
-// plan came from, and stops cleanly when the signal fires.
+// plan came from, and stops cleanly when the signal fires. A caller that already holds apply.lock
+// for this run passes `lockHeld`; the run then neither takes nor releases it.
 export const execute = <const D extends ReadonlyArray<Domain<any>>>(
   plan: Plan,
   report: MachineReport,
   domains: D,
-  options: { readonly signal?: AbortSignal } = {},
+  options: { readonly signal?: AbortSignal; readonly lockHeld?: boolean } = {},
 ): Stream.Stream<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups> =>
   Stream.callback<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups>((queue) =>
     Effect.gen(function* () {
-      yield* acquireApplyLock;
+      if (!options.lockHeld) yield* acquireApplyLock;
       const backups = yield* Backups;
       const signal = options.signal ?? new AbortController().signal;
       const total = plan.steps.length;

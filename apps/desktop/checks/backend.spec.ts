@@ -31,7 +31,14 @@ function client(t: TestContext, env: Record<string, string>, entry = 'checks/sup
   const child = spawn(command ?? runtime ?? process.execPath, args ?? (runtime ? [entry] : ['--import', 'tsx', entry]), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   const messages: any[] = [];
   const stderr: string[] = [];
-  createInterface({ input: child.stdout }).on('line', (line) => messages.push(JSON.parse(line)));
+  const junk: string[] = [];
+  createInterface({ input: child.stdout }).on('line', (line) => {
+    try {
+      messages.push(JSON.parse(line));
+    } catch {
+      junk.push(line);
+    }
+  });
   createInterface({ input: child.stderr }).on('line', (line) => stderr.push(line));
   let id = 0;
   async function until<T>(get: () => T | undefined, ms = 10_000): Promise<T> {
@@ -57,7 +64,7 @@ function client(t: TestContext, env: Record<string, string>, entry = 'checks/sup
     }
   };
   t.after(close);
-  return { child, messages, stderr, send, terminal, until, close };
+  return { child, messages, junk, stderr, send, terminal, until, close };
 }
 
 test('the real entry inspects and previews this checkout on a temporary HOME', async (t) => {
@@ -70,6 +77,25 @@ test('the real entry inspects and previews this checkout on a temporary HOME', a
   const preview = await c.send('preview', { exclude: [] });
   assert.equal(preview.ok, true);
   assert.equal(preview.result.plan.kind, 'apply');
+  const order = ['config', 'integrations', 'skills'];
+  const domainsSeen = new Set(inspected.result.items.map((i: any) => i.domain));
+  for (const domain of order) assert.ok(domainsSeen.has(domain), `no ${domain} items`);
+  const stepDomains = preview.result.plan.steps.map((s: any) => order.indexOf(s.domain));
+  assert.deepEqual(stepDomains, [...stepDomains].sort((a, b) => a - b));
+  assert.deepEqual(c.junk, []);
+});
+
+test('installer output never reaches the protocol channel', async (t) => {
+  const h = home(t, [{ key: 'config:noisy', disposition: 'apply', behavior: 'noisy' }, { key: 'config:b', disposition: 'apply' }]);
+  const c = client(t, h.env);
+  await c.send('inspect');
+  const applied = await c.send('apply', { planId: (await c.send('preview', { exclude: [] })).result.planId });
+  const done = await c.terminal(applied.result.runId);
+  assert.equal(done.progress.type, 'done');
+  assert.equal(done.progress.ok, 2);
+  assert.deepEqual(c.junk, []);
+  await c.until(() => c.stderr.find((line) => line.includes('installer noise')));
+  assert.equal((await c.send('inspect')).ok, true);
 });
 
 test('the real entry names a stale recorded checkout', async (t) => {
@@ -104,6 +130,16 @@ test('a step note above the record limit is truncated and the run completes', as
   const finished = c.messages.find((m) => m.runId === applied.result.runId && m.progress.key === 'config:loud' && m.progress.type === 'finished');
   assert.equal(finished.progress.outcome, 'failed');
   assert.ok(finished.progress.note.length > 0 && finished.progress.note.length <= 4096, `note length ${finished.progress.note.length}`);
+});
+
+test('a note cut through an emoji drops the whole pair', async (t) => {
+  const h = home(t, [{ key: 'config:emoji', disposition: 'apply', behavior: 'emoji' }]);
+  const c = client(t, h.env);
+  await c.send('inspect');
+  const applied = await c.send('apply', { planId: (await c.send('preview', { exclude: [] })).result.planId });
+  await c.terminal(applied.result.runId);
+  const finished = c.messages.find((m) => m.runId === applied.result.runId && m.progress.type === 'finished');
+  assert.equal(finished.progress.note, 'x'.repeat(4095));
 });
 
 test('busy rejection, cancel, and a released lock', async (t) => {

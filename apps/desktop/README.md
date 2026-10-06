@@ -1,6 +1,6 @@
 # Nortuscc desktop
 
-The app inspects this machine through `@nortuscc/machine`, previews a plan, applies it with backups and can cancel a run. It wires in the domains listed in `backend/domains.ts`; config (#55), integrations (#56) and skills (#57) join as they merge. Until then the list is empty and an apply runs an empty plan.
+The app inspects this machine through `@nortuscc/machine`, previews a plan, applies it with backups and can cancel a run. It wires in config, integrations and skills from `backend/domains.ts`, built per inspection from the resolved paths and the login environment.
 
 A Tauri 2 host (Rust) owns a Bun backend that speaks protocol v2 over stdio, and a React renderer talks only to the host. This app is an npm workspace of the root monorepo on Node 24+. Desktop tests live in `checks/*.spec.ts`, so the root test runner does not discover them.
 
@@ -33,7 +33,7 @@ npm run smoke -w apps/desktop
 npm test
 ```
 
-- `npm test` (Node) covers the protocol schemas, the login-shell PATH probe, the session with fake domains (inspect, preview, stale plans, apply, cancel, lock) and the renderer controller's event ordering.
+- `npm test` (Node) covers the protocol schemas, the login-shell environment probe, the session with fake domains (inspect, preview, stale plans, apply, cancel, lock), a real-domain inspect and preview on a temporary HOME, and a check that installer output stays off stdout and the renderer controller's event ordering.
 - `npm run test:bun` runs the protocol and controller checks under Bun, and the stdio backend checks on the bundled Bun: framing, busy rejection, cancel, `STALE`, shutdown, lock takeover from a dead pid, and reports larger than the old 16 KB cap.
 - `cargo test` covers the Rust envelope, the 1 MiB record bound, timeouts and the backend lifecycle on the bundled runtime.
 - `npm run smoke` runs the bundled backend on a temporary HOME whose `state.json` records this checkout, with an empty PATH: inspect, preview, apply to `done`, an unknown-key refusal, shutdown, and no leftover `apply.lock`.
@@ -61,18 +61,18 @@ JSON lines, one record per line, at most 1,048,576 bytes. Every record carries `
 | `cancel` | acknowledges; the current run stops |
 | `shutdown` | acknowledges; the backend cancels any run and exits |
 
-Errors are `{ ok: false, error: { code, message } }` with codes `INVALID_REQUEST`, `MALFORMED`, `OVERSIZED`, `SHUTDOWN`, `BUSY`, `NO_REPORT`, `UNKNOWN_KEY`, `UNKNOWN_PLAN`, `PROFILE_INVALID`, `REPO_NOT_FOUND`, `INSPECT_FAILED` and `INTERNAL`.
+Errors are `{ ok: false, error: { code, message } }` with codes `INVALID_REQUEST`, `MALFORMED`, `OVERSIZED`, `SHUTDOWN`, `BUSY`, `NO_REPORT`, `UNKNOWN_KEY`, `UNKNOWN_PLAN`, `PROFILE_INVALID`, `REPO_NOT_FOUND`, `INSPECT_FAILED`, `LOCKED` and `INTERNAL`.
 
 Run events are `{ version: 2, event: 'progress', runId, progress }` where `progress.type` is `started`, `finished`, `done`, `cancelled` or `failed`. The reply to `apply` precedes its events. `apply` re-inspects first and answers `stale` instead of running an out-of-date plan.
 
 - Timeouts per command: inspect and apply 60 s, preview 10 s, cancel 30 s, shutdown 5 s.
 - One run at a time; a second `apply` fails `BUSY`.
 - `cancel` finishes the current file step or interrupts an installer. Shutdown, EOF, SIGTERM and a closed stdout cancel first, then release the lock and exit 0.
-- The backend holds `<stateRoot>/apply.lock` during a run. The legacy CLI commands `apply`, `capture`, `pull`, `push`, `setup` and `uninstall` take the same lock. A dead holder's lock is taken over.
+- The backend holds `<stateRoot>/apply.lock` during a run. The legacy CLI commands `apply`, `capture`, `pull`, `push`, `setup` and `uninstall` take the same lock. A dead holder's lock is taken over. An apply takes `apply.lock` before it re-inspects and refuses with `LOCKED` while a live process holds it.
 
 ## Paths
 
-The backend builds paths from HOME and `state.json`'s `repo` exactly as the CLI does, with no fallback. A stale record reports `REPO_NOT_FOUND` with the recorded path. PATH comes from `$SHELL -ilc` once at startup (5 s timeout); a failed probe, or a missing `npx`, `claude` or `codex`, is a probe failure in the report, not a crash. Rust passes the backend no paths; the renderer sends only item keys and plan ids.
+The backend builds paths from HOME and `state.json`'s `repo` exactly as the CLI does, with no fallback. A stale record reports `REPO_NOT_FOUND` with the recorded path. The login shell's whole environment comes from `$SHELL -ilc` once at startup (5 s timeout) and is what paths, installers and MCP prerequisite checks read; installer output goes to the backend's stderr, never its stdout. A failed probe, or a missing `npx`, `claude` or `codex`, is a probe failure in the report, not a crash. Rust passes the backend no paths; the renderer sends only item keys and plan ids.
 
 ## Manual check
 

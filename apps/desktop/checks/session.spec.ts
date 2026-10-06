@@ -1,29 +1,31 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { Effect } from 'effect';
+import { MachinePaths, type Domain } from '@nortuscc/machine';
 import { decodeInspectResult, decodePreviewResult, type RunProgress } from '../backend/protocol.ts';
-import { Session, SessionError } from '../backend/session.ts';
+import { Session, SessionError, type DesktopServices, type DomainContext } from '../backend/session.ts';
 import { appliedFile, fakeDomain, writeFakeMachine, type FakeItem } from './support/fake-domains.ts';
 
 const checkout = resolve(import.meta.dirname, '../../..');
 
 // A machine under a temporary HOME whose state.json records this checkout.
-function machine(t: TestContext, items: FakeItem[], record: string | null = checkout) {
+function machine(t: TestContext, items: FakeItem[], record: string | null = checkout, domains: ReadonlyArray<Domain<DesktopServices>> = [fakeDomain]) {
   const home = mkdtempSync(join(tmpdir(), 'nortuscc-session-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stateRoot = join(home, '.config', 'nortuscc');
   mkdirSync(stateRoot, { recursive: true });
   if (record !== null) writeFileSync(join(stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: record, skillsOnly: false, files: {} }));
   writeFakeMachine(stateRoot, items);
+  const contexts: DomainContext[] = [];
   const session = new Session({
-    environment: { env: { PATH: process.env.PATH }, home, platform: process.platform },
-    loginPath: { path: process.env.PATH ?? '' },
-    domains: [fakeDomain],
+    environment: { env: { PATH: process.env.PATH, LOGIN_ONLY: 'yes' }, home, platform: process.platform },
+    domains: (context) => { contexts.push(context); return domains; },
     tools: [],
   });
-  return { home, stateRoot, session };
+  return { home, stateRoot, session, contexts };
 }
 
 async function run(session: Session, planId: string, lock?: string) {
@@ -60,16 +62,25 @@ test('a missing or stale checkout record names the path and the fix', async (t) 
     code('REPO_NOT_FOUND')(err) && /\/nonexistent\/claude-config/.test((err as Error).message) && /nortuscc setup --dir/.test((err as Error).message));
 });
 
-test('login-path and missing-tool failures are probe errors', async (t) => {
+test('domains are built per inspection from its paths and the login environment', async (t) => {
+  const { stateRoot, session, contexts } = machine(t, [{ key: 'config:a', disposition: 'apply' }]);
+  await session.inspect();
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0]!.paths.stateRoot, stateRoot);
+  assert.equal(contexts[0]!.paths.repo, checkout);
+  assert.equal(contexts[0]!.env.LOGIN_ONLY, 'yes');
+});
+
+test('login-environment and missing-tool failures are probe errors', async (t) => {
   const { home } = machine(t, []);
   const session = new Session({
-    environment: { env: {}, home, platform: process.platform },
-    loginPath: { path: '/nonexistent', error: 'could not read PATH from login shell /bin/zsh: timed out after 5000 ms' },
-    domains: [fakeDomain],
+    environment: { env: { PATH: '/nonexistent' }, home, platform: process.platform },
+    loginError: 'could not read the environment from login shell /bin/zsh: timed out after 5000 ms',
+    domains: () => [fakeDomain],
     tools: ['claude'],
   });
   assert.deepEqual((await session.inspect()).probeErrors, [
-    'could not read PATH from login shell /bin/zsh: timed out after 5000 ms',
+    'could not read the environment from login shell /bin/zsh: timed out after 5000 ms',
     "'claude' was not found on the login shell's PATH",
   ]);
 });
@@ -101,6 +112,30 @@ test('apply runs the previewed plan, backs up, and releases the lock', async (t)
   assert.equal(session.running, false);
   // The preview is consumed: it cannot be applied twice.
   await assert.rejects(session.apply('anything'), code('UNKNOWN_PLAN'));
+});
+
+test('a lock release that fails still clears busy and ends the run with a terminal event', async (t) => {
+  let stateRootOf = '';
+  // After its step, the domain makes the state folder read-only, so removing apply.lock fails with EACCES.
+  const locking: Domain<DesktopServices> = {
+    ...fakeDomain,
+    run: (step, report) => Effect.tap(fakeDomain.run(step, report), () =>
+      Effect.gen(function* () {
+        stateRootOf = (yield* MachinePaths).stateRoot;
+        chmodSync(stateRootOf, 0o500);
+      })),
+  };
+  const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }], checkout, [locking]);
+  await session.inspect();
+  const { events, ended } = await run(session, session.preview([]).planId);
+  try {
+    await ended;
+  } finally {
+    chmodSync(stateRoot, 0o700); // so the machine's cleanup can remove it
+  }
+  assert.equal(session.running, false);
+  assert.equal(events.at(-1)?.type === 'done' || events.at(-1)?.type === 'failed', true);
+  assert.equal(stateRootOf, stateRoot);
 });
 
 test('apply refuses a stale preview and returns the new one', async (t) => {
@@ -136,16 +171,39 @@ test('busy during a run, and cancel interrupts an installer-like step', async (t
   assert.equal(await session.cancel(), false);
 });
 
-test('a live CLI holding apply.lock fails the run before any step', async (t) => {
+test('a live CLI holding apply.lock refuses the apply before re-inspecting', async (t) => {
   const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }]);
   await session.inspect();
+  const { planId } = session.preview([]);
   writeFileSync(join(stateRoot, 'apply.lock'), JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
-  const { events, ended } = await run(session, session.preview([]).planId);
-  await ended;
-  assert.equal(events.length, 1);
-  assert.equal(events[0]!.type, 'failed');
-  assert.match((events[0] as Extract<RunProgress, { type: 'failed' }>).message, new RegExp(`pid ${process.ppid}`));
+  await assert.rejects(session.apply(planId), (err) => code('LOCKED')(err) && new RegExp(`pid ${process.ppid}`).test((err as Error).message));
+  assert.equal(session.running, false);
   assert.equal(existsSync(appliedFile(stateRoot, 'config:a')), false);
+  // The preview survives: once the CLI finishes, the same plan applies.
+  rmSync(join(stateRoot, 'apply.lock'));
+  const { ended } = await run(session, planId);
+  await ended;
+  assert.equal(existsSync(appliedFile(stateRoot, 'config:a')), true);
+});
+
+test('apply holds apply.lock while it re-inspects', async (t) => {
+  const locked: boolean[] = [];
+  const watching: Domain<DesktopServices> = {
+    ...fakeDomain,
+    inspect: (desired) => Effect.andThen(
+      Effect.gen(function* () {
+        const { stateRoot } = yield* MachinePaths;
+        locked.push(existsSync(join(stateRoot, 'apply.lock')));
+      }),
+      fakeDomain.inspect(desired),
+    ),
+  };
+  const { stateRoot, session } = machine(t, [{ key: 'config:a', disposition: 'apply' }], checkout, [watching]);
+  await session.inspect();
+  const { ended } = await run(session, session.preview([]).planId, join(stateRoot, 'apply.lock'));
+  await ended;
+  assert.deepEqual(locked, [false, true]);
+  assert.equal(existsSync(join(stateRoot, 'apply.lock')), false);
 });
 
 test('profile issues block preview', async (t) => {

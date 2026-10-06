@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { Effect, Exit, Fiber } from 'effect';
 import { nodeProcesses, Processes } from '../src/index.ts';
 
@@ -83,4 +85,30 @@ test('interrupting after the child already closed returns promptly', async () =>
     yield* Fiber.interrupt(fiber);
   }).pipe(Effect.provide(nodeProcesses())));
   assert.ok(Date.now() - started < 1200);
+});
+
+test('the env option is the child\'s whole environment', async () => {
+  const exit = await Effect.runPromiseExit(
+    Processes.use((p) => p.run({ cmd: process.execPath, args: ['-e', 'process.stdout.write(JSON.stringify([process.env.ONLY_HERE, process.env.HOME ?? null]))'], output: 'capture' }))
+      .pipe(Effect.provide(nodeProcesses({ env: { ONLY_HERE: 'yes' } }))),
+  );
+  assert.ok(Exit.isSuccess(exit));
+  assert.deepEqual(Exit.isSuccess(exit) && JSON.parse(exit.value.stdout), ['yes', null]);
+});
+
+test('inherit: stderr sends an inherit command\'s output to stderr and gives it no stdin', () => {
+  const processes = pathToFileURL(join(import.meta.dirname, '..', 'src', 'processes.ts')).href;
+  const script = `
+    import { Effect } from 'effect';
+    import { Processes, nodeProcesses } from ${JSON.stringify(processes)};
+    await Effect.runPromise(Processes.use((p) => p.run({
+      cmd: process.execPath,
+      args: ['-e', 'let got = ""; process.stdin.on("data", (c) => { got += c; }); process.stdin.on("end", () => console.log("noise stdin=" + JSON.stringify(got)));'],
+      output: 'inherit',
+    })).pipe(Effect.provide(nodeProcesses({ inherit: 'stderr' }))));
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: join(import.meta.dirname, '..'), input: 'a protocol request\n', encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /noise stdin=""/);
 });

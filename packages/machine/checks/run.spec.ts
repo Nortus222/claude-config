@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Exit, Layer, Stream } from 'effect';
@@ -217,4 +217,13 @@ test('plan hands each domain the desired config the report came from', () => {
   };
   plan('apply', report, selectAll, [domain]);
   assert.equal(seen, desired);
+});
+
+test('a caller that holds the lock runs without taking or releasing it', async () => {
+  const { stateRoot, collect } = machine();
+  const held = JSON.stringify({ pid: process.ppid });
+  writeFileSync(join(stateRoot, 'apply.lock'), held);
+  const exit = await collect(execute({ kind: 'apply', steps: [step('a')], skipped: [] }, empty, [fake(() => Effect.succeed({ ok: true }))], { lockHeld: true }));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(readFileSync(join(stateRoot, 'apply.lock'), 'utf8'), held);
 });
