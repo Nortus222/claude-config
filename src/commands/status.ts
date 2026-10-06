@@ -8,7 +8,7 @@ import {
 } from '@nortuscc/machine';
 import { cliVersion, type CliVersion } from '../cli-version.ts';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
-import { CHECKOUT, domainsFor, forTargets, openMachine, runCommand, type CliServices, type Opened } from '../machine.ts';
+import { CHECKOUT, domainsFor, forTargets, openMachine, runCommand, type CliServices, type CodexStateRead, type Opened } from '../machine.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { parseTarget, selectedTargets, type TargetChoice } from '../targets.ts';
@@ -85,13 +85,13 @@ function fileRows(file: ResolvedFile, items: ReadonlyArray<Observed>, desired: D
 
 // The selected agents' declared integrations and their observed states; nothing is inspected when
 // integrations.json is invalid, and its complaints are returned instead.
-export function inspectIntegrations(opened: Opened, targets: ReadonlyArray<Target>): Effect.Effect<{
+export function inspectIntegrations(opened: Opened, targets: ReadonlyArray<Target>, codexState?: CodexStateRead): Effect.Effect<{
   selected: DesiredConfig; manifestErrors: string[]; planned: ReadonlyArray<Observed>;
 }, unknown, CliServices> {
   return Effect.gen(function* () {
     const selected = forTargets(opened.desired, targets);
     const manifestErrors = opened.desired.issues.filter((i) => i.source === 'integrations.json').map((i) => i.message);
-    const planned = manifestErrors.length ? [] : (yield* inspect(selected, [domainsFor(opened.paths).integrations])).items;
+    const planned = manifestErrors.length ? [] : (yield* inspect(selected, [domainsFor(opened.paths, { codexState }).integrations])).items;
     return { selected, manifestErrors, planned };
   });
 }
@@ -151,10 +151,14 @@ function report(opened: Opened, input: {
     process.stdout.write('\n' + section('config', configLines));
 
     // integrations: inspected, never installed. Unknown means the agent's CLI could not answer, which
-    // re-running apply cannot repair, so it is reported without being called pending.
-    const { selected, manifestErrors, planned } = yield* inspectIntegrations(opened, targets);
+    // re-running apply cannot repair, so it is reported without being called pending. Blocked is
+    // pending but not installable: apply skips it, and its note names the fix.
+    // Codex's plugin list carries its whole remote catalog, so inspect and the probe below share one read.
+    const codexState = yield* Effect.cached(readCodexState);
+    const { selected, manifestErrors, planned } = yield* inspectIntegrations(opened, targets, codexState);
     const unresolved = planned.filter((i) => i.state !== 'installed');
     const pending = unresolved.filter((i) => i.state !== 'unknown');
+    const installable = pending.filter((i) => i.state !== 'blocked');
 
     // Claude-side state files and the Codex CLI, read for the undeclared probe and --versions.
     const installed: InstalledIntegrations[] = [];
@@ -167,7 +171,7 @@ function report(opened: Opened, input: {
       installed.push({ target: 'claude', plugins: installs.map((p) => p.name), marketplaces });
     }
     if (targets.includes('codex')) {
-      const codex = yield* readCodexState;
+      const codex = yield* codexState;
       codexErrors.push(...[codex.pluginError, codex.marketplaceError].filter((e): e is string => Boolean(e)));
       // Codex reports no versions through its CLI.
       for (const name of codex.plugins) versions.set(name, null);
@@ -191,7 +195,7 @@ function report(opened: Opened, input: {
           ? showVersions ? planned.map(integrationRow) : [formatRow('all declared', 'installed', '')]
           : [
             ...(showVersions ? planned : unresolved).map(integrationRow),
-            ...(pending.length ? ['', '  nortuscc apply --install'] : []),
+            ...(installable.length ? ['', '  nortuscc apply --install'] : []),
           ];
     process.stdout.write(section('integrations', integrationLines));
 

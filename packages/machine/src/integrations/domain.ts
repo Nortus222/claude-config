@@ -8,7 +8,7 @@ import { Processes } from '../processes.ts';
 import { asDeclaration, commandLine, type Declaration, type Inspected, type Installer, type IntegrationType } from './declaration.ts';
 import { describeHook, hookPaths, inspectHook, installHook } from './hooks.ts';
 import { blockedNote, describeMcp, inspectMcp, mcpCommand, missingEnv, readCodexMcp, type Env, type McpState } from './mcp.ts';
-import { claudePluginState, EMPTY_PLUGIN_STATE, inspectPlugin, installCommand, readCodexState } from './plugins.ts';
+import { claudePluginState, EMPTY_PLUGIN_STATE, inspectPlugin, installCommand, readCodexState, type PluginState } from './plugins.ts';
 
 // Prerequisites first: a marketplace before its plugins; hooks are inert, so cheapest first.
 // Within a type the manifest's order holds, which is how an author expresses any other dependency.
@@ -34,6 +34,8 @@ export type IntegrationsOptions = {
   readonly env: Env;
   // 'capture' keeps installer stdout off the caller's stdout, which is the desktop backend's protocol channel.
   readonly installerOutput?: 'inherit' | 'capture';
+  // How Codex's plugin state is read; a caller that needs it too passes a cached read to share it.
+  readonly codexState?: Effect.Effect<PluginState, never, Processes>;
 };
 
 export type IntegrationsServices = Fs | Processes | Backups;
@@ -84,7 +86,7 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
         const entries = ordered(desired.integrations);
         const wants = (target: Declaration['target']) => entries.some(({ d }) => d.target === target && isPluginType(d));
         const claude = wants('claude') ? yield* claudePluginState(paths.claude) : EMPTY_PLUGIN_STATE;
-        const codex = wants('codex') ? yield* readCodexState : EMPTY_PLUGIN_STATE;
+        const codex = wants('codex') ? yield* (options.codexState ?? readCodexState) : EMPTY_PLUGIN_STATE;
         const codexMcp = entries.some(({ d }) => d.target === 'codex' && d.type === 'mcp') ? yield* readCodexMcp : NO_MCP;
         const codexMarketplaces = new Set(entries.flatMap(({ d }) => (d.target === 'codex' && d.type === 'marketplace' ? [d.name!] : [])));
 
