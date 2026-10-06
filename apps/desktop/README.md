@@ -38,7 +38,7 @@ npm test
 - `cargo test` covers the Rust envelope, the 1 MiB record bound, timeouts and the backend lifecycle on the bundled runtime.
 - `npm run smoke` runs the bundled backend on a temporary HOME whose `state.json` records this checkout, with an empty PATH: inspect, preview, apply to `done`, an unknown-key refusal, shutdown, and no leftover `apply.lock`.
 
-The legacy suite has a known flaky failure named `fresh machine setup installs selected defaults for both agents` in `test/fresh-machine.test.mjs`. The root suite can also rewrite `skills-manifest.txt`; restore it after a run.
+The CLI suite has a known flaky test named `fresh machine setup installs selected defaults for both agents` in `test/fresh-machine.test.mjs`. The root suite can also rewrite `skills-manifest.txt`; restore it after a run.
 
 ## Release package
 
@@ -68,7 +68,7 @@ Run events are `{ version: 2, event: 'progress', runId, progress }` where `progr
 - Timeouts per command: inspect and apply 60 s, preview 10 s, cancel 30 s, shutdown 5 s.
 - One run at a time; a second `apply` fails `BUSY`.
 - `cancel` finishes the current file step or interrupts an installer. Shutdown, EOF, SIGTERM and a closed stdout cancel first, then release the lock and exit 0.
-- The backend holds `<stateRoot>/apply.lock` during a run. The legacy CLI commands `apply`, `capture`, `pull`, `push`, `setup` and `uninstall` take the same lock. A dead holder's lock is taken over. An apply takes `apply.lock` before it re-inspects and refuses with `LOCKED` while a live process holds it.
+- The backend holds `<stateRoot>/apply.lock` during a run. The CLI's `apply`, `capture`, `pull`, `push`, `setup`, `uninstall` and `update` take the same lock. A dead holder's lock is taken over. An apply takes `apply.lock` before it re-inspects and refuses with `LOCKED` while a live process holds it.
 
 ## Paths
 
