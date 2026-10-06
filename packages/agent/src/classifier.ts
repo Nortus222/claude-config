@@ -26,9 +26,9 @@ export type Verdict = { readonly kind: 'inert' } | { readonly kind: 'held'; read
 // top-level key, so a nested object is inert only when its whole key is listed. Keys that run or
 // steer code (hooks, statusLine, apiKeyHelper, env, permissions, enabledPlugins, …) never belong
 // here, and `worktree` waits for a review. Adding a key is a reviewed change with a test row.
-export const INERT_KEYS: Readonly<Record<string, ReadonlyArray<string>>> = {
-  'claude:settings.json': ['attribution', 'effortLevel', 'model', 'outputStyle', 'theme', 'tui'],
-};
+export const INERT_KEYS: Readonly<Record<string, ReadonlyArray<string>>> = Object.freeze({
+  'claude:settings.json': Object.freeze(['attribution', 'effortLevel', 'model', 'outputStyle', 'theme', 'tui']),
+});
 
 const INERT: Verdict = { kind: 'inert' };
 const held = (reason: HeldReason): Verdict => ({ kind: 'held', reason });

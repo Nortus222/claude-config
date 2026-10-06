@@ -16,14 +16,19 @@ const tidy = (text: string) => text.replace(/\/+$/, '').replace(/\.git$/i, '');
 
 // One form per repository, so a checkout's origin and a hosted setup's URL compare equal: no
 // scheme, credentials or port, no `.git`, and the SSH form rewritten. Remote paths are
-// lower-cased whole; local paths keep their case.
-export const normalizeRepoUrl = (url: string): string => {
+// lower-cased whole; local paths keep their case. null when the URL will not parse: the repository
+// is then unknown, as it is without an origin.
+export const normalizeRepoUrl = (url: string): string | null => {
   const text = url.trim();
-  if (/^file:\/\//i.test(text)) return tidy(decodeURIComponent(new URL(text).pathname));
-  if (LOCAL_PATH.test(text)) return tidy(text);
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-    const parsed = new URL(text);
-    return tidy(`${parsed.hostname}${parsed.pathname}`).toLowerCase();
+  try {
+    if (/^file:\/\//i.test(text)) return tidy(decodeURIComponent(new URL(text).pathname));
+    if (LOCAL_PATH.test(text)) return tidy(text);
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+      const parsed = new URL(text);
+      return tidy(`${parsed.hostname}${parsed.pathname}`).toLowerCase();
+    }
+  } catch {
+    return null;
   }
   const scp = /^(?:[^@/]+@)?([^:/]+):\/?(.+)$/.exec(text);
   return tidy(scp ? `${scp[1]}/${scp[2]}` : text).toLowerCase();

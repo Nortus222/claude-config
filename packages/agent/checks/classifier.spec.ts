@@ -55,3 +55,8 @@ for (const [name, change, verdict] of rows) {
 test('INERT_KEYS is the reviewed table; widening it needs a new row here', () => {
   assert.deepEqual(INERT_KEYS, { 'claude:settings.json': ['attribution', 'effortLevel', 'model', 'outputStyle', 'theme', 'tui'] });
 });
+
+test('INERT_KEYS cannot be changed at runtime', () => {
+  assert.ok(Object.isFrozen(INERT_KEYS));
+  for (const keys of Object.values(INERT_KEYS)) assert.ok(Object.isFrozen(keys));
+});

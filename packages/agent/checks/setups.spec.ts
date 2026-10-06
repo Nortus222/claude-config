@@ -23,6 +23,12 @@ for (const [url, normalized] of rows) {
   });
 }
 
+for (const url of ['https://[bad/x', 'file:///Users/Me/%ZZ']) {
+  test(`normalizeRepoUrl: a malformed ${url} is an unknown URL, not a defect`, () => {
+    assert.equal(normalizeRepoUrl(url), null);
+  });
+}
+
 const setupsJson = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoot, 'agent', 'setups.json');
 
 test('the own checkout is trusted once, by its normalized origin URL', async () => {
