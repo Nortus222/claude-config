@@ -8,7 +8,7 @@ import {
   backupsForRun, configDomain, execute, integrationsDomain, machinePaths, nodeFs, nodeProcesses, overridesStore,
   OverridesStore, pathsFromEnvironment, skillsDomain, stateStore,
   type Backups, type Domain, type DomainServices, type Fs, type FsFailed, type IntegrationsServices, type LockHeld,
-  type MachinePaths, type MachinePathsValue, type MachineReport, type Plan, type Processes, type RepoNotFound,
+  type MachinePaths, type MachinePathsValue, type MachineReport, type Plan, type PluginState, type Processes, type RepoNotFound,
   type StateStore, type Step,
 } from '@nortuscc/machine';
 import { resolveConfigMode, type ConfigMode } from './config-mode.ts';
@@ -74,12 +74,16 @@ export function forTargets(desired: DesiredConfig, targets: ReadonlyArray<Target
   return { ...desired, integrations: desired.integrations.filter((i) => targets.includes(i.declaration.target as Target)) };
 }
 
-export function domainsFor(paths: MachinePathsValue): {
+// A Codex state read a caller shares with the integrations domain, so the CLI is asked once.
+export type CodexStateRead = Effect.Effect<PluginState, never, Processes>;
+
+export function domainsFor(paths: MachinePathsValue, options: { codexState?: CodexStateRead | undefined } = {}): {
   config: typeof configDomain;
   integrations: Domain<IntegrationsServices>;
   skills: typeof skillsDomain;
 } {
-  return { config: configDomain, integrations: integrationsDomain({ paths, env: process.env }), skills: skillsDomain };
+  const integrations = integrationsDomain({ paths, env: process.env, ...(options.codexState ? { codexState: options.codexState } : {}) });
+  return { config: configDomain, integrations, skills: skillsDomain };
 }
 
 export type Ran = {

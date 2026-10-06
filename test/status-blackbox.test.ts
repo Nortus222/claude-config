@@ -185,6 +185,27 @@ test('--target codex reports only what Codex owns', async () => {
   assert.equal(claude.stdout.match(/superpowers\s+missing/g)?.length, 1);
 });
 
+// Apply would skip a blocked item, so its note is the fix and apply is not offered.
+test('a blocked integration names its own fix, is not offered apply, and still fails the run', async () => {
+  const m = await synced();
+  const state = join(m.codex, 'fake-codex-state.json');
+  writeFileSync(state, JSON.stringify({ ...readJson(state), signedOut: true }));
+  const result = await status(m, '--target', 'all');
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /superpowers\s+blocked\s+Codex is not offering its built-in 'openai-curated-remote' catalog/);
+  assert.doesNotMatch(result.stdout, /apply --install/);
+  assert.doesNotMatch(result.stdout, AGREEMENT);
+});
+
+// The plugin list carries Codex's whole remote catalog, so one status asks for it once.
+test('status lists Codex plugins once', async () => {
+  const m = await synced();
+  const before = probeCalls(m).length;
+  await status(m, '--target', 'codex');
+  const lists = probeCalls(m).slice(before).filter((c) => c.args[0] === 'plugin' && c.args[1] === 'list');
+  assert.equal(lists.length, 1);
+});
+
 test('an unavailable Codex CLI is unknown, not a missing install, and does not fail the run', async () => {
   const m = await synced({ codexUnavailable: true });
   const result = await status(m, '--target', 'all');

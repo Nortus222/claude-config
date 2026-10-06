@@ -149,10 +149,13 @@ if (agent === 'claude') {
     process.stdout.write(JSON.stringify({ marketplaces: state.marketplaces.map((name) => ({ name })) }));
   } else if (argv[0] === 'plugin' && argv[1] === 'list') {
     const state = codexRead();
+    // A signed-out or offline Codex still exits 0, but drops its remote catalog, installs included.
+    const remote = (pluginId) => pluginId.endsWith('@openai-curated-remote');
     process.stdout.write(JSON.stringify({
-      installed: state.plugins.map((pluginId) => ({ pluginId, marketplaceName: pluginId.slice(pluginId.lastIndexOf('@') + 1), installed: true })),
+      installed: state.plugins.filter((pluginId) => !(state.signedOut && remote(pluginId)))
+        .map((pluginId) => ({ pluginId, marketplaceName: pluginId.slice(pluginId.lastIndexOf('@') + 1), installed: true })),
       // Codex's own remote catalog, which every signed-in Codex offers.
-      available: [{ pluginId: 'superpowers@openai-curated-remote', marketplaceName: 'openai-curated-remote', installed: false }],
+      available: state.signedOut ? [] : [{ pluginId: 'superpowers@openai-curated-remote', marketplaceName: 'openai-curated-remote', installed: false }],
     }));
   } else if (argv[0] === 'plugin' && argv[1] === 'install') {
     // The real CLI has no such subcommand; failing loudly here is what keeps

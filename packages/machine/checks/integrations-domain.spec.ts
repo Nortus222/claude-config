@@ -86,6 +86,16 @@ test('an absent codex CLI makes Codex items unknown and blocked and reports prob
   assert.ok(planned.skipped.some((s) => s.key === integrationKey('cm-codex') && /could not list Codex plugins/.test(s.reason)));
 });
 
+// A caller that reads Codex state too shares one read instead of the domain asking the CLI again.
+test('a supplied Codex state read replaces the domain\'s own', async () => {
+  const state = { plugins: new Set(['context-mode@context-mode']), marketplaces: new Set<string>(), catalogs: new Set(['context-mode']) };
+  const m = machine({ codexState: Effect.succeed(state) });
+  m.fake.codex({ installed: [] }, { marketplaces: [] });
+  const report = await m.inspect(desiredOf([CODEX_PLUGIN]));
+  assert.equal(report.items[0]?.state, 'installed');
+  assert.deepEqual(m.fake.calls(), []);
+});
+
 test('only the MCP probe runs when no Codex plugin or marketplace is declared', async () => {
   const m = machine();
   m.fake.codex({ installed: [] }, { marketplaces: [] });
