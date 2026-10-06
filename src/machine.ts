@@ -125,11 +125,15 @@ const messageOf = (error: unknown): string => {
   return String(error);
 };
 
-// Wraps a command body: SIGINT aborts the signal it is given, and any failure is reported as
-// `nortuscc: <message>` with exit code 1 (LockHeld reads "another nortuscc run (pid N) holds <path>").
+// Wraps a command body: the first SIGINT aborts the signal it is given, a second exits the process
+// with 130, and any failure is reported as `nortuscc: <message>` with exit code 1 (LockHeld reads
+// "another nortuscc run (pid N) holds <path>").
 export async function runCommand(body: (signal: AbortSignal) => Effect.Effect<number, unknown, never>): Promise<number> {
   const controller = new AbortController();
-  const cancel = () => controller.abort();
+  const cancel = () => {
+    if (controller.signal.aborted) process.exit(130);
+    controller.abort();
+  };
   process.on('SIGINT', cancel);
   try {
     return await Effect.runPromise(body(controller.signal).pipe(

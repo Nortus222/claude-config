@@ -104,3 +104,20 @@ test('a failed prerequisite stops setup before anything is recorded', async () =
   assert.equal(result.code, 1);
   assert.equal(existsSync(join(m.state, 'state.json')), false);
 });
+
+// runCommand turns Ctrl-C into an aborted signal; an install child dies, but setup must stop too.
+test('Ctrl-C during prerequisites stops setup with 130 before anything is recorded', async () => {
+  const m = machine();
+  const result = await setup(m, ['--skills-only'], {
+    prerequisites: {
+      tools: [{ id: 'x', label: 'X', executables: ['nortuscc-no-such-tool'], brew: 'x', winget: 'x', url: 'u' }],
+      confirm: async () => { process.emit('SIGINT'); return false; },
+    },
+    select: async () => { throw new Error('setup must not reach the install picker after Ctrl-C'); },
+  });
+  assert.equal(result.code, 130);
+  assert.match(result.out, /cancelled; nothing was recorded/);
+  assert.equal(existsSync(join(m.state, 'state.json')), false);
+  assert.equal(existsSync(join(m.state, 'overrides.json')), false);
+  assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
+});

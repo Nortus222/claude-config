@@ -77,6 +77,10 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
   const url = flag(rest, '--repo') ?? DEFAULT_REPO;
 
   let finished = false;
+  const cancelled = () => {
+    console.log('cancelled; nothing was recorded');
+    return 130;
+  };
   const code = await runCommand((signal) => Effect.gen(function* () {
     // setup repairs a stale record itself, so the "re-run setup" warning would prescribe this very run.
     const paths = yield* resolvePaths();
@@ -112,10 +116,13 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
         setupPrerequisites({ ...deps.prerequisites, isTTY, confirm: deps.prerequisites?.confirm ?? deps.confirm ?? realConfirm }));
       if (prerequisites !== 0) return prerequisites;
     }
+    // Ctrl-C stops only the install it interrupts; setup itself checks the signal before going on.
+    if (signal.aborted) return cancelled();
 
     if (dir && !existsSync(dir)) {
       console.log(`cloning ${url} -> ${dir}`);
       const failure = cloneRepo(url, dir);
+      if (signal.aborted) return cancelled();
       if (failure) {
         console.error(`failed to clone ${url}: ${failure}`);
         return 1;
@@ -141,6 +148,7 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
     const next: MachineOverrides | undefined = picked
       ? { ...overrides.value, manageConfig: picked.manageConfig, configTargets: picked.configTargets }
       : persisted(mode, overrides.value);
+    if (signal.aborted) return cancelled();
     yield* Effect.provide(Effect.gen(function* () {
       yield* (yield* StateStore).update((state) => ({ ...state, repo: root }));
       if (next !== undefined) yield* (yield* OverridesStore).write(next);

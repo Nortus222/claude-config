@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -89,4 +90,34 @@ test('runPlan stops before the first step once the signal has fired', async () =
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A body that never checks its signal: the first Ctrl-C only aborts it, the second ends the process.
+test('runCommand: a second SIGINT exits the process with 130', { timeout: 15_000 }, async (t) => {
+  const script = `
+    import { Effect } from 'effect';
+    import { runCommand } from ${JSON.stringify(new URL('../src/machine.ts', import.meta.url).href)};
+    await runCommand((signal) => Effect.promise(() => new Promise(() => {
+      signal.addEventListener('abort', () => process.stdout.write('aborted\\n'));
+      setInterval(() => {}, 1000);
+      process.stdout.write('ready\\n');
+    })));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let out = '';
+  const waitFor = (text: string) => new Promise<void>((resolve) => {
+    const check = () => { if (out.includes(text)) { child.stdout.off('data', onData); resolve(); } };
+    const onData = (chunk: Buffer) => { out += chunk; check(); };
+    child.stdout.on('data', onData);
+    check();
+  });
+  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+
+  await waitFor('ready');
+  child.kill('SIGINT');
+  await waitFor('aborted');
+  child.kill('SIGINT');
+  const timeout = new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 5_000).unref());
+  assert.equal(await Promise.race([exited, timeout]), 130);
 });
