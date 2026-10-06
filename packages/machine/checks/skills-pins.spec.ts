@@ -210,6 +210,28 @@ test('update re-exposes a pinned skill lacking an agent link at its pin, never a
   assert.equal(readLock(m.paths).a!.ref, sha);
 });
 
+test('update backs up an unpinned skill before re-exposing it at upstream latest', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
+  writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a\n');
+  const src = skillSource(m.home);
+  src.commit({ 'skills/a/SKILL.md': '# a latest\n' });
+  writeLock(m.paths, { a: { source: 'o/r' } });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  // `stale` makes the plan non-empty, so it carries an expose step; `a` lacks only its claude-code link.
+  const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r')]);
+  const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
+  const expose: Plan = { kind: 'update', steps: p.steps.filter((s) => s.key === 'skills:expose').map((s) => ({ ...s, touches: [] })), skipped: [] };
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(expose, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
+    ['npx -y skills add o/r --skill a --agent claude-code --global --yes']);
+  assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
+});
+
 // ---- unpinning ----
 
 test('planUpdates puts an unpinned skill whose lock records a ref off-pin, reachable or not', () => {

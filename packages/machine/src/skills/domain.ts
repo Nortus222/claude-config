@@ -199,6 +199,14 @@ const installPinned = (source: string, sha: string, names: ReadonlyArray<string>
     return { ok: true, note: review ? `${verified}; ${review}` : verified, review };
   });
 
+// Adds skills at their source's upstream latest. The add replaces any installed folder, so each is backed up
+// first, as installPinned does for a pinned add.
+const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
+  Effect.gen(function* () {
+    yield* preserveAll(skills);
+    return yield* runInstaller(addCommand({ source, skills, targets }));
+  });
+
 // Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
 // An unreadable target is reported, never repaired.
 const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () {
@@ -223,7 +231,7 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
     const sha = pins.get(source);
     const result: { ok: boolean; note?: string; review?: string } = sha
       ? yield* installPinned(source, sha, skills, readable)
-      : yield* runInstaller(addCommand({ source, skills, targets: readable }));
+      : yield* addUnpinned(source, skills, readable);
     if (result.ok) {
       count += skills.length;
       if (result.review) reviews.push(`${source}: ${result.review}`);
@@ -281,8 +289,7 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
             return { ok, note };
           }
           // A ref-less `add` also reinstalls an off-pin skill, replacing its folder.
-          yield* preserveAll(names);
-          return yield* runInstaller(addCommand({ source, skills: names, targets }));
+          return yield* addUnpinned(source, names, targets);
         }
         break;
       case 'write-manifest':
