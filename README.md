@@ -453,8 +453,8 @@ Nothing is asked where nothing can answer: with no terminal, `status` reports
 and exits non-zero rather than blocking a scheduled run on a prompt. An
 unreachable remote is reported as `unknown` and does **not** fail the run —
 being offline is ordinary and offers nothing to act on, unlike an exposure read
-that failed against local files. Running via `npx github:…` has no checkout to
-compare, so the section stays silent.
+that failed against local files. Running via `npx github:…` hands `status` to
+the checkout setup recorded, so the section compares that checkout.
 
 `nortuscc update` refreshes the skills a machine already has, then re-checks
 agent exposure and asks the installer to re-expose anything a selected agent

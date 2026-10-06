@@ -102,9 +102,9 @@ function validateAllow(value: unknown, errors: string[]): Allow {
   return allow;
 }
 
-// Installable integrations. A document with any error yields no
-// integrations and no allow list: honouring half of a refused declaration is how it would still
-// reach an installer. `hookFileExists` answers whether a repo-relative hook file is shipped.
+// Installable integrations. A document with any error yields no integrations and no allow list:
+// honouring half of a refused declaration is how it would still reach an installer.
+// `hookFileExists` answers whether a repo-relative hook file is shipped.
 export function parseIntegrations(text: string | undefined, hookFileExists: (file: string) => boolean): Parsed {
   if (text === undefined) return { integrations: [], allow: {}, issues: [] };
   const refuse = (messages: string[]): Parsed => ({

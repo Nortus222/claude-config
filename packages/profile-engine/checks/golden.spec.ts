@@ -55,21 +55,38 @@ function assertReads(config: DesiredConfig, expected: Expected, label: string): 
 }
 
 // This repository's documents are valid, so the CLI read them verbatim: every owned settings key,
-// every declared integration and allow entry, and every skill line of the manifest in order.
+// every declared integration and allow entry, and every skill line of the manifest in order under
+// its `[source] markers` header. The repo's manifest has no edge cases, so a line reader suffices.
+function manifestSkills(text: string): Skill[] {
+  const skills: Skill[] = [];
+  let header: { source: string; exact: boolean; optional: boolean } | undefined;
+  for (const line of text.split(/\r?\n/).map((l) => l.trim())) {
+    if (!line || line.startsWith('#')) continue;
+    const match = /^\[([^\]]+)\]\s*(.*)$/.exec(line);
+    if (match) {
+      const markers = match[2]!.split(/\s+/);
+      header = { source: match[1]!, exact: markers.includes('exact'), optional: markers.includes('optional') };
+    } else if (header) {
+      skills.push({ name: line, ...header });
+    }
+  }
+  return skills;
+}
+
 test("this repository's configuration resolves as the CLI reads it", async () => {
   const config = await load(REPO);
   assert.deepEqual(config.issues, []);
   const read = (path: string) => readFileSync(join(REPO, path), 'utf8');
   const integrations = JSON.parse(read('integrations.json'));
-  const skillLines = read('skills-manifest.txt').split(/\r?\n/).map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#') && !line.startsWith('['));
-  assert.deepEqual(config.skills.map((s) => s.name), skillLines, 'repo: skills');
+  const skills = manifestSkills(read('skills-manifest.txt'));
+  assert.ok(skills.some((s) => s.optional) && skills.some((s) => !s.optional), 'repo: both selections exercised');
   const expected = {
     keys: JSON.parse(read('claude/settings.keys.json')),
+    skills,
     integrations: integrations.integrations,
     allow: integrations.allow ?? {},
   };
-  assertReads({ ...config, skills: [] }, expected, 'repo');
+  assertReads(config, expected, 'repo');
 });
 
 // Which agents' files the CLI managed for each state.json it could find: [] when skills-only.
