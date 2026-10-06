@@ -106,6 +106,16 @@ test('a step note above the record limit is truncated and the run completes', as
   assert.ok(finished.progress.note.length > 0 && finished.progress.note.length <= 4096, `note length ${finished.progress.note.length}`);
 });
 
+test('a note cut through an emoji drops the whole pair', async (t) => {
+  const h = home(t, [{ key: 'config:emoji', disposition: 'apply', behavior: 'emoji' }]);
+  const c = client(t, h.env);
+  await c.send('inspect');
+  const applied = await c.send('apply', { planId: (await c.send('preview', { exclude: [] })).result.planId });
+  await c.terminal(applied.result.runId);
+  const finished = c.messages.find((m) => m.runId === applied.result.runId && m.progress.type === 'finished');
+  assert.equal(finished.progress.note, 'x'.repeat(4095));
+});
+
 test('busy rejection, cancel, and a released lock', async (t) => {
   const h = home(t, [{ key: 'config:slow', disposition: 'apply', behavior: 'slow' }, { key: 'config:b', disposition: 'apply' }]);
   const c = client(t, h.env);

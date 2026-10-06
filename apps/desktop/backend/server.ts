@@ -3,6 +3,7 @@ import type { Domain } from '@nortuscc/machine';
 import { probeLoginPath } from './login-path.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
 import { Session, SessionError, type DesktopServices } from './session.ts';
+import { truncate } from './text.ts';
 
 const MAX_NOTE_LENGTH = 4096;
 
@@ -16,7 +17,7 @@ export function serve(session: Session): void {
     process.stdout.write(JSON.stringify(decodeMessage(message)) + '\n');
   };
   const reject = (id: string, code: ErrorCode, message: string) =>
-    write({ version: PROTOCOL_VERSION, id, ok: false, error: { code, message: message.slice(0, 500) } });
+    write({ version: PROTOCOL_VERSION, id, ok: false, error: { code, message: truncate(message, 500) } });
   const reply = (id: string, result: unknown) => {
     const line = JSON.stringify({ version: PROTOCOL_VERSION, id, ok: true, result });
     if (Buffer.byteLength(line) + 1 > MAX_RECORD_BYTES) return reject(id, 'OVERSIZED', `Result exceeds ${MAX_RECORD_BYTES} bytes`);
@@ -25,8 +26,8 @@ export function serve(session: Session): void {
   // Domains may put captured installer output in a note; capping it keeps every event within the record limit.
   const emitRun = (runId: string, progress: RunProgress) => {
     const capped =
-      progress.type === 'finished' ? { ...progress, note: progress.note.slice(0, MAX_NOTE_LENGTH) }
-      : progress.type === 'failed' ? { ...progress, message: progress.message.slice(0, MAX_NOTE_LENGTH) }
+      progress.type === 'finished' ? { ...progress, note: truncate(progress.note, MAX_NOTE_LENGTH) }
+      : progress.type === 'failed' ? { ...progress, message: truncate(progress.message, MAX_NOTE_LENGTH) }
       : progress;
     write({ version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped });
   };

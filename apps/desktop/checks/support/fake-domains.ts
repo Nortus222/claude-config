@@ -6,8 +6,9 @@ import type { DesktopServices } from '../../backend/session.ts';
 
 // A test machine described by <stateRoot>/fake-machine.json. `slow` steps are interruptible and
 // never finish; `sleepy` steps are file-like units that take 300 ms; `fail` steps fail; `loud` steps
-// fail with a 2 MB message, as an installer's captured output might.
-export type FakeItem = { key: string; disposition: Disposition; behavior?: 'slow' | 'sleepy' | 'fail' | 'loud' };
+// fail with a 2 MB message, as an installer's captured output might; `emoji` steps fail with a
+// message whose 4096th unit is the high half of an emoji.
+export type FakeItem = { key: string; disposition: Disposition; behavior?: 'slow' | 'sleepy' | 'fail' | 'loud' | 'emoji' };
 
 const machineFile = (stateRoot: string) => join(stateRoot, 'fake-machine.json');
 export const appliedFile = (stateRoot: string, key: string) => join(stateRoot, 'applied', encodeURIComponent(key));
@@ -55,6 +56,7 @@ export const fakeDomain: Domain<DesktopServices> = {
       if (note === 'slow') return yield* Effect.never;
       if (note === 'fail') return yield* Effect.fail(new Error(`fake failure for ${step.key}`));
       if (note === 'loud') return yield* Effect.fail(new Error('x'.repeat(2_000_000)));
+      if (note === 'emoji') return yield* Effect.fail(new Error('x'.repeat(4095) + '😀' + 'tail'));
       if (note === 'sleepy') yield* Effect.sleep('300 millis');
       const { stateRoot } = yield* MachinePaths;
       const fs = yield* Fs;
