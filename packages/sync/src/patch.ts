@@ -1,7 +1,7 @@
 import {
   FILES, INTEGRATIONS_SOURCE, parsePins, parseSkillsManifest, PINS_SOURCE, SKILLS_SOURCE, type SkillGroup,
 } from '@nortuscc/profile-engine';
-import { documentOf, inside, type Documents } from './documents.ts';
+import { desiredOfDocuments, documentOf, inside, type Documents } from './documents.ts';
 import { parseItemId, type ItemRef } from './items.ts';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
@@ -24,7 +24,8 @@ const withDocument = (documents: Documents, path: string, text: string | undefin
   return text === undefined ? rest : { ...rest, [path]: text };
 };
 
-// A settings key set to its held value, or deleted when the held commit did not own it. An empty
+// A settings key set to its held value, or deleted when the held commit did not own it (a refused
+// held document owns nothing). An empty
 // document owns nothing and is removed. An unparseable head document is left for the engine to report.
 const patchSetting = (head: Documents, ref: Extract<ItemRef, { kind: 'setting' }>, held: Documents): Documents => {
   const file = FILES.find((f) => f.id === ref.fileId && f.mode === 'merge-keys');
@@ -32,9 +33,9 @@ const patchSetting = (head: Documents, ref: Extract<ItemRef, { kind: 'setting' }
   const text = documentOf(head, file.src);
   const current = text === undefined ? {} : parseObject(text);
   if (current === undefined) return head;
-  const source = parseObject(documentOf(held, file.src));
+  const keys = desiredOfDocuments(held).files.find((f) => f.id === ref.fileId)?.keys;
   const next: Record<string, unknown> = { ...current };
-  if (source !== undefined && Object.hasOwn(source, ref.key)) next[ref.key] = source[ref.key];
+  if (keys !== undefined && Object.hasOwn(keys, ref.key)) next[ref.key] = keys[ref.key]!.value;
   else delete next[ref.key];
   return withDocument(head, file.src, Object.keys(next).length > 0 ? json(next) : undefined);
 };
@@ -113,13 +114,11 @@ const patchSkill = (head: Documents, ref: Extract<ItemRef, { kind: 'skill' }>, h
   return withDocument(withDocument(head, SKILLS_SOURCE, manifest), PINS_SOURCE, pins);
 };
 
-// The declaration as at the held commit: replaced in place, appended, or removed. A held hook keeps
+// The declaration as the engine resolved it at the held commit (a refused held document declares
+// nothing): replaced in place, appended, or removed. A held hook keeps
 // the file it ships when head no longer has one, and only from inside the repository (ruling 30).
 const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integration' }>, held: Documents): Documents => {
-  const heldDocument = parseObject(documentOf(held, INTEGRATIONS_SOURCE));
-  const entry: unknown = Array.isArray(heldDocument?.integrations)
-    ? heldDocument.integrations.find((i: unknown) => isRecord(i) && i.id === ref.id)
-    : undefined;
+  const entry: unknown = desiredOfDocuments(held).integrations.find((i) => i.id === ref.id)?.declaration;
   const text = documentOf(head, INTEGRATIONS_SOURCE);
   if (text === undefined && entry === undefined) return head;
   const document = text === undefined ? { version: 1, integrations: [] } : parseObject(text);

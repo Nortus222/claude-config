@@ -24,6 +24,13 @@ const HEAD = withDocuments(BASE, {
   'claude/hooks/hk.mjs': null,
 });
 
+// A skill's value without its source's pin.
+const withoutPin = (value: string | undefined) => {
+  if (value === undefined) return undefined;
+  const { pin: _pin, ...rest } = JSON.parse(value) as Record<string, unknown>;
+  return rest;
+};
+
 const CHANGES = diffItems(itemValues(BASE), itemValues(HEAD));
 
 test('the fixture changes every kind of item', () => {
@@ -39,7 +46,10 @@ for (const change of CHANGES) {
     for (const [id, value] of head) {
       if (id === change.itemId) continue;
       // Ruling 3: a pin belongs to a source, so a held skill moves its siblings' pin with it.
-      if (ref.kind === 'skill' && id.startsWith(`skill:${ref.source}/`)) continue;
+      if (ref.kind === 'skill' && id.startsWith(`skill:${ref.source}/`)) {
+        assert.deepEqual(withoutPin(patched.get(id)), withoutPin(value), id);
+        continue;
+      }
       assert.equal(patched.get(id), value, id);
     }
     for (const id of patched.keys()) assert.ok(id === change.itemId || head.has(id), `no other item appears: ${id}`);
@@ -85,10 +95,40 @@ test('an id that is not an item changes nothing', () => {
 });
 
 test('a held hook never brings back a file outside the repository (ruling 30)', () => {
+  // readDocuments never reads '../out.mjs', so the held commit's document is refused and declares nothing.
   const hook = { id: 'out', label: 'out', target: 'claude', type: 'hook', default: true, event: 'SessionStart', file: '../out.mjs' };
+  const held = withDocuments(BASE, { 'integrations.json': json({ version: 1, integrations: [hook] }) });
+  const patched = patchItem(BASE, 'integration:out', held);
+  assert.equal(Object.hasOwn(patched, '../out.mjs'), false);
+  const values = itemValues(patched);
+  const base = itemValues(BASE);
+  assert.equal(values.get('integration:hk'), base.get('integration:hk'));
+  assert.equal(values.get('integration:sp'), base.get('integration:sp'));
+});
+
+test('an integration held at a commit whose integrations.json was refused is removed, and the rest keep their values', () => {
   const held = withDocuments(BASE, {
-    'integrations.json': json({ version: 1, integrations: [hook] }),
-    '../out.mjs': 'console.log("out");\n',
+    'integrations.json': json({
+      version: 1,
+      integrations: [
+        { id: 'sp', label: 'superpowers', target: 'claude', type: 'plugin', default: true, plugin: 'superpowers@other' },
+        { id: 'bad', target: 'claude', type: 'plugin', default: true, plugin: 'bad@official' },
+      ],
+    }),
   });
-  assert.equal(Object.hasOwn(patchItem(BASE, 'integration:out', held), '../out.mjs'), false);
+  assert.notDeepEqual(desiredOfDocuments(held).issues, []);
+  const patched = patchItem(BASE, 'integration:sp', held);
+  const values = itemValues(patched);
+  assert.equal(values.has('integration:sp'), false);
+  assert.equal(values.get('integration:hk'), itemValues(BASE).get('integration:hk'));
+  assert.deepEqual(desiredOfDocuments(patched).issues, []);
+});
+
+test('a setting held at a commit whose settings document was refused is deleted', () => {
+  const held = withDocuments(BASE, { 'claude/settings.keys.json': json({ theme: 'dark', effortLevel: 'high', apiKey: 'sk-ant-api03-' + 'x'.repeat(40) }) });
+  assert.notDeepEqual(desiredOfDocuments(held).issues, []);
+  const patched = patchItem(BASE, 'setting:claude:settings.json#theme', held);
+  const values = itemValues(patched);
+  assert.equal(values.has('setting:claude:settings.json#theme'), false);
+  assert.equal(values.get('setting:claude:settings.json#effortLevel'), itemValues(BASE).get('setting:claude:settings.json#effortLevel'));
 });
