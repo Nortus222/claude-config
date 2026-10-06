@@ -46,6 +46,13 @@ test('done when: on an auto-apply machine an accepted inert key is applied with 
   assert.ok(typeof run.backup === 'string' && run.backup.startsWith(paths.backups));
   assert.equal(readFileSync(join(run.backup, 'claude', 'settings.json'), 'utf8'), original);
 
+  // History records both acceptances. Under the fake source (R21) accepting EFFORT alone already
+  // makes HOOK pending, so these events, not the held verdict, show the hook's acceptance happened.
+  assert.deepEqual(
+    events.flatMap((e) => (e.kind === 'decided' ? [[e.itemId, e.decision]] : [])),
+    [[EFFORT, 'accept'], [HOOK, 'accept']],
+  );
+
   // The hook waits for a person on this machine.
   const [held, ...otherHeld] = events.filter((e) => e.kind === 'held');
   assert.equal(otherHeld.length, 0);
