@@ -6,3 +6,5 @@ export * from './clock.ts';
 export * from './state.ts';
 export * from './setups.ts';
 export * from './layer.ts';
+export * from './pause.ts';
+export * from './apply.ts';
