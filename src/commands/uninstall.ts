@@ -61,8 +61,10 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
           lines.push(formatRow(label(event.key), event.outcome, event.note));
           return;
         }
-        const { action, backedUp } = splitOutcome(event.note);
-        lines.push(formatRow(label(event.key), action, backedUp ? `backed up -> ${backedUp}` : ''));
+        const { action, backedUp, older } = splitOutcome(event.note);
+        // An older backup may be the original or an old capture's repo copy (#72); the user decides.
+        const notes = [backedUp && `backed up -> ${backedUp}`, older && `not restored, from before the cutoff -> ${older}`];
+        lines.push(formatRow(label(event.key), action, notes.filter(Boolean).join('; ')));
       }));
       process.stdout.write('\n' + section('uninstall', lines));
 

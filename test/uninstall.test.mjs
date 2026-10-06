@@ -298,3 +298,20 @@ test('uninstall records skills-only before a refused restore, and a re-run refus
     assert.equal(JSON.parse(readFileSync(join(env.state, 'overrides.json'), 'utf8')).manageConfig, false);
   }
 });
+
+// Issue #72: a backup from before the cutoff may be an old capture's repo copy, so it is named, never restored.
+test('uninstall names a backup from before the cutoff instead of restoring it', async () => {
+  const env = fixture();
+  const old = join(env.state, 'backups', 'nortuscc-2026-10-05T12-00-00-000Z', 'claude', 'CLAUDE.md');
+  mkdirSync(join(old, '..'), { recursive: true });
+  writeFileSync(old, '# repo copy from an old capture\n');
+  mkdirSync(env.claude, { recursive: true });
+  writeFileSync(join(env.claude, 'CLAUDE.md'), '# mine\n');
+  assert.equal((await runCli(['apply'], env)).code, 0);
+
+  const result = await runCli(['uninstall', '--yes'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(env.claude, 'CLAUDE.md')), false);
+  assert.match(result.stdout, new RegExp(`CLAUDE\\.md\\s+removed\\s+backed up -> .+; not restored, from before the cutoff -> ${old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.equal(readFileSync(old, 'utf8'), '# repo copy from an old capture\n');
+});

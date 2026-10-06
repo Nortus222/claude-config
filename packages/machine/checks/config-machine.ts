@@ -33,8 +33,9 @@ export const configMachine = (repoFiles: Readonly<Record<string, string>> = REPO
   for (const [relative, text] of Object.entries(repoFiles)) write(join(paths.repo, relative), text);
 
   let runs = 0;
-  // A fresh backups layer per run, each with its own stamp, as a command builds one per run.
-  const layer = () => Layer.mergeAll(stateStore, backupsForRun(new Date(Date.UTC(2026, 9, 5, 12, 0, runs++))))
+  // A fresh backups layer per run, each with its own stamp, as a command builds one per run. The stamps
+  // fall after the trusted-originals cutoff; a test that needs an older run writes that folder itself.
+  const layer = () => Layer.mergeAll(stateStore, backupsForRun(new Date(Date.UTC(2026, 9, 7, 12, 0, runs++))))
     .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs)));
   const desired = (overrides?: Input<MachineOverrides>) =>
     Effect.runPromise(loadProfile(paths.repo, { overrides }).pipe(Effect.provide(nodeFiles)));
