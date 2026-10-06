@@ -7,7 +7,7 @@ import type { MachinePathsValue } from '../paths.ts';
 import { Processes } from '../processes.ts';
 import { asDeclaration, commandLine, type Declaration, type Inspected, type Installer, type IntegrationType } from './declaration.ts';
 import { describeHook, hookPaths, inspectHook, installHook } from './hooks.ts';
-import { blockedNote, describeMcp, inspectMcp, mcpCommand, missingEnv, type Env } from './mcp.ts';
+import { blockedNote, describeMcp, inspectMcp, mcpCommand, missingEnv, readCodexMcp, type Env, type McpState } from './mcp.ts';
 import { claudePluginState, EMPTY_PLUGIN_STATE, inspectPlugin, installCommand, readCodexState } from './plugins.ts';
 
 // Prerequisites first: a marketplace before its plugins; hooks are inert, so cheapest first.
@@ -23,6 +23,8 @@ export const groupLabel = (d: Declaration): string => {
   const agent = d.target === 'codex' ? 'Codex' : 'Claude';
   return d.type === 'hook' ? `${agent} hooks` : d.type === 'mcp' ? `${agent} MCP` : `${agent} plugins`;
 };
+
+const NO_MCP: McpState = { servers: new Set() };
 
 export const integrationKey = (id: string): string => `integration:${id}`;
 
@@ -83,13 +85,14 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
         const wants = (target: Declaration['target']) => entries.some(({ d }) => d.target === target && isPluginType(d));
         const claude = wants('claude') ? yield* claudePluginState(paths.claude) : EMPTY_PLUGIN_STATE;
         const codex = wants('codex') ? yield* readCodexState : EMPTY_PLUGIN_STATE;
+        const codexMcp = entries.some(({ d }) => d.target === 'codex' && d.type === 'mcp') ? yield* readCodexMcp : NO_MCP;
 
         const items: Observed[] = [];
         for (const { resolved, d } of entries) {
           const inspected = d.type === 'hook'
             ? yield* inspectHook(paths.claude, d)
             : d.type === 'mcp'
-              ? inspectMcp(d, env)
+              ? inspectMcp(d, env, [...codexMcp.servers])
               : inspectPlugin(d, d.target === 'codex' ? codex : claude);
           items.push({
             key: integrationKey(d.id),
@@ -103,7 +106,7 @@ export const integrationsDomain = (options: IntegrationsOptions): Domain<Integra
             from: resolved.from,
           });
         }
-        const probeErrors = [codex.pluginError, codex.marketplaceError].filter((e): e is string => Boolean(e));
+        const probeErrors = [codex.pluginError, codex.marketplaceError, codexMcp.error].filter((e): e is string => Boolean(e));
         return { items, probeErrors };
       }),
 

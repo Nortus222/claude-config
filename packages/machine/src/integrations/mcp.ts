@@ -1,4 +1,7 @@
+import { Effect } from 'effect';
+import type { Processes } from '../processes.ts';
 import type { Declaration, Inspected, Installer } from './declaration.ts';
+import { listNames } from './plugins.ts';
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
@@ -28,3 +31,13 @@ export const inspectMcp = (d: Declaration, env: Env, installed: ReadonlyArray<st
   const missing = missingEnv(d, env);
   return missing.length ? { state: 'blocked', note: blockedNote(d, missing) } : { state: 'missing', note: '' };
 };
+
+export const codexMcpListCommand = (): Installer => ({ cmd: 'codex', args: ['mcp', 'list', '--json'] });
+
+// The servers Codex has configured. An error means the list could not be read; it then reads as empty.
+export type McpState = { readonly servers: ReadonlySet<string>; readonly error?: string };
+
+// Only each server's name is read: the listing also carries its environment, values included.
+export const readCodexMcp: Effect.Effect<McpState, never, Processes> = listNames(codexMcpListCommand(), 'MCP server', null, 'name').pipe(
+  Effect.map((listed) => ('names' in listed ? { servers: listed.names } : { servers: new Set<string>(), error: listed.error })),
+);

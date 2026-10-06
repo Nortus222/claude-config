@@ -15,14 +15,16 @@ export const fakeBin = () => {
     writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' "${name} $*" >> '${log}'\n${body}\n`);
     chmodSync(file, 0o755);
   };
-  // A fake codex answering the two --json list commands from fixture files.
-  const codex = (plugins: unknown, marketplaces: unknown, installBody = 'exit 0') => {
+  // A fake codex answering the three --json list commands from fixture files.
+  const codex = (plugins: unknown, marketplaces: unknown, installBody = 'exit 0', mcp: unknown = []) => {
+    writeFileSync(join(dir, 'mcp.json'), JSON.stringify(mcp));
     writeFileSync(join(dir, 'plugins.json'), JSON.stringify(plugins));
     writeFileSync(join(dir, 'marketplaces.json'), JSON.stringify(marketplaces));
     tool('codex', [
       'case "$*" in',
       `  "plugin list --json") cat '${join(dir, 'plugins.json')}' ;;`,
       `  "plugin marketplace list --json") cat '${join(dir, 'marketplaces.json')}' ;;`,
+      `  "mcp list --json") cat '${join(dir, 'mcp.json')}' ;;`,
       `  *) ${installBody} ;;`,
       'esac',
     ].join('\n'));

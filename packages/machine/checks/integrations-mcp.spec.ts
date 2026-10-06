@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { describeMcp, inspectMcp, mcpCommand, missingEnv } from '../src/integrations/mcp.ts';
+import { Effect } from 'effect';
+import { nodeProcesses } from '../src/index.ts';
+import { codexMcpListCommand, describeMcp, inspectMcp, mcpCommand, missingEnv, readCodexMcp } from '../src/integrations/mcp.ts';
+import { fakeBin } from './support/integrations.ts';
 import type { Declaration } from '../src/integrations/declaration.ts';
 
 const PLAIN: Declaration = { id: 'files', label: 'files', target: 'codex', type: 'mcp', default: true, command: 'mcp-files', args: ['--root', '/srv'] };
@@ -34,4 +37,57 @@ test('describe names the variable but never its value', () => {
   const description = describeMcp(NEEDS_KEY, { OPENAI_API_KEY: 'sk-super-secret-value' });
   assert.equal(description, 'codex mcp add openai -- openai-mcp  (reads OPENAI_API_KEY from the environment)');
   assert.match(describeMcp(NEEDS_KEY, {}), /\[blocked: OPENAI_API_KEY not set\]$/);
+});
+
+const mcpState = (path: string) => Effect.runPromise(readCodexMcp.pipe(Effect.provide(nodeProcesses({ path }))));
+
+// Shape copied from codex-cli 0.160.1's `codex mcp list --json`, values replaced.
+const SERVERS = [
+  {
+    name: 'node_repl', enabled: true, disabled_reason: null,
+    transport: { type: 'stdio', command: '/bin/node', args: ['repl.js'], env: { NODE_REPL_TOKEN: 'sk-fixture-secret' }, env_vars: ['HOME', 'PATH'], cwd: '/tmp' },
+    startup_timeout_sec: null, tool_timeout_sec: 120, auth_status: 'unsupported',
+  },
+  {
+    name: 'code-review', enabled: false, disabled_reason: null,
+    transport: { type: 'stdio', command: '/bin/review', args: [], env: null, env_vars: [], cwd: '/tmp' },
+    startup_timeout_sec: null, tool_timeout_sec: 120, auth_status: 'unsupported',
+  },
+];
+
+test('the MCP list command is codex mcp list --json', () => {
+  assert.deepEqual(codexMcpListCommand(), { cmd: 'codex', args: ['mcp', 'list', '--json'] });
+});
+
+// A disabled server is still configured: re-adding it would overwrite the owner's choice.
+test('configured servers, enabled or not, are read by name from codex mcp list --json', async () => {
+  const fake = fakeBin();
+  fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', [...SERVERS, { enabled: true }]);
+  const state = await mcpState(fake.path);
+  assert.deepEqual([...state.servers], ['node_repl', 'code-review']);
+  assert.equal(state.error, undefined);
+  assert.deepEqual(fake.calls(), ['codex mcp list --json']);
+  assert.equal(inspectMcp({ ...PLAIN, id: 'code-review' }, {}, [...state.servers]).state, 'installed');
+});
+
+test('an empty list means nothing configured', async () => {
+  const fake = fakeBin();
+  fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', []);
+  assert.deepEqual(await mcpState(fake.path), { servers: new Set() });
+});
+
+// Nothing configured plus a reason: never a failure of the inspect.
+test('an absent codex, a non-zero exit or output of another shape is nothing configured with an error', async () => {
+  const absent = await mcpState(fakeBin().path);
+  assert.equal(absent.servers.size, 0);
+  assert.match(absent.error ?? '', /could not list Codex MCP servers: could not launch codex/);
+  const exits = fakeBin();
+  exits.tool('codex', 'exit 3');
+  assert.match((await mcpState(exits.path)).error ?? '', /could not list Codex MCP servers: exited 3/);
+  const garbage = fakeBin();
+  garbage.tool('codex', 'echo not-json');
+  assert.match((await mcpState(garbage.path)).error ?? '', /could not read the Codex MCP server list/);
+  const object = fakeBin();
+  object.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', { servers: SERVERS });
+  assert.match((await mcpState(object.path)).error ?? '', /could not read the Codex MCP server list/);
 });

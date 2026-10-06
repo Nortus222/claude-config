@@ -86,11 +86,37 @@ test('an absent codex CLI makes Codex items unknown and blocked and reports prob
   assert.ok(planned.skipped.some((s) => s.key === integrationKey('cm-codex') && /could not list Codex plugins/.test(s.reason)));
 });
 
-test('no Codex probe runs when no Codex plugin or marketplace is declared', async () => {
+test('only the MCP probe runs when no Codex plugin or marketplace is declared', async () => {
   const m = machine();
   m.fake.codex({ installed: [] }, { marketplaces: [] });
   await m.inspect(desiredOf([CLAUDE_PLUGIN, MCP]));
-  assert.deepEqual(m.fake.calls(), []);
+  assert.deepEqual(m.fake.calls(), ['codex mcp list --json']);
+});
+
+// Issue #90: Codex is asked what it has configured.
+test('a Codex MCP server Codex already has configured is installed and in sync', async () => {
+  const m = machine();
+  m.fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', [
+    { name: 'srv', enabled: true, transport: { type: 'stdio', command: 'srv', env: { SRV_TOKEN: 'sk-fixture-secret' }, env_vars: [] } },
+  ]);
+  const report = await m.inspect(desiredOf([MCP, { ...MCP, id: 'other', label: 'other' }]));
+  const by = Object.fromEntries(report.items.map((o) => [o.key, [o.state, o.disposition]]));
+  assert.deepEqual(by[integrationKey('srv')], ['installed', 'in-sync']);
+  assert.deepEqual(by[integrationKey('other')], ['missing', 'apply']);
+  assert.deepEqual(report.probeErrors, []);
+  assert.deepEqual(m.fake.calls(), ['codex mcp list --json']);
+  assert.doesNotMatch(JSON.stringify(report), /sk-fixture-secret/);
+});
+
+// Nothing configured plus a probe note: the server reads as it did before the probe existed.
+test('an absent codex leaves an MCP server missing and reports a probe error', async () => {
+  const m = machine();
+  const report = await m.inspect(desiredOf([MCP, { ...MCP, id: 'keyed', requiresEnv: ['KEY'] }]));
+  const by = Object.fromEntries(report.items.map((o) => [o.key, o.state]));
+  assert.equal(by[integrationKey('srv')], 'missing');
+  assert.equal(by[integrationKey('keyed')], 'blocked');
+  assert.equal(report.probeErrors.length, 1);
+  assert.match(report.probeErrors[0]!, /could not list Codex MCP servers/);
 });
 
 test('apply steps carry the exact installer command and are interruptible; the hook step is not', async () => {
@@ -189,6 +215,7 @@ test('installers run in type order through the real executor', async () => {
   m.fake.tool('codex');
   const events = await runAll(m, desiredOf([MCP, CLAUDE_PLUGIN, HOOK, CLAUDE_MARKETPLACE]));
   assert.deepEqual(m.fake.calls(), [
+    'codex mcp list --json',
     'claude plugin marketplace add mksglu/context-mode',
     'claude plugin install context-mode@context-mode',
     'codex mcp add srv -- srv',
@@ -231,7 +258,7 @@ test('an MCP prerequisite unset after planning fails before spawning anything', 
   const finished = events.find((e) => e.type === 'finished');
   assert.equal(finished?.type === 'finished' && finished.outcome, 'failed');
   assert.match(finished?.type === 'finished' ? finished.note : '', /set KEY before installing srv/);
-  assert.deepEqual(m.fake.calls(), []);
+  assert.deepEqual(m.fake.calls(), ['codex mcp list --json']);
 
   // With the variable still set, the same plan reaches the installer.
   const ran = await Effect.runPromise(
@@ -239,7 +266,7 @@ test('an MCP prerequisite unset after planning fails before spawning anything', 
   );
   const installed = ran.find((e) => e.type === 'finished');
   assert.equal(installed?.type === 'finished' && installed.outcome, 'ok');
-  assert.deepEqual(m.fake.calls(), ['codex mcp add srv -- srv']);
+  assert.deepEqual(m.fake.calls(), ['codex mcp list --json', 'codex mcp add srv -- srv']);
 });
 
 test('the hook step backs settings.json up into the run folder', async () => {
@@ -270,7 +297,7 @@ test('cancelling during an installer kills it and stops before the next step', a
   assert.ok(Date.now() - started < 10_000, 'the sleeping installer must be killed, not awaited');
   assert.deepEqual(outcomes(events), [`${integrationKey('cm')}:cancelled`]);
   assert.deepEqual(events.at(-1), { type: 'cancelled', remaining: [integrationKey('srv')], backups: undefined });
-  assert.equal(m.fake.calls().some((c) => c.startsWith('codex')), false);
+  assert.equal(m.fake.calls().some((c) => c.startsWith('codex') && c !== 'codex mcp list --json'), false);
 });
 
 // The desktop backend speaks JSON lines on stdout: its installers must not inherit it.
