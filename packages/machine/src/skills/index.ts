@@ -4,3 +4,4 @@ export * from './installer.ts';
 export * from './upstream.ts';
 export * from './domain.ts';
 export * from './pins.ts';
+export * from './verify.ts';

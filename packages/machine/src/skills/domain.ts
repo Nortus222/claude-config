@@ -8,8 +8,9 @@ import { MachinePaths } from '../paths.ts';
 import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
 import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
-import { lockRef, offPinNote, pinnedSource, pinsBySource, splitPinned } from './pins.ts';
+import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
 import { installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
+import { verifyPinned } from './verify.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
 
@@ -170,11 +171,27 @@ const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
   for (const name of names) yield* backups.preserve(join(store, name), join('skills', name));
 });
 
-// Installs at a pin. Skills already present are backed up first, since a pinned install may replace them.
-const installPinned = (source: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) => Effect.gen(function* () {
-  yield* preserveAll(names);
-  return yield* runInstaller(addCommand({ source, skills: names, targets }));
-});
+// Installs at a pin, then verifies the install against the commit: the installer may resolve the sha as a
+// branch or tag of that name. A mismatch is removed again; the backup taken first keeps the previous version.
+// `review` names the bundled scripts of a verified install.
+const installPinned = (source: string, sha: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
+  Effect.gen(function* () {
+    yield* preserveAll(names);
+    const installed = yield* runInstaller(addCommand({ source: pinnedSource(source, sha), skills: names, targets }));
+    if (!installed.ok) return installed;
+    const { failed, scripts } = yield* verifyPinned({ source, sha, names });
+    if (failed.size > 0) {
+      const bad = sortedUnique(failed.keys());
+      const removed = yield* runInstaller(removeCommand(bad));
+      const problems = bad.map((n) => failed.get(n)![0]).join('; ');
+      return { ok: false, note: `${removed.ok ? 'removed' : 'could not remove'} ${bad.join(', ')}: does not match ${short(sha)} (${problems})` };
+    }
+    const review = scripts.size > 0
+      ? `bundles scripts, review: ${sortedUnique(scripts.keys()).map((n) => `${n} (${scripts.get(n)!.join(', ')})`).join('; ')}`
+      : '';
+    const verified = `verified ${names.length} skill(s) at ${short(sha)}`;
+    return { ok: true, note: review ? `${verified}; ${review}` : verified, review };
+  });
 
 // Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
 // An unreadable target is reported, never repaired.
@@ -194,20 +211,24 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
   let ok = true;
   let count = 0;
   const failures: string[] = [];
+  const reviews: string[] = [];
   for (const source of [...bySource.keys()].sort(byCodePoint)) {
     const skills = bySource.get(source)!;
     const sha = pins.get(source);
-    const result = sha
-      ? yield* installPinned(pinnedSource(source, sha), skills, readable)
+    const result: { ok: boolean; note?: string; review?: string } = sha
+      ? yield* installPinned(source, sha, skills, readable)
       : yield* runInstaller(addCommand({ source, skills, targets: readable }));
-    if (result.ok) count += skills.length;
-    else {
+    if (result.ok) {
+      count += skills.length;
+      if (result.review) reviews.push(`${source}: ${result.review}`);
+    } else {
       ok = false;
       failures.push(`${source}: ${result.note}`);
     }
   }
   const parts = [
     ...(count > 0 ? [`re-exposed ${count} skill(s) to ${readable.map((t) => SKILL_AGENTS[t]).join(', ')}`] : []),
+    ...reviews,
     ...failures,
     ...exposure.errors,
   ];
@@ -248,7 +269,11 @@ const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResu
         if (step.key.startsWith(SKILL_STEP.install)) {
           const source = step.key.slice(SKILL_STEP.install.length);
           const targets = step.targets ?? TARGETS;
-          if (splitPinned(source).sha) return yield* installPinned(source, names, targets);
+          const pinned = splitPinned(source);
+          if (pinned.sha) {
+            const { ok, note } = yield* installPinned(pinned.source, pinned.sha, names, targets);
+            return { ok, note };
+          }
           return yield* runInstaller(addCommand({ source, skills: names, targets }));
         }
         break;

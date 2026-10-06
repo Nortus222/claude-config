@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
@@ -8,8 +8,9 @@ import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
   backupsForRun, checkUpdates, execute, inspectSkills, lockRef, machinePaths, nodeFs, pinnedSource, pinsBySource, plan, planUpdates, Processes,
   samePlan, selectAll, skillsDomain, splitPinned, updateItems,
-  type Command, type MachinePathsValue, type MachineReport, type Observed, type Plan, type Progress,
+  type Command, type MachineReport, type Observed, type Plan, type Progress,
 } from '../src/index.ts';
+import { fakeInstaller, readLock, skillSource } from './support/skills-source.ts';
 
 const SHA = 'a'.repeat(40);
 const NEXT = 'b'.repeat(40);
@@ -162,43 +163,7 @@ test('planUpdates classifies pinned skills by their lock ref without a remote tr
   ]);
 });
 
-// ---- run: through execute, real files, a fake installer ----
-
-const lockFile = (paths: MachinePathsValue) => join(paths.agentsSkills, '..', '.skill-lock.json');
-const readLock = (paths: MachinePathsValue): Record<string, Record<string, unknown>> =>
-  existsSync(lockFile(paths)) ? JSON.parse(readFileSync(lockFile(paths), 'utf8')).skills : {};
-
-// Simulates `npx -y skills add <source>[#ref] …`, recording the `#ref` suffix into the lock as the installer does.
-const fakeInstaller = (paths: MachinePathsValue) => {
-  const commands: Command[] = [];
-  const layer = Layer.succeed(Processes, {
-    run: (command: Command) => Effect.sync(() => {
-      commands.push(command);
-      const [, , verb, ...rest] = command.args;
-      if (command.cmd !== 'npx' || command.args[1] !== 'skills' || verb !== 'add') return { code: 2, stdout: '' };
-      const valuesOf = (flag: string) => {
-        const at = rest.indexOf(flag);
-        if (at < 0) return [];
-        const end = rest.findIndex((a, i) => i > at && a.startsWith('--'));
-        return rest.slice(at + 1, end < 0 ? undefined : end);
-      };
-      const [arg] = rest;
-      const hash = arg!.lastIndexOf('#');
-      const source = hash < 0 ? arg : arg!.slice(0, hash);
-      const ref = hash < 0 ? undefined : arg!.slice(hash + 1);
-      const lock = readLock(paths);
-      for (const n of valuesOf('--skill')) {
-        rmSync(join(paths.agentsSkills, n), { recursive: true, force: true });
-        mkdirSync(join(paths.agentsSkills, n), { recursive: true });
-        lock[n] = { source, ...(ref ? { ref } : {}) };
-        if (valuesOf('--agent').includes('claude-code')) mkdirSync(join(paths.claude, 'skills', n), { recursive: true });
-      }
-      writeFileSync(lockFile(paths), JSON.stringify({ skills: lock }));
-      return { code: 0, stdout: '' };
-    }),
-  });
-  return { commands, layer };
-};
+// ---- run: through execute, real files, a fake installer copying from a local source repo ----
 
 test('an off-pin reinstall backs up the installed folder and adds the skill at its pin', async () => {
   const m = skillsMachine();
@@ -206,17 +171,20 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
   mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
   writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a\n');
   writeLock(m.paths, { a: { source: 'o/r', ref: NEXT } });
-  const installer = fakeInstaller(m.paths);
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
   const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
-  const r = report([item('a', 'off-pin', 'apply')], [skill('a', 'o/r', pin(SHA))]);
+  const r = report([item('a', 'off-pin', 'apply')], [skill('a', 'o/r', pin(sha))]);
   const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
   const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
   const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
   assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
   assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
   assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
-    [`npx -y skills add o/r#${SHA} --skill a --agent claude-code codex --global --yes`]);
-  assert.equal(readLock(m.paths).a!.ref, SHA);
+    [`npx -y skills add o/r#${sha} --skill a --agent claude-code codex --global --yes`]);
+  assert.equal(readLock(m.paths).a!.ref, sha);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
 });
 
 test('update re-exposes a pinned skill lacking an agent link at its pin, never at upstream HEAD', async () => {
@@ -224,18 +192,20 @@ test('update re-exposes a pinned skill lacking an agent link at its pin, never a
   mkdirSync(m.paths.repo, { recursive: true });
   mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
   writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a\n');
-  writeLock(m.paths, { a: { source: 'o/r', ref: SHA } });
-  const installer = fakeInstaller(m.paths);
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
+  writeLock(m.paths, { a: { source: 'o/r', ref: sha } });
+  const installer = fakeInstaller(m.paths, src);
   const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
   // `stale` makes the plan non-empty, so it carries an expose step; `a` lacks only its claude-code link.
-  const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r', pin(SHA))]);
+  const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r', pin(sha))]);
   const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
   const expose: Plan = { kind: 'update', steps: p.steps.filter((s) => s.key === 'skills:expose').map((s) => ({ ...s, touches: [] })), skipped: [] };
   const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(expose, r, [skillsDomain])).pipe(Effect.provide(layer)))];
   const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
   assert.deepEqual([done.type, done.ok, done.failed], ['done', 1, 0]);
   assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')),
-    [`npx -y skills add o/r#${SHA} --skill a --agent claude-code --global --yes`]);
+    [`npx -y skills add o/r#${sha} --skill a --agent claude-code --global --yes`]);
   assert.equal(readFileSync(join(done.backups!, 'skills', 'a', 'SKILL.md'), 'utf8'), '# a\n');
-  assert.equal(readLock(m.paths).a!.ref, SHA);
+  assert.equal(readLock(m.paths).a!.ref, sha);
 });
