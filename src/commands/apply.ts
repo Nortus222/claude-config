@@ -10,6 +10,8 @@ import { domainsFor, openMachine, runCommand, runPlan, type CliServices, type Op
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 
+// A config item key's settings key: `config:claude:settings.json#theme` -> `theme`.
+const settingsKeyOf = (key: string): string | undefined => (key.includes('#') ? key.slice(key.indexOf('#') + 1) : undefined);
 const CONFLICT_NOTE = 'conflict — nothing changed';
 const UNPARSEABLE_NOTE = 'could not be parsed as JSON — fix it by hand, then re-run';
 
@@ -50,6 +52,9 @@ export function applyConfig(opened: Opened, input: { targets: Target[]; takeRepo
       const copied = results.filter((r) => r.outcome === 'ok' && splitOutcome(r.note).action === 'copied');
       if (copied.length > 0) changed = true;
 
+      const backedUp = copied.map((r) => splitOutcome(r.note).backedUp).find(Boolean);
+      const backupNote = backedUp ? `backed up -> ${backedUp}` : '';
+      const conflicts = skipped.filter((s) => stateOf(s) === 'conflict');
       const failure = results.find((r) => r.outcome !== 'ok');
       if (failure) {
         failed += 1;
@@ -58,12 +63,14 @@ export function applyConfig(opened: Opened, input: { targets: Target[]; takeRepo
         // Neither --take-repo nor --take-local can fix invalid JSON, so it is counted apart.
         unreadable += 1;
         lines.push(formatRow(file.dest, 'refused', UNPARSEABLE_NOTE));
-      } else if (skipped.some((s) => stateOf(s) === 'conflict')) {
+      } else if (conflicts.length > 0) {
         refused += 1;
-        lines.push(formatRow(file.dest, 'refused', CONFLICT_NOTE));
+        // Settings keys merge one by one, so the keys not in conflict may already have been written.
+        const keys = conflicts.map((s) => settingsKeyOf(s.key) ?? s.key).join(', ');
+        lines.push(formatRow(file.dest, 'refused', copied.length === 0 ? CONFLICT_NOTE
+          : `conflict on ${keys}; other keys copied${backupNote ? `; ${backupNote}` : ''}`));
       } else if (copied.length > 0) {
-        const backedUp = copied.map((r) => splitOutcome(r.note).backedUp).find(Boolean);
-        lines.push(formatRow(file.dest, 'copied', backedUp ? `backed up -> ${backedUp}` : ''));
+        lines.push(formatRow(file.dest, 'copied', backupNote));
       } else {
         // In sync, changed only here, or blocked in the repo: nothing written. A blocked file says why.
         const blocked = skipped.find((s) => ['missing-repo', 'invalid'].includes(stateOf(s) ?? ''));

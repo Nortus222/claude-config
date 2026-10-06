@@ -142,6 +142,25 @@ test('a configuration conflict stops apply --install before anything is installe
   assert.deepEqual(installerCalls(m), []);
 });
 
+test('a settings.json with one conflicting key writes the others and says so', async () => {
+  const m = machine();
+  const keys = join(m.repo, 'claude', 'settings.keys.json');
+  writeFileSync(keys, JSON.stringify({ theme: 'dark', effortLevel: 'high' }) + '\n');
+  assert.equal((await apply(m)).code, 0);
+  const settings = join(m.claude, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ theme: 'light', effortLevel: 'high' }) + '\n');
+  writeFileSync(keys, JSON.stringify({ theme: 'blue', effortLevel: 'low' }) + '\n');
+
+  const result = await apply(m);
+  assert.equal(result.code, 1);
+  const after = readJson(settings);
+  assert.equal(after.theme, 'light', 'the conflicting key is untouched');
+  assert.equal(after.effortLevel, 'low', 'the key not in conflict is written');
+  assert.match(result.stdout, /settings\.json\s+refused\s+conflict on theme; other keys copied; backed up -> \S+/);
+  assert.doesNotMatch(result.stdout, /nothing changed/);
+  assert.match(result.stdout, /1 conflict\(s\) refused/);
+});
+
 test('an unparseable local settings.json is refused, reported apart from conflicts, and left untouched', async () => {
   const m = machine();
   assert.equal((await apply(m)).code, 0);
