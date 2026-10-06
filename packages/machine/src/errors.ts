@@ -31,3 +31,10 @@ export class LockHeld extends Data.TaggedError('LockHeld')<{ readonly path: stri
     return `another nortuscc run (pid ${this.pid}) holds ${this.path}`;
   }
 }
+
+// decisions.json exists but is not a decisions file; nothing rewrites it until a person fixes it.
+export class DecisionsInvalid extends Data.TaggedError('DecisionsInvalid')<{ readonly path: string; readonly reason: string }> {
+  override get message() {
+    return `${this.path} is not valid (${this.reason}); fix it by hand`;
+  }
+}
