@@ -144,7 +144,7 @@ this ships.
 | `apply [--install] [--take-repo] [--skills-only]` | Repo → machine. `--install` also offers missing integrations and skills |
 | `update [--check] [--yes]` | Refresh installed skills, then reconcile agent exposure |
 | `capture` | Machine → repo, including regenerating the skills manifest |
-| `pull` | `git pull --ff-only`, then apply. Reports new integrations; installs them only with `--install` |
+| `pull` | `git pull --ff-only`; reinstalls the runtime dependencies when `package-lock.json` changed, then applies. Reports new integrations; installs them only with `--install` |
 | `push -m MSG` | Capture, then commit and push only what changed |
 | `uninstall --yes [--force]` | Restore or remove managed configuration, then switch the machine to skills-only mode |
 
@@ -160,7 +160,7 @@ skills; it prints one warning and points at `--install`.
 ## Undoing configuration setup
 
 ```bash
-npx github:Nortus222/claude-config uninstall --yes
+nortuscc uninstall --yes
 ```
 
 `uninstall` reverses the configuration part of setup. A file that existed
@@ -174,7 +174,8 @@ Before changing a current file, uninstall backs it up under
 after the last apply, the whole command refuses before changing anything. Pass
 `--force` to preserve those current files in the uninstall backup and continue.
 
-The machine is recorded as skills-only after a successful run, so a later
+The machine is recorded as skills-only in `overrides.json` before anything is
+restored, so a later
 `apply` does not reinstall the configuration. Integrations and skills stay
 installed because nortuscc does not record whether setup installed them or
 they were already present. The repository checkout also stays in place; remove
@@ -267,11 +268,16 @@ than one agent:
 It is written atomically (temp file plus rename), so an interrupted write can
 never leave a half-parsed file that makes every managed file look unsynced.
 
-It records where the repo lives, a baseline hash per synced file, and
-`skillsOnly`, plus `configTargets` when an interactive choice has been recorded.
-`skillsOnly` is read strictly: anything but a literal `true` means this machine manages
-its instruction files, which is what every state record written before the flag
-existed was describing.
+`state.json` holds bookkeeping only: where the repo lives and a baseline hash per
+synced file or settings key.
+
+This machine's choices live beside it in `overrides.json`: whether configuration
+is managed (`manageConfig`) and for which agents (`configTargets`). Setup's picker,
+`--skills-only`, `--no-skills-only` and `uninstall` write it; `--with-config` never
+does. A `state.json` from an older release that still carries `skillsOnly` or
+`configTargets` is honoured, and the first state write moves those choices into
+`overrides.json` unless that file already exists. `skillsOnly` is read strictly:
+anything but a literal `true` means configuration is managed.
 
 On first use, the older `~/.claude/.nortuscc-lock.json` is imported once: the
 recorded repo and the `CLAUDE.md` baseline come across as `claude:CLAUDE.md`,
@@ -415,9 +421,10 @@ home, and every other test injects its own runner. Keep it that way.
 `update` clones each *skill* source into a temp directory to compare tree SHAs;
 it never touches the claude-config checkout. So a machine running the CLI from a
 checkout — `--dir`, or an `npm link` — is still on the code it had before, and
-`nortuscc pull` is what moves it forward. Running the CLI through
-`npx github:Nortus222/claude-config` instead means there is no checkout to
-update; each invocation resolves the repo itself.
+`nortuscc pull` is what moves it forward, reinstalling the runtime dependencies
+when `package-lock.json` changed. Running the CLI through
+`npx github:Nortus222/claude-config` runs the same checkout: `setup` clones one,
+and every other command hands off to the checkout setup recorded.
 
 Order matters when a release changes both: `pull` first, then `update`, so the
 skill pass runs on the newer code and against the newer `skills-manifest.txt`.
@@ -498,8 +505,8 @@ them for every other machine.
 
 ## Adding a synced path
 
-Add one line to `SYNC` in `src/manifest.mjs`, tagged with the agent it belongs
-to. Every command reads that table; nothing else needs to change.
+Add one entry to `packages/profile-engine/src/files.json`, tagged with the agent
+it belongs to. Every command reads that table; nothing else needs to change.
 
 ## Development
 
