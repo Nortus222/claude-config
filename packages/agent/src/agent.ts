@@ -9,7 +9,7 @@ import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
 import { ensureOwnSetup } from './setups.ts';
-import type { SetupSource } from './source.ts';
+import type { SetupSource } from '@nortuscc/sync';
 import type { AgentStateStore, Policy } from './state.ts';
 
 // What #78's IPC handlers and the CLI's agent commands call. Each change answers with the status

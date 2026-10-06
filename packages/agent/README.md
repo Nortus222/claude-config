@@ -7,7 +7,8 @@ Decisions: `docs/adr/0011-local-agent-per-user-login-service.md` and
 - `startAgent(domains)` runs the scheduler: one job at a time, and triggers that arrive during a
   job coalesce into one follow-up. `runAgent({ paths, domains, source })` builds every service from
   `paths` and runs until interrupted.
-- A job refreshes through `SetupSource` (#43's contract, faked in tests), resolves
+- A job refreshes through `SetupSource` (machine sync's contract, owned by `@nortuscc/sync`, whose
+  `setupSourceLayer(paths)` is the real one; tests fake it), resolves
   `effective(decisions)`, inspects, sorts pending items from drift, classifies, and acts by policy
   (`auto-apply`, `notify`, `manual`). Drift is never auto-applied.
 - `classify` fails closed: only instruction markdown and the settings keys in `INERT_KEYS` are
@@ -15,5 +16,5 @@ Decisions: `docs/adr/0011-local-agent-per-user-login-service.md` and
   with its own test row.
 - Auto-apply runs only `write-file` and `merge-keys` steps, under `apply.lock`, bracketed in
   History. A failed, refused or interrupted run pauses auto-apply until a person resumes it.
-- State: `<stateRoot>/agent/agent.json` (policy, pause) and `agent/setups.json` (trusted setups).
+- State: `<stateRoot>/agent/agent.json` (policy, pause) and `agent/setups.json` (trusted setups — its store lives in @nortuscc/sync).
   Decisions and History live in `@nortuscc/machine`.

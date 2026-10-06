@@ -6,7 +6,7 @@ import {
 } from '@nortuscc/machine';
 import { AgentClock, systemClock } from './clock.ts';
 import { agentStateStore, type AgentStateStore } from './state.ts';
-import { setupsStore, type SetupsStore } from './setups.ts';
+import { setupsStore, type SetupsStore } from '@nortuscc/sync';
 
 export type AgentServices =
   | MachinePaths | Fs | Processes | StateStore | HistoryStore | DecisionsStore | AgentStateStore | SetupsStore | AgentClock;
