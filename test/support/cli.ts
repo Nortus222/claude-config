@@ -84,7 +84,7 @@ function fakeNativeInstallers({ codexUnavailable }: { codexUnavailable: boolean 
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
 
   const script = (name: string) => `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const argv = process.argv.slice(2);
@@ -171,18 +171,28 @@ if (agent === 'claude') {
       agents.push(argv[i]);
     }
     // The real installer does two things per skill: it puts the skill in the
-    // shared store, and it places a copy under the skills directory of every
+    // shared store, and it places it under the skills directory of every
     // agent named by --agent. Only the second makes the skill loadable, so a
     // fixture that did the first alone reported a machine whose skills no
-    // agent could load as fully installed.
+    // agent could load as fully installed. Claude's placement is a link into
+    // the store, as the real installer makes it; a plain directory there reads
+    // as an undeclared skill that did not come from the store.
     const agentDirs = {
       'claude-code': process.env.NORTUSCC_CLAUDE_DIR,
       codex: process.env.NORTUSCC_CODEX_DIR,
     };
     for (const skill of names) {
-      mkdirSync(join(process.env.NORTUSCC_AGENTS_DIR, skill), { recursive: true });
+      const stored = join(process.env.NORTUSCC_AGENTS_DIR, skill);
+      mkdirSync(stored, { recursive: true });
       for (const name of agents) {
-        if (agentDirs[name]) mkdirSync(join(agentDirs[name], 'skills', skill), { recursive: true });
+        if (!agentDirs[name]) continue;
+        const placed = join(agentDirs[name], 'skills', skill);
+        if (name === 'claude-code') {
+          mkdirSync(join(agentDirs[name], 'skills'), { recursive: true });
+          if (!existsSync(placed)) symlinkSync(stored, placed, 'dir');
+        } else {
+          mkdirSync(placed, { recursive: true });
+        }
       }
     }
   }
