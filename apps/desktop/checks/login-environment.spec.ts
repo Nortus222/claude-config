@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { missingTools, probeLoginPath } from '../backend/login-path.ts';
+import { missingTools, probeLoginEnvironment } from '../backend/login-environment.ts';
 
-const dir = mkdtempSync(join(tmpdir(), 'nortuscc-login-path-'));
+const dir = mkdtempSync(join(tmpdir(), 'nortuscc-login-env-'));
 test.after(() => rmSync(dir, { recursive: true, force: true }));
 const script = (name: string, body: string) => {
   const path = join(dir, name);
@@ -14,18 +14,22 @@ const script = (name: string, body: string) => {
   return path;
 };
 
-test('reads PATH from between markers despite login banners', async () => {
-  // Runs the probe's own script ($2) with a PATH a login rc file would set.
-  const shell = script('noisy', 'echo "Welcome to your shell"\nPATH=/opt/tools/bin:/usr/bin\nexport PATH\n/bin/sh -c "$2"\necho "bye"');
-  assert.deepEqual(await probeLoginPath({ env: { SHELL: shell, PATH: '/inherited' } }), { path: '/opt/tools/bin:/usr/bin' });
+test('reads the login environment despite login banners', async () => {
+  // Runs the probe's own script ($2) after an rc file that sets PATH and a secret an MCP server needs.
+  const shell = script('noisy', 'echo "Welcome to your shell"\nPATH=/opt/tools/bin:/usr/bin\nAPI_TOKEN=secret\nMULTI="a\nb"\nexport PATH API_TOKEN MULTI\n/bin/sh -c "$2"\necho "bye"');
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' } });
+  assert.equal(result.error, undefined);
+  assert.equal(result.env.PATH, '/opt/tools/bin:/usr/bin');
+  assert.equal(result.env.API_TOKEN, 'secret');
+  assert.equal(result.env.MULTI, 'a\nb');
 });
 
 test('a hanging shell times out and falls back to the inherited PATH', async () => {
   const shell = script('hang', '/bin/sleep 30');
   const started = Date.now();
-  const result = await probeLoginPath({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 200 });
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 200 });
   assert.ok(Date.now() - started < 3000);
-  assert.equal(result.path, '/inherited');
+  assert.equal(result.env.PATH, '/inherited');
   assert.match(result.error!, /timed out/);
 });
 
@@ -34,9 +38,10 @@ test('a background process holding stdout does not delay the PATH or outlive the
   const pidFile = join(dir, 'background.pid');
   const shell = script('background', `/bin/sleep 30 &\necho $! > ${pidFile}\nPATH=/opt/tools/bin:/usr/bin\nexport PATH\n/bin/sh -c "$2"`);
   const started = Date.now();
-  const result = await probeLoginPath({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 5000 });
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 5000 });
   assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
-  assert.deepEqual(result, { path: '/opt/tools/bin:/usr/bin' });
+  assert.equal(result.env.PATH, '/opt/tools/bin:/usr/bin');
+  assert.equal(result.error, undefined);
   const pid = Number(readFileSync(pidFile, 'utf8'));
   const alive = () => {
     try {
@@ -54,16 +59,16 @@ test('a background process holding stdout does not delay the PATH or outlive the
 });
 
 test('a missing shell falls back with a probe error', async () => {
-  const result = await probeLoginPath({ env: { SHELL: join(dir, 'absent-shell'), PATH: '/inherited' } });
-  assert.equal(result.path, '/inherited');
+  const result = await probeLoginEnvironment({ env: { SHELL: join(dir, 'absent-shell'), PATH: '/inherited' } });
+  assert.equal(result.env.PATH, '/inherited');
   assert.match(result.error!, /absent-shell/);
 });
 
-test('a shell that prints no PATH falls back', async () => {
+test('a shell that prints no environment falls back to the inherited one', async () => {
   const shell = script('silent', 'exit 0');
-  const result = await probeLoginPath({ env: { SHELL: shell, PATH: '/inherited' } });
-  assert.equal(result.path, '/inherited');
-  assert.match(result.error!, /no PATH/);
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited', KEEP: 'me' } });
+  assert.deepEqual(result.env, { SHELL: shell, PATH: '/inherited', KEEP: 'me' });
+  assert.match(result.error!, /no environment/);
 });
 
 test('missingTools names each tool not executable on PATH', () => {

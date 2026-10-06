@@ -8,7 +8,7 @@ import {
   samePlan, selectAll, stateStore,
   type Domain, type MachinePathsValue, type MachineReport, type PathsEnvironment, type Plan, type Progress,
 } from '@nortuscc/machine';
-import { DEFAULT_TOOLS, missingTools, type LoginPath } from './login-path.ts';
+import { DEFAULT_TOOLS, missingTools } from './login-environment.ts';
 import type { ApplyResult, ErrorCode, InspectResult, PreviewResult, RunProgress, WireObserved, WirePlan } from './protocol.ts';
 
 export type DesktopServices = MachinePaths | Fs | Processes | StateStore | OverridesStore | Backups;
@@ -21,6 +21,8 @@ export class SessionError extends Error {
     this.code = code;
   }
 }
+
+export type LoginPath = { readonly path: string; readonly error?: string };
 
 export type SessionOptions = {
   readonly environment: Pick<PathsEnvironment, 'env' | 'home' | 'platform'>;

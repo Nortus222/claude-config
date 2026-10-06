@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import type { Domain } from '@nortuscc/machine';
-import { probeLoginPath } from './login-path.ts';
+import { probeLoginEnvironment } from './login-environment.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
 import { Session, SessionError, type DesktopServices } from './session.ts';
 import { truncate } from './text.ts';
@@ -119,7 +119,8 @@ export async function startBackend(
   domains: ReadonlyArray<Domain<DesktopServices>>,
   options: { readonly tools?: ReadonlyArray<string> } = {},
 ): Promise<void> {
-  const loginPath = await probeLoginPath({ env: process.env });
+  const login = await probeLoginEnvironment({ env: process.env });
+  const loginPath = { path: login.env.PATH ?? '', ...(login.error ? { error: login.error } : {}) };
   serve(new Session({
     environment: { env: process.env, home: homedir(), platform: process.platform },
     loginPath,
