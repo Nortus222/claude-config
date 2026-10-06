@@ -56,16 +56,22 @@ export const entryOf = (itemId: string, snapshot: Snapshot): Effect.Effect<Entry
 const sameEntry = (a: Entry | undefined, b: Entry | undefined): boolean =>
   a === undefined || b === undefined ? a === b : canonical(a) === canonical(b);
 
+// A config item with no recorded baseline that the machine already holds a value for: set by hand,
+// never applied by nortuscc, so it may be deliberate.
+const heldWithoutBaseline = (item: Observed): boolean =>
+  item.domain === 'config' && item.state === 'unmanaged' && !(item.facts ?? []).includes('local-absent');
+
 // Pending: an item the machine is behind on (`apply`) whose desired value changed between the applied revision and the effective
 // configuration, because a person accepted the change. Drift: every other differing item, including
-// machine-local keys with no item id and every `capture` item, since a local edit may be deliberate. Only pending items are ever auto-applied.
+// machine-local keys with no item id, every `capture` item and every value held without a baseline,
+// since a local edit may be deliberate. Only pending items are ever auto-applied.
 export const sortItems = (report: MachineReport, applied: Snapshot, effective: Snapshot): Effect.Effect<Sorted, FsFailed, Fs> =>
   Effect.gen(function* () {
     const pending: Pending[] = [];
     const drift: string[] = [];
     for (const item of report.items) {
       if (!differs(item)) continue;
-      if (item.disposition === 'capture') {
+      if (item.disposition === 'capture' || heldWithoutBaseline(item)) {
         drift.push(item.key);
         continue;
       }

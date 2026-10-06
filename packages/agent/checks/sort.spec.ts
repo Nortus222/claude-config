@@ -95,3 +95,15 @@ test('a settings key removed from the effective configuration is pending and hel
   assert.notEqual(sorted.pending[0]!.verdict.kind, 'inert');
   assert.deepEqual(sorted.drift, []);
 });
+
+test('a key this machine holds with no recorded baseline is drift even when a person accepted the change', async () => {
+  const held: Observed = { ...observed(EFFORT_KEY), state: 'unmanaged', facts: [] };
+  const sorted = await sort([held], snap(desiredOf({ settings: { effortLevel: 'low' } })), snap(desiredOf({ settings: { effortLevel: 'high' } })));
+  assert.deepEqual(sorted, { pending: [], drift: [EFFORT_KEY] });
+});
+
+test('a key absent from this machine with no recorded baseline is pending when a person accepted the change', async () => {
+  const absent: Observed = { ...observed(EFFORT_KEY), state: 'unmanaged', facts: ['local-absent'] };
+  const sorted = await sort([absent], snap(desiredOf()), snap(desiredOf({ settings: { effortLevel: 'high' } })));
+  assert.deepEqual(sorted, { pending: [{ key: EFFORT_KEY, itemId: EFFORT, verdict: { kind: 'inert' } }], drift: [] });
+});

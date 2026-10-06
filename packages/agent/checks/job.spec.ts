@@ -154,6 +154,17 @@ test('a key changed on both sides is not auto-applied', async () => {
   assert.ok(!status.pending.some((p) => p.itemId === EFFORT));
 });
 
+test('a key this machine already holds, with no baseline, is not auto-applied', async () => {
+  // Hand-set to "low" and never applied by nortuscc; the accepted revision says "high".
+  const { m, job, settings } = await scenario({ policy: 'auto-apply', settings: { theme: 'dark', effortLevel: 'low' } });
+  const status = await job();
+  assert.deepEqual(settings(), { theme: 'dark', effortLevel: 'low' });
+  assert.equal(status.autoApply, undefined);
+  assert.ok(!status.pending.some((p) => p.itemId === EFFORT));
+  assert.ok(status.drift.includes(EFFORT_KEY));
+  assert.ok(!(await m.kinds()).includes('apply-started'));
+});
+
 test('an item set that clears and recurs is recorded again', async () => {
   const { m, job } = await scenario({ policy: 'notify' });
   await job();
