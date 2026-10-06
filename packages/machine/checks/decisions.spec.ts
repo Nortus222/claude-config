@@ -77,3 +77,31 @@ test('DecisionsInvalid says which file and why', () => {
     '/s/decisions.json is not valid (not valid JSON); fix it by hand',
   );
 });
+
+test('a malformed decision is refused before anything is written', async () => {
+  const { run, file, stateRoot } = setup();
+  const bad = [
+    decision({ revision: 2 }),
+    decision({ commit: null }),
+    decision({ setupId: '' }),
+    decision({ decidedAt: 'yesterday' }),
+    decision({ commit: null, revision: 1.5 }),
+  ];
+  for (const b of bad) {
+    const exit = await run((d) => d.record(b));
+    assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('DecisionsInvalid'));
+  }
+  assert.throws(() => readdirSync(stateRoot));
+  mkdirSync(stateRoot, { recursive: true });
+  const text = JSON.stringify({ version: 1, decisions: [decision()] });
+  writeFileSync(file, text);
+  assert.ok(Exit.isFailure(await run((d) => d.record(decision({ commit: null })))));
+  assert.equal(readFileSync(file, 'utf8'), text);
+});
+
+test('an equal decidedAt replaces the stored decision', async () => {
+  const { ok } = setup();
+  await ok((d) => d.record(decision()));
+  assert.equal(await ok((d) => d.record(decision({ decision: 'skip' }))), true);
+  assert.deepEqual((await ok((d) => d.read)).map((d) => d.decision), ['skip']);
+});

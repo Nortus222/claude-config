@@ -71,6 +71,7 @@ export const decisionsStore = Layer.effect(
       read,
       record: (decision: Decision) =>
         Effect.gen(function* () {
+          if (!isDecision(decision)) return yield* Effect.fail(new DecisionsInvalid({ path, reason: 'decision is malformed' }));
           const current = yield* read;
           const same = (d: Decision) => d.setupId === decision.setupId && d.itemId === decision.itemId;
           const existing = current.find(same);
