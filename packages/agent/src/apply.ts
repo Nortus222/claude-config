@@ -24,9 +24,9 @@ const NOTHING: AutoApplyOutcome = { kind: 'nothing' };
 const LOCK_HELD: AutoApplyOutcome = { kind: 'lock-held' };
 
 // Under apply.lock, History brackets the run, so a crash between the two events reads as interrupted.
+// The bracket is uninterruptible: shutdown stops it through `signal`, and it still records how it ended.
 const runUnderLock = (planned: Plan, report: MachineReport, domains: ReadonlyArray<AgentDomain>, signal?: AbortSignal) =>
-  Effect.gen(function* () {
-    yield* acquireApplyLock;
+  Effect.andThen(acquireApplyLock, Effect.uninterruptible(Effect.gen(function* () {
     const history = yield* HistoryStore;
     const runId = randomUUID();
     yield* history.append({ kind: 'apply-started', actor: 'agent', runId, automatic: true, keys: planned.steps.map((s) => s.key) });
@@ -42,7 +42,7 @@ const runUnderLock = (planned: Plan, report: MachineReport, domains: ReadonlyArr
     if (failed > 0) yield* pause(`${failed} step(s) failed in auto-apply run ${runId}`, runId);
     const outcome: AutoApplyOutcome = { kind: 'ran', runId, result: ran.result, failed, backup: ran.backup };
     return outcome;
-  });
+  })));
 
 // Applies the given inert item keys. Never builds an uninstall, capture or update plan. A refused
 // plan or a failed step pauses auto-apply; a cancelled run does not; a held apply.lock (the CLI is
