@@ -4,7 +4,7 @@ import {
   existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { git, machine, probeCalls, readJson, runCli, type Machine } from './support/cli.ts';
 
 // `nortuscc status` from the outside: a temp machine, a temp repo and fake installers. Every
@@ -378,6 +378,42 @@ test('a skill one agent cannot load is partial and pointed at update', async () 
   // The store already has it, so an install has nothing to offer.
   assert.doesNotMatch(result.stdout, /apply --install/);
   assert.doesNotMatch(result.stdout, AGREEMENT);
+});
+
+// Pins tdd's source (mattpocock/skills) and records tdd in the skills lock without a ref, as an install
+// from an older pin would. The lock holds only this pinned entry, so `update --check` clones nothing.
+function pinTddSourceWithLockEntry(m: Machine) {
+  writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: { 'mattpocock/skills': 'a'.repeat(40) } }));
+  const lock = join(dirname(m.agents), '.skill-lock.json');
+  const existing = existsSync(lock) ? JSON.parse(read(lock)) : {};
+  const tdd = {
+    source: 'mattpocock/skills', sourceUrl: 'https://github.com/mattpocock/skills.git',
+    skillPath: 'skills/tdd/SKILL.md', skillFolderHash: 'x',
+  };
+  writeFileSync(lock, JSON.stringify({ ...existing, skills: { ...existing.skills, tdd } }));
+}
+
+test('a skill installed off its pin is reported and pointed at update', async () => {
+  const m = await synced();
+  pinTddSourceWithLockEntry(m);
+  const result = await status(m);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /off-pin\s+\d+\s+.*\btdd \(installed at no pin, pinned to aaaaaaa\)/);
+  assert.match(result.stdout, /^ {2}nortuscc update$/m);
+  assert.doesNotMatch(result.stdout, AGREEMENT);
+
+  // The advised command sees the same skill.
+  const check = await runCli(m, ['update', '--check']);
+  assert.equal(check.code, 1, check.stdout + check.stderr);
+  assert.match(check.stdout, /off-pin\s+\d+\s+.*\btdd\b/);
+});
+
+test('off-pin and partial together point at update once', async () => {
+  const m = await synced();
+  pinTddSourceWithLockEntry(m);
+  rmSync(join(m.claude, 'skills', 'show-me'));
+  const result = await status(m);
+  assert.equal(result.stdout.match(/^ {2}nortuscc update$/gm)?.length, 1);
 });
 
 test('a skill no selected agent can load is unlinked', async () => {
