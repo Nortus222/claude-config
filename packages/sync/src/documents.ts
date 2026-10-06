@@ -19,7 +19,7 @@ export const documentOf = (documents: Documents, path: string): string | undefin
   Object.hasOwn(documents, path) ? documents[path] : undefined;
 
 // A repo-relative path that stays inside the repository.
-const inside = (path: string): boolean =>
+export const inside = (path: string): boolean =>
   path !== '' && !isAbsolute(path) && !/^[a-z]:/i.test(path) && !path.split(/[\\/]/).includes('..');
 
 // The profile documents, then the hook files the integrations document names inside the repository.
