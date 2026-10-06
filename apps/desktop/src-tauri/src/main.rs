@@ -99,13 +99,27 @@ async fn restart_backend(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, S
     .await
     .map_err(|e| e.to_string())?
 }
-// Exercises the packaged owner against the machine at $HOME (the smoke script passes a temporary one).
-fn smoke(resources: PathBuf) -> Result<(), String> {
+// The smoke applies a real plan, so it runs only against a throwaway HOME inside the system temp dir.
+fn smoke_home(arg: Option<&str>) -> Result<PathBuf, String> {
+    let arg = arg.ok_or("Usage: --smoke <temporary HOME> [resources]")?;
+    let home = std::fs::canonicalize(arg).map_err(|e| format!("Smoke HOME {arg}: {e}"))?;
+    let temp = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| e.to_string())?;
+    if home == temp || !home.starts_with(&temp) {
+        return Err(format!(
+            "Smoke HOME {} is not inside {}; refusing to apply to it",
+            home.display(),
+            temp.display()
+        ));
+    }
+    Ok(home)
+}
+// Exercises the packaged owner against a temporary HOME; it refuses any other.
+fn smoke(resources: PathBuf, home: PathBuf) -> Result<(), String> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     let backend = Backend::spawn(
         &resources,
-        None,
+        Some(&home),
         Arc::new(move |event| captured.lock().unwrap().push(event)),
     )?;
     let inspected = backend.request(Request::Inspect)?;
@@ -156,9 +170,16 @@ fn smoke(resources: PathBuf) -> Result<(), String> {
 }
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--smoke") {
+        let home = match smoke_home(std::env::args().nth(2).as_deref()) {
+            Ok(home) => home,
+            Err(error) => {
+                eprintln!("Smoke failed: {error}");
+                std::process::exit(1);
+            }
+        };
         let executable = std::env::current_exe().unwrap();
         let resources = std::env::args()
-            .nth(2)
+            .nth(3)
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 executable
@@ -166,7 +187,7 @@ fn main() {
                     .unwrap()
                     .join("../Resources/backend-runtime")
             });
-        if let Err(error) = smoke(resources) {
+        if let Err(error) = smoke(resources, home) {
             eprintln!("Smoke failed: {error}");
             std::process::exit(1);
         }
@@ -225,6 +246,44 @@ fn main() {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("smoke-home-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    #[test]
+    fn smoke_home_requires_an_argument() {
+        assert!(smoke_home(None).unwrap_err().contains("--smoke <temporary HOME>"));
+    }
+    #[test]
+    fn smoke_home_accepts_a_directory_inside_temp() {
+        let dir = scratch("ok");
+        let home = smoke_home(dir.to_str()).unwrap();
+        assert_eq!(home, std::fs::canonicalize(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn smoke_home_refuses_the_temp_dir_itself() {
+        assert!(smoke_home(std::env::temp_dir().to_str()).is_err());
+    }
+    #[test]
+    fn smoke_home_refuses_a_directory_outside_temp() {
+        assert!(smoke_home(Some(env!("CARGO_MANIFEST_DIR"))).is_err());
+    }
+    #[test]
+    fn smoke_home_refuses_a_symlink_out_of_temp() {
+        let dir = scratch("link");
+        let link = dir.join("escape");
+        std::os::unix::fs::symlink(env!("CARGO_MANIFEST_DIR"), &link).unwrap();
+        assert!(smoke_home(link.to_str()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn smoke_home_refuses_a_missing_path() {
+        let missing = std::env::temp_dir().join(format!("smoke-home-missing-{}", std::process::id()));
+        assert!(smoke_home(missing.to_str()).is_err());
+    }
     #[test]
     fn a_request_in_flight_does_not_block_reading_the_generation() {
         // Answers inspect after a second and shutdown at once.

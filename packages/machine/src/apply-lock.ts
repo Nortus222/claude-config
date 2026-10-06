@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { LockHeld } from './errors.ts';
@@ -14,12 +14,45 @@ const alive = (pid: number) => {
   }
 };
 
-const holder = (path: string): number | undefined => {
+const read = (path: string): string | undefined => {
   try {
-    const pid = JSON.parse(readFileSync(path, 'utf8')).pid;
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+};
+
+const holderOf = (text: string): number | undefined => {
+  try {
+    const pid = JSON.parse(text).pid;
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return undefined;
+  }
+};
+
+// Removes the lock at `path` only if it still reads `seen`, and reports whether the path is free to
+// claim. Renaming moves exactly one file, so of two processes taking over the same dead lock only one
+// deletes it; a lock that changed since it was read is linked back. Only a third claimant landing in
+// the microseconds before that link can still lose its lock.
+export const takeOver = (path: string, seen: string): boolean => {
+  const moved = `${path}.${process.pid}.${randomUUID()}.stale`;
+  try {
+    renameSync(path, moved);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw err;
+  }
+  try {
+    if (read(moved) === seen) return true;
+    try {
+      linkSync(moved, path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    return false;
+  } finally {
+    rmSync(moved, { force: true });
   }
 };
 
@@ -42,22 +75,25 @@ export const acquireApplyLock = Effect.gen(function* () {
     Effect.suspend(() => {
       mkdirSync(stateRoot, { recursive: true });
       let last = 0;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
           claim();
           return Effect.void;
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return Effect.die(err);
-          const pid = holder(path);
+          const seen = read(path);
+          if (seen === undefined) continue; // released meanwhile
+          const pid = holderOf(seen);
           last = pid ?? 0;
           if (pid !== undefined && alive(pid)) return Effect.fail(new LockHeld({ path, pid }));
-          rmSync(path, { force: true });
+          takeOver(path, seen);
         }
       }
       return Effect.fail(new LockHeld({ path, pid: last }));
     }),
     () => Effect.sync(() => {
-      if (holder(path) === process.pid) rmSync(path, { force: true });
+      const text = read(path);
+      if (text !== undefined && holderOf(text) === process.pid) rmSync(path, { force: true });
     }),
   );
 });
