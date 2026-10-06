@@ -11,7 +11,7 @@ const flag = (args: string[], name: string): string | undefined => {
 };
 
 // `nortuscc push -m MSG`: capture the machine's changes into the repo, then commit and push exactly
-// what capture wrote. Never invents a message and never stages anything capture did not write.
+// what capture wrote and changed. Never invents a message and never stages anything capture did not write.
 export async function run(args: string[] = []): Promise<number> {
   const mode = parseConfigMode(args);
   const { target, rest, error } = parseTarget(mode.rest);
@@ -45,30 +45,32 @@ export async function run(args: string[] = []): Promise<number> {
 
     // In the terminal's foreground, so `git push` can prompt for credentials.
     const git = (output: 'inherit' | 'capture', ...gitArgs: string[]) => runGit(repo, gitArgs, output);
+    const failed = () => {
+      console.error('\nnortuscc: git add/commit/push failed.');
+      console.error('Resolve the git error above, then try again.');
+      return 1;
+    };
     const paths = result.captured;
+    if (paths.length > 0 && git('inherit', 'add', '--', ...paths).code !== 0) return failed();
+    // capture can rewrite a file without changing it (the manifest is regenerated every run), and
+    // such a file stages nothing to commit. `diff --quiet` exits 0 only when nothing differs.
+    const staged = paths.length > 0 && git('capture', 'diff', '--cached', '--quiet', '--', ...paths).code !== 0;
 
     // No upstream (rev-list fails) means "ahead" is not a meaningful question. Real git state decides
     // the no-op: a commit left unpushed by an earlier rejected push must be retried, not forgotten.
     const counted = git('capture', 'rev-list', '--count', '@{u}..HEAD');
     const ahead = counted.code === 0 ? Number.parseInt(counted.stdout.trim(), 10) : 0;
-    if (paths.length === 0 && !(ahead > 0)) {
+    if (!staged && !(ahead > 0)) {
       console.log('\nnothing captured; nothing to push');
       return 0;
     }
 
     const steps: Array<[string, ...string[]]> = [];
-    if (paths.length > 0) {
-      steps.push(['add', '--', ...paths], ['diff', '--cached', '--stat'], ['commit', '-m', message]);
-    }
+    if (staged) steps.push(['diff', '--cached', '--stat'], ['commit', '-m', message]);
     steps.push(['push']);
     for (const step of steps) {
       if (step[0] === 'diff') console.log('\nstaged:');
-      const done = git('inherit', ...step);
-      if (done.code !== 0) {
-        console.error('\nnortuscc: git add/commit/push failed.');
-        console.error('Resolve the git error above, then try again.');
-        return 1;
-      }
+      if (git('inherit', ...step).code !== 0) return failed();
     }
     return 0;
   }));

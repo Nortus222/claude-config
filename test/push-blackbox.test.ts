@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git, machine, runCli, type Machine } from './support/cli.ts';
 
@@ -154,4 +154,23 @@ test('an invalid overrides.json refuses push with exit 1; nothing is staged, com
   assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
   assert.equal(git(m.repo, 'status', '--porcelain'), '');
   assert.equal(git(origin(m), 'rev-parse', 'main'), head);
+});
+
+// capture rewrites the manifest from the installed skills even when the result is byte-identical.
+test('a manifest rewritten unchanged is not committed; push is a no-op that exits 0', async () => {
+  const m = await applied();
+  mkdirSync(join(m.agents, 'alpha'), { recursive: true });
+  writeFileSync(join(m.agents, '..', '.skill-lock.json'), JSON.stringify({ skills: { alpha: { source: 'foo/bar' } } }));
+  writeFileSync(join(m.repo, 'skills-manifest.txt'), '[foo/bar]\nalpha\n');
+  const settled = await runCli(m, ['capture']);
+  assert.equal(settled.code, 0, settled.stderr);
+  git(m.repo, 'commit', '-qam', 'manifest as capture writes it');
+  git(m.repo, 'push', '-q');
+  const head = git(m.repo, 'rev-parse', 'HEAD');
+
+  const result = await push(m, '-m', 'x');
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /nothing captured; nothing to push/);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(git(m.repo, 'status', '--porcelain'), '');
 });
