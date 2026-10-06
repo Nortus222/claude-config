@@ -79,7 +79,7 @@ test('a synced machine is in agreement, and status changes nothing in its home',
   assert.doesNotMatch(result.stdout, /settings\.json#/);
   assert.match(result.stdout, /all declared\s+installed/);
   // Unselected optional skills are informational and need no repair.
-  assert.match(result.stdout, /optional\s+3\s+deploy-mobile-apps, explain, share-artifacts/);
+  assert.match(result.stdout, /optional\s+4\s+deploy-mobile-apps, emws-api, explain, share-artifacts/);
   assert.doesNotMatch(result.stdout, /apply --install/);
   assert.match(result.stdout, /all categories\s+declared/);
   assert.match(result.stdout, AGREEMENT);
