@@ -9,6 +9,7 @@ export * from './backups.ts';
 export * from './apply-lock.ts';
 export * from './history.ts';
 export * from './decisions.ts';
+export * from './prune.ts';
 export * from './model.ts';
 export * from './run.ts';
 export {
