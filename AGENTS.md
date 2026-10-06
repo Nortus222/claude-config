@@ -25,7 +25,7 @@ Feature branches target **`main`**.
 | `bin/` | The dependency-free launcher. A checkout runs `src/main.ts`; an npx copy clones a checkout for `setup` and hands every other verb to the recorded one |
 | `src/` | The CLI: `src/main.ts` dispatches every verb to `src/commands/<verb>.ts` |
 | `packages/profile-engine/` | Shared TypeScript/Effect engine that resolves a machine's desired configuration — base profile, revision pins, machine overrides — with per-value provenance |
-| `packages/machine/` | Shared TypeScript/Effect package that inspects a machine, plans against the engine's desired configuration, and executes plans with backups, progress and cancellation. Used by the CLI and the desktop app |
+| `packages/machine/` | Shared TypeScript/Effect package that inspects a machine, plans against the engine's desired configuration, and executes plans with backups, progress and cancellation; it also keeps History, decisions and backup pruning. Used by the CLI and the desktop app |
 | `packages/source-watch/` | Author-side watcher of the skill sources a setup uses: upstream revisions, `SKILL.md` diffs, pins and ignores |
 | `packages/agent/` | The local agent's core: scheduler, job, fail-closed classifier and apply policy. Runs in-process until the login service lands (#79) |
 | `apps/desktop/` | Tauri 2 desktop app with a bundled Bun backend over `@nortuscc/machine` |

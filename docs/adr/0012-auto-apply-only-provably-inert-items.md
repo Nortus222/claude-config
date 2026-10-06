@@ -1,5 +1,5 @@
 ---
-status: accepted (designed in #50 and #51, not built)
+status: accepted (classifier and auto-apply built in #77)
 ---
 
 # Auto-apply changes only items proven inert; only a person on the machine changes trust
@@ -22,3 +22,5 @@ machine trusts is stored on that machine and changed only by a person there.
 
 - Adding a key to `INERT_KEYS` is a reviewed code change.
 - A remote policy change can switch a machine to auto-apply but cannot release held items.
+- An item this machine changed, or holds without a recorded baseline, is drift even when a person
+  accepted the upstream change; only a person applies over it.
