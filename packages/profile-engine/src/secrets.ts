@@ -1,5 +1,5 @@
-// What a credential looks like, by name and by shape. The same rules as the CLI's
-// src/secrets.mjs: committed documents may name an environment variable, never carry a value.
+// What a credential looks like, by name and by shape: committed documents may name an
+// environment variable, never carry a value.
 
 const SECRET_FIELD = /^(token|secret|password|passphrase|credential|api_?key|access_?key)s?$/i;
 

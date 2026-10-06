@@ -100,6 +100,8 @@ test('skillExposure splits exposed, partial and missing', () => {
     { exposed: ['a'], partial: [{ name: 'b', missing: ['codex'] }], missing: ['c'] });
   assert.deepEqual(skillExposure({ names: [], targets: ['codex'], list: { codex: ['x'] } }), { exposed: [], partial: [], missing: [] });
   assert.deepEqual(skillExposure({ names: ['a'], targets: ['claude'], list: {} }), { exposed: [], partial: [], missing: ['a'] });
+  // An agent outside the selection never makes a skill partial.
+  assert.deepEqual(skillExposure({ names: ['a'], targets: ['claude'], list: { claude: ['a'], codex: [] } }), { exposed: ['a'], partial: [], missing: [] });
 });
 
 test('installer argv: variadic names, explicit agents, global and non-interactive', () => {

@@ -23,9 +23,11 @@ before(() => {
     { cwd: REPO, encoding: 'utf8' },
   ))[0];
 
-  assert.ok(packed.files.some((entry) => entry.path === 'integrations.json'));
-  assert.ok(packed.files.some((entry) => entry.path === 'packages/profile-engine/src/files.json'));
-  assert.ok(packed.files.some((entry) => entry.path === 'src/commands/setup.mjs'));
+  // An npx copy runs only bin/: setup clones a checkout, every other verb hands off to one.
+  for (const path of ['bin/nortuscc.mjs', 'bin/launcher.mjs', 'bin/commands.mjs', 'integrations.json']) {
+    assert.ok(packed.files.some((entry) => entry.path === path), path);
+  }
+  assert.equal(packed.files.some((entry) => entry.path.startsWith('src/') || entry.path.startsWith('packages/')), false);
   assert.equal(packed.files.some((entry) => entry.path.startsWith('test/')), false);
 
   execFileSync(
@@ -48,22 +50,20 @@ test('the packed GitHub package installs a working global command', { skip: !npm
   assert.match(output, /Usage: nortuscc/);
 });
 
-test('a packed copy runs unported commands itself', { skip: !npmCli }, () => {
-  const result = spawnSync(command, ['uninstall', '--target', 'all'], { encoding: 'utf8', shell: process.platform === 'win32' });
+test('a packed copy with no recorded checkout runs nothing and says how to get one', { skip: !npmCli }, () => {
+  const state = join(stage, 'no-record');
+  mkdirSync(state, { recursive: true });
+  const result = spawnSync(command, ['uninstall', '--target', 'all'], {
+    encoding: 'utf8', shell: process.platform === 'win32', env: { ...process.env, NORTUSCC_STATE_DIR: state },
+  });
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /Re-run with --yes to confirm/);
+  assert.match(result.stderr, /'uninstall' needs a nortuscc checkout/);
 });
 
-test('an npx copy hands a ported verb to the recorded checkout', { skip: !npmCli }, () => {
+test('an npx copy hands a verb to the recorded checkout', { skip: !npmCli }, () => {
   const copy = join(stage, 'node_modules', 'nortuscc');
   mkdirSync(copy, { recursive: true });
   cpSync(join(REPO, 'bin'), join(copy, 'bin'), { recursive: true });
-  writeFileSync(join(copy, 'bin', 'commands.mjs'), `${[
-    "export const VERBS = ['status'];",
-    "export const USAGE = '';",
-    "export const PORTED = ['status'];",
-    "export const LOCKED = [];",
-  ].join('\n')}\n`);
 
   const state = join(stage, 'state');
   mkdirSync(state, { recursive: true });

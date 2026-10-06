@@ -29,7 +29,7 @@ export const nodeFiles = Layer.succeed(ProfileFiles, {
         }),
       catch: (err) => new ReadFailed({ path, reason: err instanceof Error ? err.message : String(err) }),
     }),
-  // Any failure reads as absent, matching the CLI's existsSync.
+  // Any failure reads as absent.
   exists: (path: string) => Effect.promise(() => stat(path).then(() => true, () => false)),
 });
 

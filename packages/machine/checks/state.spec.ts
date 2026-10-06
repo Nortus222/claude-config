@@ -44,19 +44,69 @@ test('the legacy lock migrates once, carrying repo and the CLAUDE.md baseline on
   const { paths, run } = machine();
   mkdirSync(paths.claude, { recursive: true });
   const baseline = { hash: 'sha256:1', appliedAt: '2026-01-01T00:00:00.000Z' };
-  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), JSON.stringify({ repo: '/r', files: { 'CLAUDE.md': baseline, 'settings.json': baseline } }));
+  const lockText = JSON.stringify({ repo: '/r', files: { 'CLAUDE.md': baseline, 'settings.json': baseline } });
+  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), lockText);
   const state = await run((s) => s.read);
   assert.equal(state.repo, '/r');
   assert.deepEqual(state.files, { 'claude:CLAUDE.md': baseline });
   assert.ok(existsSync(join(paths.stateRoot, 'state.json')));
-  assert.ok(existsSync(join(paths.claude, '.nortuscc-lock.json')));
+  assert.equal(readFileSync(join(paths.claude, '.nortuscc-lock.json'), 'utf8'), lockText);
 });
 
-test('skillsOnly is strict and configTargets is kept only when valid', () => {
-  assert.equal(parseState(JSON.stringify({ skillsOnly: 'yes', files: {} }))!.skillsOnly, false);
-  assert.deepEqual(parseState(JSON.stringify({ configTargets: ['codex', 'codex'], files: {} }))!.configTargets, ['codex']);
-  assert.equal(parseState(JSON.stringify({ configTargets: ['nope'], files: {} }))!.configTargets, undefined);
+test('a corrupt legacy lock is skipped: empty state, nothing written', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.claude, { recursive: true });
+  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), '{ broken');
+  assert.deepEqual(await run((s) => s.read), emptyState);
+  assert.equal(existsSync(join(paths.stateRoot, 'state.json')), false);
+});
+
+test('parseState drops the legacy machine choices', () => {
+  assert.deepEqual(
+    parseState(JSON.stringify({ repo: '/r', skillsOnly: true, configTargets: ['codex'], files: {} })),
+    { version: 1, repo: '/r', files: {} },
+  );
   assert.equal(parseState('[]'), undefined);
+});
+
+const legacyState = { version: 1, repo: null, skillsOnly: true, configTargets: ['codex'], files: {} };
+const readJson = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
+
+test('the first state write migrates the legacy choices into overrides.json', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify(legacyState));
+  await run((s) => s.update((state) => state));
+  const overridesText = readFileSync(join(paths.stateRoot, 'overrides.json'), 'utf8');
+  assert.ok(overridesText.endsWith('}\n'));
+  assert.deepEqual(JSON.parse(overridesText), { version: 1, manageConfig: false, configTargets: ['codex'] });
+  assert.deepEqual(readJson(join(paths.stateRoot, 'state.json')), { version: 1, repo: null, files: {} });
+});
+
+test('an existing overrides.json is left alone and state.json still loses the legacy choices', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify(legacyState));
+  writeFileSync(join(paths.stateRoot, 'overrides.json'), '{"version":1}');
+  await run((s) => s.update((state) => state));
+  assert.equal(readFileSync(join(paths.stateRoot, 'overrides.json'), 'utf8'), '{"version":1}');
+  assert.deepEqual(readJson(join(paths.stateRoot, 'state.json')), { version: 1, repo: null, files: {} });
+});
+
+test('a state write without legacy choices creates no overrides.json', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: null, files: {} }));
+  await run((s) => s.update((state) => state));
+  assert.equal(existsSync(join(paths.stateRoot, 'overrides.json')), false);
+});
+
+test('reading state never creates overrides.json', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify(legacyState));
+  assert.deepEqual(await run((s) => s.read), { version: 1, repo: null, files: {} });
+  assert.equal(existsSync(join(paths.stateRoot, 'overrides.json')), false);
 });
 
 test('update writes the legacy layout and baselines round-trip', async () => {
@@ -67,7 +117,7 @@ test('update writes the legacy layout and baselines round-trip', async () => {
   const text = readFileSync(join(paths.stateRoot, 'state.json'), 'utf8');
   assert.ok(text.endsWith('}\n'));
   assert.deepEqual(JSON.parse(text), {
-    version: 1, repo: null, skillsOnly: false,
+    version: 1, repo: null,
     files: { 'claude:CLAUDE.md': { hash: 'sha256:a', appliedAt: '2026-10-05T00:00:00.000Z' } },
   });
 });

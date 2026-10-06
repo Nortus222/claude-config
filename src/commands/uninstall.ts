@@ -4,10 +4,10 @@ import { Cause, Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import {
   backupsForRun, CHANGED_SINCE_APPLY, configDomain, configFileId, execute, inspect, machinePaths, nodeFs,
-  OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, StateStore, stateStore,
+  OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, stateStore,
 } from '@nortuscc/machine';
-import { formatRow, section } from '../report.mjs';
-import { parseTarget } from '../targets.mjs';
+import { formatRow, section } from '../report.ts';
+import { parseTarget } from '../targets.ts';
 
 const CHECKOUT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -41,6 +41,16 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
         return 1;
       }
 
+      const overrides = yield* overridesFile.read;
+      if (overrides.issues.length > 0) {
+        console.error(`nortuscc: ${overrides.source} is not valid, so nothing was uninstalled; fix it or set "manageConfig": false there by hand.`);
+        return 1;
+      }
+      // Record skills-only before restoring: a concurrent run that starts after this point no longer applies
+      // configuration, and an interrupted uninstall is completed by re-running it (uninstall restores every
+      // recorded file whether or not the machine manages configuration). overrides.json is the only record.
+      yield* overridesFile.write({ ...overrides.value, manageConfig: false });
+
       const lines: string[] = [];
       const run = { complete: true };
       yield* Stream.runForEach(execute(planned, report, [configDomain], { signal }), (event) => Effect.sync(() => {
@@ -55,16 +65,11 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
         lines.push(formatRow(label(event.key), action, backedUp ? `backed up -> ${backedUp}` : ''));
       }));
       process.stdout.write('\n' + section('uninstall', lines));
-      if (!run.complete) return 1;
 
-      // overrides.json holds the choice; state.json keeps the legacy copy until cutover (#59).
-      const overrides = yield* overridesFile.read;
-      yield* (yield* StateStore).update((state) => ({ ...state, skillsOnly: true }));
-      if (overrides.issues.length > 0) {
-        console.error(`nortuscc: ${overrides.source} is not valid, so it was left as it is; set "manageConfig": false there by hand.`);
+      if (!run.complete) {
+        console.error("nortuscc: uninstall did not finish; re-run 'nortuscc uninstall --yes' to complete it.");
         return 1;
       }
-      yield* overridesFile.write({ ...overrides.value, manageConfig: false });
       return 0;
     }).pipe(Effect.provide(services));
   });
