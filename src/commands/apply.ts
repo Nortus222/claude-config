@@ -1,19 +1,13 @@
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import type { Target } from '@nortuscc/profile-engine';
-import {
-  configFileId, inspect, OverridesStore, plan, selectAll, splitOutcome, StateStore, type Skipped,
-} from '@nortuscc/machine';
+import { inspect, OverridesStore, plan, selectAll, StateStore } from '@nortuscc/machine';
+import { CONFLICT_NOTE, fileOutcomes, UNPARSEABLE_NOTE } from '../config-rows.ts';
 import { parseConfigMode, persisted, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
 import { domainsFor, openMachine, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
-
-// A config item key's settings key: `config:claude:settings.json#theme` -> `theme`.
-const settingsKeyOf = (key: string): string | undefined => (key.includes('#') ? key.slice(key.indexOf('#') + 1) : undefined);
-const CONFLICT_NOTE = 'conflict — nothing changed';
-const UNPARSEABLE_NOTE = 'could not be parsed as JSON — fix it by hand, then re-run';
 
 // repo -> machine for the selected agents' configuration: one row per managed file, then the
 // restart reminder when something was written and the trailers for what was refused. Returns 1
@@ -44,37 +38,27 @@ export function applyConfig(opened: Opened, input: { targets: Target[]; takeRepo
     let failed = 0;
     let changed = false;
     const files = opened.desired.files.filter((f) => f.managed && input.targets.includes(f.target));
-    for (const file of files) {
-      const mine = <T extends { key: string }>(entries: ReadonlyArray<T>) => entries.filter((e) => configFileId(e.key) === file.id);
-      const stateOf = (s: Skipped) => report.items.find((i) => i.key === s.key)?.state;
-      const results = mine((ran?.results ?? []).map((r) => ({ ...r, key: r.step.key })));
-      const skipped = mine(planned.skipped);
-      const copied = results.filter((r) => r.outcome === 'ok' && splitOutcome(r.note).action === 'copied');
-      if (copied.length > 0) changed = true;
-
-      const backedUp = copied.map((r) => splitOutcome(r.note).backedUp).find(Boolean);
-      const backupNote = backedUp ? `backed up -> ${backedUp}` : '';
-      const conflicts = skipped.filter((s) => stateOf(s) === 'conflict');
-      const failure = results.find((r) => r.outcome !== 'ok');
+    for (const outcome of fileOutcomes(files, report, planned, ran)) {
+      const { file, copied, backupNote, conflicts } = outcome;
+      if (copied) changed = true;
+      const failure = outcome.failures[0];
       if (failure) {
         failed += 1;
         lines.push(formatRow(file.dest, failure.outcome, failure.note));
-      } else if (skipped.some((s) => stateOf(s) === 'unparseable-local')) {
+      } else if (outcome.unparseable) {
         // Neither --take-repo nor --take-local can fix invalid JSON, so it is counted apart.
         unreadable += 1;
         lines.push(formatRow(file.dest, 'refused', UNPARSEABLE_NOTE));
       } else if (conflicts.length > 0) {
         refused += 1;
         // Settings keys merge one by one, so the keys not in conflict may already have been written.
-        const keys = conflicts.map((s) => settingsKeyOf(s.key) ?? s.key).join(', ');
-        lines.push(formatRow(file.dest, 'refused', copied.length === 0 ? CONFLICT_NOTE
-          : `conflict on ${keys}; other keys copied${backupNote ? `; ${backupNote}` : ''}`));
-      } else if (copied.length > 0) {
+        lines.push(formatRow(file.dest, 'refused', !copied ? CONFLICT_NOTE
+          : `conflict on ${conflicts.join(', ')}; other keys copied${backupNote ? `; ${backupNote}` : ''}`));
+      } else if (copied) {
         lines.push(formatRow(file.dest, 'copied', backupNote));
       } else {
         // In sync, changed only here, or blocked in the repo: nothing written. A blocked file says why.
-        const blocked = skipped.find((s) => ['missing-repo', 'invalid'].includes(stateOf(s) ?? ''));
-        lines.push(formatRow(file.dest, 'skipped', blocked?.reason ?? ''));
+        lines.push(formatRow(file.dest, 'skipped', outcome.blocked ?? ''));
       }
     }
     process.stdout.write('\n' + section('apply', lines));

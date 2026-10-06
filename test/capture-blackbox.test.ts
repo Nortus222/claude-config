@@ -258,3 +258,16 @@ test('a skills-only machine captures no configuration and records nothing', asyn
   assert.equal(existsSync(join(flagged.state, 'overrides.json')), false);
   assert.equal('skillsOnly' in readJson(statePath(flagged)), false);
 });
+
+test('a saved Claude-only selection never captures Codex configuration', async () => {
+  const m = await applied();
+  const state = readJson(statePath(m));
+  writeFileSync(statePath(m), JSON.stringify({ ...state, configTargets: ['claude'] }, null, 2) + '\n');
+  writeFileSync(join(m.codex, 'AGENTS.md'), '# private Codex rules\n');
+  writeFileSync(join(m.claude, 'CLAUDE.md'), '# claude edit\n');
+
+  const result = await capture(m);
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /AGENTS\.md/);
+  assert.deepEqual(changed(m), ['claude/CLAUDE.md']);
+});
