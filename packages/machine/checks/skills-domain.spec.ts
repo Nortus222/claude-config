@@ -354,6 +354,22 @@ test('--target claude installs for claude-code only', async () => {
   assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill want --agent claude-code --global --yes']);
 });
 
+// Issue #104: an off-pin skill whose pin was removed is reinstalled by a ref-less `add`, which replaces its folder.
+test('an unpinned install backs up the skill folders it replaces', async () => {
+  const m = runMachine();
+  m.install('tdd');
+  const r = report([item('tdd', 'off-pin', 'apply'), item('want', 'missing', 'apply')], [skill('tdd', 'o/r'), skill('want', 'o/r')]);
+  const p = plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
+  assert.deepEqual(p.steps.map((s) => s.key), ['skills:install:o/r']);
+  const events = await m.go(p, r);
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.equal(done.type, 'done');
+  assert.equal(readFileSync(join(done.backups!, 'skills', 'tdd', 'SKILL.md'), 'utf8'), '# tdd\n');
+  // Nothing was installed yet, so nothing is backed up.
+  assert.equal(existsSync(join(done.backups!, 'skills', 'want')), false);
+  assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill tdd want --agent claude-code --global --yes']);
+});
+
 const exposeStep = plan('update', report([item('x', 'outdated', 'apply')]), { ...selectAll, targets: ['claude'] }, [skillsDomain])
   .steps.find((s) => s.key === 'skills:expose')!;
 const exposeOnly = (): Plan => ({ kind: 'update', steps: [{ ...exposeStep, touches: [] }], skipped: [] });
