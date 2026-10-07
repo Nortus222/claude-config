@@ -36,7 +36,9 @@ const planWithout = (exclude: string[]) => ({
   skipped: exclude.map((key) => ({ key, reason: 'excluded' })),
 });
 
-type Script = { stale?: boolean };
+// `stale` answers apply with a new preview; `drop` closes the connection after the run's first step
+// starts; `status` answers the status command, which goes unanswered without it.
+type Script = { stale?: boolean; drop?: boolean; status?: unknown };
 type Fake = { paths: MachinePathsValue; seen: Array<Record<string, unknown>>; close: () => Promise<void> };
 
 const send = (socket: Socket, record: unknown) => socket.write(JSON.stringify(record) + '\n');
@@ -67,6 +69,9 @@ async function fake(script: Script = {}): Promise<Fake> {
           case 'hello':
             ok(socket, request.id, { agentVersion: 'v', protocol: 3, policy: 'notify', paused: null });
             break;
+          case 'status':
+            if (script.status !== undefined) ok(socket, request.id, script.status);
+            break;
           case 'inspect':
             ok(socket, request.id, INSPECTED);
             break;
@@ -81,6 +86,11 @@ async function fake(script: Script = {}): Promise<Fake> {
             }
             ok(socket, request.id, { status: 'started', runId: 'run-1' });
             const steps = previewed!.steps;
+            if (script.drop) {
+              progress(socket, { type: 'started', index: 0, total: steps.length, step: steps[0] });
+              socket.destroy();
+              break;
+            }
             steps.forEach((s, index) => {
               progress(socket, { type: 'started', index, total: steps.length, step: s });
               progress(socket, { type: 'finished', index, total: steps.length, key: s.key, outcome: 'ok', note: '' });
@@ -192,6 +202,43 @@ test('agent review exits 1 when the machine changed since the preview', { skip }
     const { result, stdout } = await captured(() => run(['review'], deps(f)));
     assert.equal(result, 1);
     assert.match(stdout, /^the machine changed; review again$/m);
+  } finally {
+    await f.close();
+  }
+});
+
+test('agent review exits 1 promptly when the agent goes away during the run', { skip }, async () => {
+  const f = await fake({ drop: true });
+  try {
+    const started = Date.now();
+    const { result, stdout, stderr } = await captured(() => run(['review'], deps(f)));
+    assert.equal(result, 1);
+    assert.ok(Date.now() - started < 2000, 'did not wait for a terminal event');
+    assert.match(stdout, /^started 1\/2: write config:a$/m);
+    assert.equal(stderr.trim(), 'nortuscc: lost the agent during the run; check nortuscc agent status');
+  } finally {
+    await f.close();
+  }
+});
+
+test('an agent command whose request goes unanswered exits 1 and says so', { skip }, async () => {
+  const f = await fake();
+  try {
+    const { result, stderr } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths, { requestTimeoutMs: 50 }) }));
+    assert.equal(result, 1);
+    assert.equal(stderr.trim(), 'nortuscc: the agent did not answer in time');
+  } finally {
+    await f.close();
+  }
+});
+
+test('agent status prints the status error and exits 1', { skip }, async () => {
+  const f = await fake({ status: { ...STATUS, error: 'JOB_FAILED', detail: 'the job stopped' } });
+  try {
+    const { result, stdout } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths) }));
+    assert.equal(result, 1);
+    assert.match(stdout, /^policy: notify$/m);
+    assert.match(stdout, /^error: JOB_FAILED: the job stopped$/m);
   } finally {
     await f.close();
   }

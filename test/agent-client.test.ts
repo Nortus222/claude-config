@@ -175,12 +175,54 @@ test('a request past its timeout rejects', { skip }, async () => {
   }
 });
 
-test('a closed connection rejects what is still pending', { skip }, async () => {
+test('a request with no timeout of its own times out at the connection default', { skip }, async () => {
+  const f = await fake();
+  try {
+    const conn = await connectAgent(f.paths, { requestTimeoutMs: 50 });
+    try {
+      await assert.rejects(conn.request({ command: 'status' }), (error: unknown) =>
+        error instanceof AgentError && error.code === 'TIMEOUT' && error.message === 'the agent did not answer in time');
+    } finally {
+      conn.close();
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test('inspect and apply wait for the longer inspect timeout, not the request default', { skip }, async () => {
+  const f = await fake((request, socket) => {
+    if (request.command !== 'status') setTimeout(() => ok(socket, request.id, { answered: request.command }), 150);
+  });
+  try {
+    const conn = await connectAgent(f.paths, { requestTimeoutMs: 50, inspectTimeoutMs: 1000 });
+    try {
+      assert.deepEqual(await conn.request({ command: 'inspect' }), { answered: 'inspect' });
+      assert.deepEqual(await conn.request({ command: 'apply', planId: 'p' }), { answered: 'apply' });
+      await assert.rejects(conn.request({ command: 'status' }), (error: unknown) => error instanceof AgentError && error.code === 'TIMEOUT');
+    } finally {
+      conn.close();
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test('a closed connection rejects what is still pending as AgentUnavailable and tells onClose once', { skip }, async () => {
   const f = await fake((_request, socket) => socket.destroy());
   try {
     const conn = await connectAgent(f.paths);
+    let closes = 0;
+    conn.onClose(() => closes++);
     try {
-      await assert.rejects(conn.request({ command: 'status' }), AgentError);
+      await assert.rejects(conn.request({ command: 'status' }), (error: unknown) =>
+        error instanceof AgentUnavailable && error.message === 'the agent closed the connection');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(closes, 1);
+      let late = 0;
+      conn.onClose(() => late++);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(late, 1, 'a listener added after the close still hears it');
     } finally {
       conn.close();
     }
