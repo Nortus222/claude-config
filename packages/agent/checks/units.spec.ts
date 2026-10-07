@@ -23,6 +23,21 @@ test('the scheduled task matches its snapshot', () => matches('nortuscc-agent.xm
 
 test('the plist XML-escapes values', () => {
   assert.ok(renderLaunchAgent('com.nortuscc.agent', awkward).includes('<string>a&quot;b%c$d&amp;e</string>'));
+  assert.ok(renderLaunchAgent('com.nortuscc.agent', { ...program, argv: ['/bin/x', `<a>'b'`] }).includes('<string>&lt;a&gt;&apos;b&apos;</string>'));
+});
+
+test('systemd Environment= keeps $ single, since it is not expanded there', () => {
+  const unit = renderSystemdUnit({ ...program, env: { SECRET: 'pa$word' } });
+  assert.ok(unit.includes('Environment="SECRET=pa$word"'));
+});
+
+test('systemd values with a control character are refused', () => {
+  assert.throws(() => renderSystemdUnit({ ...program, argv: ['/bin/x', 'a\nExecStop=/bin/evil'] }), /control character/);
+  assert.throws(() => renderSystemdUnit({ ...program, env: { K: 'a\nb' } }), /control character/);
+});
+
+test('the scheduled task omits Arguments when there are none', () => {
+  assert.ok(!renderScheduledTask({ ...program, argv: ['/bin/x'] }, 'me').includes('<Arguments>'));
 });
 
 test('the systemd unit escapes quotes, specifiers and variable expansion', () => {

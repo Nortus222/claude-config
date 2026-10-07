@@ -52,10 +52,16 @@ export const renderLaunchAgent = (label: string, program: ServiceProgram): strin
   '',
 ].join('\n');
 
-// Inside a systemd double-quoted word: `\` and `"` are escaped, `$` would expand a variable and
-// `%` would start a specifier, so both are doubled.
-const quoted = (text: string) => `"${text.replace(/[\\"]/g, '\\$&').replace(/[$%]/g, '$&$&')}"`;
-const specifiers = (text: string) => text.replace(/%/g, '%%');
+// systemd values live on one line, so a control character (newline included) is refused.
+const line = (text: string) => {
+  if (/[\x00-\x1f\x7f]/.test(text)) throw new Error(`a systemd unit value cannot contain a control character: ${JSON.stringify(text)}`);
+  return text;
+};
+// Inside a systemd double-quoted word `\` and `"` are escaped and `%` starts a specifier, so it is doubled.
+const quotedWord = (text: string) => `"${line(text).replace(/[\\"]/g, '\\$&').replace(/%/g, '%%')}"`;
+// ExecStart= also expands `$VAR`, so `$` is doubled there; Environment= does not expand it.
+const execWord = (text: string) => quotedWord(text).replace(/\$/g, '$$$$');
+const specifiers = (text: string) => line(text).replace(/%/g, '%%');
 
 /** A systemd user unit that runs the argv directly (no shell) and restarts it on failure. */
 export const renderSystemdUnit = (program: ServiceProgram): string => [
@@ -64,8 +70,8 @@ export const renderSystemdUnit = (program: ServiceProgram): string => [
   '',
   '[Service]',
   'Type=simple',
-  `ExecStart=${program.argv.map(quoted).join(' ')}`,
-  ...sortedEnv(program).map(([key, value]) => `Environment=${quoted(`${key}=${value}`)}`),
+  `ExecStart=${program.argv.map(execWord).join(' ')}`,
+  ...sortedEnv(program).map(([key, value]) => `Environment=${quotedWord(`${key}=${value}`)}`),
   `WorkingDirectory=${specifiers(program.workingDirectory)}`,
   'Restart=on-failure',
   'RestartSec=10',
@@ -116,7 +122,7 @@ export const renderScheduledTask = (program: ServiceProgram, user: string): stri
     '  <Actions Context="Author">',
     '    <Exec>',
     `      <Command>${xml(command)}</Command>`,
-    `      <Arguments>${xml(args.map(windowsArgument).join(' '))}</Arguments>`,
+    ...(args.length === 0 ? [] : [`      <Arguments>${xml(args.map(windowsArgument).join(' '))}</Arguments>`]),
     `      <WorkingDirectory>${xml(program.workingDirectory)}</WorkingDirectory>`,
     '    </Exec>',
     '  </Actions>',
