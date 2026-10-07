@@ -36,8 +36,11 @@ test('systemd values with a control character are refused', () => {
   assert.throws(() => renderSystemdUnit({ ...program, env: { K: 'a\nb' } }), /control character/);
 });
 
-test('the scheduled task omits Arguments when there are none', () => {
-  assert.ok(!renderScheduledTask({ ...program, argv: ['/bin/x'] }, 'me').includes('<Arguments>'));
+test('the scheduled task launches a single program through the headless console host', () => {
+  const task = renderScheduledTask({ ...program, argv: ['/bin/x'] }, 'me');
+  assert.ok(task.includes('<Command>%SystemRoot%\\System32\\conhost.exe</Command>'));
+  assert.ok(task.includes('<Arguments>--headless &quot;/bin/x&quot;</Arguments>'));
+  assert.match(task, /<RestartOnFailure>\s*<Interval>PT1M<\/Interval>\s*<Count>3<\/Count>/);
 });
 
 test('the systemd unit escapes quotes, specifiers and variable expansion', () => {
@@ -48,6 +51,14 @@ test('the systemd unit escapes quotes, specifiers and variable expansion', () =>
 
 test('the scheduled task quotes arguments for Windows and escapes XML', () => {
   const xml = renderScheduledTask(awkward, 'me');
-  assert.ok(xml.includes('<Arguments>&quot;a\\&quot;b%c$d&amp;e&quot;</Arguments>'));
+  assert.ok(xml.includes('<Arguments>--headless &quot;/opt/node/bin/node&quot; &quot;a\\&quot;b%c$d&amp;e&quot;</Arguments>'));
   assert.ok(xml.includes('<UserId>me</UserId>'));
+});
+
+test('the headless task preserves spaces, embedded quotes, trailing slashes and empty arguments', () => {
+  const task = renderScheduledTask({ ...program, argv: [
+    'C:\\Program Files\\node.exe', 'C:\\config & files\\nortuscc.mjs', 'a\\"b', 'C:\\trailing\\', '',
+  ] }, 'me & you');
+  assert.ok(task.includes('<Arguments>--headless &quot;C:\\Program Files\\node.exe&quot; &quot;C:\\config &amp; files\\nortuscc.mjs&quot; &quot;a\\\\\\&quot;b&quot; &quot;C:\\trailing\\\\&quot; &quot;&quot;</Arguments>'));
+  assert.ok(task.includes('<UserId>me &amp; you</UserId>'));
 });

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Effect, Exit, Scope } from 'effect';
-import { rotateAgentLog, startAgentLogRotation } from '../src/log.ts';
+import { captureAgentOutput, rotateAgentLog, startAgentLogRotation } from '../src/log.ts';
 
 const fixture = async (t: { after: (cleanup: () => Promise<void>) => void }) => {
   const root = await fs.mkdtemp(join(tmpdir(), 'agent-log-'));
@@ -164,4 +165,64 @@ test('a rotation failure reports once per check and later checks still rotate', 
   } finally {
     await Effect.runPromise(Scope.close(scope, Exit.void));
   }
+});
+
+const output = () => {
+  const chunks: string[] = [];
+  const stream = new Writable({ write: (chunk, _encoding, done) => { chunks.push(chunk.toString()); done(); } });
+  return { stream, chunks };
+};
+
+test('scoped output capture appends stdout and stderr, preserves callbacks and restores both writers', async (t) => {
+  const path = await fixture(t);
+  await fs.writeFile(path, 'existing\n');
+  const stdout = output();
+  const stderr = output();
+  const originalOut = stdout.stream.write;
+  const originalErr = stderr.stream.write;
+  let intercepted!: typeof originalOut;
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* captureAgentOutput(path, { stdout: stdout.stream, stderr: stderr.stream });
+    intercepted = stdout.stream.write;
+    yield* Effect.promise(async () => {
+      await new Promise<void>((resolve, reject) => stdout.stream.write('stdout\n', (error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) => stderr.stream.write('c3a9', 'hex', (error) => error ? reject(error) : resolve()));
+      assert.equal(stdout.stream.write(Buffer.from(' buffer\n')), true);
+    });
+  })));
+  assert.equal(await fs.readFile(path, 'utf8'), 'existing\nstdout\né buffer\n');
+  assert.deepEqual(stdout.chunks, []);
+  assert.deepEqual(stderr.chunks, []);
+  assert.equal(stdout.stream.write, originalOut);
+  assert.equal(stderr.stream.write, originalErr);
+  stdout.stream.write('restored');
+  assert.deepEqual(stdout.chunks, ['restored']);
+  assert.throws(() => intercepted('closed'), /EBADF/);
+});
+
+test('captured output follows the active file through rotation', async (t) => {
+  const path = await fixture(t);
+  const stdout = output().stream;
+  const stderr = output().stream;
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* captureAgentOutput(path, { stdout, stderr });
+    stdout.write('a'.repeat(1_048_576));
+    yield* Effect.promise(() => rotateAgentLog(path));
+    stderr.write('after rotation\n');
+  })));
+  assert.equal(await fs.readFile(path, 'utf8'), 'after rotation\n');
+  assert.equal(await fs.readFile(path + '.1', 'utf8'), 'a'.repeat(1_048_576));
+});
+
+test('failed capture acquisition leaves the original writers in place', async (t) => {
+  const path = await fixture(t);
+  await fs.mkdir(path);
+  const stdout = output().stream;
+  const stderr = output().stream;
+  const originalOut = stdout.write;
+  const originalErr = stderr.write;
+  const exit = await Effect.runPromiseExit(Effect.scoped(captureAgentOutput(path, { stdout, stderr })));
+  assert.ok(Exit.isFailure(exit));
+  assert.equal(stdout.write, originalOut);
+  assert.equal(stderr.write, originalErr);
 });

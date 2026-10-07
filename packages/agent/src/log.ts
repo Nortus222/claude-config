@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { closeSync, constants, openSync, writeFileSync } from 'node:fs';
 import { Effect } from 'effect';
 
 const absent = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
@@ -62,4 +62,40 @@ export const startAgentLogRotation = (logPath: string, options: {
     };
   }),
   (close) => Effect.promise(close),
+).pipe(Effect.asVoid);
+
+export type AgentLogOutput = {
+  readonly stdout: Pick<NodeJS.WritableStream, 'write'>;
+  readonly stderr: Pick<NodeJS.WritableStream, 'write'>;
+};
+
+// Capture diagnostics in one append descriptor; restore the caller's streams before closing it.
+export const captureAgentOutput = (logPath: string, output: AgentLogOutput) => Effect.acquireRelease(
+  Effect.try({
+    try: () => {
+      const descriptor = openSync(logPath, 'a', 0o600);
+      const stdoutWrite = output.stdout.write;
+      const stderrWrite = output.stderr.write;
+      const write: NodeJS.WritableStream['write'] = (
+        chunk: string | Uint8Array,
+        encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+        callback?: (error?: Error | null) => void,
+      ) => {
+        // Diagnostic writes finish synchronously, so there is no buffer to drain at shutdown.
+        writeFileSync(descriptor, chunk, typeof encodingOrCallback === 'string' ? { encoding: encodingOrCallback } : undefined);
+        const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+        if (done) queueMicrotask(() => done());
+        return true;
+      };
+      output.stdout.write = write;
+      output.stderr.write = write;
+      return () => {
+        output.stdout.write = stdoutWrite;
+        output.stderr.write = stderrWrite;
+        closeSync(descriptor);
+      };
+    },
+    catch: (cause) => new Error(`Could not capture agent output in ${logPath}`, { cause }),
+  }),
+  (close) => Effect.sync(close),
 ).pipe(Effect.asVoid);

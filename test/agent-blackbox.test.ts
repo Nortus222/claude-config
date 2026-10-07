@@ -200,7 +200,7 @@ test('agent run holds the agent lock, refuses a second agent and stops cleanly o
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
   try {
-    assert.ok(await until(() => existsSync(lock), 15_000), `agent.lock never appeared: ${stderr}`);
+    assert.ok(await until(() => existsSync(lock) && stderr.includes('nortuscc agent: running from'), 15_000), `agent never started: ${stderr}`);
     assert.match(stderr, new RegExp(`nortuscc agent: running from .* \\(pid ${child.pid}\\)`));
 
     const second = await runCli(m, ['agent', 'run']);

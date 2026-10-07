@@ -1,3 +1,4 @@
+import { fstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
 import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
@@ -68,8 +69,7 @@ const install = (linger: boolean) =>
       yield* installService(target, program, { linger });
       yield* state.update((s) => ({ ...s, installedBy: 'cli', agentVersion: checkoutVersion() }));
       console.log(`agent installed: ${unitPath(target)}`);
-      // Task Scheduler cannot redirect the agent's output, so nothing writes the log on Windows.
-      if (target.platform !== 'win32') console.log(`log: ${program.logPath}`);
+      console.log(`log: ${program.logPath}`);
       return 0;
     }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
   });
@@ -110,13 +110,21 @@ async function runForeground(): Promise<number> {
     return await Effect.runPromise(Effect.gen(function* () {
       const paths = yield* resolvePaths((m) => console.error(m));
       const lock = join(paths.stateRoot, 'agent', 'agent.lock');
-      console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`);
       // Each job builds its domains from its own paths, so the integrations domain reads the job's
       // snapshot, as ADR 0016 requires.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env: process.env }), skillsDomain];
       // Windows has no socket server yet; there the agent runs without IPC.
       const ipc = process.platform !== 'win32';
-      return yield* runAgent({ paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, signal: controller.signal }).pipe(
+      let redirected = false;
+      if (!ipc) {
+        // Headless console handles may be absent; only a regular file proves existing redirection.
+        try { redirected = fstatSync(process.stdout.fd).isFile(); } catch {}
+      }
+      return yield* runAgent({
+        paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, signal: controller.signal,
+        ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
+        onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
+      }).pipe(
         Effect.as(0),
         Effect.catchTag('LockHeld', (err) => Effect.sync(() => {
           console.error(err.path === lock ? `nortuscc: another agent (pid ${err.pid}) is running` : `nortuscc: ${err.message}`);

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Writable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
@@ -214,8 +215,16 @@ test('a second agent fails LockHeld before it writes anything', async () => {
   const content = 'active'.repeat(200_000);
   writeFileSync(logPath, content);
   for (const suffix of ['1', '2', '3']) writeFileSync(logPath + '.' + suffix, 'archive ' + suffix);
-  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0' }));
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const original = stdout.write;
+  let started = false;
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    logOutput: { stdout, stderr }, onStarted: () => { started = true; },
+  }));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.equal(stdout.write, original);
+  assert.equal(started, false);
   assert.deepEqual(await m.kinds(), []);
   assert.equal(existsSync(lockPath(m)), true);
   assert.equal(readFileSync(logPath, 'utf8'), content);
@@ -344,4 +353,52 @@ test('a second agent with ipc fails LockHeld and leaves the running agent\'s soc
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
   assert.equal(readFileSync(join(dir, 'agent.sock'), 'utf8'), 'live');
   assert.equal(readFileSync(join(dir, 'agent.token'), 'utf8'), 'live');
+});
+
+test('runAgent captures startup output under its lock and restores writers when aborted', async (t) => {
+  const m = agentMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const controller = new AbortController();
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const original = stdout.write;
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    signal: controller.signal, logOutput: { stdout, stderr },
+    onStarted: () => {
+      assert.ok(existsSync(lockPath(m)));
+      stdout.write('started stdout\n');
+      stderr.write('started stderr\n');
+      controller.abort();
+    },
+  }));
+  try {
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('2 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'startup did not capture and finish');
+    assert.equal(readFileSync(logPath, 'utf8'), 'started stdout\nstarted stderr\n');
+    assert.equal(stdout.write, original);
+    assert.equal(existsSync(lockPath(m)), false);
+  } finally {
+    controller.abort();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
+});
+
+test('runAgent records a fatal startup failure before restoring captured output', async (t) => {
+  const m = agentMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const originalOut = stdout.write;
+  const originalErr = stderr.write;
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    logOutput: { stdout, stderr }, onStarted: () => { throw new Error('startup failed'); },
+  }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('startup failed'));
+  assert.match(readFileSync(join(m.paths.stateRoot, 'agent', 'agent.log'), 'utf8'), /Agent failed: startup failed/);
+  assert.equal(stdout.write, originalOut);
+  assert.equal(stderr.write, originalErr);
+  assert.equal(existsSync(lockPath(m)), false);
 });

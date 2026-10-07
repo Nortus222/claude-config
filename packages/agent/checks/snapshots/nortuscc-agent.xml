@@ -25,8 +25,8 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>/opt/node/bin/node</Command>
-      <Arguments>&quot;/Users/me/claude config/bin/nortuscc.mjs&quot; &quot;agent&quot; &quot;run&quot;</Arguments>
+      <Command>%SystemRoot%\System32\conhost.exe</Command>
+      <Arguments>--headless &quot;/opt/node/bin/node&quot; &quot;/Users/me/claude config/bin/nortuscc.mjs&quot; &quot;agent&quot; &quot;run&quot;</Arguments>
       <WorkingDirectory>/Users/me/claude config</WorkingDirectory>
     </Exec>
   </Actions>
