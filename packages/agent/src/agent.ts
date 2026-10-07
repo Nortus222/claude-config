@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Cause, Effect, Layer, Ref } from 'effect';
+import { Cause, Effect, Layer, Ref, Semaphore } from 'effect';
 import {
   acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
 } from '@nortuscc/machine';
@@ -28,6 +28,9 @@ export type AgentHandle = {
   // Calls `listener` with each job's status once it is the latest; answers the unsubscribe. It runs
   // before the job's requests are answered, so it is not ordered relative to their replies.
   readonly onStatus: (listener: (status: AgentStatus) => void) => () => void;
+  // Runs `effect` while no scheduled job runs, holding the next one back until it ends, so a job
+  // run outside the scheduler never overlaps one.
+  readonly exclusive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
 };
 
 const describe = (cause: Cause.Cause<unknown>): string => {
@@ -46,8 +49,11 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const listeners = new Set<(status: AgentStatus) => void>();
     const shutdown = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, shutdown.signal]) : shutdown.signal;
+    // One job at a time, scheduled or not. A scheduled auto-apply that finds apply.lock held skips
+    // rather than waits, so a holder of apply.lock may wait here without a cycle.
+    const jobs = yield* Semaphore.make(1);
     const job = (_triggers: ReadonlyArray<Trigger>) =>
-      runJob(domains, { signal }).pipe(
+      jobs.withPermit(runJob(domains, { signal })).pipe(
         // A failed job is reported, never fatal: the loop must survive failures and defects alike.
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -90,6 +96,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+      exclusive: (effect) => jobs.withPermit(effect),
     };
     return handle;
   });

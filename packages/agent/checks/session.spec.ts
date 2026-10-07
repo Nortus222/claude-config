@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Deferred, Effect, Fiber } from 'effect';
+import { Deferred, Effect, Fiber, Layer } from 'effect';
 import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
 import {
-  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, SessionError, startAgent,
-  type AgentDomain, type AgentDomains, type AgentServices, type AgentSession, type RunProgress,
+  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, SessionError, SetupSource, startAgent,
+  type AgentDomain, type AgentDomains, type AgentHandle, type AgentServices, type AgentSession, type RunProgress,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
@@ -21,6 +21,8 @@ type Options = {
   readonly fixture?: FixtureOptions;
   // Replaces the config domain, so a test can gate or fail a step.
   readonly config?: AgentDomain;
+  // Wraps the fixture's setup source, so a test can watch or slow it.
+  readonly source?: (service: SetupSource['Service']) => SetupSource['Service'];
 };
 
 // A trusted machine whose head adds two accepted settings keys, effortLevel and model. No key has a
@@ -39,12 +41,13 @@ const sessionMachine = async (options: Options = {}) => {
   for (const itemId of [EFFORT, MODEL]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
   const domains: AgentDomains = (paths) => [options.config ?? configDomain, integrationsDomain({ paths, env: {} })];
   const shutdown = new AbortController();
-  const within = <A, E>(body: (session: AgentSession) => Effect.Effect<A, E, AgentServices>) =>
+  const source = options.source ? Layer.succeed(SetupSource, options.source(fixture.service)) : fixture.source;
+  const within = <A, E>(body: (session: AgentSession, agent: AgentHandle) => Effect.Effect<A, E, AgentServices>) =>
     m.run(Effect.scoped(Effect.gen(function* () {
       const agent = yield* startAgent(domains);
       const session = yield* makeSession(agent, { signal: shutdown.signal, domains });
-      return yield* body(session);
-    })), fixture.source);
+      return yield* body(session, agent);
+    })), source);
   const lock = join(m.paths.stateRoot, 'apply.lock');
   return { m, fixture, within, shutdown, lock };
 };
@@ -293,4 +296,28 @@ test('a listener that throws never stops the run: History still brackets it and 
   assert.equal(finished.result, 'done');
   assert.equal(finished.steps.length, 3);
   assert.equal(existsSync(lock), false);
+});
+
+test('a scheduled job and an apply\'s re-inspection never run a job at the same time', async () => {
+  // Every job fetches first; a slow fetch that counts its callers shows any two jobs overlapping.
+  let active = 0;
+  let most = 0;
+  const source = (service: SetupSource['Service']): SetupSource['Service'] => ({
+    ...service,
+    fetch: Effect.sync(() => { most = Math.max(most, ++active); }).pipe(
+      Effect.andThen(Effect.sleep('50 millis')),
+      Effect.andThen(service.fetch),
+      Effect.ensuring(Effect.sync(() => { active--; })),
+    ),
+  });
+  const { within, lock } = await sessionMachine({ source });
+  const result = await within((session, agent) => Effect.gen(function* () {
+    const { planId } = yield* session.preview(yield* configOnly(session));
+    most = 0;
+    const [, run] = yield* Effect.all([agent.request('timer'), startRun(session, planId, lock)], { concurrency: 'unbounded' });
+    yield* Deferred.await(run.ended);
+    return run;
+  }));
+  assert.equal(result.result.status, 'started');
+  assert.equal(most, 1);
 });

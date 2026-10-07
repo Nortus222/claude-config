@@ -144,9 +144,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         return { planId: next.planId, plan: wirePlan(next.plan) };
       });
 
-    // The re-inspection runs outside the scheduler, so it can overlap a scheduled job. That is safe:
-    // apply.lock guards the run (a scheduled auto-apply finds it held and skips), and the revision
-    // verdicts both may record are idempotent to their readers.
+    // The re-inspection runs outside the scheduler but never beside a scheduled job: it waits for the
+    // agent's job permit while holding apply.lock. That cannot deadlock, since a scheduled job holding
+    // the permit never waits for apply.lock: its auto-apply finds it held and skips.
     const apply: AgentSession['apply'] = (planId, actor, listener) =>
       Effect.gen(function* () {
         // A listener's failure is the listener's: it must never stop the run or skip its History bracket.
@@ -184,7 +184,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             Effect.provideContext(context),
             Effect.catchTag('LockHeld', (held) => Effect.fail(new SessionError('LOCKED', `${held.message}; apply again when it finishes`))),
           );
-          const job = yield* runJob(options.domains, { inspectOnly: true }).pipe(
+          const job = yield* handle.exclusive(runJob(options.domains, { inspectOnly: true })).pipe(
             Effect.provideContext(context),
             Effect.mapError((error) => new SessionError('INSPECT_FAILED', describe(error))),
           );
@@ -216,8 +216,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       });
 
     // One run under the held lock: History brackets it, then the lock is released, old backups are
-    // pruned and busy is cleared, and only then is the terminal event emitted. A person saw the run,
-    // so a failed step does not pause auto-apply.
+    // pruned and busy is cleared, and only then is the terminal event emitted. Then a fresh job
+    // brings the agent's status, and its subscribers, up to date with what the run changed. A person
+    // saw the run, so a failed step does not pause auto-apply.
     const execute = (
       inspection: JobInspection, planned: Plan, runId: string, actor: Client, signal: AbortSignal,
       emit: (progress: RunProgress) => void, release: Effect.Effect<void>, clear: Effect.Effect<void>,
@@ -241,6 +242,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         if (Exit.isSuccess(exit)) yield* pruneBackups(now, actor).pipe(Effect.ignore);
         yield* clear;
         if (terminal) emit(terminal);
+        if (!shutdown.aborted) yield* Effect.forkIn(handle.request('inspect'), runs);
       }).pipe(Effect.provideContext(context));
 
     const session: AgentSession = {
