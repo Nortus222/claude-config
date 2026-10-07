@@ -368,6 +368,20 @@ impl Agent {
             if !self.inner.alive.load(Ordering::SeqCst) { return Err("Agent disconnected; restart explicitly".into()); }
             pending.insert(id.clone(), sender);
         }
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let expired = timed_out.clone();
+        let watch = self.inner.clone();
+        // Dropping this sender cancels the watchdog on every success, refusal and early error.
+        let (_cancel_deadline, wait_deadline) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            if matches!(
+                wait_deadline.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                expired.store(true, Ordering::SeqCst);
+                watch.disconnect("Agent request timed out; restart explicitly");
+            }
+        });
         let written = (|| -> Result<(), String> {
             let mut socket = loop {
                 if let Ok(socket) = self.inner.socket.try_lock() { break socket; }
@@ -381,11 +395,21 @@ impl Agent {
             socket.write_all(record.as_bytes()).map_err(|_| "Agent write failed".into())
         })();
         if let Err(error) = written {
+            let error = if timed_out.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                "Agent request timed out; restart explicitly".into()
+            } else {
+                error
+            };
             self.inner.disconnect(&error);
+            self.inner.pending.lock().unwrap().remove(&id);
             return Err(error);
         }
         match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(result) => {
+                if timed_out.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                    self.inner.disconnect("Agent request timed out; restart explicitly");
+                    return Err("Agent request timed out; restart explicitly".into());
+                }
                 let result = result?;
                 if is_status {
                     if let Err(error) = validate_status(&result) {
@@ -535,6 +559,7 @@ pub(crate) mod fixtures {
             Self { reader: BufReader::new(socket.try_clone().unwrap()), writer: socket }
         }
         pub fn next(&mut self) -> Option<Value> { bounded_line(&mut self.reader).unwrap().map(|line| serde_json::from_slice(&line).unwrap()) }
+        pub fn read_bytes(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> { std::io::Read::read(&mut self.reader, buffer) }
         pub fn discard_until_close(&mut self) { let mut bytes = Vec::new(); let _ = std::io::Read::read_to_end(&mut self.reader, &mut bytes); }
         pub fn raw(&mut self, bytes: &[u8]) { self.writer.write_all(bytes).unwrap(); }
         pub fn send(&mut self, value: Value) { self.raw(format!("{value}\n").as_bytes()); }
@@ -582,6 +607,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod socket_tests {
     use super::*;
+    use std::os::fd::AsRawFd;
     use super::fixtures::*;
     #[test]
     fn hello_is_strict_and_requires_all_fields() {
@@ -725,6 +751,87 @@ mod socket_tests {
         assert!(writer.join().unwrap().is_err());
         drop(agent); fixture.finish();
         assert!(timely, "Closing the app must interrupt a blocked socket writer");
+    }
+    #[test]
+    fn slow_drain_cannot_extend_request_write_deadline() {
+        use std::os::fd::AsRawFd;
+        let fixture = Fixture::new(|mut wire| {
+            wire.handshake();
+            let mut buffer = [0u8; 1024];
+            loop {
+                thread::sleep(Duration::from_millis(20));
+                match wire.read_bytes(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => {},
+                    Err(error) => panic!("Slow reader failed: {error}"),
+                }
+            }
+        });
+        let agent = fixture.connect(Arc::new(|_| {}));
+        let socket = agent.inner.socket.lock().unwrap();
+        let size: libc::c_int = 1024;
+        assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
+        drop(socket);
+        let start = Instant::now();
+        let result = agent.request_timeout(Request::Preview { exclude: vec!["x".repeat(500); 128] }, Duration::from_millis(100));
+        let elapsed = start.elapsed();
+        let disconnected = !agent.is_connected();
+        let pending_empty = agent.inner.pending.lock().unwrap().is_empty();
+        let future = agent.request(Request::Cancel);
+        drop(agent); fixture.finish();
+        assert!(result.as_ref().err().is_some_and(|error| error.contains("timed out")), "An unfinished request must time out: {result:?}");
+        assert!(pending_empty, "Timed-out writes must reject and clear pending requests");
+        assert!(future.is_err(), "Disconnected requests must never be replayed");
+        assert!(disconnected, "A timed-out request must close the connection");
+        assert!(elapsed < Duration::from_millis(500), "Slow drain extended a 100ms deadline to {elapsed:?}");
+    }
+    #[test]
+    fn queued_request_deadline_includes_waiting_for_the_writer() {
+        let (release, held) = mpsc::channel();
+        let fixture = Fixture::new(move |mut wire| {
+            wire.handshake(); held.recv().unwrap(); wire.discard_until_close();
+        });
+        let agent = Arc::new(fixture.connect(Arc::new(|_| {})));
+        let socket = agent.inner.socket.lock().unwrap();
+        let size: libc::c_int = 1024;
+        assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
+        drop(socket);
+        let writing = agent.clone();
+        let writer = thread::spawn(move || writing.request(Request::Preview { exclude: vec!["x".repeat(500); 128] }));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while agent.inner.socket.try_lock().is_ok() { assert!(Instant::now() < deadline); thread::sleep(Duration::from_millis(1)); }
+        let start = Instant::now();
+        let result = agent.request_timeout(Request::Inspect, Duration::from_millis(60));
+        let elapsed = start.elapsed();
+        release.send(()).unwrap(); assert!(writer.join().unwrap().is_err());
+        let pending_empty = agent.inner.pending.lock().unwrap().is_empty();
+        let disconnected = !agent.is_connected();
+        drop(agent); fixture.finish();
+        assert!(result.as_ref().err().is_some_and(|error| error.contains("timed out")));
+        assert!(elapsed < Duration::from_millis(500), "Writer wait extended a 60ms deadline to {elapsed:?}");
+        assert!(pending_empty && disconnected);
+    }
+    #[test]
+    fn completed_and_refused_requests_cancel_their_deadline_watchdog() {
+        for refused in [false, true] {
+            let fixture = Fixture::new(|mut wire| {
+                wire.handshake();
+                while let Some(request) = wire.next() {
+                    if request["command"] == "apply" { wire.error(&request, "PAUSED"); }
+                    else { wire.reply(&request, json!({"command":request["command"]})); }
+                }
+            });
+            let agent = fixture.connect(Arc::new(|_| {}));
+            let request = if refused { Request::Apply { plan_id: "p".into() } } else { Request::Inspect };
+            let result = agent.request_timeout(request, Duration::from_millis(100));
+            if refused { assert_eq!(result.unwrap_err(), "PAUSED: refused"); }
+            else { assert_eq!(result.unwrap()["command"], "inspect"); }
+            assert!(agent.request(Request::Preview { exclude: vec![String::new()] }).is_err());
+            thread::sleep(Duration::from_millis(150));
+            assert!(agent.is_connected(), "A cancelled watchdog must leave the connection live");
+            assert_eq!(agent.request(Request::Inspect).unwrap()["command"], "inspect");
+            drop(agent); fixture.finish();
+        }
     }
     #[test]
     fn command_timeout_closes_socket_and_rejects_future_requests() {
