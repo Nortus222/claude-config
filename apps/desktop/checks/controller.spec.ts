@@ -38,7 +38,7 @@ test('connect subscribes, learns the generation, then inspects', async () => {
   const f = fake({ inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  assert.deepEqual(f.calls.map(([name]) => name), ['subscribe', 'agent_generation', 'agent_status', 'inspect_machine']);
+  assert.deepEqual(f.calls.map(([name]) => name), ['subscribe', 'agent_generation', 'take_review_request', 'agent_status', 'inspect_machine']);
   assert.equal(c.state.connection, 'connected');
   assert.equal(c.snapshot().inspection?.items.length, 1);
 });
@@ -612,4 +612,126 @@ test('the shared Cancel button gate enables connected external activity and refu
   ] as const) {
     assert.equal(canCancel({ ...c.state, connection, status: { ...status({ applying }), policy: 'notify' }, run: null }), expected);
   }
+});
+
+const review = (generation = 1): HostEvent => ({ generation, event: 'review-requested' } as HostEvent);
+const settle = () => new Promise((done) => setTimeout(done, 0));
+
+test('review requests focus and refresh without preview, apply or cancel', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  f.emit(review(2));
+  assert.equal(c.state.reviewRequested, 0);
+  f.emit(review());
+  await settle();
+  assert.equal(c.state.reviewRequested, 1);
+  assert.equal(f.calls.filter(([name]) => name === 'take_review_request').length, 2, 'live route consumes its native pending flag');
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 2);
+  assert.equal(f.calls.some(([name]) => ['preview_plan', 'apply_plan', 'cancel_apply'].includes(name)), false);
+});
+
+for (const pending of [false, true]) test(`startup preserves ${pending ? 'native pending' : 'preconnect event'} review routing`, async () => {
+  const f = fake({
+    agent_generation: () => { if (!pending) { f.emit(review(2)); f.emit(review()); } return null; },
+    take_review_request: () => ({ requested: pending }),
+    inspect_machine: () => inspection(['config:a']),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.reviewRequested, 1);
+  assert.equal(c.state.inspection?.items.length, 1);
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
+});
+
+test('an optional native route failure leaves the agent connected', async () => {
+  const f = fake({ take_review_request: () => { throw new Error('CLOSED: route unavailable'); }, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'connected');
+  assert.equal(c.state.inspection?.items.length, 1);
+});
+
+test('review during a pending refresh waits and then refreshes safely', async () => {
+  const refresh = deferred<unknown>();
+  let count = 0;
+  const f = fake({ inspect_machine: () => ++count === 2 ? refresh.promise : inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  const inspecting = c.inspect();
+  await settle();
+  f.emit(review());
+  assert.equal(count, 2);
+  assert.equal(c.state.reviewRequested, 1);
+  refresh.resolve(inspection(['config:a']));
+  await inspecting;
+  await settle();
+  assert.equal(count, 3);
+});
+
+test('review during apply waits for idle without cancelling or replacing the run', async () => {
+  let applying = false;
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  applying = true;
+  f.emit(review());
+  await settle();
+  assert.equal(c.state.run?.runId, 'r1');
+  assert.equal(c.state.run?.outcome, 'running');
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
+  applying = false;
+  f.emit(event('r1', { type: 'done', ok: 1, failed: 0 }));
+  await settle();
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 2);
+  assert.equal(f.calls.some(([name]) => name === 'cancel_apply'), false);
+});
+
+test('a pending route reply from another generation cannot request review', async () => {
+  const f = fake({ take_review_request: () => ({ requested: true }), inspect_machine: () => inspection(['config:a']) });
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation: command === 'take_review_request' ? 2 : 1 }) };
+  const c = new MachineController(bridge);
+  await c.connect();
+  assert.equal(c.state.reviewRequested, 0);
+});
+
+test('review during external apply refreshes after authoritative idle', async () => {
+  let applying = true;
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  f.emit(review());
+  await settle();
+  assert.equal(f.calls.some(([name]) => name === 'inspect_machine'), false);
+  applying = false;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
+  await settle();
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
+  assert.equal(c.state.reviewRequested, 1);
+});
+
+test('browser preview remains inert', async () => {
+  const c = new MachineController(null);
+  await c.connect();
+  await c.inspect();
+  await c.previewPlan();
+  await c.apply();
+  assert.equal(c.state.connection, 'browser');
+  assert.equal(c.state.reviewRequested, 0);
+  assert.equal(c.state.inspection, null);
+});
+
+test('a review refresh refusal is visible and does not retry indefinitely', async () => {
+  let statuses = 0;
+  const f = fake({ agent_status: () => { if (++statuses > 1) throw new Error('INTERNAL: status unavailable'); return status(); }, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  f.emit(review());
+  await settle();
+  assert.equal(statuses, 2);
+  assert.equal(c.state.pending, false);
+  assert.equal(c.state.connection, 'connected');
+  assert.match(c.state.detail, /status unavailable/);
 });

@@ -25,6 +25,7 @@ export class ServeFailed extends Data.TaggedError('ServeFailed')<{ readonly reas
 
 // How long a new connection may stay silent before it is closed.
 export const HANDSHAKE_MS = 10_000;
+const NOTIFICATION_ACK_MS = 5000;
 const MAX_NOTE_LENGTH = 4096;
 // How long a refused connection may take to read its refusal.
 const REFUSED_MS = 1000;
@@ -198,8 +199,8 @@ export const serveIpc = (input: {
             conn.pendingNotification = undefined;
             resume(Effect.succeed(delivered));
           };
-          const timer = setTimeout(() => finish(false), input.notificationTimeoutMs ?? 1000);
-          conn.pendingNotification = { id: notification.id, receipt, deadline: Date.now() + (input.notificationTimeoutMs ?? 1000), finish };
+          const timer = setTimeout(() => finish(false), input.notificationTimeoutMs ?? NOTIFICATION_ACK_MS);
+          conn.pendingNotification = { id: notification.id, receipt, deadline: Date.now() + (input.notificationTimeoutMs ?? NOTIFICATION_ACK_MS), finish };
           const message = { version: PROTOCOL_VERSION, event: 'notification', notification, receipt };
           event(conn, message);
           return Effect.sync(() => finish(false));

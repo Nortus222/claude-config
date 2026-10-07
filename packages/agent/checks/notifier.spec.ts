@@ -216,3 +216,15 @@ test('a late helper ACK cannot acknowledge a later retry of the same durable bat
   assert.notEqual(receipts[0], receipts[1]);
   for (const receipt of receipts) assert.match(receipt, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
 });
+
+test('bounded notification text preserves whole Unicode characters at the UTF16 limit', async (t) => {
+  const f = fixture(t); const n = await f.create(); const seen: Notification[] = [];
+  n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  await Effect.runPromise(n.notify(status([], { error: 'JOB_FAILED', detail: 'x'.repeat(499) + '😀' })));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.body, 'x'.repeat(499));
+  assert.ok(seen[0]!.body.length <= 500);
+  await Effect.runPromise(n.notify(status([], { error: 'JOB_FAILED', detail: 'x'.repeat(498) + '😀' })));
+  assert.equal(seen[1]!.body, 'x'.repeat(498) + '😀');
+  assert.equal(seen[1]!.body.length, 500);
+});

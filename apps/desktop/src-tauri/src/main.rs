@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod notifications;
 use host::{Agent, Request, Setup};
 use serde_json::{json, Value};
 use std::{
@@ -20,16 +21,45 @@ struct Owner {
     lifecycle: Mutex<()>,
     resources: PathBuf,
     app: tauri::AppHandle,
+    review: Arc<notifications::ReviewRoute>,
 }
 impl Owner {
-    fn connect(&self, generation: u64, setup: Setup) -> Result<Agent, String> {
+    fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<Agent, String> {
         let state_root = host::setup_agent(&self.resources, setup)?;
         let app = self.app.clone();
-        Agent::connect_ready(&state_root, Arc::new(move |mut event| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let agent = Agent::connect_ready(&state_root, Arc::new(move |mut event| {
+            if event["event"] == "notification" {
+                if let Ok(delivery) = notifications::Delivery::decode(event) { let _ = send.send(delivery); }
+                return;
+            }
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
-        }))
+        }))?;
+        let owner = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            while let Ok(delivery) = receive.recv() {
+                let Some(owner) = owner.upgrade() else { return; };
+                let _ = deliver_current(&owner.session, &owner.lifecycle, generation, delivery, &notifications::post);
+            }
+        });
+        Ok(agent)
     }
+}
+/// Startup events wait for publication; posting and ACK never run on the socket reader.
+fn deliver_current(session: &Mutex<Session>, lifecycle: &Mutex<()>, mine: u64, delivery: notifications::Delivery, post: &notifications::Poster<'_>) -> Result<bool, String> {
+    let agent = {
+        let _lifecycle = lifecycle.lock().unwrap();
+        let current = session.lock().unwrap();
+        if current.closed || current.generation != mine { return Ok(false); }
+        current.agent.clone().ok_or(UNAVAILABLE)?
+    };
+    let deadline = delivery.received_at + std::time::Duration::from_secs(3);
+    let active = || {
+        let current = session.lock().unwrap();
+        !current.closed && current.generation == mine && agent.is_connected() && std::time::Instant::now() < deadline
+    };
+    notifications::deliver(&agent, &delivery.notification, &delivery.receipt, &active, post)
 }
 /// Holds the session lock only to read the connection and generation.
 fn request(session: &Mutex<Session>, request: Request) -> Result<Value, String> {
@@ -123,6 +153,34 @@ async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, Str
     let owner = owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || restart(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart))).await.map_err(|e| e.to_string())?
 }
+#[tauri::command]
+fn take_review_request(owner: tauri::State<'_, Arc<Owner>>) -> Value {
+    let current = owner.session.lock().unwrap();
+    json!({"generation":current.generation,"data":{"requested":owner.review.take()}})
+}
+fn show_review(app: tauri::AppHandle) {
+    let dispatch = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = dispatch.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        if let Some(owner) = dispatch.try_state::<Arc<Owner>>() {
+            let generation = owner.session.lock().unwrap().generation;
+            let _ = dispatch.emit("machine-agent", json!({"event":"review-requested","generation":generation}));
+        }
+    });
+}
+/// Hidden delivery resolves paths through the read-only helper before a direct app connection.
+fn notify_mode(id: &str) -> Result<bool, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let executable = std::env::current_exe().map_err(|e|e.to_string())?;
+    let contents = executable.parent().and_then(|p|p.parent()).ok_or("Missing app resources")?;
+    let resources = contents.join("Resources/agent-runtime");
+    let state_root = host::setup_agent(&resources, Setup::Paths)?;
+    notifications::notify_only(&state_root, id, deadline, notifications::post)
+}
 /// Smoke may apply only inside a canonicalized throwaway HOME under the system temporary root.
 fn smoke_home(arg: Option<&str>) -> Result<PathBuf, String> {
     let arg = arg.ok_or("Usage: --smoke <temporary HOME> [resources]")?;
@@ -165,25 +223,48 @@ fn smoke(home: PathBuf) -> Result<(), String> {
     Ok(())
 }
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match notifications::notify_argument(&args) {
+        Ok(Some(id)) => {
+            match notify_mode(&id) {
+                Ok(true) => {},
+                Ok(false) => std::process::exit(1),
+                Err(error) => { eprintln!("Notification failed: {error}"); std::process::exit(1); }
+            }
+            return;
+        }
+        Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        Ok(None) => {},
+    }
     if std::env::args().nth(1).as_deref() == Some("--smoke") {
         let result = smoke_home(std::env::args().nth(2).as_deref()).and_then(smoke);
         if let Err(error) = result { eprintln!("Smoke failed: {error}"); std::process::exit(1); }
         return;
     }
+    let review = Arc::new(notifications::ReviewRoute::default());
+    let handle = Arc::new(Mutex::new(None::<tauri::AppHandle>));
+    let click_review = review.clone();
+    let click_handle = handle.clone();
+    let _delegate = notifications::install(Arc::new(move || {
+        click_review.request();
+        if let Some(app) = click_handle.lock().unwrap().clone() { show_review(app); }
+    }));
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
+            *handle.lock().unwrap() = Some(app.handle().clone());
             let resources = app.path().resource_dir()?.join("agent-runtime");
             #[cfg(debug_assertions)]
             let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
             let owner = Arc::new(Owner {
                 session: Mutex::new(Session { agent: None, generation: 0, error: None, closed: false }),
-                lifecycle: Mutex::new(()), resources, app: app.handle().clone(),
+                lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),
             });
+            app.manage(owner.clone());
+            notifications::request_permission();
             if let Err(error) = restart(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Ensure)) { eprintln!("Agent startup failed: {error}"); }
-            app.manage(owner);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent])
+        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
@@ -200,6 +281,54 @@ mod tests {
     use host::fixtures::{idle_agent, Fixture};
     use std::{sync::mpsc, thread, time::{Duration, Instant}};
     fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false }) }
+    #[test]
+    fn startup_notification_waits_for_publication_and_acks_off_reader() {
+        let (sent, received) = mpsc::channel();
+        let fixture = Fixture::new(|mut wire| {
+            let hello = wire.next().unwrap(); wire.reply(&hello, host::fixtures::hello_result());
+            let subscribe = wire.next().unwrap();
+            wire.send(json!({"version":3,"event":"notification","notification":{"id":"a".repeat(64),"title":"Review","body":"Items"},"receipt":"r"}));
+            wire.reply(&subscribe, json!({"subscribed":true}));
+            let ack = wire.next().unwrap(); assert_eq!(ack["command"],"notificationAck"); assert_eq!(ack["delivered"],true);
+            wire.reply(&ack,json!({"accepted":true})); assert!(wire.next().is_none());
+        });
+        let session = Arc::new(session(1)); let lifecycle = Arc::new(Mutex::new(()));
+        let held = lifecycle.lock().unwrap();
+        let agent = fixture.connect(Arc::new(move |event| {
+            if event["event"] == "notification" { sent.send(notifications::Delivery::decode(event).unwrap()).unwrap(); }
+        }));
+        let delivery = received.recv_timeout(Duration::from_secs(1)).unwrap();
+        let s = session.clone(); let l = lifecycle.clone();
+        let worker = thread::spawn(move || deliver_current(&s,&l,1,delivery,&|_,active| active()));
+        session.lock().unwrap().agent = Some(Arc::new(agent));
+        drop(held);
+        assert!(worker.join().unwrap().unwrap()); close(&session); fixture.finish();
+    }
+    #[test]
+    fn superseded_notification_never_posts_and_restart_during_post_never_acks() {
+        for stale_before_post in [true,false] {
+            let (agent, fixture) = idle_agent(); let session = session(2); let lifecycle = Mutex::new(());
+            session.lock().unwrap().agent = Some(Arc::new(agent));
+            let delivery = notifications::Delivery::decode(json!({"version":3,"event":"notification","notification":{"id":"a".repeat(64),"title":"Review","body":"Items"},"receipt":"r"})).unwrap();
+            let mine = if stale_before_post {1} else {2};
+            let posted = std::sync::atomic::AtomicBool::new(false);
+            assert!(!deliver_current(&session,&lifecycle,mine,delivery,&|_,active| {
+                assert!(active()); posted.store(true,std::sync::atomic::Ordering::SeqCst);
+                close(&session); assert!(!active()); true
+            }).unwrap());
+            assert_eq!(posted.load(std::sync::atomic::Ordering::SeqCst),!stale_before_post);
+            close(&session); fixture.finish();
+        }
+    }
+    #[test]
+    fn expired_queued_notification_never_starts_posting() {
+        let (agent, fixture) = idle_agent(); let session = session(1); let lifecycle = Mutex::new(());
+        session.lock().unwrap().agent = Some(Arc::new(agent));
+        let mut delivery = notifications::Delivery::decode(json!({"version":3,"event":"notification","notification":{"id":"a".repeat(64),"title":"Review","body":"Items"},"receipt":"r"})).unwrap();
+        delivery.received_at = Instant::now() - Duration::from_secs(4);
+        assert!(!deliver_current(&session,&lifecycle,1,delivery,&|_,_|panic!("Expired delivery must not post")).unwrap());
+        close(&session); fixture.finish();
+    }
     #[test]
     fn smoke_home_requires_a_directory_under_the_canonical_system_temporary_root() {
         assert!(smoke_home(None).is_err());

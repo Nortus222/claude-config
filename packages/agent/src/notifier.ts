@@ -18,6 +18,7 @@ type Store = { version: 1; batches: Record<string, Batch> };
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const hash = (ids: readonly string[]) => createHash('sha256').update(JSON.stringify([...new Set(ids)].sort())).digest('hex');
 const identity = (...parts: string[]) => JSON.stringify(parts);
+const boundedText = (text: string, limit: number) => text.slice(0, limit).replace(/[\uD800-\uDBFF]$/, '');
 
 // Invalid state is preserved, never silently replaced with an empty delivery ledger.
 const decode = (text: string | undefined): Store | undefined => {
@@ -114,7 +115,7 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
       const unique = [...new Set(identities)].sort();
       const id = hash(unique);
       if (Object.hasOwn(store.batches, id)) return;
-      const batch: Batch = { notification: { id, title: title.slice(0, 100), body: body.slice(0, 500) }, identities: unique, delivered: false };
+      const batch: Batch = { notification: { id, title: boundedText(title, 100), body: boundedText(body, 500) }, identities: unique, delivered: false };
       store.batches[id] = batch;
       yield* save(store); // Lookup payload is durable before either app delivery path starts.
       yield* post(batch);

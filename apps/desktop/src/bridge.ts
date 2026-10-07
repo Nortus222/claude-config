@@ -4,8 +4,8 @@ import { Schema } from 'effect';
 import { decodeMessage, type RunEvent, type StatusEvent } from '@nortuscc/agent/ipc/protocol';
 
 // The renderer's whole reach: these commands, with opaque keys and plan ids as their only arguments.
-export type Command = 'agent_generation' | 'agent_status' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_agent';
-export type HostEvent = (RunEvent | StatusEvent | { event: 'disconnected'; detail: string }) & { generation: number };
+export type Command = 'agent_generation' | 'agent_status' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_agent' | 'take_review_request';
+export type HostEvent = (RunEvent | StatusEvent | { event: 'disconnected'; detail: string } | { event: 'review-requested' }) & { generation: number };
 export type Envelope = { generation: number; data: unknown };
 export interface Bridge {
   subscribe(receive: (event: HostEvent) => void): Promise<() => void>;
@@ -14,6 +14,7 @@ export interface Bridge {
 
 const Generation = Schema.Int.check(Schema.isGreaterThan(0));
 const HostEnvelope = Schema.Struct({ generation: Generation, data: Schema.Unknown });
+const ReviewRequested = Schema.Struct({ event: Schema.Literal('review-requested') });
 const Disconnected = Schema.Struct({ event: Schema.Literal('disconnected'), detail: Schema.String });
 
 export function decodeHostEvent(value: unknown): HostEvent {
@@ -22,6 +23,8 @@ export function decodeHostEvent(value: unknown): HostEvent {
   const checked = Schema.decodeUnknownSync(Generation)(generation);
   if ('event' in message && message.event === 'disconnected')
     return { ...Schema.decodeUnknownSync(Disconnected, { onExcessProperty: 'error' })(message), generation: checked };
+  if ('event' in message && message.event === 'review-requested')
+    return { ...Schema.decodeUnknownSync(ReviewRequested, { onExcessProperty: 'error' })(message), generation: checked };
   const decoded = decodeMessage(message);
   if (!('event' in decoded) || decoded.event === 'notification') throw new Error('Expected an agent event');
   return { ...decoded, generation: checked };

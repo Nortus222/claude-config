@@ -33,6 +33,8 @@ pub enum Request {
     Cancel,
     Hello { token: String },
     Subscribe,
+    Notification { notification_id: String },
+    NotificationAck { notification_id: String, receipt: String, delivered: bool },
 }
 impl Request {
     fn command(&self) -> &'static str {
@@ -44,6 +46,8 @@ impl Request {
             Self::Cancel => "cancel",
             Self::Hello { .. } => "hello",
             Self::Subscribe => "subscribe",
+            Self::Notification { .. } => "notification",
+            Self::NotificationAck { .. } => "notificationAck",
         }
     }
     fn timeout(&self) -> Duration {
@@ -51,6 +55,7 @@ impl Request {
             Self::Inspect | Self::Apply { .. } => Duration::from_secs(60),
             Self::Cancel => Duration::from_secs(30),
             Self::Hello { .. } => HELLO_TIMEOUT,
+            Self::NotificationAck { .. } => Duration::from_secs(1),
             _ => Duration::from_secs(10),
         }
     }
@@ -71,6 +76,15 @@ impl Request {
                 if token.is_empty() || token.encode_utf16().count() > 200 { return Err("Invalid agent token".into()); }
                 record["token"] = json!(token);
                 record["client"] = json!("app");
+            }
+            Self::Notification { notification_id } | Self::NotificationAck { notification_id, .. } => {
+                if !crate::notifications::valid_id(notification_id) { return Err("Invalid notification id".into()); }
+                record["notificationId"] = json!(notification_id);
+                if let Self::NotificationAck { receipt, delivered, .. } = self {
+                    if !crate::notifications::valid_receipt(receipt) { return Err("Invalid notification receipt".into()); }
+                    record["receipt"] = json!(receipt);
+                    record["delivered"] = json!(delivered);
+                }
             }
             _ => {}
         }
@@ -220,7 +234,9 @@ struct ProtocolError {
 fn valid_id(value: &str) -> bool { !value.is_empty() && value.encode_utf16().count() <= 100 }
 fn validate(message: &Value) -> Result<(), String> {
     if message.get("event").is_some() {
-        if message["event"] == "status" {
+        if message["event"] == "notification" {
+            crate::notifications::Delivery::decode(message.clone())?;
+        } else if message["event"] == "status" {
             let m: StatusEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid status event")?;
             if m.version != 3 || m.event != "status" { return Err("Invalid status event contract".into()); }
             let _ = m.status;
@@ -284,9 +300,9 @@ impl Agent {
         Self::connect_timeout(state_root, emit, HELLO_TIMEOUT)
     }
     fn connect_timeout(state_root: &Path, emit: Emit, hello_timeout: Duration) -> Result<Self, String> {
-        Self::connect_deadline(state_root, emit, hello_timeout, None)
+        Self::connect_deadline(state_root, emit, hello_timeout, None, true)
     }
-    fn connect_deadline(state_root: &Path, emit: Emit, hello_timeout: Duration, deadline: Option<Instant>) -> Result<Self, String> {
+    fn connect_deadline(state_root: &Path, emit: Emit, hello_timeout: Duration, deadline: Option<Instant>, subscribe: bool) -> Result<Self, String> {
         let remaining = |limit: Duration| deadline.map_or(limit, |end| limit.min(end.saturating_duration_since(Instant::now())));
         let directory = state_root.join("agent");
         let token = std::fs::read_to_string(directory.join("agent.token")).map_err(|e| format!("UNREACHABLE: Agent token: {e}"))?;
@@ -334,8 +350,11 @@ impl Agent {
         let hello = agent.request_timeout(Request::Hello { token }, remaining(hello_timeout))?;
         validate_hello(&hello)?;
         agent.hello = hello;
-        agent.request_timeout(Request::Subscribe, remaining(Request::Subscribe.timeout()))?;
+        if subscribe { agent.request_timeout(Request::Subscribe, remaining(Request::Subscribe.timeout()))?; }
         Ok(agent)
+    }
+    pub fn connect_notification(state_root: &Path, deadline: Instant) -> Result<Self, String> {
+        Self::connect_deadline(state_root, Arc::new(|_| {}), HELLO_TIMEOUT, Some(deadline), false)
     }
     pub fn connect_ready(state_root: &Path, emit: Emit) -> Result<Self, String> {
         Self::connect_ready_timeout(state_root, emit, READY_TIMEOUT)
@@ -343,7 +362,7 @@ impl Agent {
     fn connect_ready_timeout(state_root: &Path, emit: Emit, timeout: Duration) -> Result<Self, String> {
         let deadline = Instant::now() + timeout;
         loop {
-            match Self::connect_deadline(state_root, emit.clone(), HELLO_TIMEOUT, Some(deadline)) {
+            match Self::connect_deadline(state_root, emit.clone(), HELLO_TIMEOUT, Some(deadline), true) {
                 Ok(agent) => return Ok(agent),
                 Err(error) if error.starts_with("UNREACHABLE:") => {
                     if Instant::now() >= deadline { return Err(error); }
@@ -352,6 +371,9 @@ impl Agent {
                 Err(error) => return Err(error),
             }
         }
+    }
+    pub fn request_before(&self, request: Request, deadline: Instant) -> Result<Value, String> {
+        self.request_timeout(request, deadline.saturating_duration_since(Instant::now()))
     }
     pub fn request(&self, request: Request) -> Result<Value, String> {
         let timeout = request.timeout();
@@ -443,12 +465,14 @@ impl Drop for Agent {
 pub enum Setup {
     Ensure,
     Restart,
+    Paths,
 }
 impl Setup {
     fn argument(self) -> &'static str {
         match self {
             Self::Ensure => "--ensure",
             Self::Restart => "--restart",
+            Self::Paths => "--paths",
         }
     }
 }
@@ -463,7 +487,9 @@ fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result
     let script = resources.join("agent.mjs");
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
-    command.arg(script).arg(setup.argument()).arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?).current_dir(resources)
+    command.arg(script).arg(setup.argument());
+    if !matches!(setup, Setup::Paths) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(home) = home {
@@ -478,7 +504,7 @@ fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
-    run_helper(helper_command(resources, setup, None)?, HELPER_TIMEOUT)
+    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(3) } else { HELPER_TIMEOUT })
 }
 fn run_helper(mut command: Command, timeout: Duration) -> Result<PathBuf, String> {
     let mut child = command.spawn().map_err(|e| e.to_string())?;
@@ -921,6 +947,14 @@ mod helper_tests {
         root
     }
     #[test]
+    fn paths_helper_has_no_registration_arguments() {
+        let root = resources(r#"[ "$#" = 2 ] || exit 9
+[ "$2" = --paths ] || exit 8
+printf '%s\n' '{"stateRoot":"/tmp/read-only-state"}'"#);
+        assert_eq!(run_helper(helper_command(&root,Setup::Paths,None).unwrap(),Duration::from_secs(1)).unwrap(),PathBuf::from("/tmp/read-only-state"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn fixed_helper_arguments_and_strict_output_determine_the_state_root() {
         let root = resources(r#"[ "$1" = "$PWD/agent.mjs" ] || exit 9
 case "$2" in --ensure|--restart) ;; *) exit 8;; esac
@@ -975,5 +1009,30 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         assert!(run_helper(helper_command(&root, Setup::Ensure, None).unwrap(), Duration::from_millis(500)).unwrap_err().contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(1));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    #[test]
+    fn fixed_notification_requests_reject_invalid_ids_and_receipts() {
+        let id = "a".repeat(64);
+        let request: Value = serde_json::from_str(&Request::Notification {notification_id:id.clone()}.record("1").unwrap()).unwrap();
+        assert_eq!(request,json!({"version":3,"id":"1","command":"notification","notificationId":id}));
+        let ack: Value = serde_json::from_str(&Request::NotificationAck {notification_id:id.clone(),receipt:"r".into(),delivered:false}.record("2").unwrap()).unwrap();
+        assert_eq!(ack,json!({"version":3,"id":"2","command":"notificationAck","notificationId":id,"receipt":"r","delivered":false}));
+        assert!(Request::Notification {notification_id:"path".into()}.record("1").is_err());
+        for receipt in [String::new(),"r".repeat(101)] { assert!(Request::NotificationAck {notification_id:id.clone(),receipt,delivered:true}.record("1").is_err()); }
+    }
+    #[test]
+    fn notification_event_is_strict_and_bounded() {
+        let good = json!({"version":3,"event":"notification","notification":{"id":"a".repeat(64),"title":"Review","body":"Items"},"receipt":"receipt"});
+        assert!(validate(&good).is_ok());
+        for (pointer, value) in [("/notification/id", json!("A".repeat(64))), ("/notification/title", json!("a".repeat(101))), ("/notification/body", json!("a".repeat(501))), ("/receipt",json!("")), ("/receipt",json!("a".repeat(101)))] {
+            let mut bad = good.clone(); *bad.pointer_mut(pointer).unwrap() = value; assert!(validate(&bad).is_err());
+        }
+        for field in ["extra", "received_at"] { let mut bad = good.clone(); bad[field] = json!(true); assert!(validate(&bad).is_err()); }
+        let mut bad = good; bad["notification"]["extra"] = json!(true); assert!(validate(&bad).is_err());
     }
 }

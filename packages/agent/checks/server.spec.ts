@@ -85,6 +85,7 @@ const ask = async (client: Client, command: object) => {
 
 type Options = {
   readonly notifier?: Notifier;
+  readonly notificationTimeoutMs?: number | null;
   readonly paused?: boolean;
   readonly config?: AgentDomain;
   readonly handshakeMs?: number;
@@ -124,7 +125,7 @@ const serverMachine = async (options: Options = {}) => {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      notifier: options.notifier, notificationTimeoutMs: 80, paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
+      notifier: options.notifier, ...(options.notificationTimeoutMs === null ? {} : { notificationTimeoutMs: options.notificationTimeoutMs ?? 80 }), paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
       ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
     });
     if (options.starting === undefined) while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
@@ -701,5 +702,21 @@ test('a connected ACK past its deadline is rejected before its timer runs', unix
     } finally { Date.now = now; }
     assert.equal(accepted, false);
     assert.equal(await pending, false);
+  });
+});
+
+test('the default app posting budget accepts native completion after one second', unixOnly, async () => {
+  const notification = { id: 'd'.repeat(64), title: 'Review', body: 'Held items' };
+  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
+  await withServer({ notifier, notificationTimeoutMs: null }, async (s) => {
+    const app = await s.open();
+    await ask(app, { command: 'subscribe' });
+    const pending = Effect.runPromise(deliver!(notification));
+    const event = await app.waitFor((r) => r.event === 'notification');
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const ack = await ask(app, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true });
+    assert.equal(ack.result.accepted, true);
+    assert.equal(await pending, true);
   });
 });
