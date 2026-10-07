@@ -31,6 +31,14 @@ const holderOf = (text: string): number | undefined => {
   }
 };
 
+// The live process holding the pid lock at `path`, or undefined when it is absent, unreadable or
+// left by a dead process.
+export const liveLockHolder = (path: string): number | undefined => {
+  const text = read(path);
+  const pid = text === undefined ? undefined : holderOf(text);
+  return pid !== undefined && alive(pid) ? pid : undefined;
+};
+
 // Removes the lock at `path` only if it still reads `seen`, and reports whether the path is free to
 // claim. Renaming moves exactly one file, so of two processes taking over the same dead lock only one
 // deletes it; a lock that changed since it was read is linked back. Only a third claimant landing in

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { Effect, Exit, type Scope } from 'effect';
-import { acquireApplyLock, acquirePidLock, machinePaths, takeOver, type MachinePaths } from '../src/index.ts';
+import { acquireApplyLock, acquirePidLock, liveLockHolder, machinePaths, takeOver, type MachinePaths } from '../src/index.ts';
 
 const setup = () => {
   const stateRoot = mkdtempSync(join(tmpdir(), 'machine-lock-'));
@@ -125,4 +125,15 @@ test('a pid lock on a custom path creates its parent, fails when a live pid hold
   writeFileSync(custom, JSON.stringify({ pid: dead, startedAt: 'x' }));
   assert.ok(Exit.isSuccess(await run(acquirePidLock(custom))));
   assert.equal(existsSync(custom), false);
+});
+
+test('liveLockHolder names a live holder only', () => {
+  const { lock } = setup();
+  assert.equal(liveLockHolder(lock), undefined);
+  writeFileSync(lock, 'not json');
+  assert.equal(liveLockHolder(lock), undefined);
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 'x' }));
+  assert.equal(liveLockHolder(lock), process.pid);
+  writeFileSync(lock, JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid, startedAt: 'x' }));
+  assert.equal(liveLockHolder(lock), undefined);
 });

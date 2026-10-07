@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BIN, cliEnv, machine, readJson, REPO, runCli, writeFakeBin, type Call, type Machine } from './support/cli.ts';
+import { BIN, cliEnv, machine, pushUpstream, readJson, REPO, runCli, writeFakeBin, type Call, type Machine } from './support/cli.ts';
 
 // `nortuscc agent` against fake service managers: a real launchctl, systemctl or loginctl never runs.
 const skip = process.platform === 'win32' ? 'the login service is registered by schtasks on Windows' : false;
@@ -184,4 +184,51 @@ test('agent run holds the agent lock, refuses a second agent and stops cleanly o
   } finally {
     if (child.exitCode === null) child.kill('SIGKILL');
   }
+});
+
+// The restart argv: launchd kickstarts the unchanged unit; systemd restarts it.
+const restarted = (m: Machine) =>
+  linux
+    ? serviceCalls(m).some((c) => c.cmd === 'systemctl' && c.args.join(' ') === '--user restart nortuscc-agent.service')
+    : serviceCalls(m).some((c) => c.cmd === 'launchctl' && c.args.join(' ') === `kickstart -k gui/${process.getuid!()}/com.nortuscc.agent`);
+
+test('sync restarts a CLI-installed agent after the checkout moves', { skip }, async () => {
+  const m = serviceMachine();
+  assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  assert.equal(restarted(m), false);
+  pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
+  const result = await runCli(m, ['sync', '--yes']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(restarted(m), JSON.stringify(serviceCalls(m)));
+  assert.match(result.stdout, /^agent restarted on [0-9a-f]{7}$/m);
+  assert.equal(agentJson(m).agentVersion, execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
+});
+
+test('sync with no agent installed runs no service command', { skip }, async () => {
+  const m = serviceMachine();
+  pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
+  const result = await runCli(m, ['sync', '--yes']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(serviceCalls(m), []);
+  assert.doesNotMatch(result.stdout, /agent restarted/);
+});
+
+test('sync that leaves the checkout where it was does not restart the agent', { skip }, async () => {
+  const m = serviceMachine();
+  assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  const before = serviceCalls(m).length;
+  const result = await runCli(m, ['sync', '--yes']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(serviceCalls(m).length, before);
+});
+
+test('a failed restart warns and never fails the sync', { skip }, async () => {
+  const m = serviceMachine();
+  assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  for (const tool of TOOLS) writeFakeBin(m.bin, tool, "#!/usr/bin/env node\nprocess.stdout.write('refused'); process.exit(5);\n");
+  pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
+  const result = await runCli(m, ['sync', '--yes']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /^nortuscc: .*exited 5: refused/m);
+  assert.doesNotMatch(result.stdout, /agent restarted/);
 });
