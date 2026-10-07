@@ -18,9 +18,9 @@ const fixture = (t: { after: (f: () => void) => void }, platform = 'darwin', run
 
 test('sorted unique batches deduplicate across restart and recurrence', async (t) => {
   const f = fixture(t); const seen: Notification[] = [];
-  let n = await f.create(); n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  let n = await f.create(); n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(n.notify(status([item('b'), item('a'), item('a')])));
-  n = await f.create(); n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  n = await f.create(); n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(n.notify(status([item('a'), item('b')])));
   await Effect.runPromise(n.notify(status()));
   await Effect.runPromise(n.notify(status([item('a'), item('b')])));
@@ -32,7 +32,7 @@ test('sorted unique batches deduplicate across restart and recurrence', async (t
 test('held items notify on every policy and ready items only on notify', async (t) => {
   for (const policy of ['manual', 'notify', 'auto-apply'] as const) {
     const f = fixture(t); const seen: Notification[] = []; const n = await f.create();
-    n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+    n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
     await Effect.runPromise(n.notify(status([item('ready', false)], { policy })));
     assert.equal(seen.length, policy === 'notify' ? 1 : 0);
     await Effect.runPromise(n.notify(status([item('held')], { policy })));
@@ -42,7 +42,7 @@ test('held items notify on every policy and ready items only on notify', async (
 
 test('new failures pause and rejection coalesce and remain distinct by durable identity', async (t) => {
   const f = fixture(t); const n = await f.create(); const seen: Notification[] = [];
-  n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   const append = (runId: string) => f.m.run(HistoryStore.use((h) => Effect.all([
     h.append({ actor: 'cli', kind: 'apply-finished', runId, steps: [{ key: 'x', outcome: 'failed', note: 'bad' }], backup: null, result: 'done' }),
     h.append({ actor: 'agent', kind: 'paused', reason: 'bad', runId }),
@@ -56,7 +56,7 @@ test('new failures pause and rejection coalesce and remain distinct by durable i
 
 test('successful or cancelled runs and historical ready batches are silent', async (t) => {
   const f = fixture(t); const n = await f.create(); let delivered = 0;
-  n.setConnected(() => Effect.sync(() => { delivered++; return true; }));
+  n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered++; return true; }) }));
   for (const result of ['done', 'cancelled'] as const) await f.m.run(HistoryStore.use((h) => h.append({ actor: 'agent', kind: 'apply-finished', runId: result, steps: [{ key: 'x', outcome: result === 'done' ? 'ok' : 'cancelled', note: '' }], backup: null, result })));
   await f.m.run(HistoryStore.use((h) => h.append({ actor: 'agent', kind: 'ready', items: [{ itemId: 'old', reason: 'inert' }] })));
   await Effect.runPromise(n.notify(status([item('old', false)], { policy: 'auto-apply', autoApply: { kind: 'ran', runId: 'done', result: 'done', failed: 0, backup: null } })));
@@ -65,7 +65,7 @@ test('successful or cancelled runs and historical ready batches are silent', asy
 
 test('inspection error identity excludes poll timestamp and bounds text', async (t) => {
   const f = fixture(t); const n = await f.create(); const seen: Notification[] = [];
-  n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(n.notify(status([], { error: 'JOB_FAILED', detail: 'x'.repeat(2000) })));
   await Effect.runPromise(n.notify(status([], { at: 'later', error: 'JOB_FAILED', detail: 'x'.repeat(2000) })));
   assert.equal(seen.length, 1); assert.ok(seen[0]!.title.length <= 100); assert.ok(seen[0]!.body.length <= 500);
@@ -91,7 +91,7 @@ test('registered app payload and ACK waiter exist before launch; open exit alone
 test('connected refusal or timeout falls through to Linux; successful delivery deduplicates', async (t) => {
   for (const timeout of [false, true]) {
     const calls: Command[] = []; const f = fixture(t, 'linux', (c) => Effect.sync(() => { calls.push(c); return { code: 0, stdout: '' }; }));
-    const n = await f.create(); n.setConnected(() => timeout ? Effect.never : Effect.succeed(false));
+    const n = await f.create(); n.setConnected(() => ({ timeoutMs: 15, deliver: timeout ? Effect.never : Effect.succeed(false) }));
     await Effect.runPromise(n.notify(status([item('x')]))); await Effect.runPromise(n.notify(status([item('x')])));
     assert.equal(calls.length, 1); assert.equal(calls[0]!.cmd, 'notify-send'); assert.equal(calls[0]!.output, 'capture');
   }
@@ -101,13 +101,13 @@ test('no channel is retryable and never scans or launches an unregistered path',
   const calls: Command[] = []; const f = fixture(t, 'darwin', (c) => Effect.sync(() => { calls.push(c); return { code: 0, stdout: '' }; }));
   await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'cli', appPath: '/Applications/Test.app/Contents/MacOS/Test' }))));
   const n = await f.create(); await Effect.runPromise(n.notify(status([item('x')]))); assert.equal(calls.length, 0);
-  let deliveries = 0; n.setConnected(() => Effect.sync(() => { deliveries++; return true; }));
+  let deliveries = 0; n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.sync(() => { deliveries++; return true; }) }));
   await Effect.runPromise(n.notify(status([item('x')]))); assert.equal(deliveries, 1);
 });
 
 test('concurrent identical batches serialize and corrupt stores are preserved', async (t) => {
   const f = fixture(t); const n = await f.create(); let delivered = 0;
-  n.setConnected(() => Effect.sync(() => { delivered++; return true; }));
+  n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered++; return true; }) }));
   await Effect.runPromise(Effect.all([n.notify(status([item('x')])), n.notify(status([item('x')]))], { concurrency: 'unbounded' })); assert.equal(delivered, 1);
   f.m.write(f.path, '{broken'); await Effect.runPromise(n.notify(status([item('y')])));
   assert.equal(f.m.read(f.path), '{broken'); assert.equal(delivered, 1);
@@ -124,7 +124,7 @@ test('unreadable and unwritable ledgers never fail jobs or post unpersisted payl
         writeTextAtomic: (path, value) => failure === 'write' && path === f.path ? Effect.fail(new FsFailed({ op: 'test', path, reason: 'denied' })) : fs.writeTextAtomic(path, value),
       }), Effect.provideService(Processes, { run: () => Effect.succeed({ code: 1, stdout: '' }) }));
     }));
-    n.setConnected(() => Effect.sync(() => { delivered++; return true; }));
+    n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered++; return true; }) }));
     await Effect.runPromise(n.notify(status([item('x')])));
     assert.equal(delivered, 0); assert.equal(await Effect.runPromise(n.get('unknown')), undefined);
   }
@@ -140,9 +140,9 @@ test('native app refusal and Linux nonzero stay retryable, connected success sto
   n = await f.create();
   await Effect.runPromise(n.notify(status([item('x')]))); await Effect.runPromise(n.notify(status([item('x')])));
   assert.deepEqual(calls.map((c) => c.cmd), ['/opt/Test', 'notify-send', '/opt/Test', 'notify-send']);
-  n.setConnected(() => Effect.succeed(true)); await Effect.runPromise(n.notify(status([item('x')])));
+  n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.succeed(true) })); await Effect.runPromise(n.notify(status([item('x')])));
   assert.equal(calls.length, 4);
-  const restarted = await f.create(); restarted.setConnected(() => Effect.die(new Error('must deduplicate')));
+  const restarted = await f.create(); restarted.setConnected(() => ({ timeoutMs: 15, deliver: Effect.die(new Error('must deduplicate')) }));
   await Effect.runPromise(restarted.notify(status([item('x')]))); assert.equal(calls.length, 4);
 });
 
@@ -171,7 +171,7 @@ test('unreadable app registration still permits Linux fallback', async (t) => {
 test('held and ready items coalesce, and obsolete undelivered item batches stay silent', async (t) => {
   const f = fixture(t); const n = await f.create();
   await Effect.runPromise(n.notify(status([item('obsolete')])));
-  const seen: Notification[] = []; n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  const seen: Notification[] = []; n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(n.notify(status([item('held'), item('ready', false)])));
   assert.equal(seen.length, 1);
   await Effect.runPromise(n.notify(status([item('ready', false), item('held')])));
@@ -180,9 +180,9 @@ test('held and ready items coalesce, and obsolete undelivered item batches stay 
 
 test('new faults after restart never renotify previously delivered fault identities', async (t) => {
   const f = fixture(t); const seen: Notification[] = [];
-  const first = await f.create(); first.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  const first = await f.create(); first.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(first.notify(status([], { error: 'JOB_FAILED', detail: 'first' })));
-  const restarted = await f.create(); restarted.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  const restarted = await f.create(); restarted.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(restarted.notify(status([], { error: 'JOB_FAILED', detail: 'first', paused: { at: 'pause1', reason: 'paused' } })));
   await Effect.runPromise(restarted.notify(status([], { paused: { at: 'pause1', reason: 'paused' } })));
   assert.equal(seen.length, 2);
@@ -190,7 +190,7 @@ test('new faults after restart never renotify previously delivered fault identit
 
 test('an apply with failed steps notifies even when its run later cancels', async (t) => {
   const f = fixture(t); const n = await f.create(); let delivered = 0;
-  n.setConnected(() => Effect.sync(() => { delivered++; return true; }));
+  n.setConnected(() => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered++; return true; }) }));
   await f.m.run(HistoryStore.use((h) => h.append({ actor: 'app', kind: 'apply-finished', runId: 'failed-then-cancelled', result: 'cancelled', backup: null, steps: [{ key: 'failed', outcome: 'failed', note: 'bad' }, { key: 'cancelled', outcome: 'cancelled', note: '' }] })));
   await Effect.runPromise(n.notify(status())); assert.equal(delivered, 1);
 });
@@ -219,7 +219,7 @@ test('a late helper ACK cannot acknowledge a later retry of the same durable bat
 
 test('bounded notification text preserves whole Unicode characters at the UTF16 limit', async (t) => {
   const f = fixture(t); const n = await f.create(); const seen: Notification[] = [];
-  n.setConnected((v) => Effect.sync(() => { seen.push(v); return true; }));
+  n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
   await Effect.runPromise(n.notify(status([], { error: 'JOB_FAILED', detail: 'x'.repeat(499) + '😀' })));
   assert.equal(seen.length, 1);
   assert.equal(seen[0]!.body, 'x'.repeat(499));

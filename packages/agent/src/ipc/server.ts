@@ -186,29 +186,37 @@ export const serveIpc = (input: {
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
 
     // Only OS posting acknowledged by the selected app counts as delivery.
-    const deliverNotification = (notification: Notification) => Effect.gen(function* () {
-      for (const conn of subscribers().filter((c) => c.client === 'app')) {
-        if (conn.socket.destroyed) continue;
-        const delivered = yield* Effect.callback<boolean>((resume) => {
-          const receipt = randomBytes(32).toString('base64url');
-          let finished = false;
-          const finish = (delivered: boolean) => {
-            if (finished) return;
-            finished = true;
-            clearTimeout(timer);
-            conn.pendingNotification = undefined;
-            resume(Effect.succeed(delivered));
-          };
-          const timer = setTimeout(() => finish(false), input.notificationTimeoutMs ?? NOTIFICATION_ACK_MS);
-          conn.pendingNotification = { id: notification.id, receipt, deadline: Date.now() + (input.notificationTimeoutMs ?? NOTIFICATION_ACK_MS), finish };
-          const message = { version: PROTOCOL_VERSION, event: 'notification', notification, receipt };
-          event(conn, message);
-          return Effect.sync(() => finish(false));
-        });
-        if (delivered) return true;
-      }
-      return false;
-    });
+    const deliverNotification = (notification: Notification) => {
+      const apps = subscribers().filter((c) => c.client === 'app');
+      const ackMs = input.notificationTimeoutMs ?? NOTIFICATION_ACK_MS;
+      return {
+        // One interval per app, plus a bounded allowance for scheduling and cleanup.
+        timeoutMs: (apps.length + 1) * ackMs,
+        deliver: Effect.gen(function* () {
+          for (const conn of apps) {
+            if (conn.socket.destroyed) continue;
+            const delivered = yield* Effect.callback<boolean>((resume) => {
+              const receipt = randomBytes(32).toString('base64url');
+              let finished = false;
+              const finish = (delivered: boolean) => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                conn.pendingNotification = undefined;
+                resume(Effect.succeed(delivered));
+              };
+              const timer = setTimeout(() => finish(false), ackMs);
+              conn.pendingNotification = { id: notification.id, receipt, deadline: Date.now() + ackMs, finish };
+              const message = { version: PROTOCOL_VERSION, event: 'notification', notification, receipt };
+              event(conn, message);
+              return Effect.sync(() => finish(false));
+            });
+            if (delivered) return true;
+          }
+          return false;
+        }),
+      };
+    };
     input.notifier?.setConnected(deliverNotification);
     yield* Effect.addFinalizer(() => Effect.sync(() => input.notifier?.setConnected(undefined)));
 

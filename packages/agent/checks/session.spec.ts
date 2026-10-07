@@ -330,7 +330,7 @@ test('a manual apply defect records a durable failure without pausing and refres
   const { m, within, lock } = await sessionMachine({ config: failing, onStatus: (status) => notify(status) });
   await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, policy: 'manual' }))));
   const notifier = await m.run(makeNotifier({ platform: 'test' }));
-  notifier.setConnected((notification) => Effect.sync(() => { delivered.push(notification); return true; }));
+  notifier.setConnected((notification) => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered.push(notification); return true; }) }));
   notify = notifier.notify;
   const run = await within((session, agent) => Effect.gen(function* () {
     const { planId } = yield* session.preview(yield* configOnly(session));

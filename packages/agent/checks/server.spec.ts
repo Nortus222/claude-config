@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
-import { configDomain, DecisionsStore, HistoryStore, historyStore, integrationsDomain } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, HistoryStore, historyStore, integrationsDomain, Processes } from '@nortuscc/machine';
 import {
-  AgentStateStore, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
-  type AgentDomain, type AgentDomains, type Notifier,
+  AgentStateStore, makeNotifier, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
+  type AgentDomain, type AgentDomains, type AgentStatus, type Notifier,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
@@ -84,7 +84,7 @@ const ask = async (client: Client, command: object) => {
 };
 
 type Options = {
-  readonly notifier?: Notifier;
+  readonly notifier?: Notifier | ((m: ReturnType<typeof agentMachine>) => Promise<Notifier>);
   readonly notificationTimeoutMs?: number | null;
   readonly paused?: boolean;
   readonly config?: AgentDomain;
@@ -119,13 +119,14 @@ const prepare = async (options: Options = {}) => {
 // finished before this answers.
 const serverMachine = async (options: Options = {}) => {
   const { m, domains, source, dir, socketPath, tokenPath } = await prepare(options);
+  const notifier = typeof options.notifier === 'function' ? await options.notifier(m) : options.notifier;
   let shutdowns = 0;
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      notifier: options.notifier, ...(options.notificationTimeoutMs === null ? {} : { notificationTimeoutMs: options.notificationTimeoutMs ?? 80 }), paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
+      notifier, ...(options.notificationTimeoutMs === null ? {} : { notificationTimeoutMs: options.notificationTimeoutMs ?? 80 }), paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
       ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
     });
     if (options.starting === undefined) while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
@@ -143,7 +144,7 @@ const serverMachine = async (options: Options = {}) => {
     for (const c of clients) c.socket.destroy();
     await Effect.runPromise(Scope.close(scope, Exit.void));
   };
-  return { m, dir, socketPath, tokenPath, token, open, clients, close, shutdowns: () => shutdowns };
+  return { m, dir, socketPath, tokenPath, token, notifier, open, clients, close, shutdowns: () => shutdowns };
 };
 
 const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof serverMachine>>) => Promise<void>) => {
@@ -631,9 +632,46 @@ test('status observes a manual apply while its first step is blocked and becomes
   });
 });
 
+test('real notifier gives a healthy second app its own posting budget and persists delivery', unixOnly, async (t) => {
+  let fallbacks = 0;
+  const createNotifier = (m: ReturnType<typeof agentMachine>) => m.run(makeNotifier({ platform: 'linux', timeoutMs: 150 }).pipe(
+    Effect.provideService(Processes, { run: () => Effect.sync(() => { fallbacks++; return { code: 1, stdout: '' }; }) }),
+  ));
+  await withServer({ notifier: createNotifier, notificationTimeoutMs: 150 }, async (s) => {
+    t.after(() => rmSync(s.m.root, { recursive: true, force: true }));
+    const first = await s.open();
+    const second = await s.open();
+    for (const app of [first, second]) await ask(app, { command: 'subscribe' });
+    const status: AgentStatus = {
+      at: 'now', policy: 'notify', paused: null, trusted: true,
+      pending: [{ key: 'held', itemId: 'held', verdict: { kind: 'held', reason: 'not a known item' } }],
+      drift: [], conflicts: [], probeErrors: [],
+    };
+    const notifying = Effect.runPromise(s.notifier!.notify(status));
+    const ignored = await first.waitFor((r) => r.event === 'notification');
+    assert.equal(second.records.some((r) => r.event === 'notification'), false);
+    const next = await second.waitFor((r) => r.event === 'notification');
+    assert.notEqual(next.receipt, ignored.receipt);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await ask(first, { command: 'notificationAck', notificationId: ignored.notification.id, receipt: ignored.receipt, delivered: true })).result.accepted, false);
+    const ack = await ask(second, { command: 'notificationAck', notificationId: next.notification.id, receipt: next.receipt, delivered: true });
+    await notifying;
+    assert.equal(ack.result.accepted, true);
+    const ledger = JSON.parse(readFileSync(join(s.dir, 'notified.json'), 'utf8'));
+    assert.equal(ledger.batches[next.notification.id].delivered, true);
+    assert.equal(fallbacks, 0);
+    await Effect.runPromise(s.notifier!.notify(status));
+    assert.equal(first.records.filter((r) => r.event === 'notification').length, 1);
+    assert.equal(second.records.filter((r) => r.event === 'notification').length, 1);
+    const restarted = await createNotifier(s.m);
+    await Effect.runPromise(restarted.notify(status));
+    assert.equal(fallbacks, 0, 'durable delivery suppresses fallback after restart');
+  });
+});
+
 test('notification delivery binds fresh receipts to one authenticated app and falls through on refusal', unixOnly, async () => {
   const notification = { id: 'a'.repeat(64), title: 'Review', body: 'Held items' };
-  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(notification), receipt: () => 'launch-receipt', acknowledge: (_id, _ok, receipt) => receipt === 'launch-receipt', setConnected: (value) => { deliver = value; } };
   await withServer({ notifier }, async (s) => {
     const cli = await s.open('cli');
@@ -641,7 +679,7 @@ test('notification delivery binds fresh receipts to one authenticated app and fa
     const second = await s.open();
     for (const c of [cli, first, second]) await ask(c, { command: 'subscribe' });
     assert.equal((await ask(cli, { command: 'notification', notificationId: notification.id })).error.code, 'UNAUTHORIZED');
-    const pending = Effect.runPromise(deliver!(notification));
+    const pending = Effect.runPromise(deliver!(notification).deliver);
     const event = await first.waitFor((r) => r.event === 'notification');
     assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted, false);
     assert.equal((await ask(cli, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).error.code, 'UNAUTHORIZED');
@@ -662,21 +700,21 @@ test('notification delivery binds fresh receipts to one authenticated app and fa
 
 test('notification disconnect and timeout reject late ACK and try the next app', unixOnly, async () => {
   const notification = { id: 'b'.repeat(64), title: 'Review', body: 'Held items' };
-  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
   await withServer({ notifier }, async (s) => {
     const first = await s.open();
     const second = await s.open();
     for (const c of [first, second]) await ask(c, { command: 'subscribe' });
     assert.deepEqual((await ask(second, { command: 'notification', notificationId: notification.id })).result, { notification: null, receipt: null });
-    const pending = Effect.runPromise(deliver!(notification));
+    const pending = Effect.runPromise(deliver!(notification).deliver);
     await first.waitFor((r) => r.event === 'notification');
     first.socket.destroy();
     const event = await second.waitFor((r) => r.event === 'notification');
     assert.equal(await pending, false);
     assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted, false);
     const from = second.records.length;
-    const retry = Effect.runPromise(deliver!(notification));
+    const retry = Effect.runPromise(deliver!(notification).deliver);
     const next = await second.waitFor((r) => r.event === 'notification', from);
     assert.notEqual(next.receipt, event.receipt);
     assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: false })).result.accepted, false);
@@ -687,12 +725,12 @@ test('notification disconnect and timeout reject late ACK and try the next app',
 
 test('a connected ACK past its deadline is rejected before its timer runs', unixOnly, async () => {
   const notification = { id: 'c'.repeat(64), title: 'Review', body: 'Held items' };
-  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
   await withServer({ notifier }, async (s) => {
     const app = await s.open();
     await ask(app, { command: 'subscribe' });
-    const pending = Effect.runPromise(deliver!(notification));
+    const pending = Effect.runPromise(deliver!(notification).deliver);
     const event = await app.waitFor((r) => r.event === 'notification');
     const now = Date.now;
     let accepted: boolean;
@@ -707,12 +745,12 @@ test('a connected ACK past its deadline is rejected before its timer runs', unix
 
 test('the default app posting budget accepts native completion after one second', unixOnly, async () => {
   const notification = { id: 'd'.repeat(64), title: 'Review', body: 'Held items' };
-  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
   await withServer({ notifier, notificationTimeoutMs: null }, async (s) => {
     const app = await s.open();
     await ask(app, { command: 'subscribe' });
-    const pending = Effect.runPromise(deliver!(notification));
+    const pending = Effect.runPromise(deliver!(notification).deliver);
     const event = await app.waitFor((r) => r.event === 'notification');
     await new Promise((resolve) => setTimeout(resolve, 1100));
     const ack = await ask(app, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true });

@@ -6,12 +6,14 @@ import { AgentStateStore } from './state.ts';
 import type { AgentStatus } from './job.ts';
 
 export type Notification = { readonly id: string; readonly title: string; readonly body: string };
+// The transport snapshots its recipients and budgets the complete sequential delivery.
+type ConnectedDelivery = { readonly timeoutMs: number; readonly deliver: Effect.Effect<boolean> };
 export type Notifier = {
   readonly notify: (status: AgentStatus) => Effect.Effect<void>;
   readonly get: (id: string) => Effect.Effect<Notification | undefined>;
   readonly receipt: (id: string) => string | undefined;
   readonly acknowledge: (id: string, delivered: boolean, receipt: string) => boolean;
-  readonly setConnected: (deliver: ((notification: Notification) => Effect.Effect<boolean>) | undefined) => void;
+  readonly setConnected: (prepare: ((notification: Notification) => ConnectedDelivery) | undefined) => void;
 };
 type Batch = { notification: Notification; identities: string[]; delivered: boolean };
 type Store = { version: 1; batches: Record<string, Batch> };
@@ -48,16 +50,19 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
   const lock = yield* Semaphore.make(1);
   const path = join(paths.stateRoot, 'agent', 'notified.json');
   const timeoutMs = options.timeoutMs ?? 5000;
-  let connected: ((notification: Notification) => Effect.Effect<boolean>) | undefined;
+  let connected: Parameters<Notifier['setConnected']>[0];
   const waiters = new Map<string, { receipt: string; deadline: number; resume: (delivered: boolean) => void }>();
   const read = Effect.map(fs.readText(path), decode);
   const save = (store: Store) => fs.writeTextAtomic(path, JSON.stringify(store, null, 2) + '\n');
-  const attempt = <E>(effect: Effect.Effect<boolean, E>): Effect.Effect<boolean> => effect.pipe(
-    Effect.timeout(timeoutMs), Effect.catchCause(() => Effect.succeed(false)),
+  const attempt = <E>(effect: Effect.Effect<boolean, E>, budgetMs = timeoutMs): Effect.Effect<boolean> => effect.pipe(
+    Effect.timeout(budgetMs), Effect.catchCause(() => Effect.succeed(false)),
   );
   const deliver = (notification: Notification) => Effect.gen(function* () {
     const current = connected;
-    if (current !== undefined && (yield* attempt(Effect.suspend(() => current(notification))))) return true;
+    if (current !== undefined && (yield* Effect.suspend(() => {
+      const prepared = current(notification);
+      return attempt(prepared.deliver, prepared.timeoutMs);
+    }).pipe(Effect.catchCause(() => Effect.succeed(false))))) return true;
     const registered = yield* state.read.pipe(Effect.catchCause(() => Effect.succeed(undefined)));
     if (registered?.installedBy === 'app' && registered.appPath && isAbsolute(registered.appPath)) {
       const executable = registered.appPath;

@@ -41,6 +41,8 @@ Every JSON line is bounded to 1,048,576 bytes. Inspect/apply time out after 60 s
 
 The root test suite can modify `skills-manifest.txt`; inspect its diff after running. A successful native build does not establish that tests pass.
 
+The `macos` CI workflow runs on macOS arm64 for pull requests and pushes to `main`. It prepares resources with Bun 1.3.14 and its matching license, runs the resource-enabled Node checks, Bun checks and locked Rust tests using the runner's installed toolchain, then builds the release app and runs the packaged temporary-HOME smoke. It does not open a window, register a service or post OS notifications.
+
 ## Release package
 
 ```sh
@@ -66,6 +68,6 @@ The Rust host posts macOS notifications through UserNotifications under the inst
 
 Hidden delivery branches before Tauri creates a window. Its fixed `--paths` helper resolves the same configured state root without registering or restarting the service. It reads the current token, authenticates as an app without subscribing, fetches the exact id and active receipt, posts, acknowledges and exits. Invalid ids, expired receipts and malformed payloads fail closed. Unbundled executables decline native posting. Native posting on non-macOS platforms returns unavailable so the agent can try Linux `notify-send`; packaging remains macOS arm64 only.
 
-Native work has a three-second budget from event enqueue or hidden-mode entry, including authorization settings and submission, followed by a bounded acknowledgment. The agent allows five seconds for a connected receipt. Late native completions cannot acknowledge an expired generation. OS acceptance followed by a lost acknowledgment can still cause a later repeat; acceptance does not prove a banner appeared.
+Native work has a three-second budget from event enqueue or hidden-mode entry, including authorization settings and submission, followed by a bounded acknowledgment. The agent allows five seconds for each connected app's receipt and tries a fixed snapshot of subscribers sequentially. The total delivery deadline allows those per-app budgets plus five seconds for scheduling and cleanup. Late native completions cannot acknowledge an expired generation. OS acceptance followed by a lost acknowledgment can still cause a later repeat; acceptance does not prove a banner appeared.
 
 Rust checks exercise fake posting success/refusal, strict payloads, direct hidden connections, the read-only helper, startup events before session publication, off-reader acknowledgments, stale generations and queued clicks. They never initialize the notification center or show a window. On a disposable macOS machine, manually verify permission grant/denial, Notification Center with banners disabled, foreground presentation, warm and cold clicks, hidden posting with the app closed, no permission dialog in hidden mode, and exit after posting. Also verify the hidden path leaves service registration and machine state unchanged. These OS behaviors are not established by automated tests or a successful native build.
