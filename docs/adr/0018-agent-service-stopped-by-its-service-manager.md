@@ -24,5 +24,12 @@ would replace.
 - On Windows, `schtasks /End` terminates without a signal, so an interrupted auto-apply pauses:
   safe, by ADR 0011.
 - The Windows task carries no environment, so `NORTUSCC_*` overrides do not reach it.
+- The Windows task may show a console window at logon; closing it stops the agent.
+- Task Scheduler cannot redirect output, so nothing writes `agent.log` on Windows.
+- Task Scheduler's restart-on-failure may not restart an agent that exits non-zero, so it can stay
+  down until the next logon.
+- Task Scheduler may expand `%VAR%` in the task's arguments.
+- On every OS the unit pins the absolute node path (`process.execPath`), so removing that Node
+  version (nvm, fnm) breaks the service until `agent install` or a sync restarts it.
 - `agent.log` is not rotated yet.
 - #78 replaces the signal with `shutdown` and the lock with `hello`.
