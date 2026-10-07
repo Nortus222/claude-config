@@ -1,4 +1,5 @@
 import { Schema } from 'effect';
+import type { HistoryEvent } from '@nortuscc/machine';
 import type { AgentStatus, StatusError } from '../job.ts';
 import { POLICIES } from '../state.ts';
 
@@ -26,6 +27,10 @@ const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const Sha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}([0-9a-f]{24})?$/));
 const IsoTime = Schema.String.check(Schema.makeFilter((s: string) =>
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(s) && !Number.isNaN(Date.parse(s))));
+export const HistoryCursorSchema = Schema.Struct({
+  at: IsoTime,
+  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+});
 const Client = Schema.Literals(['app', 'cli']);
 const Policy = Schema.Literals(POLICIES);
 const STATUS_ERRORS = ['PROFILE_INVALID', 'DECISIONS_INVALID', 'REVISION_UNAVAILABLE', 'JOB_FAILED'] as const satisfies ReadonlyArray<StatusError>;
@@ -46,7 +51,7 @@ export const RequestSchema = Schema.Union([
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('setPolicy'), policy: Policy }),
   Schema.Struct({
     version: Version, id: Id, command: Schema.Literal('history'),
-    before: Schema.optionalKey(IsoTime),
+    before: Schema.optionalKey(HistoryCursorSchema),
     limit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_HISTORY })),
   }),
 ]);
@@ -144,6 +149,11 @@ export const decodeInspectResult = Schema.decodeUnknownSync(InspectResultSchema,
 export const decodePreviewResult = Schema.decodeUnknownSync(PreviewResultSchema, strict);
 export const decodeApplyResult = Schema.decodeUnknownSync(ApplyResultSchema, strict);
 
+export type HistoryCursor = typeof HistoryCursorSchema.Type;
+export type HistoryResult = {
+  readonly events: ReadonlyArray<HistoryEvent>;
+  readonly nextBefore: HistoryCursor | null;
+};
 export type Request = typeof RequestSchema.Type;
 export type WireDecision = typeof DecisionSchema.Type;
 export type HelloResult = typeof HelloResultSchema.Type;

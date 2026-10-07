@@ -28,7 +28,8 @@ const accepted: ReadonlyArray<Record<string, unknown>> = [
   { ...head, command: 'setPolicy', policy: 'notify' },
   { ...head, command: 'setPolicy', policy: 'manual' },
   { ...head, command: 'history', limit: 1 },
-  { ...head, command: 'history', limit: MAX_HISTORY, before: '2026-10-06T12:00:00.000Z' },
+  { ...head, command: 'history', limit: 1, before: { at: '2026-10-06T05:00:00-07:00', seq: Number.MAX_SAFE_INTEGER } },
+  { ...head, command: 'history', limit: MAX_HISTORY, before: { at: '2026-10-06T12:00:00.000Z', seq: 0 } },
 ];
 
 test('every v3 request shape decodes to itself', () => {
@@ -53,7 +54,18 @@ test('requests outside v3 are rejected', () => {
     { ...head, command: 'history', limit: 0 },
     { ...head, command: 'history', limit: MAX_HISTORY + 1 },
     { ...head, command: 'history', limit: 1.5 },
-    { ...head, command: 'history', limit: 10, before: 'yesterday' },
+    { ...head, command: 'history', limit: 10, before: '2026-10-06T12:00:00.000Z' },
+    ...[
+      { at: 'yesterday', seq: 0 },
+      { at: '2026-10-06T12:00:00.000Z', seq: -1 },
+      { at: '2026-10-06T12:00:00.000Z', seq: 0.5 },
+      { at: '2026-10-06T12:00:00.000Z', seq: Number.MAX_SAFE_INTEGER + 1 },
+      { at: '2026-10-06T12:00:00.000Z', seq: '0' },
+      { at: '2026-10-06T12:00:00.000Z' },
+      { seq: 0 },
+      { at: '2026-10-06T12:00:00.000Z', seq: 0, extra: 1 },
+      null,
+    ].map((before) => ({ ...head, command: 'history', limit: 10, before })),
     { ...head, command: 'decide', items: [{ ...decision, revision: 'HEAD' }] },
     { ...head, command: 'decide', items: [{ ...decision, revision: 'A'.repeat(40) }] },
     { ...head, command: 'decide', items: [{ ...decision, decision: 'defer' }] },
