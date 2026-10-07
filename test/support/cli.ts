@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync, type ChildProcess } from 'node:child_process';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { after } from 'node:test';
 
 // Black-box harness: every run gets its own home, state, repo and fake
 // installers, so a test can never observe or disturb the developer's machine.
@@ -32,7 +33,7 @@ export type Machine = {
 export type Call = { cmd: string; args: string[] };
 
 export function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  return execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
 }
 
 export function readJson(path: string): any {
@@ -40,6 +41,20 @@ export function readJson(path: string): any {
 }
 
 const COPIED = ['claude', 'codex', 'integrations.json', 'skills-manifest.txt', 'package.json', 'package-lock.json'];
+const temporaryRoots: string[] = [];
+const running = new Map<ChildProcess, Promise<void>>();
+after(async () => {
+  await Promise.all([...running].map(async ([child, closed]) => {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      if (process.platform === 'win32') {
+        await new Promise<void>((done) => execFile(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => done()));
+      } else child.kill('SIGKILL');
+    }
+    await closed;
+  }));
+  for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true });
+});
 
 // A throwaway git repo holding the files the CLI syncs, committed once, with a
 // bare `origin` the branch tracks so push and pull have somewhere to go.
@@ -49,6 +64,7 @@ function copyRepo(home: string): string {
   mkdirSync(repo, { recursive: true });
   for (const name of COPIED) cpSync(join(REPO, name), join(repo, name), { recursive: true });
   git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'config', 'core.autocrlf', 'false');
   git(repo, 'add', '.');
   git(repo, 'commit', '-qm', 'initial');
   git(home, 'init', '-q', '--bare', '-b', 'main', origin);
@@ -61,6 +77,7 @@ function copyRepo(home: string): string {
 // commands only); 'copy' (default) makes a temp git repo of copies.
 export function machine(options: { repo?: 'checkout' | 'copy'; codexUnavailable?: boolean } = {}): Machine {
   const home = mkdtempSync(join(tmpdir(), 'nortuscc-bb-'));
+  temporaryRoots.push(home);
   const m: Machine = {
     home,
     claude: join(home, '.claude'),
@@ -90,6 +107,7 @@ export function machine(options: { repo?: 'checkout' | 'copy'; codexUnavailable?
 // no network, no real installer.
 function fakeNativeInstallers({ codexUnavailable }: { codexUnavailable: boolean }): string {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
+  temporaryRoots.push(dir);
   // Foreground agents may notify on Linux; keep fixture delivery unavailable and inert.
   writeFakeBin(dir, 'notify-send', '#!/usr/bin/env node\nprocess.exit(1);\n');
 
@@ -271,6 +289,9 @@ export function runCli(
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
       resolve({ code, stdout, stderr });
     });
+    const closed = new Promise<void>((done) => child.once('close', () => done()));
+    running.set(child, closed);
+    void closed.then(() => running.delete(child));
     child.stdin?.end(options.input ?? '');
   });
 }

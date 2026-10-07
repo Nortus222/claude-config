@@ -1,36 +1,49 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { after } from 'node:test';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import type { Declaration } from '../../src/integrations/declaration.ts';
 
-// A temp bin of fake agent CLIs. Each records "<name> <args>" to a log, then runs `body` (sh).
+const directories: string[] = [];
+after(() => { for (const dir of directories) rmSync(dir, { recursive: true, force: true }); });
+
+// Fake agent CLIs log their argv, then run the supplied JavaScript with an absolute Node path.
 export const fakeBin = () => {
   const dir = mkdtempSync(join(tmpdir(), 'machine-agents-'));
+  directories.push(dir);
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const log = join(dir, 'calls.log');
-  const tool = (name: string, body = 'exit 0') => {
+  const tool = (name: string, body = 'process.exit(0)') => {
     const file = join(bin, name);
-    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' "${name} $*" >> '${log}'\n${body}\n`);
-    chmodSync(file, 0o755);
+    const script = `const fs = require('node:fs');\nconst args = process.argv.slice(2);\nfs.appendFileSync(${JSON.stringify(log)}, ${JSON.stringify(name + ' ')} + args.join(' ') + '\\n');\n${body}\n`;
+    writeFileSync(`${file}.cjs`, script);
+    if (process.platform === 'win32') {
+      writeFileSync(`${file}.cmd`, `@echo off\r\n"${process.execPath}" "%~dp0${name}.cjs" %*\r\n`);
+    } else {
+      writeFileSync(file, `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${file.replaceAll("'", "'\\''")}.cjs' "$@"\n`);
+      chmodSync(file, 0o755);
+    }
   };
   // A fake codex answering the three --json list commands from fixture files.
-  const codex = (plugins: unknown, marketplaces: unknown, installBody = 'exit 0', mcp: unknown = []) => {
+  const codex = (plugins: unknown, marketplaces: unknown, installBody = 'process.exit(0)', mcp: unknown = []) => {
     writeFileSync(join(dir, 'mcp.json'), JSON.stringify(mcp));
     writeFileSync(join(dir, 'plugins.json'), JSON.stringify(plugins));
     writeFileSync(join(dir, 'marketplaces.json'), JSON.stringify(marketplaces));
     tool('codex', [
-      'case "$*" in',
-      `  "plugin list --json --available") cat '${join(dir, 'plugins.json')}' ;;`,
-      `  "plugin marketplace list --json") cat '${join(dir, 'marketplaces.json')}' ;;`,
-      `  "mcp list --json") cat '${join(dir, 'mcp.json')}' ;;`,
-      `  *) ${installBody} ;;`,
-      'esac',
+      'switch (args.join(" ")) {',
+      `  case "plugin list --json --available": process.stdout.write(fs.readFileSync(${JSON.stringify(join(dir, 'plugins.json'))})); break;`,
+      `  case "plugin marketplace list --json": process.stdout.write(fs.readFileSync(${JSON.stringify(join(dir, 'marketplaces.json'))})); break;`,
+      `  case "mcp list --json": process.stdout.write(fs.readFileSync(${JSON.stringify(join(dir, 'mcp.json'))})); break;`,
+      `  default: ${installBody};`,
+      '}',
     ].join('\n'));
   };
   const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
-  return { dir, bin, path: `${bin}:/usr/bin:/bin`, tool, codex, calls };
+  // Do not inherit the user's PATH: an absent fake must never reach an installed agent CLI.
+  const path = [bin, ...(process.platform === 'win32' ? [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')] : [])].join(delimiter);
+  return { dir, bin, path, tool, codex, calls };
 };
 
 export const CLAUDE_MARKETPLACE: Declaration = {

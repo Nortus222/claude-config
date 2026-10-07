@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, chmod, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { setTimeout } from 'node:timers/promises';
 import { Context, Effect, Layer } from 'effect';
 import { FsFailed } from './errors.ts';
 
@@ -30,7 +31,7 @@ export class Fs extends Context.Service<
   }
 >()('machine/Fs') {}
 
-const attempt = <A>(op: string, path: string, run: () => Promise<A>) =>
+const attempt = <A>(op: string, path: string, run: (signal: AbortSignal) => Promise<A>) =>
   Effect.tryPromise({
     try: run,
     catch: (err) => new FsFailed({ op, path, reason: err instanceof Error ? err.message : String(err) }),
@@ -65,6 +66,21 @@ const copyTree = (from: string, to: string, follow = false) => async () => {
   await cp(from, to, follow ? { recursive: true, dereference: true } : { recursive: true, verbatimSymlinks: true });
 };
 
+// Windows can deny replacement briefly even when both files are writable. Keep the old file
+// intact and retry only the atomic rename, with a bounded wait that cancellation can interrupt.
+const replaceFile = async (from: string, to: string, signal: AbortSignal) => {
+  for (let retry = 0; ; retry++) {
+    signal.throwIfAborted();
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      if (process.platform !== 'win32' || (err as NodeJS.ErrnoException).code !== 'EPERM' || retry === 5) throw err;
+      await setTimeout(10 * 2 ** retry, undefined, { signal });
+    }
+  }
+};
+
 export const nodeFs = Layer.succeed(Fs, {
   readText: (path) =>
     attempt('read', path, () =>
@@ -75,7 +91,7 @@ export const nodeFs = Layer.succeed(Fs, {
   // A reader sees the old file or the whole new one, never half of it. A symlink stays a link (its
   // target is replaced) and an existing file keeps its mode.
   writeTextAtomic: (path, text) =>
-    attempt('write', path, async () => {
+    attempt('write', path, async (signal) => {
       const target = await writeTarget(path);
       await mkdir(dirname(target), { recursive: true });
       const previous = await stat(target).catch((err) => {
@@ -86,7 +102,7 @@ export const nodeFs = Layer.succeed(Fs, {
       try {
         await writeFile(temp, text, 'utf8');
         if (previous) await chmod(temp, previous.mode & 0o7777);
-        await rename(temp, target);
+        await replaceFile(temp, target, signal);
       } catch (err) {
         await rm(temp, { force: true }).catch(() => undefined);
         throw err;

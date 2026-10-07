@@ -19,7 +19,7 @@
   ],
   "bin": { "nortuscc": "./bin/nortuscc.mjs" },
   "scripts": {
-    "test": "node --test --test-timeout=30000",
+    "test": "node --test --test-concurrency=2 --test-timeout=60000",
     "test:packages": "npm run test --workspaces --if-present",
     "typecheck": "tsc --noEmit && npm run typecheck --workspaces --if-present",
     "smoke:agent": "node --test packages/agent/smoke/launchd.smoke.ts"

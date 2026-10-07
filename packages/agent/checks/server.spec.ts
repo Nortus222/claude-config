@@ -599,7 +599,7 @@ test('shutdown mid-apply answers, cancels the run, releases apply.lock and remov
   }
 });
 
-test('status observes an automatic apply lock rather than the cached job report', async () => {
+test('status observes an automatic apply lock rather than the cached job report', unixOnly, async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     assert.equal((await ask(c, { command: 'status' })).result.applying, false);
@@ -613,7 +613,7 @@ test('status observes an automatic apply lock rather than the cached job report'
   });
 });
 
-test('status observes a manual apply while its first step is blocked and becomes idle after completion', async () => {
+test('status observes a manual apply while its first step is blocked and becomes idle after completion', unixOnly, async () => {
   const started = Deferred.makeUnsafe<void>();
   const release = Deferred.makeUnsafe<void>();
   const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Deferred.succeed(started, undefined), Effect.andThen(Deferred.await(release), configDomain.run(step, report))) };

@@ -72,8 +72,9 @@ test('a skill only in the store is exposed to Codex but not Claude', async () =>
   assert.deepEqual(list, { claude: [], codex: ['x'] });
 });
 
-test('an unreadable agent directory is an error, never an empty list', async () => {
-  if (process.getuid?.() === 0) return;
+test('an unreadable agent directory is an error, never an empty list', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory access');
+  if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const { paths, run } = skillsMachine();
   mkdirSync(join(paths.claude, 'skills'), { recursive: true });
   chmodSync(join(paths.claude, 'skills'), 0o000);

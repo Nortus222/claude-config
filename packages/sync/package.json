@@ -6,7 +6,7 @@
   "description": "Machine sync: setup items, held items composed over the checkout, sync.json, and the agent's SetupSource",
   "exports": { ".": "./src/index.ts" },
   "scripts": {
-    "test": "node --test \"checks/*.spec.ts\"",
+    "test": "node --test --test-concurrency=2 \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

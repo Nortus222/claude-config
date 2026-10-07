@@ -35,9 +35,9 @@ test('every NORTUSCC_ variable overrides its path', async () => {
   assert.equal(paths.repo, '/r');
   assert.equal(paths.claude, '/c');
   assert.equal(paths.codex, '/x/.codex');
-  assert.equal(paths.codexOpenRouter, '/x/.codex-openrouter');
+  assert.equal(paths.codexOpenRouter, join('/x', '.codex-openrouter'));
   assert.equal(paths.agentsSkills, '/a');
-  assert.equal(paths.backups, '/s/backups');
+  assert.equal(paths.backups, join('/s', 'backups'));
 });
 
 test('the OpenRouter variable beats the Codex sibling rule', async () => {
@@ -90,6 +90,6 @@ test('no record and no fallback fails with RepoNotFound', async () => {
 
 test('homeDir maps an engine home to its directory', async () => {
   const paths = await resolve({ env: {}, home: '/h', platform: 'linux', fallbackRepo: '/cli' });
-  assert.equal(homeDir(paths, 'codex-openrouter'), '/h/.codex-openrouter');
-  assert.equal(homeDir(paths, 'claude'), '/h/.claude');
+  assert.equal(homeDir(paths, 'codex-openrouter'), join('/h', '.codex-openrouter'));
+  assert.equal(homeDir(paths, 'claude'), join('/h', '.claude'));
 });

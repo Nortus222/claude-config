@@ -14,11 +14,11 @@ const hookDoc = JSON.stringify({
   integrations: [{ id: 'h', label: 'h', target: 'claude', type: 'hook', default: true, event: 'Stop', file: 'hooks/h.sh' }],
 });
 const repo = {
-  '/repo/skills-manifest.txt': '[a/core]\ntdd\n',
-  '/repo/integrations.json': hookDoc,
-  '/repo/hooks/h.sh': '#!/bin/sh\n',
-  '/repo/claude/settings.keys.json': '{"effortLevel":"high"}',
-  '/repo/skill-pins.json': JSON.stringify({ version: 1, pins: { 'a/core': PIN } }),
+  [join('/repo', 'skills-manifest.txt')]: '[a/core]\ntdd\n',
+  [join('/repo', 'integrations.json')]: hookDoc,
+  [join('/repo', 'hooks/h.sh')]: '#!/bin/sh\n',
+  [join('/repo', 'claude/settings.keys.json')]: '{"effortLevel":"high"}',
+  [join('/repo', 'skill-pins.json')]: JSON.stringify({ version: 1, pins: { 'a/core': PIN } }),
 };
 const run = <A, E>(effect: Effect.Effect<A, E, ProfileFiles>, layer = memoryFiles(repo)) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer)));
@@ -32,7 +32,7 @@ test('loads every layer from the repo directory', async () => {
 });
 
 test('a hook file missing from the repo refuses the integrations document', async () => {
-  const { '/repo/hooks/h.sh': _hook, ...withoutHook } = repo;
+  const { [join('/repo', 'hooks/h.sh')]: _hook, ...withoutHook } = repo;
   const config = await run(loadProfile('/repo'), memoryFiles(withoutHook));
   assert.deepEqual(config.integrations, []);
   assert.match(config.issues[0]!.message, /referenced file 'hooks\/h.sh' is not in the repo/);
@@ -54,7 +54,7 @@ test('a read failure is ReadFailed, not an absent file', async () => {
 });
 
 test('requireValid fails with every issue', async () => {
-  const config = await run(loadProfile('/repo'), memoryFiles({ '/repo/integrations.json': '{', '/repo/skill-pins.json': '{' }));
+  const config = await run(loadProfile('/repo'), memoryFiles({ [join('/repo', 'integrations.json')]: '{', [join('/repo', 'skill-pins.json')]: '{' }));
   const error = await Effect.runPromise(Effect.flip(requireValid(config)));
   assert.equal(error._tag, 'ProfileInvalid');
   assert.deepEqual(error.issues.map((i) => i.layer), ['base', 'pin']);

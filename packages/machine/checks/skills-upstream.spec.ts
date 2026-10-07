@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
@@ -237,7 +238,7 @@ function sourceRepo(home: string) {
   }
   git(dir, 'add', '.');
   git(dir, 'commit', '-qm', 'i');
-  return { url: `file://${dir}`, tree: (p: string) => git(dir, 'rev-parse', `HEAD:${p}`) };
+  return { url: pathToFileURL(dir).href, tree: (p: string) => git(dir, 'rev-parse', `HEAD:${p}`) };
 }
 
 test('inspectSource reads folder trees and every SKILL.md, and cleans up its clone', async () => {
@@ -258,7 +259,7 @@ test('an exact source is not listed, and an unreachable one is null', async () =
   const layer = Layer.mergeAll(m.layer, nodeProcesses());
   const pinned = await Effect.runPromise(inspectSource(src.url, ['s/a'], false).pipe(Effect.provide(layer)));
   assert.deepEqual(pinned!.skillPaths, []);
-  assert.equal(await Effect.runPromise(inspectSource(`file://${join(m.home, 'nope')}`, ['s/a'], true).pipe(Effect.provide(layer))), null);
+  assert.equal(await Effect.runPromise(inspectSource(pathToFileURL(join(m.home, 'nope')).href, ['s/a'], true).pipe(Effect.provide(layer))), null);
 });
 
 test('inspectUpdates turns the plan into skill items', async () => {

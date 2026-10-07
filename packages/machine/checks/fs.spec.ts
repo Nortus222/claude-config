@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Exit } from 'effect';
+import { setTimeout } from 'node:timers/promises';
+import { Cause, Effect, Exit } from 'effect';
 import { Fs, nodeFs } from '../src/index.ts';
 
 const run = <A, E>(effect: Effect.Effect<A, E, Fs>) => Effect.runPromise(effect.pipe(Effect.provide(nodeFs)));
@@ -19,6 +24,108 @@ test('writeTextAtomic creates parents and leaves no temp file', async () => {
   await run(Fs.use((fs) => fs.writeTextAtomic(target, '{"x":1}\n')));
   assert.equal(readFileSync(target, 'utf8'), '{"x":1}\n');
   assert.deepEqual(readdirSync(join(dir, 'a', 'b')), ['state.json']);
+});
+
+test('writeTextAtomic replaces a Windows file after a sharing denial clears', { skip: process.platform !== 'win32', timeout: 10000 }, async (t) => {
+  const dir = scratch();
+  const target = join(dir, 'agent.json');
+  writeFileSync(target, 'old');
+  // A native reader without delete sharing reproduces Windows' rename EPERM.
+  const source = `$stream = [System.IO.File]::Open('${target.replaceAll("'", "''")}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite); [Console]::WriteLine('ready'); [Console]::In.ReadLine() | Out-Null; $stream.Dispose()`;
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')], { windowsHide: true });
+  const closed = once(holder, 'close');
+  t.after(async () => { holder.kill(); await closed; });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const [ready] = await once(holder.stdout, 'data', { signal: AbortSignal.timeout(5000) });
+  assert.equal(String(ready).trim(), 'ready');
+  const rename = fsPromises.rename;
+  let denied = false;
+  t.mock.method(fsPromises, 'rename', async (from: string, to: string) => {
+    try {
+      await rename(from, to);
+    } catch (error) {
+      assert.equal((error as NodeJS.ErrnoException).code, 'EPERM');
+      assert.equal(readFileSync(target, 'utf8'), 'old');
+      if (!denied) {
+        denied = true;
+        holder.stdin.end('release\n');
+        await closed;
+      }
+      throw error;
+    }
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await run(Fs.use((fs) => fs.writeTextAtomic(target, 'new')));
+  assert.ok(denied);
+  assert.equal(readFileSync(target, 'utf8'), 'new');
+  assert.deepEqual(readdirSync(dir), ['agent.json']);
+});
+
+test('writeTextAtomic bounds persistent Windows rename denials and preserves the file', { skip: process.platform !== 'win32', timeout: 5000 }, async (t) => {
+  const dir = scratch();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, 'state.json');
+  writeFileSync(target, 'old');
+  let attempts = 0;
+  t.mock.method(fsPromises, 'rename', async () => {
+    attempts++;
+    throw Object.assign(new Error('persistent rename denial'), { code: 'EPERM' });
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const exit = await Effect.runPromiseExit(Fs.use((fs) => fs.writeTextAtomic(target, 'new')).pipe(Effect.provide(nodeFs)));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('persistent rename denial'));
+  assert.ok(attempts > 1 && attempts <= 6);
+  assert.equal(readFileSync(target, 'utf8'), 'old');
+  assert.deepEqual(readdirSync(dir), ['state.json']);
+});
+
+test('writeTextAtomic does not retry unrelated rename failures', async (t) => {
+  const dir = scratch();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, 'state.json');
+  writeFileSync(target, 'old');
+  let attempts = 0;
+  t.mock.method(fsPromises, 'rename', async () => {
+    attempts++;
+    throw Object.assign(new Error('rename I/O failure'), { code: 'EIO' });
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const exit = await Effect.runPromiseExit(Fs.use((fs) => fs.writeTextAtomic(target, 'new')).pipe(Effect.provide(nodeFs)));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('rename I/O failure'));
+  assert.equal(attempts, 1);
+  assert.equal(readFileSync(target, 'utf8'), 'old');
+  assert.deepEqual(readdirSync(dir), ['state.json']);
+});
+
+test('interrupting a Windows rename retry preserves the file and cleans the temp', { skip: process.platform !== 'win32' }, async (t) => {
+  const dir = scratch();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, 'state.json');
+  writeFileSync(target, 'old');
+  const controller = new AbortController();
+  let signalDenial!: () => void;
+  const denied = new Promise<void>((resolve) => { signalDenial = resolve; });
+  let attempts = 0;
+  t.mock.method(fsPromises, 'rename', async () => {
+    attempts++;
+    signalDenial();
+    throw Object.assign(new Error('rename denial'), { code: 'EPERM' });
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const writing = Effect.runPromiseExit(Fs.use((fs) => fs.writeTextAtomic(target, 'new')).pipe(Effect.provide(nodeFs)), { signal: controller.signal });
+  await denied;
+  controller.abort();
+  const exit = await writing;
+  assert.ok(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause));
+  // Promise cleanup may finish after the interrupted Effect has returned.
+  for (let i = 0; i < 50 && readdirSync(dir).length > 1; i++) await setTimeout(10);
+  assert.equal(attempts, 1);
+  assert.equal(readFileSync(target, 'utf8'), 'old');
+  assert.deepEqual(readdirSync(dir), ['state.json']);
 });
 
 test('copy keeps a symlink a symlink', async () => {
