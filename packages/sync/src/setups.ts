@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
 import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
+export { normalizeRepoUrl } from '@nortuscc/hosted-protocol';
 
 // A setup this machine applies. P2 has only the own checkout, `setupId: null`.
 export type TrustedSetup = {
@@ -13,29 +14,6 @@ export type TrustedSetup = {
 // The own setup trusted for `checkout`: an own entry for another checkout trusts nothing there.
 export const ownSetup = (setups: ReadonlyArray<TrustedSetup> | undefined, checkout: string): TrustedSetup | undefined =>
   setups?.find((s) => s.setupId === null && s.checkout === checkout);
-
-const LOCAL_PATH = /^(?:[/.~]|[a-z]:[\\/])/i;
-const tidy = (text: string) => text.replace(/\/+$/, '').replace(/\.git$/i, '');
-
-// One form per repository, so a checkout's origin and a hosted setup's URL compare equal: no
-// scheme, credentials or port, no `.git`, and the SSH form rewritten. Remote paths are
-// lower-cased whole; local paths keep their case. null when the URL will not parse: the repository
-// is then unknown, as it is without an origin.
-export const normalizeRepoUrl = (url: string): string | null => {
-  const text = url.trim();
-  try {
-    if (/^file:\/\//i.test(text)) return tidy(decodeURIComponent(new URL(text).pathname));
-    if (LOCAL_PATH.test(text)) return tidy(text);
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-      const parsed = new URL(text);
-      return tidy(`${parsed.hostname}${parsed.pathname}`).toLowerCase();
-    }
-  } catch {
-    return null;
-  }
-  const scp = /^(?:[^@/]+@)?([^:/]+):\/?(.+)$/.exec(text);
-  return tidy(scp ? `${scp[1]}/${scp[2]}` : text).toLowerCase();
-};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -1,3 +1,2 @@
-// Policy values shared by the agent state and browser-safe wire contract.
-export const POLICIES = ['auto-apply', 'notify', 'manual'] as const;
-export type Policy = typeof POLICIES[number];
+// Policy literals shared by local agent state, local IPC and hosted metadata.
+export { POLICIES, type Policy } from '@nortuscc/hosted-protocol';

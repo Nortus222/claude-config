@@ -1,0 +1,10 @@
+export const time = '2026-10-05T12:30:00Z';
+export const item = { id: 'setting:claude:settings.json#effortLevel', kind: 'setting', change: 'changed' };
+export const publication = { number: 12, commitSha: 'a'.repeat(40), tag: 'v12', changelog: 'A new revision', items: [item], requiredEnv: ['API_KEY'] };
+export const revision = { setupId: 'setup-1', ...publication, publishedAt: time, machineId: 'machine-1' };
+export const setup = { setupId: 'setup-1', name: 'Personal setup', repoUrl: 'https://github.com/Nortus222/claude-config', latestRevision: 12, createdAt: time };
+export const decision = { setupId: 'setup-1', itemId: item.id, revision: 12, decision: 'accept' };
+export const statusSetup = { setupId: 'setup-1', revisionApplied: 12, adopted: ['skill:Nortus222/agent-skills/explain'], skipped: [item.id], pending: ['file:claude:CLAUDE.md'], waitingForPerson: ['integration:superpowers-codex'] };
+export const status = { reportedAt: time, policy: 'auto-apply', agents: ['claude', 'codex'], setups: [statusSetup], drift: { setting: 1, skill: 2, integration: 0, file: 0 } };
+export const machine = { machineId: 'machine-1', name: 'macOS machine', os: 'macos', agents: ['claude', 'codex'], policy: 'notify', reportStatus: true, createdAt: time, lastSeenAt: time, status };
+export const sync = { seq: 42, decisions: [{ ...decision, decidedAt: time, machineId: 'machine-1' }], revisions: [{ setupId: 'setup-1', ...publication }], machine: { policy: 'auto-apply', reportStatus: true }, setups: [{ setupId: setup.setupId, name: setup.name, repoUrl: setup.repoUrl, latestRevision: 12 }], pollAfter: 900 };

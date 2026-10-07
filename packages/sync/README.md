@@ -16,3 +16,9 @@ Decisions: [ADR 0017](../../docs/adr/0017-held-items-compose-over-the-checkout.m
   `<stateRoot>/snapshots/`.
 - It owns the contract the agent codes against (`SetupSource`, `itemIdOf`, `entryOf`, trusted setups);
   the CLI depends on this package, never on the agent.
+
+`ItemKind`, `ItemRef`, `parseItemId` and `normalizeRepoUrl` retain their existing exports
+from this package and come from [`@nortuscc/hosted-protocol`](../hosted-protocol/README.md).
+`itemIdOf` stays here because it maps engine-resolved observed keys. Item values, held
+documents, trusted setups and `SetupSource` also remain local. Normalization compares
+repository identity, including local Git fixtures; it grants no trust or fetch permission.

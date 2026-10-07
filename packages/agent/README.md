@@ -34,3 +34,8 @@ per-user login service. Decisions: `docs/adr/0011-local-agent-per-user-login-ser
   annotates events and preserves their positions within each timestamp bucket.
 - `nortuscc agent install [--linger] | uninstall | run` drives it; `agent status | review | resume | policy` talk to the running
   agent; `npm run smoke:agent` with `NORTUSCC_SMOKE=1` registers a throwaway LaunchAgent on a Mac and checks `hello` (`smoke/launchd.smoke.ts`).
+
+`POLICIES` and `Policy` retain their existing exports and come from
+[`@nortuscc/hosted-protocol`](../hosted-protocol/README.md). Shared literals do not
+change local state, decision ordering, trust or classification. Local IPC v3 and
+hosted HTTP v1 keep separate contracts.
