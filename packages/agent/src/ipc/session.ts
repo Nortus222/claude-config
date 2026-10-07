@@ -32,8 +32,10 @@ export type AgentSession = {
   // Runs a job now and answers what it inspected, with its status. Clears any preview.
   readonly inspect: (actor: Client) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
   readonly preview: (exclude: ReadonlyArray<string>) => Effect.Effect<PreviewResult, SessionError>;
-  // Answers `started` and runs in the background, or `stale` with a new preview. `emit` sees the
-  // run's events only after this answers; the terminal one comes after apply.lock is released.
+  // Answers `started` and runs in the background, or `stale` with a new preview. The run's events
+  // start once this resolves, so a caller that writes its reply synchronously on resolving, before
+  // yielding, sends the reply first. The terminal event comes after apply.lock is released. A
+  // throwing `emit` is logged to stderr and never reaches the run.
   readonly apply: (planId: string, actor: Client, emit: (runId: string, progress: RunProgress) => void) => Effect.Effect<ApplyResult, SessionError>;
   // Stops the active run and waits for it to settle. Answers whether one was running.
   readonly cancel: Effect.Effect<boolean>;
@@ -142,8 +144,19 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         return { planId: next.planId, plan: wirePlan(next.plan) };
       });
 
-    const apply: AgentSession['apply'] = (planId, actor, emit) =>
+    // The re-inspection runs outside the scheduler, so it can overlap a scheduled job. That is safe:
+    // apply.lock guards the run (a scheduled auto-apply finds it held and skips), and the revision
+    // verdicts both may record are idempotent to their readers.
+    const apply: AgentSession['apply'] = (planId, actor, listener) =>
       Effect.gen(function* () {
+        // A listener's failure is the listener's: it must never stop the run or skip its History bracket.
+        const emit = (runId: string, progress: RunProgress) => {
+          try {
+            listener(runId, progress);
+          } catch (error) {
+            process.stderr.write(`apply run ${runId}: a progress listener failed: ${describe(error)}\n`);
+          }
+        };
         if (active) return yield* Effect.fail(busy);
         const wanted = previewed;
         if (wanted === undefined || wanted.planId !== planId) {

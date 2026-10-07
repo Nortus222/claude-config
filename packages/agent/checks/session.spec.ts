@@ -169,11 +169,29 @@ test('an apply whose plan changed since the preview runs nothing and answers the
     const old = yield* Effect.flip(session.apply(planId, 'app', () => {}));
     return { result, old: codeOf(old), running: yield* session.running };
   }));
-  assert.equal(result.result.status, 'stale');
   assert.ok(result.result.status === 'stale');
   assert.deepEqual(result.result.plan.steps.map((s) => s.key), [THEME_KEY]);
   assert.equal(result.old, 'UNKNOWN_PLAN');
   assert.equal(result.running, false);
+  assert.equal(existsSync(lock), false);
+  assert.ok(!(await m.kinds()).includes('apply-started'));
+});
+
+test('an apply whose machine changed since the preview runs nothing and answers the new preview', async () => {
+  const { m, within, lock } = await sessionMachine();
+  const settings = join(m.paths.claude, 'settings.json');
+  const result = await within((session) => Effect.gen(function* () {
+    const { planId, plan } = yield* session.preview(yield* configOnly(session));
+    // The managed file is broken by hand between preview and apply.
+    m.write(settings, '{ not json');
+    const result = yield* session.apply(planId, 'app', () => assert.fail('a stale apply emitted progress'));
+    return { before: plan, result };
+  }));
+  assert.ok(result.result.status === 'stale');
+  assert.deepEqual(result.before.steps.map((s) => s.key), [THEME_KEY, EFFORT_KEY, MODEL_KEY]);
+  assert.deepEqual(result.result.plan.steps, []);
+  assert.ok(result.result.plan.skipped.some((s) => s.key === 'config:claude:settings.json' && /not valid JSON/.test(s.reason)));
+  assert.equal(m.read(settings), '{ not json');
   assert.equal(existsSync(lock), false);
   assert.ok(!(await m.kinds()).includes('apply-started'));
 });
@@ -255,4 +273,24 @@ test('a person applies while auto-apply is paused, and a failed step does not pa
   assert.equal(done.failed, 3);
   assert.ok(!(await m.kinds()).includes('paused'));
   assert.equal(m.agentJson().paused.reason, 'test pause');
+});
+
+test('a listener that throws never stops the run: History still brackets it and the lock is released', async () => {
+  const { m, within, lock } = await sessionMachine();
+  const settled = await within((session) => Effect.gen(function* () {
+    const { planId } = yield* session.preview(yield* configOnly(session));
+    const result = yield* session.apply(planId, 'app', () => {
+      throw new Error('listener gone');
+    });
+    assert.equal(result.status, 'started');
+    // The run settles even though no terminal event can be observed through the listener.
+    for (let i = 0; i < 200 && (yield* session.running); i++) yield* Effect.sleep('10 millis');
+    return !(yield* session.running);
+  }));
+  assert.equal(settled, true);
+  const finished = (await m.events()).find((e) => e.kind === 'apply-finished');
+  assert.ok(finished?.kind === 'apply-finished');
+  assert.equal(finished.result, 'done');
+  assert.equal(finished.steps.length, 3);
+  assert.equal(existsSync(lock), false);
 });
