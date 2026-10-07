@@ -13,7 +13,7 @@ const TOKEN = 'the-token';
 
 const send = (socket: Socket, record: unknown) => socket.write(JSON.stringify(record) + '\n');
 
-async function serve(counts: { pending: number; held: number }, delayMs = 0) {
+async function serve(counts: { pending: number; held: number; ready?: number }, delayMs = 0) {
   const stateRoot = mkdtempSync('/tmp/nac-');
   const dir = join(stateRoot, 'agent');
   mkdirSync(dir);
@@ -31,7 +31,7 @@ async function serve(counts: { pending: number; held: number }, delayMs = 0) {
         buffered = buffered.slice(newline + 1);
         const result = request.command === 'hello'
           ? { agentVersion: 'v', protocol: 3, policy: 'notify', paused: null }
-          : { counts: { ...counts, ready: 0, drift: 0 } };
+          : { counts: { ready: 0, drift: 0, ...counts } };
         const answer = () => { if (!socket.destroyed) send(socket, { version: 3, id: request.id, ok: true, result }); };
         if (request.command === 'hello' || delayMs === 0) answer();
         else setTimeout(answer, delayMs);
@@ -57,7 +57,7 @@ const run = async (paths: MachinePathsValue, extra: { connect?: typeof connectAg
 };
 
 test('reminder prints the plural line when pending and held items wait', { skip }, async () => {
-  const f = await serve({ pending: 1, held: 1 });
+  const f = await serve({ pending: 2, held: 1, ready: 1 });
   try {
     assert.deepEqual(await run(f.paths), ['2 items wait for you: run nortuscc agent review']);
   } finally {
@@ -66,9 +66,18 @@ test('reminder prints the plural line when pending and held items wait', { skip 
 });
 
 test('reminder prints the singular line for one item', { skip }, async () => {
-  const f = await serve({ pending: 0, held: 1 });
+  const f = await serve({ pending: 1, held: 1 });
   try {
     assert.deepEqual(await run(f.paths), ['1 item waits for you: run nortuscc agent review']);
+  } finally {
+    await f.close();
+  }
+});
+
+test('reminder ignores pending items nobody has to decide on', { skip }, async () => {
+  const f = await serve({ pending: 3, held: 0, ready: 0 });
+  try {
+    assert.deepEqual(await run(f.paths), []);
   } finally {
     await f.close();
   }
@@ -113,7 +122,7 @@ test('reminder swallows a connect that throws and one that never settles', async
 });
 
 test('remindAfter asks only for an interactive verb on a terminal, and survives failing paths', { skip }, async () => {
-  const f = await serve({ pending: 1, held: 0 });
+  const f = await serve({ pending: 1, held: 1 });
   try {
     const attempt = async (verb: string | undefined, interactive: boolean, paths = async () => f.paths) => {
       const lines: string[] = [];

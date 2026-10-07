@@ -24,7 +24,7 @@ export async function reminder(paths: MachinePathsValue, options: Options = {}):
     connection = conn;
     if (expired) conn.close();
     const status = await conn.request<WireStatus>({ command: 'status' }, { timeoutMs: budgetMs });
-    return status.counts.pending + status.counts.held;
+    return status.counts.held + status.counts.ready;  // pending also holds held and auto-applied items
   };
   try {
     const waiting = await Promise.race([
