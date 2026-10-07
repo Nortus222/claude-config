@@ -193,3 +193,11 @@ test('current is the checkout HEAD with holds applied, and needs no trust', asyn
   assert.deepEqual(JSON.parse(readFileSync(join(current.success.repo, 'claude/settings.keys.json'), 'utf8')), { theme: 'light', effortLevel: 'high' });
   assert.equal(existsSync(join(s.stateRoot, 'agent', 'setups.json')), false);
 });
+
+test('local source never grants hosted tag provenance merely from a reachable commit', async () => {
+  const s = setup(); s.trust(normalizeRepoUrl(s.origin));
+  const record = { setupId: 'hosted-1', number: 1, commitSha: s.first, tag: 'absent', changelog: '', requiredEnv: [], items: [] };
+  const result = await s.source((source) => source.load(record));
+  assert.ok(result._tag === 'Failure');
+  assert.equal(result.failure._tag, 'RevisionMismatch');
+});

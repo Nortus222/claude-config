@@ -86,3 +86,23 @@ test('trusting again after the origin changed records the new repository', async
   assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [own]);
   assert.deepEqual(await m.kinds(), ['setup-trusted', 'setup-trusted']);
 });
+
+test('reinstall preserves linked own identity and account binding, origin change releases it', async () => {
+  const m = agentMachine();
+  const linked = { setupId: 'hosted-1', accountId: 'account-1', repoUrl: 'github.com/example/setup', checkout: m.paths.repo, trustedAt: '2026-10-01T00:00:00Z' };
+  await m.run(SetupsStore.use((s) => s.write([linked])));
+  assert.deepEqual(await m.run(trustOwnSetup('cli')), linked);
+  assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [linked]);
+  assert.deepEqual(await m.kinds(), []);
+  spawnSync('git', ['-C', m.paths.repo, 'remote', 'set-url', 'origin', 'https://github.com/example/new.git']);
+  const replacement = await m.run(trustOwnSetup('cli'));
+  assert.equal(replacement?.setupId, null);
+  assert.equal(replacement?.accountId, undefined);
+  assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [replacement]);
+});
+
+test('malformed account binding makes the entire trust file unreadable', async () => {
+  const m = agentMachine();
+  m.write(setupsJson(m), JSON.stringify({ version: 1, setups: [{ setupId: 'hosted-1', accountId: 1, repoUrl: 'github.com/example/setup', checkout: m.paths.repo, trustedAt: '2026-10-01T00:00:00Z' }] }));
+  assert.equal(await m.run(SetupsStore.use((s) => s.read)), undefined);
+});

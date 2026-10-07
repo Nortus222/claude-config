@@ -12,3 +12,5 @@ export * from './plan.ts';
 export * from './snapshots.ts';
 export * from './setup-source.ts';
 export * from './checkout-groups.ts';
+
+export * from './hosted-source.ts';

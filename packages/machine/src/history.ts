@@ -28,7 +28,7 @@ export type HistoryEventBody =
   | { readonly kind: 'setup-trusted'; readonly setupId: string | null; readonly repoUrl: string | null }
   | { readonly kind: 'paused'; readonly reason: string; readonly runId?: string }
   | { readonly kind: 'resumed'; readonly reason: string }
-  | { readonly kind: 'revision-verified' | 'revision-rejected'; readonly setupId: string; readonly revision: string; readonly error?: string }
+  | { readonly kind: 'revision-verified' | 'revision-rejected'; readonly setupId: string; readonly revision: string | number; readonly error?: string }
   | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> }
   | { readonly kind: 'outbox-dropped'; readonly accountId: string; readonly count: number; readonly code: 'invalid' };
 

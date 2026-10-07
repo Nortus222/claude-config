@@ -4,7 +4,7 @@ import { Effect } from 'effect';
 import { loadProfile, nodeFiles, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
 import { canonical, Fs, type FsFailed } from '@nortuscc/machine';
 import { composeDocuments } from './compose.ts';
-import { writeDocuments } from './documents.ts';
+import { writeDocuments, type Documents } from './documents.ts';
 import type { Snapshot } from './source.ts';
 import type { Holds } from './store.ts';
 
@@ -41,24 +41,45 @@ export const snapshotFor = (input: {
   readonly overrides: Input<MachineOverrides>;
   readonly now: Date;
 }) =>
-  Effect.gen(function* () {
-    const fs = yield* Fs;
-    const root = snapshotsDir(input.stateRoot);
-    const key = snapshotKey(input);
-    const dir = join(root, key);
-    const marker = JSON.stringify({ commit: input.commit, held: input.held, usedAt: input.now.toISOString() }, null, 2) + '\n';
-    if ((yield* fs.readText(join(dir, MARKER))) === undefined) {
-      const staging = join(root, `${STAGING}${key}-${input.now.getTime()}-${randomUUID()}`);
-      yield* writeDocuments(staging, yield* composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.commit }, held: input.held }));
-      yield* fs.writeTextAtomic(join(staging, MARKER), marker);
-      yield* fs.remove(dir);
-      yield* fs.move(staging, dir);
-    } else {
-      yield* fs.writeTextAtomic(join(dir, MARKER), marker);
-    }
-    const snapshot: Snapshot = { desired: yield* loadProfile(dir, { overrides: input.overrides }).pipe(Effect.provide(nodeFiles)), repo: dir };
-    return snapshot;
+  materializeSnapshot({
+    stateRoot: input.stateRoot, key: snapshotKey(input), overrides: input.overrides, now: input.now,
+    marker: { commit: input.commit, held: input.held },
+    documents: composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.commit }, held: input.held }),
   });
+
+// Materializes an empty or mixed-provenance configuration without inventing a Git commit.
+export const snapshotFromDocuments = (input: {
+  readonly documents: Documents;
+  readonly stateRoot: string;
+  readonly overrides: Input<MachineOverrides>;
+  readonly now: Date;
+}) => materializeSnapshot({
+  ...input,
+  key: createHash('sha256').update(canonical({ format: SNAPSHOT_FORMAT, documents: input.documents })).digest('hex').slice(0, 32),
+  marker: { documents: true }, documents: Effect.succeed(input.documents),
+});
+
+const materializeSnapshot = <E, R>(input: {
+  readonly stateRoot: string; readonly key: string; readonly now: Date;
+  readonly overrides: Input<MachineOverrides>; readonly marker: Readonly<Record<string, unknown>>;
+  readonly documents: Effect.Effect<Documents, E, R>;
+}) => Effect.gen(function* () {
+  const fs = yield* Fs;
+  const root = snapshotsDir(input.stateRoot);
+  const dir = join(root, input.key);
+  const marker = JSON.stringify({ ...input.marker, usedAt: input.now.toISOString() }, null, 2) + '\n';
+  if ((yield* fs.readText(join(dir, MARKER))) === undefined) {
+    const staging = join(root, `${STAGING}${input.key}-${input.now.getTime()}-${randomUUID()}`);
+    yield* writeDocuments(staging, yield* input.documents);
+    yield* fs.writeTextAtomic(join(staging, MARKER), marker);
+    yield* fs.remove(dir);
+    yield* fs.move(staging, dir);
+  } else {
+    yield* fs.writeTextAtomic(join(dir, MARKER), marker);
+  }
+  const snapshot: Snapshot = { desired: yield* loadProfile(dir, { overrides: input.overrides }).pipe(Effect.provide(nodeFiles)), repo: dir };
+  return snapshot;
+});
 
 // Keeps the SNAPSHOTS_KEPT most recently used snapshot folders and every folder in `keep`; removes
 // the rest and any staging folder created more than STALE_STAGING_MS before `now`, which a crashed run

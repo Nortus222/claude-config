@@ -3,17 +3,18 @@ import { Context, Effect, Layer } from 'effect';
 import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
 export { normalizeRepoUrl } from '@nortuscc/hosted-protocol';
 
-// A setup this machine applies. P2 has only the own checkout, `setupId: null`.
+// Repository consent is local; a hosted identity additionally needs an explicit account binding.
 export type TrustedSetup = {
   readonly setupId: string | null;
+  readonly accountId?: string;
   readonly repoUrl: string | null;
   readonly checkout: string | null;
   readonly trustedAt: string;
 };
 
-// The own setup trusted for `checkout`: an own entry for another checkout trusts nothing there.
+// The own or linked setup trusted for `checkout`: an own entry for another checkout trusts nothing there.
 export const ownSetup = (setups: ReadonlyArray<TrustedSetup> | undefined, checkout: string): TrustedSetup | undefined =>
-  setups?.find((s) => s.setupId === null && s.checkout === checkout);
+  setups?.find((s) => s.checkout === checkout);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -23,7 +24,8 @@ const isSetup = (value: unknown): value is TrustedSetup =>
   && (value.setupId === null || typeof value.setupId === 'string')
   && (value.repoUrl === null || typeof value.repoUrl === 'string')
   && (value.checkout === null || typeof value.checkout === 'string')
-  && typeof value.trustedAt === 'string';
+  && typeof value.trustedAt === 'string'
+  && (value.accountId === undefined || (typeof value.accountId === 'string' && /^[A-Za-z0-9-]{1,100}$/.test(value.accountId) && value.accountId !== 'local'));
 
 export class SetupsStore extends Context.Service<
   SetupsStore,

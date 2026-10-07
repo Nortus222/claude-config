@@ -75,6 +75,7 @@ export const setupSourceLayer = (
 
   const load = (revision: Revision) =>
     Effect.gen(function* () {
+      if (typeof revision !== 'string') return yield* Effect.fail(new RevisionMismatch({ revision, reason: 'hosted records require the hosted source' }));
       const commit = yield* revParse(repo, revision);
       if (commit === undefined) return yield* unavailable(revision, 'no such commit in the checkout');
       const upstream = yield* trustedOrigin(revision);

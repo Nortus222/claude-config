@@ -5,7 +5,7 @@ import {
   acquireApplyLock, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
-import type { SetupSource } from '@nortuscc/sync';
+import { revisionCommit, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
 import { AgentClock } from '../clock.ts';
@@ -116,7 +116,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const result: InspectResult & { status: WireStatus } = {
           profile: {
             repo,
-            revision: inspection.revision,
+            revision: inspection.revision === null ? null : revisionCommit(inspection.revision),
             overrides: join(stateRoot, 'overrides.json'),
             issues: inspection.desired.issues.map((i) => ({ layer: i.layer, source: i.source, path: i.path, message: i.message })),
           },

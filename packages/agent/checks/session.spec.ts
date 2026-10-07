@@ -350,3 +350,13 @@ test('a manual apply defect records a durable failure without pausing and refres
   assert.equal(finished[0].steps.some((s) => s.outcome === 'failed'), true);
   assert.ok(!(await m.kinds()).includes('paused'));
 });
+
+test('hosted numeric job identity serializes inspect profile as its commit SHA', async () => {
+  const hosted = { setupId: 'hosted-1', number: 2, commitSha: HEAD, tag: 'v2', changelog: '', requiredEnv: [], items: [] };
+  const s = await sessionMachine({ source: (source) => ({ ...source, setupId: hosted.setupId, trusted: Effect.succeed(true), fetch: Effect.succeed({ head: hosted }), load: () => source.load(HEAD) }) });
+  await s.within((session) => Effect.gen(function* () {
+    const result = yield* session.inspect('app');
+    assert.equal(result.profile.revision, HEAD);
+    assert.equal(decodeInspectResult(result).profile.revision, HEAD);
+  }));
+});
