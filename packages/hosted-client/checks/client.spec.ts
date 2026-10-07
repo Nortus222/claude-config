@@ -524,3 +524,19 @@ test('oversized complete status is declined before HTTP, never truncated', async
   await assert.rejects(run(f.client.reportStatus(summary)), /invalid_request/);
   assert.equal(f.requests.length, before);
 });
+
+for (const retryAfter of [2_147_484, Number.MAX_SAFE_INTEGER]) test(`device long Retry-After ${retryAfter} preserves failure and expires without HTTP`, async (t) => {
+  const f = await fixture(t);
+  await run(f.client.startSignIn({ os: 'macos', agents: [] })); f.advance(5000);
+  const failure = new HostedFailure({ code: 'rate_limited', status: 429, retryAfter });
+  f.actions.push(() => Effect.fail(failure));
+  const failed = await run(f.client.pollSignIn().pipe(Effect.result));
+  assert.equal(failed._tag, 'Failure');
+  if (failed._tag === 'Failure') assert.equal(failed.failure, failure, 'preserves original rate limit and retry metadata');
+  const count = f.requests.length;
+  f.advance(5000); assert.deepEqual(await run(f.client.pollSignIn()), { status: 'pending', pollAfter: 110 });
+  f.advance(109000); await run(f.client.pollSignIn()); assert.equal(f.requests.length, count);
+  f.advance(1000); await assert.rejects(run(f.client.pollSignIn()), /sign_in_expired/);
+  f.advance(2_147_484_000); await assert.rejects(run(f.client.pollSignIn()), /sign_in_expired/);
+  assert.equal(f.requests.length, count, 'expiry and timer-ceiling jumps cannot restart HTTP polling');
+});

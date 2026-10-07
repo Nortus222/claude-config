@@ -269,7 +269,13 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       const reply = yield* transport.request({ method: 'POST', path: '/auth/device/poll', body: { pendingId: flow.pendingId } }).pipe(Effect.catch((error) => {
         if (error.code === 'sign_in_expired' || error.code === 'not_allowlisted') pending = undefined;
         return Effect.gen(function* () {
-          if (error.retryAfter !== undefined) flow.nextAt = Math.max(flow.nextAt, yield* deadline(error.retryAfter));
+          // The flow expires before a later retry matters; timer limits do not constrain retry policy.
+          if (error.retryAfter !== undefined) {
+            const at = now().getTime();
+            const remaining = Math.max(0, flow.expiresAt - at);
+            const retryDelay = Math.min(error.retryAfter, remaining / 1000) * 1000;
+            flow.nextAt = Math.max(flow.nextAt, at + retryDelay);
+          }
           return yield* Effect.fail(error);
         });
       }));

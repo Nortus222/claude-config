@@ -7,11 +7,12 @@ import { join } from 'node:path';
 import { Effect, Layer, Deferred } from 'effect';
 import { configDomain, HistoryStore, integrationsDomain, nodeProcesses, Processes, type Decision } from '@nortuscc/machine';
 import { HostedTransport, type HostedRequest } from '@nortuscc/hosted-client';
-import { diffItems, itemValues, setupSourceLayer, SetupsStore } from '@nortuscc/sync';
+import { diffItems, hostedSetupSourceLayer, itemValues, setupSourceLayer, SetupSource, SetupsStore } from '@nortuscc/sync';
 import type { StatusSummary, SyncRevision, SyncedDecision } from '@nortuscc/hosted-protocol';
 import { AgentClock, AgentStateStore, agentLayer, configuredHostedRuntime, makeSession, startAgent } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { tempRepo, json } from '../../sync/checks/support/repo.ts';
+import { hashValue } from '../../machine/src/config/file-state.ts';
 
 const URL = 'https://github.com/example/hosted';
 const ADDITIONAL = 'https://github.com/example/additional';
@@ -136,4 +137,57 @@ test('fake three-machine service: person accepts/configures first, inert auto ap
       }
     })).pipe(Effect.provide(Layer.merge(agentLayer(m.paths, { processes, clock }), setupSourceLayer(m.paths, { processes })))));
   }
+});
+
+for (const reportStatus of [true, false]) test(`accepted override conflict preserves unrelated origins with reporting ${reportStatus}`, async (t) => {
+  const docs = { 'claude/settings.keys.json': json({ effortLevel: 'high', model: 'test-model' }) };
+  const repo = tempRepo({ 'claude/settings.keys.json': json({ effortLevel: 'low', model: 'old-model' }) });
+  const m = agentMachine(realpathSync(tmpdir()));
+  t.after(() => { rmSync(repo.root, { recursive: true, force: true }); rmSync(m.root, { recursive: true, force: true }); });
+  const commitSha = repo.commit(docs); repo.git('tag', 'v1');
+  const record: SyncRevision = { setupId: 'setup1', number: 1, commitSha, tag: 'v1', changelog: '', requiredEnv: [],
+    items: diffItems(itemValues({}), itemValues(docs)).map((i) => ({ id: i.itemId, kind: i.kind, change: 'added' })) };
+  rmSync(m.paths.repo, { recursive: true });
+  execFileSync('git', ['clone', '-q', repo.dir, m.paths.repo]);
+  execFileSync('git', ['-C', m.paths.repo, 'reset', '-q', '--hard', repo.first]);
+  execFileSync('git', ['-C', m.paths.repo, 'remote', 'set-url', 'origin', URL]);
+  m.write(join(m.paths.stateRoot, 'overrides.json'), json({ version: 1, settings: { 'claude:settings.json': { effortLevel: 'max' } } }));
+  m.write(join(m.paths.claude, 'settings.json'), json({ effortLevel: 'max', model: 'test-model' }));
+  m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, repo: m.paths.repo, files: Object.fromEntries(
+    Object.entries({ effortLevel: 'max', model: 'test-model' }).map(([key, value]) => [`claude:settings.json#${key}`, { hash: hashValue(value), appliedAt: '2026-10-07T00:00:00Z' }])) }));
+  let now = Date.parse('2026-10-07T00:00:00Z'); let token: string | undefined;
+  const reports: StatusSummary[] = [];
+  const transport = Layer.succeed(HostedTransport, { request: (req) => Effect.sync(() => {
+    if (req.path === '/auth/device/start') return { status: 200, body: { pendingId: 'private', userCode: 'ABCD', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 } };
+    if (req.path === '/auth/device/poll') return { status: 200, body: { accountId: 'account1', login: 'person', machineId: 'machine1', token: `nmt_account1_machine1_${'s'.repeat(43)}`, defaultPolicy: 'notify' } };
+    if (req.path.startsWith('/sync?')) return { status: 200, body: { seq: 2, revisions: [record],
+      decisions: [EFFORT, MODEL].map((itemId) => ({ setupId: 'setup1', itemId, revision: 1, decision: 'accept', decidedAt: new Date(now).toISOString(), machineId: 'other' })),
+      machine: { policy: 'notify', reportStatus }, setups: [{ setupId: 'setup1', name: 'Test', repoUrl: URL, latestRevision: 1 }], pollAfter: 900 } };
+    if (req.path === '/machines/self/status') { reports.push(req.body as StatusSummary); return { status: 204 }; }
+    assert.fail(`unexpected fake HTTP ${req.path}`);
+  }) });
+  const processes = Layer.effect(Processes, Effect.gen(function* () {
+    const real = yield* Processes;
+    return { run: (command: Parameters<Processes['Service']['run']>[0]) => {
+      assert.equal(command.cmd, 'git');
+      return real.run({ ...command, args: command.args.map((a) => command.args.includes('fetch') && a === URL ? repo.dir : a), stderr: 'capture' });
+    } };
+  })).pipe(Layer.provide(nodeProcesses()));
+  const clock = Layer.succeed(AgentClock, { now: Effect.sync(() => new Date(now)), random: Effect.succeed(0.5), sleep: () => Effect.never });
+  await Effect.runPromise(Effect.gen(function* () {
+    const runtime = yield* configuredHostedRuntime(m.paths, { url: 'https://fake.example/v1', platform: 'darwin', transport, now: () => new Date(now),
+      keychain: { read: () => Effect.succeed(token), write: (s) => Effect.sync(() => { token = s; }), remove: () => Effect.sync(() => { token = undefined; }) } }, { domains: () => [configDomain], os: 'macos' });
+    yield* runtime.signIn(); now += 5000; yield* runtime.tick; yield* runtime.trust('setup1', 'cli');
+    const result = yield* runtime.runJobs;
+    assert.deepEqual(result.status.conflicts, [EFFORT], JSON.stringify({ status: result.status, hosted: yield* runtime.state }));
+    assert.deepEqual(result.inspection!.report.items.filter((row) => [EFFORT, MODEL].includes(row.key.replace('config:', 'setting:'))).map((row) => [row.state, row.disposition]), [['clean', 'in-sync'], ['clean', 'in-sync']]);
+    assert.equal((yield* runtime.state).error, null, 'an ordinary override conflict is not a storage failure');
+    const baseline = yield* SetupSource.use((source) => source.baseline!).pipe(Effect.provide(hostedSetupSourceLayer(m.paths, {
+      accountId: 'account1', currentAccountId: Effect.succeed('account1'), setupId: 'setup1', repoUrl: URL, records: Effect.succeed([record]), processes,
+    })));
+    assert.equal(baseline.origins[EFFORT], repo.first, 'conflicting origin does not advance');
+    assert.equal(baseline.origins[MODEL], record.commitSha, 'unrelated positive origin advances even with uploads disabled');
+    assert.equal(reports.length, reportStatus ? 1 : 0);
+    if (reportStatus) assert.deepEqual(reports[0]!.setups, [{ setupId: 'setup1', revisionApplied: 1, adopted: [MODEL], skipped: [], pending: [], waitingForPerson: [EFFORT] }]);
+  }).pipe(Effect.provide(Layer.merge(agentLayer(m.paths, { processes, clock }), setupSourceLayer(m.paths, { processes })))));
 });

@@ -117,7 +117,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
       if (!inspection || fresh.status.error || !inspection.trusted || revision === null || typeof revision !== 'object'
         || revision.number !== records.at(-1)!.number || revision.commitSha !== records.at(-1)!.commitSha) return;
       const head = yield* source.load(revision);
-      const accepted = [...currentChoices(records, choices)].filter(([, choice]) => choice === 'accept').map(([id]) => id);
+      const accepted = [...currentChoices(records, choices)].filter(([id, choice]) => choice === 'accept' && !fresh.status.conflicts.includes(id)).map(([id]) => id);
       const appliedRevision = applied?.inspection.revision;
       const previousBaseline = yield* source.baseline!;
       const priorProof = accepted.filter((id) => previousBaseline.origins[id] !== undefined && confirmed.get(`${selected.scope}/${id}`) === previousBaseline.origins[id]);

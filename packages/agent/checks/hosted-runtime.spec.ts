@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { Effect, Layer, Deferred, Queue } from 'effect';
 import { acquireApplyLock } from '@nortuscc/machine';
-import { HostedFailure, type HostedClient, type HostedState } from '@nortuscc/hosted-client';
+import { HostedFailure, HostedTransport, type HostedClient, type HostedState } from '@nortuscc/hosted-client';
 import { AgentClock, configuredHostedRuntime, hostedCadence, hostedWait, makeHostedRuntime, makeSession, SetupSource, SetupsStore, startAgent } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
@@ -112,4 +114,34 @@ test('device completion defers behind person apply and scheduler honors durable 
     assert.equal(calls.filter((s) => s === 'poll').length, 1);
     assert.equal(calls.includes('sync'), false, 'far-future durable retry does not issue HTTP sync');
   })), f.source);
+});
+
+for (const cancel of [false, true]) test(`device long retry wakes for expiry without early HTTP, cancellation ${cancel}`, async (t) => {
+  const m = agentMachine(realpathSync(tmpdir())); const f = setupFixture(m.root);
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const startedAt = Date.parse('2026-10-07T00:00:00Z'); let now = startedAt; let polls = 0;
+  const transport = Layer.succeed(HostedTransport, { request: (req) => {
+    if (req.path === '/auth/device/start') return Effect.succeed({ status: 200, body: { pendingId: 'private', userCode: 'ABCD', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 } });
+    assert.equal(req.path, '/auth/device/poll'); polls++;
+    return Effect.fail(new HostedFailure({ code: 'rate_limited', status: 429, retryAfter: Number.MAX_SAFE_INTEGER }));
+  } });
+  const clock = { now: Effect.sync(() => new Date(now)), random: Effect.succeed(0.5), sleep: () => Effect.never };
+  await m.run(Effect.gen(function* () {
+    const runtime = yield* configuredHostedRuntime(m.paths, { url: 'https://fake.example/v1', platform: 'darwin', transport, now: () => new Date(now),
+      keychain: { read: () => Effect.succeed(undefined), write: () => Effect.die('unexpected credential write'), remove: () => Effect.void } }, { domains: () => m.domains, os: 'macos' }).pipe(Effect.provideService(AgentClock, clock));
+    yield* runtime.signIn();
+    now += 4999; assert.equal(yield* runtime.due, false); yield* runtime.tick; assert.equal(polls, 0);
+    now++; yield* runtime.tick; assert.equal(polls, 1);
+    assert.equal((yield* runtime.state).error, 'rate_limited');
+    assert.equal(yield* runtime.wait, 60_000, 'long retry uses bounded timer chunks');
+    if (cancel) yield* runtime.signOut();
+    now += 5000; assert.equal(yield* runtime.due, false); yield* runtime.tick; assert.equal(polls, 1);
+    now = startedAt + 119000;
+    assert.equal(yield* runtime.wait, cancel ? 60_000 : 1000, 'active flow wakes at expiry before retry');
+    now += 1000; assert.equal(yield* runtime.due, !cancel); yield* runtime.tick;
+    assert.equal((yield* runtime.state).signingIn, false, 'expiry or cancellation always ends the flow');
+    assert.equal((yield* runtime.state).error, cancel ? null : 'sign_in_expired');
+    now += 2_147_484_000; assert.equal(yield* runtime.due, false); yield* runtime.tick;
+    assert.equal(polls, 1, 'no transport poll after retry, expiry or cancellation');
+  }), f.source);
 });
