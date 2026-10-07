@@ -41,6 +41,9 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
 }): Layer.Layer<SetupSource> => {
   const now = options.now ?? (() => new Date());
   const repoIdentity = normalizeRepoUrl(options.repoUrl);
+  // Identity-only host/path references need an explicit transport before reaching Git.
+  const transport = /^(?:https|ssh):\/\//.test(options.repoUrl) || options.repoUrl.startsWith('git@')
+    ? options.repoUrl : `https://${options.repoUrl}`;
   const repoKey = hash(repoIdentity);
   const scope = hash([options.accountId, options.setupId, repoIdentity]);
   const baselinePath = join(paths.stateRoot, 'agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
@@ -64,15 +67,30 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const entry = yield* consent;
     const repo = entry.checkout ?? clone;
     const fs = yield* Fs;
-    if (entry.checkout === null && !(yield* fs.exists(repo))) {
-      // Bare init and fetch avoid checking out or running repository-supplied code.
-      yield* consent;
-      yield* fs.writeTextAtomic(join(repo, '.nortuscc-hosted'), `${scope}\n`);
-      if ((yield* git(repo, ['init', '--quiet', '--bare'])).code !== 0) return yield* unavailable('HEAD', 'private repository initialization failed');
-      if ((yield* git(repo, ['remote', 'add', 'origin', options.repoUrl])).code !== 0) return yield* unavailable('HEAD', 'private origin initialization failed');
+    const origin = entry.checkout === null
+      ? git(repo, ['--git-dir=.', 'remote', 'get-url', 'origin']).pipe(Effect.map(({ code, stdout }) => code === 0 && stdout.trim() !== '' ? stdout.trim() : undefined))
+      : originUrl(repo);
+    if (entry.checkout === null) {
+      const marker = join(repo, '.nortuscc-hosted');
+      if (!(yield* fs.exists(repo))) {
+        yield* consent;
+        yield* fs.writeTextAtomic(marker, `${scope}\n`);
+      }
+      if ((yield* fs.readText(marker)) !== `${scope}\n`) return yield* unavailable('HEAD', 'private repository is not owned by this source');
+      if ((yield* origin) === undefined) {
+        // Retry only source-owned empty initialization, never repair another repository.
+        const names = yield* fs.list(repo);
+        const allowed = new Set(['.nortuscc-hosted', 'HEAD', 'config', 'description', 'hooks', 'info', 'objects', 'refs', 'branches']);
+        const remotes = yield* git(repo, ['--git-dir=.', 'remote']);
+        const refs = yield* git(repo, ['--git-dir=.', 'for-each-ref', '--format=%(refname)']);
+        if (names?.some((name) => !allowed.has(name)) || remotes.stdout.trim() !== '' || refs.stdout.trim() !== '') return yield* unavailable('HEAD', 'private repository has unexpected initialization state');
+        // Bare init and fetch avoid checking out or running repository-supplied code.
+        if ((yield* git(repo, ['init', '--quiet', '--bare'])).code !== 0) return yield* unavailable('HEAD', 'private repository initialization failed');
+        if ((yield* git(repo, ['remote', 'add', 'origin', transport])).code !== 0) return yield* unavailable('HEAD', 'private origin initialization failed');
+      }
     }
-    const origin = yield* originUrl(repo);
-    if (origin === undefined || normalizeRepoUrl(origin) !== repoIdentity) return yield* unavailable('HEAD', 'origin is not the trusted repository');
+    const configured = yield* origin;
+    if (configured === undefined || normalizeRepoUrl(configured) !== repoIdentity) return yield* unavailable('HEAD', 'origin is not the trusted repository');
     return { repo, linked: entry.checkout !== null };
   });
 
@@ -94,7 +112,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       const verifiedRef = `refs/nortuscc/hosted/${scope}/verified/${record.number}-${hash(record)}`;
       const fetchedRef = `refs/nortuscc/hosted/${scope}/candidate/${record.number}`;
       const fetched = yield* Processes.use((p) => p.run({
-        cmd: 'git', args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', options.repoUrl, `+refs/tags/${record.tag}:${fetchedRef}`],
+        cmd: 'git', args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
         cwd: repo, env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
       })).pipe(Effect.timeoutOption(FETCH_TIMEOUT_MS), Effect.map((result) => result._tag === 'Some' && result.value.code === 0), Effect.catchTag('LaunchFailed', () => Effect.succeed(false)));
       const sha = yield* revParse(repo, fetched ? fetchedRef : verifiedRef);
@@ -138,12 +156,29 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       commit ??= yield* revParse(repo, 'HEAD');
       if (commit === undefined) return yield* unavailable('HEAD', 'linked checkout has no baseline commit');
       const docs = yield* commitDocuments(repo, commit);
+      const cache = new Map([[commit, docs]]);
+      let seed = docs;
       for (const id of itemValues(docs).keys()) origins[id] = commit;
-      for (const [id, held] of Object.entries(holds)) {
-        const heldDocs = yield* commitDocuments(repo, held);
+      for (const id of Object.keys(holds).sort()) {
+        const held = holds[id]!;
+        let heldDocs = cache.get(held);
+        if (heldDocs === undefined) { heldDocs = yield* commitDocuments(repo, held); cache.set(held, heldDocs); }
+        seed = patchItem(seed, id, heldDocs);
         if (itemValues(heldDocs).has(id)) origins[id] = held;
         else delete origins[id];
       }
+      // A root hold can also move a sibling's shared pin. Choose an existing origin with
+      // that composed value, then prove the whole seed survives item-order materialization.
+      const expected = itemValues(seed);
+      for (const id of Object.keys(origins)) if (!expected.has(id)) delete origins[id];
+      for (const [id, value] of expected) {
+        if (origins[id] !== undefined && itemValues(cache.get(origins[id]!)!).get(id) === value) continue;
+        const origin = [...cache].find(([, candidate]) => itemValues(candidate).get(id) === value)?.[0];
+        if (origin === undefined) return yield* unavailable('HEAD', 'local held seed cannot be represented by item origins');
+        origins[id] = origin;
+      }
+      const materialized = itemValues(yield* baselineDocuments(repo, { revisionApplied: 0, origins }, cache));
+      if ([...new Set([...expected.keys(), ...materialized.keys()])].some((id) => expected.get(id) !== materialized.get(id))) return yield* unavailable('HEAD', 'local held seed cannot be preserved by item origins');
     }
     const baseline: HostedBaseline = { revisionApplied: 0, origins };
     yield* consent;

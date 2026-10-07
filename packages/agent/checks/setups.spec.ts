@@ -106,3 +106,12 @@ test('malformed account binding makes the entire trust file unreadable', async (
   m.write(setupsJson(m), JSON.stringify({ version: 1, setups: [{ setupId: 'hosted-1', accountId: 1, repoUrl: 'github.com/example/setup', checkout: m.paths.repo, trustedAt: '2026-10-01T00:00:00Z' }] }));
   assert.equal(await m.run(SetupsStore.use((s) => s.read)), undefined);
 });
+
+for (const repoUrl of ['https://github.com/example/setup.git', 'ssh://git@github.com/example/setup.git', 'git@github.com:example/setup.git']) test(`I2 reinstall preserves the raw linked URL ${repoUrl} verbatim`, async () => {
+  const m = agentMachine();
+  const linked = { setupId: 'hosted-1', accountId: 'account-1', repoUrl, checkout: m.paths.repo, trustedAt: '2026-10-01T00:00:00Z' };
+  await m.run(SetupsStore.use((s) => s.write([linked])));
+  assert.deepEqual(await m.run(trustOwnSetup('cli')), linked);
+  assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [linked]);
+  assert.deepEqual(await m.kinds(), []);
+});

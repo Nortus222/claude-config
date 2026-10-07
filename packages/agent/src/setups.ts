@@ -16,7 +16,7 @@ export const trustOwnSetup = (actor: Actor) =>
       Effect.map(({ code, stdout }) => (code === 0 && stdout.trim() !== '' ? normalizeRepoUrl(stdout.trim()) : null)),
       Effect.catchTag('LaunchFailed', () => Effect.succeed(null)),
     );
-    const own = setups.find((s) => s.checkout === paths.repo && s.repoUrl === repoUrl);
+    const own = setups.find((s) => s.checkout === paths.repo && (s.repoUrl === null ? null : normalizeRepoUrl(s.repoUrl)) === repoUrl);
     if (own) return own;
     const entry: TrustedSetup = { setupId: null, repoUrl, checkout: paths.repo, trustedAt: (yield* (yield* AgentClock).now).toISOString() };
     yield* store.write([...setups.filter((s) => s.setupId !== null && s.checkout !== paths.repo), entry]);

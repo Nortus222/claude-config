@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -32,12 +33,15 @@ const fixture = (base: Readonly<Record<string, string>> = initial) => {
   let records: SyncRevision[] = [];
   const calls: string[][] = [];
   let afterFetch: (() => void) | undefined;
+  let failCommand: string | undefined;
   const processes = Layer.effect(Processes, Effect.gen(function* () {
     const real = yield* Processes;
     return { run: (command: Parameters<Processes['Service']['run']>[0]) => {
       calls.push([...command.args]);
+      if (failCommand && command.args.includes(failCommand)) { failCommand = undefined; return Effect.succeed({ code: 1, stdout: '' }); }
       if (offline && command.args.includes('fetch')) return Effect.succeed({ code: 128, stdout: '' });
-      return real.run({ ...command, args: command.args.map((arg) => arg === URL && command.args.includes('fetch') ? origin : arg), stderr: 'capture' }).pipe(Effect.tap(() => Effect.sync(() => { if (command.args.includes('fetch')) afterFetch?.(); })));
+      if (command.args.includes('fetch')) assert.equal(command.args.some((arg) => arg === 'github.com/example/hosted'), false, 'identity-only repository reference is never a relative Git path');
+      return real.run({ ...command, args: command.args.map((arg) => [URL, 'https://github.com/example/hosted', 'ssh://git@github.com/example/hosted.git', 'git@github.com:example/hosted.git'].includes(arg) && command.args.includes('fetch') ? origin : arg), stderr: 'capture' }).pipe(Effect.tap(() => Effect.sync(() => { if (command.args.includes('fetch')) afterFetch?.(); })));
     } };
   })).pipe(Layer.provide(nodeProcesses()));
   const trust = (checkoutValue: string | null = checkout, accountId: string | null = 'account-1', repoUrl = URL) => write(join(paths.stateRoot, 'agent', 'setups.json'), json({ version: 1, setups: [{ setupId: 'setup-1', repoUrl: sync.normalizeRepoUrl(repoUrl), checkout: checkoutValue, trustedAt: '2026-10-07T00:00:00Z', ...(accountId ? { accountId } : {}) }] }));
@@ -61,7 +65,7 @@ const fixture = (base: Readonly<Record<string, string>> = initial) => {
   };
   const textAt = (repo: string, path: string) => existsSync(join(repo, path)) ? readFileSync(join(repo, path), 'utf8') : undefined;
   trust();
-  return { afterFetch: (f: () => void) => { afterFetch = f; }, ...repo, checkout, origin, paths, trust, source, publish, write, calls, textAt, records: () => records, setRecords: (r: SyncRevision[]) => { records = r; }, offline: () => { offline = true; }, online: () => { offline = false; }, account: (a: string | null) => { account = a; } };
+  return { failCommand: (name: string) => { failCommand = name; }, afterFetch: (f: () => void) => { afterFetch = f; }, ...repo, checkout, origin, paths, trust, source, publish, write, calls, textAt, records: () => records, setRecords: (r: SyncRevision[]) => { records = r; }, offline: () => { offline = true; }, online: () => { offline = false; }, account: (a: string | null) => { account = a; } };
 };
 const fails = (result: { _tag: string; failure?: { _tag: string } }, tag: string) => { assert.equal(result._tag, 'Failure'); assert.equal(result.failure?._tag, tag); };
 const keys = (s: ReturnType<typeof fixture>, repo: string) => JSON.parse(s.textAt(repo, 'claude/settings.keys.json') ?? '{}');
@@ -279,4 +283,72 @@ test('partial pin adoption refuses provenance that cannot materialize the positi
   if (composed._tag === 'Success') assert.equal(composed.success.effective.desired.skills.find((skill) => skill.name === 'a')?.pin?.ref, newPin);
   fails(await s.source((service) => service.recordApplied!({ revision: r, decisions, observed: [a], released: [] })), 'RevisionMismatch');
   assert.equal((await s.source((service) => service.recordApplied!({ revision: r, decisions, observed: [a, b], released: [] })))._tag, 'Success');
+});
+
+const repoHash = (url = URL) => createHash('sha256').update(JSON.stringify(sync.normalizeRepoUrl(url))).digest('hex');
+const clonePath = (s: ReturnType<typeof fixture>) => join(s.paths.stateRoot, 'agent', 'checkouts', 'account-1', repoHash(), 'setup-1');
+const baselinePath = (s: ReturnType<typeof fixture>) => join(s.paths.stateRoot, 'agent', 'baselines', 'account-1', repoHash(), 'setup-1.json');
+const seedSkills = (s: ReturnType<typeof fixture>, head: string) => {
+  execFileSync('git', ['-C', s.checkout, 'fetch', '-q', s.origin, 'main']);
+  s.write(join(s.paths.stateRoot, 'state.json'), json({ version: 1, repo: null, files: {}, applied: { commit: head, at: '2026-10-07T00:00:00Z' } }));
+  s.write(join(s.paths.stateRoot, 'sync.json'), json({ version: 1, held: { 'skill:example/skills/a': s.first } }));
+};
+
+test('I1 linked seed preserves a held source pin when held skill sorts before its unheld sibling', async (t) => {
+  const oldPin = 'a'.repeat(40); const newPin = 'b'.repeat(40);
+  const s = fixture({ 'skills-manifest.txt': '[example/skills]\na\nb\n', 'skill-pins.json': json({ version: 1, pins: { 'example/skills': oldPin } }) });
+  t.after(() => rmSync(s.root, { recursive: true, force: true })); s.publish();
+  const r = s.publish({ 'skill-pins.json': json({ version: 1, pins: { 'example/skills': newPin } }) }); seedSkills(s, r.commitSha);
+  const current = await s.source((source) => source.current);
+  assert.equal(current._tag, 'Success');
+  if (current._tag === 'Success') assert.deepEqual(current.success.desired.skills.map((skill) => skill.pin?.ref), [oldPin, oldPin]);
+  const baseline = await s.source((source) => source.baseline!);
+  assert.equal(baseline._tag, 'Success'); if (baseline._tag === 'Success') assert.equal(baseline.success.origins['skill:example/skills/b'], s.first);
+});
+
+test('I1 unrepresentable mixed seed fails without saving an incompatible baseline', async (t) => {
+  const s = fixture({ 'skills-manifest.txt': '[example/skills]\na\nb\n', 'skill-pins.json': json({ version: 1, pins: { 'example/skills': 'a'.repeat(40) } }) });
+  t.after(() => rmSync(s.root, { recursive: true, force: true })); s.publish();
+  const r = s.publish({ 'skills-manifest.txt': '[example/skills]\na\n[example/skills] exact\nb\n', 'skill-pins.json': json({ version: 1, pins: { 'example/skills': 'b'.repeat(40) } }) }); seedSkills(s, r.commitSha);
+  fails(await s.source((source) => source.current), 'RevisionUnavailable');
+  assert.equal(existsSync(baselinePath(s)), false);
+});
+
+for (const transport of ['github.com/example/hosted', URL, 'ssh://git@github.com/example/hosted.git', 'git@github.com:example/hosted.git']) test(`I3 remote transport for ${transport}`, async (t) => {
+  const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true })); const r = s.publish(); s.trust(null, 'account-1', transport);
+  const result = await s.source((source) => source.load(r), 'account-1', transport);
+  assert.equal(result._tag, 'Success');
+  const expected = transport === 'github.com/example/hosted' ? 'https://github.com/example/hosted' : transport;
+  assert.ok(s.calls.some((args) => args.includes('fetch') && args.includes(expected)));
+  assert.ok(s.calls.some((args) => args.includes('remote') && args.includes('add') && args.includes(expected)));
+});
+
+for (const command of ['init', 'add']) test(`I4 failed first clone ${command} retries its owned incomplete initialization`, async (t) => {
+  const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true })); const r = s.publish(); s.trust(null); s.failCommand(command);
+  fails(await s.source((source) => source.load(r)), 'RevisionUnavailable');
+  assert.equal(existsSync(join(clonePath(s), '.nortuscc-hosted')), true);
+  assert.equal((await s.source((source) => source.load(r)))._tag, 'Success');
+});
+
+test('I4 marker-only interrupted clone retries without repairing an arbitrary existing directory', async (t) => {
+  const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true })); const r = s.publish(); s.trust(null);
+  const clone = clonePath(s); const marker = join(clone, '.nortuscc-hosted');
+  const scope = createHash('sha256').update(JSON.stringify(['account-1', 'setup-1', sync.normalizeRepoUrl(URL)])).digest('hex');
+  s.write(marker, `${scope}\n`);
+  assert.equal((await s.source((source) => source.load(r)))._tag, 'Success');
+  execFileSync('git', ['-C', clone, 'remote', 'set-url', 'origin', 'https://github.com/example/wrong.git']); s.calls.length = 0;
+  fails(await s.source((source) => source.load(r)), 'RevisionUnavailable');
+  assert.equal(s.calls.some((args) => args.includes('init') || args.includes('add')), false);
+  rmSync(clone, { recursive: true, force: true }); s.write(join(clone, 'unrelated'), 'keep\n'); s.calls.length = 0;
+  fails(await s.source((source) => source.load(r)), 'RevisionUnavailable');
+  assert.equal(s.textAt(clone, 'unrelated'), 'keep\n');
+  assert.equal(s.calls.some((args) => args.includes('init') || args.includes('add')), false);
+});
+
+test('I4 incomplete private clone never discovers an ancestor checkout as its repository', async (t) => {
+  const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true })); const r = s.publish();
+  Object.assign(s.paths, { stateRoot: join(s.checkout, 'state') }); s.trust(null);
+  assert.equal((await s.source((source) => source.load(r)))._tag, 'Success');
+  assert.equal(existsSync(join(clonePath(s), 'HEAD')), true);
+  assert.equal(execFileSync('git', ['-C', s.checkout, 'for-each-ref', '--format=%(refname)', 'refs/nortuscc/'], { encoding: 'utf8' }), '');
 });
