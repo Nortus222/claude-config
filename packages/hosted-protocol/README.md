@@ -70,24 +70,29 @@ this phase.
 | Schema | Shape | Endpoint response |
 | --- | --- | --- |
 | `DeviceStartRequestSchema` | `{ name, os, agents }` | Request to `POST /auth/device/start` |
-| `DeviceStartResponseSchema` | `{ pendingId, userCode, verificationUri, interval, expiresIn }` | Successful device start |
+| `DeviceStartResponseSchema` | `{ pendingId, userCode, verificationUri, interval, expiresIn }` | `200`, successful device start |
 | `DevicePollRequestSchema` | `{ pendingId }` | Request to `POST /auth/device/poll` |
 | `DevicePollPendingSchema` | `{ interval }` | `202`, authorization pending or slow down |
 | `DevicePollSuccessSchema` | `{ accountId, login, machineId, token, defaultPolicy }` | `200`, signed in |
 | `SetupRegistrationSchema` | `{ name, repoUrl }` | Request to `POST /setups` |
-| `SetupRecordSchema` | `{ setupId, name, repoUrl, latestRevision, createdAt }` | Successful setup registration |
-| `SetupsResponseSchema` | `{ setups: SetupRecord[] }` | `GET /setups` |
+| `SetupRecordSchema` | `{ setupId, name, repoUrl, latestRevision, createdAt }` | `201`, successful setup registration |
+| `SetupsResponseSchema` | `{ setups: SetupRecord[] }` | `200` from `GET /setups` |
 | `RevisionPublicationSchema` | `{ number, commitSha, tag, changelog, items, requiredEnv }` | Request to `POST /setups/:id/revisions` |
-| `RevisionRecordSchema` | Publication fields plus `{ setupId, publishedAt, machineId }` | Successful revision publication |
-| `RevisionsResponseSchema` | `{ revisions: RevisionRecord[], nextAfter }` | `GET /setups/:id/revisions?after=<n>` |
+| `RevisionRecordSchema` | Publication fields plus `{ setupId, publishedAt, machineId }` | `201`, successful revision publication |
+| `RevisionsResponseSchema` | `{ revisions: RevisionRecord[], nextAfter }` | `200` from `GET /setups/:id/revisions?after=<n>` |
 | `DecisionsRequestSchema` | `{ decisions: Decision[] }` | Request to `PUT /decisions` |
-| `DecisionsResponseSchema` | `{ seq, results: DecisionResult[] }` | Successful decision write |
+| `DecisionsResponseSchema` | `{ seq, results: DecisionResult[] }` | `200`, successful decision write |
 | `MachinePatchSchema` | Any nonempty subset of `{ name, policy, reportStatus }` | Request to `PATCH /machines/:id` |
-| `MachineRecordSchema` | `{ machineId, name, os, agents, policy, reportStatus, createdAt, lastSeenAt, status }` | Successful machine patch |
-| `MachinesResponseSchema` | `{ machines: MachineRecord[] }` | `GET /machines` |
+| `MachineRecordSchema` | `{ machineId, name, os, agents, policy, reportStatus, createdAt, lastSeenAt, status }` | `200`, successful machine patch |
+| `MachinesResponseSchema` | `{ machines: MachineRecord[] }` | `200` from `GET /machines` |
 | `SyncResponseSchema` | `{ seq, decisions, revisions, machine, setups, pollAfter }` | `200` from `GET /sync` |
 | `StatusSummarySchema` | `{ reportedAt, policy, agents, setups, drift }` | Request to `PUT /machines/self/status` |
 | `ErrorResponseSchema` | `{ error, message }` | Non-success error body |
+
+The source designs leave several success statuses unspecified. This foundation
+sets `200` for device start, reads, decision writes and machine patches, and `201`
+for setup and revision creation. These are explicit contract refinements for the
+later service and client.
 
 Device-start intervals and expiry durations are positive safe integer seconds.
 `userCode` is uppercase ASCII letters/digits/hyphens, 1..100 characters;
@@ -214,15 +219,16 @@ captured diagnostics.
 | `unavailable` | 503 with `Retry-After` |
 
 The service must authenticate tokens, derive account identity from authentication,
-check ownership and repository access, and enforce account/rate limits. Another
+check hosted resource ownership, and enforce account/rate limits. Another
 account's resource returns `not_found`, never `forbidden`. Publication requires
 `number === latestRevision + 1`. Decision items must exist in the named revision.
 Status items must belong to the setup's revision history, including removed items.
 These checks require service data and are separate from structural validation.
 
-The client fetches each tag using its own Git credentials, verifies tag-to-SHA
-agreement, and recomputes revision items before applying. Repository normalization
-and a valid schema do not prove content integrity or local trust.
+The client accesses repositories and fetches each tag using its own Git credentials,
+verifies tag-to-SHA agreement, and recomputes revision items before applying. The
+service never reads Git or holds private repository credentials. Repository
+normalization and a valid schema do not prove content integrity or local trust.
 
 Decision revisions older than stored ones are stale. Otherwise service arrival
 order wins, including equal-revision accept/skip reversals. Decisions carry forward
