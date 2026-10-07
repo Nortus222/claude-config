@@ -8,7 +8,6 @@ import { agentLayer, type AgentDomain } from './layer.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
-import { ensureOwnSetup } from './setups.ts';
 import type { SetupSource } from '@nortuscc/sync';
 import type { AgentStateStore, Policy } from './state.ts';
 
@@ -27,11 +26,11 @@ const describe = (cause: Cause.Cause<unknown>): string => {
   return error instanceof Error && error.message ? error.message : String(error);
 };
 
-// Starts the scheduler and the timer in the current scope and queues the start job. Closing the
+// Starts the scheduler and the timer in the current scope and queues the start job. It never
+// changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
 export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { readonly signal?: AbortSignal } = {}) =>
   Effect.gen(function* () {
-    yield* ensureOwnSetup('agent');
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
     const shutdown = new AbortController();

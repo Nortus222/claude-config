@@ -6,7 +6,7 @@ import {
 } from '@nortuscc/machine';
 import { fetchTracked, isAncestor, originUrl, revParse, upstreamOf } from './git.ts';
 import { incoming, nextHolds } from './plan.ts';
-import { normalizeRepoUrl, SetupsStore, setupsStore } from './setups.ts';
+import { normalizeRepoUrl, ownSetup, SetupsStore, setupsStore } from './setups.ts';
 import { pruneSnapshots, snapshotFor } from './snapshots.ts';
 import { LOCAL_SETUP, RevisionMismatch, RevisionUnavailable, SetupSource, type Effective, type Revision } from './source.ts';
 import { SyncStore, syncStore, type Holds } from './store.ts';
@@ -28,11 +28,11 @@ export const setupSourceLayer = (
   const repo = paths.repo;
   const now = options.now ?? (() => new Date());
 
-  // The tracked branch, once origin's URL is the trusted repoUrl and the branch tracks origin. Every
-  // call checks it afresh, so a remote ref filled from anywhere else is never read.
+  // The tracked branch, once this checkout is trusted, origin's URL is its repoUrl and the branch
+  // tracks origin. Every call checks it afresh, so a remote ref filled from anywhere else is never read.
   const trustedOrigin = (revision: Revision) =>
     Effect.gen(function* () {
-      const own = ((yield* (yield* SetupsStore).read) ?? []).find((s) => s.setupId === null);
+      const own = ownSetup(yield* (yield* SetupsStore).read, repo);
       const trusted = own?.repoUrl ?? null;
       const url = yield* originUrl(repo);
       const actual = url === undefined ? null : normalizeRepoUrl(url);
@@ -120,6 +120,19 @@ export const setupSourceLayer = (
       Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
     );
 
+  const current = Effect.gen(function* () {
+    const head = yield* revParse(repo, 'HEAD');
+    if (head === undefined) return yield* unavailable('HEAD', 'the checkout has no commit');
+    const result = yield* snapshot(head, yield* (yield* SyncStore).read);
+    yield* pruneSnapshots(paths.stateRoot, [result.repo], now());
+    return result;
+  }).pipe(
+    Effect.catchTag('LaunchFailed', (e) => unavailable('HEAD', e.message)),
+    Effect.catchTag('FsFailed', (e) => Effect.die(e)),
+    Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+    Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
+  );
+
   const services = Layer.mergeAll(overridesStore, syncStore, setupsStore).pipe(
     Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, options.processes ?? nodeProcesses({ inherit: 'stderr' }))),
   );
@@ -132,6 +145,7 @@ export const setupSourceLayer = (
         fetch: provide(fetch),
         load: (revision: Revision) => provide(load(revision)),
         effective: (decisions: ReadonlyArray<Decision>) => provide(effective(decisions)),
+        current: provide(current),
       };
     }),
   ).pipe(Layer.provide(services));

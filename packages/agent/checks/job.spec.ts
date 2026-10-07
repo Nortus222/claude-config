@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonical, DecisionsStore, hashText, HistoryStore } from '@nortuscc/machine';
-import { AgentStateStore, runJob, type Policy } from '../src/index.ts';
+import { AgentStateStore, runJob, SetupsStore, type Policy } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, HOOK, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
 
@@ -110,12 +110,35 @@ test('a rejected revision is recorded once and its decisions are not used', asyn
   assert.equal(events[0].error, 'RevisionMismatch');
 });
 
-test('nothing is verified or applied from a setup this machine does not trust', async () => {
-  const { m, job, settings } = await scenario({ policy: 'auto-apply', trusted: false });
+test('an untrusted checkout is inspected for drift at its HEAD, and nothing is fetched, verified or applied', async () => {
+  const { m, job, settings, fixture } = await scenario({ policy: 'auto-apply', trusted: false });
   const status = await job();
   assert.equal(status.trusted, false);
+  assert.equal(status.error, undefined);
   assert.deepEqual(status.pending, []);
+  assert.ok(status.drift.includes(THEME_KEY));
+  assert.ok(status.drift.includes(EFFORT_KEY));
+  assert.deepEqual(fixture.calls, ['current']);
   assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), []);
+});
+
+test('an own entry for another checkout trusts nothing here', async () => {
+  const { m, job, fixture } = await scenario({ policy: 'auto-apply', trusted: false });
+  await m.run(SetupsStore.use((s) => s.write([{ setupId: null, repoUrl: null, checkout: join(m.root, 'elsewhere'), trustedAt: '2026-10-06T00:00:00.000Z' }])));
+  const status = await job();
+  assert.equal(status.trusted, false);
+  assert.ok(status.drift.includes(THEME_KEY));
+  assert.deepEqual(fixture.calls, ['current']);
+  assert.deepEqual(await m.kinds(), []);
+});
+
+test('an untrusted checkout whose HEAD cannot be read reports REVISION_UNAVAILABLE', async () => {
+  const { m, job } = await scenario({ policy: 'auto-apply', trusted: false, fixture: { unavailable: ['current'] } });
+  const status = await job();
+  assert.equal(status.trusted, false);
+  assert.equal(status.error, 'REVISION_UNAVAILABLE');
+  assert.deepEqual(status.drift, []);
   assert.deepEqual(await m.kinds(), []);
 });
 

@@ -171,3 +171,25 @@ test('effective reads state.json without writing, and fails on one it cannot par
   await assert.rejects(s.source((source) => source.effective([])));
   assert.equal(readFileSync(join(s.stateRoot, 'state.json'), 'utf8'), '{ not json');
 });
+
+test('fetch refuses an own entry for another checkout, even with the trusted origin', async () => {
+  const s = setup();
+  s.write(join(s.stateRoot, 'agent', 'setups.json'), json({
+    version: 1, setups: [{ setupId: null, repoUrl: normalizeRepoUrl(s.origin), checkout: join(s.root, 'elsewhere'), trustedAt: '2026-10-07T00:00:00.000Z' }],
+  }));
+  s.push({ 'claude/CLAUDE.md': '# newer\n' });
+  failsUnavailable(await s.source((source) => source.fetch));
+  assert.equal(s.tracked(), s.first);
+});
+
+test('current is the checkout HEAD with holds applied, and needs no trust', async () => {
+  const s = setup();
+  writeFileSync(join(s.checkout, 'claude/settings.keys.json'), json({ theme: 'light', effortLevel: 'medium' }));
+  s.inCheckout('commit', '-qam', 'local');
+  s.write(join(s.stateRoot, 'sync.json'), json({ version: 1, held: { [EFFORT]: s.first } }));
+  const current = await s.source((source) => source.current);
+  assert.ok(current._tag === 'Success');
+  assert.equal(current.success.repo.startsWith(join(s.stateRoot, 'snapshots')), true);
+  assert.deepEqual(JSON.parse(readFileSync(join(current.success.repo, 'claude/settings.keys.json'), 'utf8')), { theme: 'light', effortLevel: 'high' });
+  assert.equal(existsSync(join(s.stateRoot, 'agent', 'setups.json')), false);
+});

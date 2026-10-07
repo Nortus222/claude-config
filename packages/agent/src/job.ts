@@ -3,7 +3,7 @@ import {
   backupsForRun, DecisionsStore, HistoryStore, inspect, MachinePaths, machinePaths,
   type HistoryEvent, type ItemReason,
 } from '@nortuscc/machine';
-import { LOCAL_SETUP, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
+import { LOCAL_SETUP, ownSetup, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
@@ -63,8 +63,9 @@ const recordBatch = (events: ReadonlyArray<HistoryEvent>, kind: 'held' | 'ready'
     yield* (yield* HistoryStore).append({ kind, actor: 'agent', items });
   });
 
-// One job: refresh, resolve, inspect, sort, classify, act by policy. It never fails on what it
-// reads from the setup; those outcomes are reported in the status.
+// One job: refresh, resolve, inspect, sort, classify, act by policy. A checkout this machine does
+// not trust is only inspected for drift, against its own HEAD. It never fails on what it reads
+// from the setup; those outcomes are reported in the status.
 export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly signal?: AbortSignal } = {}) =>
   Effect.gen(function* () {
     const history = yield* HistoryStore;
@@ -77,21 +78,29 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
     if (interrupted !== undefined) yield* pause(`auto-apply run ${interrupted} was interrupted`, interrupted);
 
     const state = yield* agentState.read;
-    const trusted = ((yield* (yield* SetupsStore).read) ?? []).some((s) => s.setupId === null);
+    const trusted = ownSetup(yield* (yield* SetupsStore).read, paths.repo) !== undefined;
     const finish = (fields: Partial<AgentStatus> = {}) =>
       Effect.map(agentState.read, (current): AgentStatus => ({
         at: now.toISOString(), policy: current.policy, paused: current.paused, trusted,
         pending: [], drift: [], conflicts: [], probeErrors: [], ...fields,
       }));
+    // MachinePaths.repo at a snapshot's files, and a fresh backup folder.
+    const at = (repo: string) => backupsForRun(now).pipe(Layer.provideMerge(machinePaths({ ...paths, repo })));
+
+    // Untrusted: never fetched, verified, recorded or applied; only drift from the checkout's HEAD.
+    if (!trusted) {
+      const current = yield* source.current.pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)));
+      if (current === undefined) return yield* finish({ error: 'REVISION_UNAVAILABLE' });
+      const report = yield* inspect(current.desired, domains).pipe(Effect.provide(at(current.repo)));
+      return yield* finish({ drift: report.items.filter(differs).map((i) => i.key), probeErrors: report.probeErrors });
+    }
 
     // 1. Refresh: verify the tracked branch's head once. A mismatch blocks only that revision; an
-    // unreachable one is retried by the next job. An untrusted setup is never fetched or verified.
-    const head = trusted
-      ? yield* source.fetch.pipe(
-        Effect.map((fetched): Revision | undefined => fetched.head),
-        Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)),
-      )
-      : undefined;
+    // unreachable one is retried by the next job.
+    const head = yield* source.fetch.pipe(
+      Effect.map((fetched): Revision | undefined => fetched.head),
+      Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)),
+    );
     if (head !== undefined && !(yield* history.read).some((e) => isVerdictOn(e, head))) {
       yield* source.load(head).pipe(
         Effect.andThen(history.append({ kind: 'revision-verified', actor: 'agent', setupId: LOCAL_SETUP, revision: head })),
@@ -111,16 +120,13 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
     if (resolved === undefined) return yield* finish({ error: 'REVISION_UNAVAILABLE' });
     const decisionsError: Partial<AgentStatus> = decisions === undefined ? { error: 'DECISIONS_INVALID' } : {};
 
-    // 3-6 with MachinePaths.repo at the effective revision's files, and a fresh backup folder.
-    const jobLayer = backupsForRun(now).pipe(Layer.provideMerge(machinePaths({ ...paths, repo: resolved.effective.repo })));
+    // 3-6 at the effective revision's files.
     return yield* Effect.gen(function* () {
       const report = yield* inspect(resolved.effective.desired, domains);
       const base: Partial<AgentStatus> = { conflicts: resolved.conflicts, probeErrors: report.probeErrors, ...decisionsError };
-      const invalid = resolved.effective.desired.issues.length > 0;
-      if (invalid || !trusted) {
+      if (resolved.effective.desired.issues.length > 0) {
         // Inspect-only: report every difference, record nothing, apply nothing.
-        const drift = report.items.filter(differs).map((i) => i.key);
-        return yield* finish({ ...base, drift, ...(invalid ? { error: 'PROFILE_INVALID' as const } : {}) });
+        return yield* finish({ ...base, drift: report.items.filter(differs).map((i) => i.key), error: 'PROFILE_INVALID' });
       }
       const sorted = yield* sortItems(report, resolved.applied, resolved.effective);
       const inert = sorted.pending.filter((p) => p.verdict.kind === 'inert');
@@ -137,5 +143,5 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
         applied = yield* autoApply(report, inert.map((p) => p.key), domains, options);
       }
       return yield* finish({ ...base, pending: sorted.pending, drift: sorted.drift, ...(applied ? { autoApply: applied } : {}) });
-    }).pipe(Effect.provide(jobLayer));
+    }).pipe(Effect.provide(at(resolved.effective.repo)));
   });

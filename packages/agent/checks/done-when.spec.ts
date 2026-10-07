@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { configDomain, HistoryStore, integrationsDomain, pathsFromEnvironment } from '@nortuscc/machine';
-import { agentLayer, startAgent, type AgentDomain } from '../src/index.ts';
+import { agentLayer, startAgent, trustOwnSetup, type AgentDomain } from '../src/index.ts';
 import { accept, EFFORT, HEAD, HOOK, setupFixture } from './support/setup-fixture.ts';
 
 test('done when: on an auto-apply machine an accepted inert key is applied with a backup, an accepted hook is held, and History shows both', async () => {
@@ -26,6 +26,8 @@ test('done when: on an auto-apply machine an accepted inert key is applied with 
   const domains: ReadonlyArray<AgentDomain> = [configDomain, integrationsDomain({ paths, env: {} })];
 
   const { status, events } = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    // Installing the agent is the person's act that trusts this checkout.
+    yield* trustOwnSetup('cli');
     const agent = yield* startAgent(domains);
     yield* agent.setPolicy('auto-apply', 'cli');
     yield* agent.decide(accept(EFFORT), 'app');
