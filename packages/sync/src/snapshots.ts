@@ -11,6 +11,10 @@ import type { Holds } from './store.ts';
 export const SNAPSHOTS_KEPT = 5;
 const MARKER = '.snapshot.json';
 const STAGING = '.staging-';
+// A staging folder snapshotFor names: .staging-<key>-<createdAtMs>-<uuid>.
+const DATED_STAGING = /^\.staging-[0-9a-f]{32}-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// How old a staging folder must be before pruning takes it for a crashed run's, not one in flight.
+export const STALE_STAGING_MS = 60 * 60 * 1000;
 // A folder snapshotFor names: the first 32 hex digits of its key's sha256.
 const KEY = /^[0-9a-f]{32}$/;
 
@@ -26,8 +30,9 @@ export const snapshotKey = (input: { readonly commit: string; readonly held: Hol
   createHash('sha256').update(canonical({ format, commit: input.commit, held: input.held })).digest('hex').slice(0, 32);
 
 // A commit with holds, composed from git objects only into <stateRoot>/snapshots/<key>/ (ADR 0016)
-// and resolved with `overrides`. Keyed by (format, commit, holds) and reused; a fresh one is staged and
-// moved into place whole, so a reader never sees half a snapshot.
+// and resolved with `overrides`. Keyed by (format, commit, holds) and reused; a fresh one is staged in
+// a folder named for its key, `now` and a uuid, and moved into place whole, so a reader never sees half
+// a snapshot.
 export const snapshotFor = (input: {
   readonly repo: string;
   readonly stateRoot: string;
@@ -43,7 +48,7 @@ export const snapshotFor = (input: {
     const dir = join(root, key);
     const marker = JSON.stringify({ commit: input.commit, held: input.held, usedAt: input.now.toISOString() }, null, 2) + '\n';
     if ((yield* fs.readText(join(dir, MARKER))) === undefined) {
-      const staging = join(root, `${STAGING}${key}-${randomUUID()}`);
+      const staging = join(root, `${STAGING}${key}-${input.now.getTime()}-${randomUUID()}`);
       yield* writeDocuments(staging, yield* composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.commit }, held: input.held }));
       yield* fs.writeTextAtomic(join(staging, MARKER), marker);
       yield* fs.remove(dir);
@@ -56,16 +61,18 @@ export const snapshotFor = (input: {
   });
 
 // Keeps the SNAPSHOTS_KEPT most recently used snapshot folders and every folder in `keep`; removes
-// the rest and any staging folder a crashed run left behind. Entries snapshotFor did not name are
-// never touched.
-export const pruneSnapshots = (stateRoot: string, keep: ReadonlyArray<string>): Effect.Effect<void, FsFailed, Fs> =>
+// the rest and any staging folder created more than STALE_STAGING_MS before `now`, which a crashed run
+// left behind. A younger staging folder may be another job's in flight and is kept. Entries
+// snapshotFor did not name, including staging folders without a creation time, are never touched.
+export const pruneSnapshots = (stateRoot: string, keep: ReadonlyArray<string>, now: Date): Effect.Effect<void, FsFailed, Fs> =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const root = snapshotsDir(stateRoot);
     const used: Array<{ readonly name: string; readonly usedAt: string }> = [];
     for (const name of (yield* fs.list(root)) ?? []) {
       if (name.startsWith(STAGING)) {
-        yield* fs.remove(join(root, name));
+        const created = DATED_STAGING.exec(name)?.[1];
+        if (created !== undefined && Number(created) < now.getTime() - STALE_STAGING_MS) yield* fs.remove(join(root, name));
         continue;
       }
       if (!KEY.test(name)) continue;

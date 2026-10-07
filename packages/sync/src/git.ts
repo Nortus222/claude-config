@@ -61,9 +61,30 @@ export const originUrl = (repo: string): Effect.Effect<string | undefined, Launc
   Effect.map(git(repo, ['remote', 'get-url', 'origin']), ({ code, stdout }) =>
     (code === 0 && stdout.trim() !== '' ? stdout.trim() : undefined));
 
+// How long a fetch may take before it is abandoned as failed.
+export const FETCH_TIMEOUT_MS = 120_000;
+
 // Updates the tracked branch's remote-tracking ref only: never the working tree, the index or HEAD.
-export const fetchTracked = (repo: string, upstream: Upstream): Effect.Effect<boolean, LaunchFailed, Processes> =>
-  Effect.map(
-    git(repo, ['fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`]),
-    ({ code }) => code === 0,
+// Runs unattended: git, its credential helpers and ssh are told never to prompt, and a fetch still
+// running after `timeoutMs` is killed and answers false. ssh keeps the repository's core.sshCommand;
+// a GIT_SSH_COMMAND already in the environment is replaced, not honoured.
+export const fetchTracked = (
+  repo: string,
+  upstream: Upstream,
+  options: { readonly timeoutMs?: number } = {},
+): Effect.Effect<boolean, LaunchFailed, Processes> =>
+  Effect.gen(function* () {
+    const configured = yield* git(repo, ['config', '--get', 'core.sshCommand']);
+    const ssh = configured.code === 0 && configured.stdout.trim() !== '' ? configured.stdout.trim() : 'ssh';
+    const { code } = yield* Processes.use((p) => p.run({
+      cmd: 'git',
+      args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`],
+      cwd: repo,
+      env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` },
+      output: 'capture',
+    }));
+    return code === 0;
+  }).pipe(
+    Effect.timeoutOption(options.timeoutMs ?? FETCH_TIMEOUT_MS),
+    Effect.map((fetched) => fetched._tag === 'Some' && fetched.value),
   );

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { Effect, Layer } from 'effect';
 import { Processes } from '@nortuscc/machine';
 import { join } from 'node:path';
-import { ensureOwnSetup, normalizeRepoUrl, SetupsStore } from '../src/index.ts';
+import { normalizeRepoUrl, SetupsStore, trustOwnSetup } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 
 const rows: ReadonlyArray<readonly [string, string]> = [
@@ -34,8 +34,8 @@ const setupsJson = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoo
 test('the own checkout is trusted once, by its normalized origin URL', async () => {
   const m = agentMachine();
   spawnSync('git', ['-C', m.paths.repo, 'remote', 'set-url', 'origin', 'git@github.com:Nortus222/Claude-Config.git']);
-  const first = await m.run(ensureOwnSetup('cli'));
-  const second = await m.run(ensureOwnSetup('cli'));
+  const first = await m.run(trustOwnSetup('cli'));
+  const second = await m.run(trustOwnSetup('cli'));
   assert.deepEqual(second, first);
   assert.equal(first?.setupId, null);
   assert.equal(first?.repoUrl, 'github.com/nortus222/claude-config');
@@ -51,7 +51,7 @@ test('a checkout with no origin is trusted with repoUrl null', async () => {
   const m = agentMachine();
   // git's answer for a checkout with no origin, without its message on the test's stderr.
   const noOrigin = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 2, stdout: '' }) });
-  const own = await m.run(ensureOwnSetup('agent').pipe(Effect.provide(noOrigin)));
+  const own = await m.run(trustOwnSetup('agent').pipe(Effect.provide(noOrigin)));
   assert.equal(own?.repoUrl, null);
   assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [own]);
 });
@@ -61,8 +61,28 @@ test('an unreadable setups.json trusts nothing and is left alone', async () => {
   for (const text of ['{ broken', JSON.stringify({ version: 1, setups: [{ setupId: 3 }] })]) {
     m.write(setupsJson(m), text);
     assert.equal(await m.run(SetupsStore.use((s) => s.read)), undefined);
-    assert.equal(await m.run(ensureOwnSetup('agent')), undefined);
+    assert.equal(await m.run(trustOwnSetup('agent')), undefined);
     assert.equal(m.read(setupsJson(m)), text);
   }
   assert.deepEqual(await m.kinds(), []);
+});
+
+test('trusting this checkout replaces an own entry for another checkout', async () => {
+  const m = agentMachine();
+  const other = { setupId: null, repoUrl: 'github.com/example/setup', checkout: join(m.root, 'elsewhere'), trustedAt: '2026-10-01T00:00:00.000Z' };
+  await m.run(SetupsStore.use((s) => s.write([other])));
+  const own = await m.run(trustOwnSetup('cli'));
+  assert.equal(own?.checkout, m.paths.repo);
+  assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [own]);
+  assert.deepEqual(await m.kinds(), ['setup-trusted']);
+});
+
+test('trusting again after the origin changed records the new repository', async () => {
+  const m = agentMachine();
+  await m.run(trustOwnSetup('cli'));
+  spawnSync('git', ['-C', m.paths.repo, 'remote', 'set-url', 'origin', 'https://github.com/example/moved.git']);
+  const own = await m.run(trustOwnSetup('cli'));
+  assert.equal(own?.repoUrl, 'github.com/example/moved');
+  assert.deepEqual(await m.run(SetupsStore.use((s) => s.read)), [own]);
+  assert.deepEqual(await m.kinds(), ['setup-trusted', 'setup-trusted']);
 });

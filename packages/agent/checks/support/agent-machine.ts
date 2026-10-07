@@ -9,7 +9,7 @@ import { agentLayer, SetupSource, SetupsStore, type AgentDomain, type AgentServi
 const NO_SOURCE = () => Effect.die(new Error('this test has no setup source'));
 
 // For tests that never refresh or resolve.
-const noSource = Layer.succeed(SetupSource, { fetch: NO_SOURCE(), load: NO_SOURCE, effective: NO_SOURCE });
+const noSource = Layer.succeed(SetupSource, { fetch: NO_SOURCE(), load: NO_SOURCE, effective: NO_SOURCE, current: NO_SOURCE() });
 
 // A temporary HOME, git checkout and state root, with the agent's services over them.
 export const agentMachine = () => {

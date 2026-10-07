@@ -8,9 +8,14 @@ export type Command = {
   readonly cmd: string;
   readonly args: readonly string[];
   readonly cwd?: string;
+  // Merged over the layer's environment for this command only.
+  readonly env?: Readonly<Record<string, string>>;
   readonly output: 'inherit' | 'capture';
+  // With `output: 'capture'`, also captures stderr into Completed.stderr instead of inheriting it.
+  readonly stderr?: 'capture';
 };
-export type Completed = { readonly code: number; readonly stdout: string };
+// `stderr` is present only when the command asked to capture it.
+export type Completed = { readonly code: number; readonly stdout: string; readonly stderr?: string };
 
 export type ProcessesOptions = {
   // The child's whole environment; defaults to this process's.
@@ -31,6 +36,14 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 // Windows variables are case-insensitive: `Path` and `PATH` name one variable.
 const lookup = (env: Env, name: string) => Object.entries(env).find(([key]) => key.toUpperCase() === name)?.[1];
+
+// `env` with `extra` set over it; on Windows an extra name replaces the same name in any case.
+const withVariables = (env: Env, extra: Readonly<Record<string, string>> | undefined): Env => {
+  if (extra === undefined) return env;
+  const names = new Set(Object.keys(extra).map((name) => (process.platform === 'win32' ? name.toUpperCase() : name)));
+  const kept = Object.entries(env).filter(([key]) => !names.has(process.platform === 'win32' ? key.toUpperCase() : key));
+  return { ...Object.fromEntries(kept), ...extra };
+};
 
 const isFile = (path: string) => statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
 
@@ -64,8 +77,8 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
     run: (command) =>
       Effect.callback<Completed, LaunchFailed>((resume) => {
         const base: Env = options.env ?? process.env;
-        const env = options.path === undefined ? base
-          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path };
+        const env = withVariables(options.path === undefined ? base
+          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path }, command.env);
         const batch = process.platform === 'win32' ? batchFile(command.cmd, command.cwd, env) : undefined;
         if (batch !== undefined && command.args.some((arg) => /[\r\n]/.test(arg))) {
           resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'a batch file cannot take an argument with a line break' })));
@@ -73,6 +86,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         }
         const [file, args] = batch === undefined ? [command.cmd, [...command.args]]
           : [lookup(env, 'COMSPEC') ?? 'cmd.exe', ['/d', '/s', '/c', `"${[batch.replace(cmdMeta, '^$1'), ...command.args.map(batchArgument)].join(' ')}"`]];
+        const captureStderr = command.output === 'capture' && command.stderr === 'capture';
         const child = spawn(file, args, {
           cwd: command.cwd,
           env,
@@ -80,19 +94,23 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           windowsVerbatimArguments: batch !== undefined,
           // Its own process group, so cancelling reaches the installer's own children too.
           detached: process.platform !== 'win32',
-          stdio: command.output === 'capture' ? ['ignore', 'pipe', 'inherit']
+          stdio: command.output === 'capture' ? ['ignore', 'pipe', captureStderr ? 'pipe' : 'inherit']
             : options.inherit === 'stderr' ? ['ignore', 2, 2]
             : 'inherit',
         });
         let stdout = '';
+        let stderr = '';
         let closed = false;
-        // Decoded as one stream, so a character split across chunks is not mangled.
+        // Decoded as one stream each, so a character split across chunks is not mangled.
         child.stdout?.setEncoding('utf8');
         child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
+        child.stderr?.setEncoding('utf8');
+        child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
         child.on('close', (code, signal) => {
           closed = true;
-          resume(Effect.succeed({ code: code ?? (signal ? 128 : 1), stdout }));
+          const exit = code ?? (signal ? 128 : 1);
+          resume(Effect.succeed(captureStderr ? { code: exit, stdout, stderr } : { code: exit, stdout }));
         });
 
         return Effect.promise(() => new Promise<void>((done) => {

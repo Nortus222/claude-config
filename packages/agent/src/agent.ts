@@ -1,6 +1,7 @@
+import { join } from 'node:path';
 import { Cause, Effect, Layer, Ref } from 'effect';
 import {
-  type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
+  acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus } from './job.ts';
@@ -8,7 +9,6 @@ import { agentLayer, type AgentDomain } from './layer.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
-import { ensureOwnSetup } from './setups.ts';
 import type { SetupSource } from '@nortuscc/sync';
 import type { AgentStateStore, Policy } from './state.ts';
 
@@ -27,11 +27,11 @@ const describe = (cause: Cause.Cause<unknown>): string => {
   return error instanceof Error && error.message ? error.message : String(error);
 };
 
-// Starts the scheduler and the timer in the current scope and queues the start job. Closing the
+// Starts the scheduler and the timer in the current scope and queues the start job. It never
+// changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
 export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { readonly signal?: AbortSignal } = {}) =>
   Effect.gen(function* () {
-    yield* ensureOwnSetup('agent');
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
     const shutdown = new AbortController();
@@ -79,6 +79,7 @@ const untilAborted = (signal?: AbortSignal): Effect.Effect<void> =>
 
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted or `signal` aborts; either closes the agent, cancelling an in-flight auto-apply.
+// A pid lock makes it the only agent per state root: a second fails LockHeld before touching state.
 // The caller builds `domains` and `source` at the same boundary as `paths`.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
@@ -86,6 +87,8 @@ export const runAgent = (input: {
   readonly source: Layer.Layer<SetupSource>;
   readonly signal?: AbortSignal;
 }) =>
-  Effect.scoped(Effect.andThen(startAgent(input.domains, { signal: input.signal }), untilAborted(input.signal))).pipe(
-    Effect.provide(Layer.merge(agentLayer(input.paths), input.source)),
-  );
+  Effect.scoped(Effect.gen(function* () {
+    yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
+    yield* startAgent(input.domains, { signal: input.signal });
+    yield* untilAborted(input.signal);
+  })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths), input.source)));

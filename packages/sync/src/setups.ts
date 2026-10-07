@@ -10,6 +10,10 @@ export type TrustedSetup = {
   readonly trustedAt: string;
 };
 
+// The own setup trusted for `checkout`: an own entry for another checkout trusts nothing there.
+export const ownSetup = (setups: ReadonlyArray<TrustedSetup> | undefined, checkout: string): TrustedSetup | undefined =>
+  setups?.find((s) => s.setupId === null && s.checkout === checkout);
+
 const LOCAL_PATH = /^(?:[/.~]|[a-z]:[\\/])/i;
 const tidy = (text: string) => text.replace(/\/+$/, '').replace(/\.git$/i, '');
 

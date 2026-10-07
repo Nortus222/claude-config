@@ -14,6 +14,7 @@ import {
   type Conflict, type Holds, type ItemChange,
 } from '@nortuscc/sync';
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
+import { restartAfterPull } from '../agent-service.ts';
 import { runGit } from '../git.ts';
 import { CHECKOUT, cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
 import { parseConfigMode } from '../config-mode.ts';
@@ -312,6 +313,10 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     const code = applyChild(target, flags.rest);
     if (code !== 0) return code;
     yield* (yield* StateStore).update((state) => withApplied(state, head));
+    // The agent runs from this checkout and never downloads code; whoever installed it upgrades it
+    // (ADR 0011), so a CLI-installed agent behind the checkout is restarted on its code. Checked on
+    // every successful sync, so an agent missed when an apply failed after the pull catches up.
+    yield* restartAfterPull(paths);
     return yield* reportIntegrations(target, flags.rest);
   });
 

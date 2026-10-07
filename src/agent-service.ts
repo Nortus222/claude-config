@@ -1,0 +1,85 @@
+import { spawnSync } from 'node:child_process';
+import { homedir, userInfo } from 'node:os';
+import { join } from 'node:path';
+import { Effect, Layer } from 'effect';
+import { liveLockHolder, machinePaths, type FsFailed, type MachinePathsValue } from '@nortuscc/machine';
+import {
+  AgentStateStore, agentStateStore, restartService, serviceInstalled, type ServiceFailed, type ServiceProgram, type ServiceTarget,
+} from '@nortuscc/agent';
+import { CHECKOUT } from './machine.ts';
+import { short } from './report.ts';
+
+// Where and as whom this user's login service is registered; undefined on an unsupported platform.
+// This is the CLI boundary, so it reads the process's own platform, home and user.
+export function serviceTarget(paths: MachinePathsValue): ServiceTarget | undefined {
+  const platform = process.platform;
+  if (platform !== 'darwin' && platform !== 'linux' && platform !== 'win32') return undefined;
+  return { platform, home: homedir(), uid: process.getuid?.() ?? 0, user: userInfo().username, stateRoot: paths.stateRoot };
+}
+
+// What the service runs: this checkout's `nortuscc agent run`, with PATH and the installer's
+// NORTUSCC_* variables (test-only ones excepted), so the agent resolves the same paths it was installed with.
+export function agentProgram(paths: MachinePathsValue): ServiceProgram {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    // Windows spells it Path; the unit always gets PATH.
+    if (key.toUpperCase() === 'PATH') env.PATH = value;
+    else if (key.startsWith('NORTUSCC_') && !key.startsWith('NORTUSCC_TEST_')) env[key] = value;
+  }
+  return {
+    argv: [process.execPath, join(CHECKOUT, 'bin', 'nortuscc.mjs'), 'agent', 'run'],
+    env,
+    workingDirectory: CHECKOUT,
+    logPath: join(paths.stateRoot, 'agent', 'agent.log'),
+  };
+}
+
+// The checkout's HEAD commit, or 'unknown' when git cannot say. The agent runs CHECKOUT's code,
+// so this is its version.
+export function checkoutVersion(): string {
+  const result = spawnSync('git', ['-C', CHECKOUT, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const head = result.status === 0 ? result.stdout.trim() : '';
+  return head === '' ? 'unknown' : head;
+}
+
+export type RestartOptions = {
+  readonly target?: ServiceTarget; // default serviceTarget(paths)
+  readonly timeoutMs?: number; // how long a live apply may hold apply.lock; default 60 s
+  readonly pollMs?: number; // default 500 ms
+};
+
+// Restarts a CLI-installed agent whose recorded version is not this checkout's, once no live apply
+// holds apply.lock, and records its new version; an agent already on this checkout is left alone.
+// Keyed on the version rather than on a pull, so an agent missed by one sync is restarted by the
+// next. It never fails: a problem is a warning and the sync stands. An app-installed agent is the
+// app's to upgrade.
+export const restartAfterPull = (paths: MachinePathsValue, options: RestartOptions = {}) => {
+  const target = options.target ?? serviceTarget(paths);
+  if (target === undefined) return Effect.void;
+  const { timeoutMs = 60_000, pollMs = 500 } = options;
+  const notRestarted = (problem: string) => Effect.sync(() => {
+    console.error(`nortuscc: ${problem}; the agent was not restarted. Run: nortuscc agent install`);
+  });
+  return Effect.gen(function* () {
+    const state = yield* AgentStateStore;
+    const recorded = yield* state.read;
+    if (recorded.installedBy !== 'cli') return;
+    const version = checkoutVersion();
+    if (recorded.agentVersion === version || !(yield* serviceInstalled(target))) return;
+    const lock = join(paths.stateRoot, 'apply.lock');
+    for (const deadline = Date.now() + timeoutMs; liveLockHolder(lock) !== undefined;) {
+      if (Date.now() >= deadline) return yield* notRestarted('an apply is running');
+      yield* Effect.sleep(pollMs);
+    }
+    yield* restartService(target, agentProgram(paths));
+    yield* state.update((s) => ({ ...s, agentVersion: version }));
+    console.log(`agent restarted on ${short(version)}`);
+  }).pipe(
+    Effect.catchTags({
+      ServiceFailed: (err: ServiceFailed) => notRestarted(`${err.command} exited ${err.code}: ${err.reason}`),
+      FsFailed: (err: FsFailed) => notRestarted(err.message),
+    }),
+    Effect.provide(agentStateStore.pipe(Layer.provide(machinePaths(paths)))),
+  );
+};

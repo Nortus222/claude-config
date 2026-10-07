@@ -44,5 +44,8 @@ export class SetupSource extends Context.Service<
     readonly load: (revision: Revision) => Effect.Effect<Snapshot, RevisionMismatch | RevisionUnavailable>;
     // This machine's desired configuration; skipped and undecided items stay at their applied value.
     readonly effective: (decisions: ReadonlyArray<Decision>) => Effect.Effect<Effective, RevisionUnavailable>;
+    // The checkout's HEAD with this machine's holds and overrides. No fetch and no trust check: it
+    // is only for inspecting an untrusted checkout for drift, never for applying.
+    readonly current: Effect.Effect<Snapshot, RevisionUnavailable>;
   }
 >()('sync/SetupSource') {}

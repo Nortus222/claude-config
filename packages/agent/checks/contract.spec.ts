@@ -7,7 +7,7 @@ import * as agent from '../src/index.ts';
 // Layer built for one is the service the other asks for.
 const MOVED = [
   'SetupSource', 'RevisionMismatch', 'RevisionUnavailable', 'LOCAL_SETUP', 'itemIdOf', 'entryOf',
-  'SetupsStore', 'setupsStore', 'normalizeRepoUrl',
+  'SetupsStore', 'setupsStore', 'normalizeRepoUrl', 'ownSetup',
 ] as const;
 
 for (const name of MOVED) {

@@ -97,6 +97,16 @@ test('the env option is the child\'s whole environment', async () => {
   assert.deepEqual(Exit.isSuccess(exit) && JSON.parse(exit.value.stdout), ['yes', null]);
 });
 
+test('a command\'s env is merged over the environment for that command only', async () => {
+  const probe = ['-e', 'process.stdout.write(process.env.NORTUSCC_PROBE ?? "")'];
+  const exit = await run(Effect.all([
+    Processes.use((p) => p.run({ cmd: node, args: probe, env: { NORTUSCC_PROBE: 'x' }, output: 'capture' })),
+    exec(probe),
+  ]));
+  assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
+  assert.deepEqual(Exit.isSuccess(exit) && exit.value.map((c) => c.stdout), ['x', '']);
+});
+
 test('inherit: stderr sends an inherit command\'s output to stderr and gives it no stdin', () => {
   const processes = pathToFileURL(join(import.meta.dirname, '..', 'src', 'processes.ts')).href;
   const script = `
@@ -153,4 +163,18 @@ test('captured output keeps multi-byte characters that straddle chunk boundaries
   const exit = await run(exec(['-e', 'process.stdout.write("a" + "é".repeat(200000))']));
   assert.ok(Exit.isSuccess(exit));
   assert.equal(Exit.isSuccess(exit) && exit.value.stdout, 'a' + 'é'.repeat(200000));
+});
+
+test('stderr: capture returns stderr instead of inheriting it; without it nothing is captured', async () => {
+  const script = 'process.stdout.write("out"); process.stderr.write("é err"); process.exit(4)';
+  const captured = await run(Processes.use((p) => p.run({ cmd: node, args: ['-e', script], output: 'capture', stderr: 'capture' })));
+  assert.deepEqual(Exit.isSuccess(captured) && captured.value, { code: 4, stdout: 'out', stderr: 'é err' });
+  const child = spawnSync(node, ['--input-type=module', '-e', `
+    import { Effect } from 'effect';
+    import { nodeProcesses, Processes } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'src', 'index.ts')).href)};
+    const done = await Effect.runPromise(Processes.use((p) => p.run({ cmd: process.execPath, args: ['-e', ${JSON.stringify(script)}], output: 'capture' })).pipe(Effect.provide(nodeProcesses())));
+    console.log(JSON.stringify(done));
+  `], { encoding: 'utf8', cwd: join(import.meta.dirname, '..') });
+  assert.deepEqual(JSON.parse(child.stdout), { code: 4, stdout: 'out' });
+  assert.equal(child.stderr, 'é err');
 });

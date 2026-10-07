@@ -1,29 +1,43 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore } from '@nortuscc/machine';
 import { AgentStateStore, runAgent, SetupSource, startAgent, type AgentDomain } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
 
-test('startAgent trusts the own checkout and runs a start job', async () => {
+test('startAgent runs a start job on a trusted machine', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
     const agent = yield* startAgent(m.domains);
     return yield* agent.request('inspect');
   })), fixture.source);
   assert.equal(status.policy, 'notify');
   assert.equal(status.trusted, true);
-  const setups = JSON.parse(m.read(join(m.paths.stateRoot, 'agent', 'setups.json'))!);
-  assert.deepEqual(setups.setups.map((s: { setupId: unknown; checkout: unknown }) => [s.setupId, s.checkout]), [[null, m.paths.repo]]);
-  assert.deepEqual(await m.kinds(), ['setup-trusted', 'revision-verified']);
+  assert.deepEqual(await m.kinds(), ['revision-verified']);
+});
+
+test('startAgent never trusts the checkout itself', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const status = await m.run(Effect.scoped(Effect.gen(function* () {
+    const agent = yield* startAgent(m.domains);
+    return yield* agent.request('inspect');
+  })), fixture.source);
+  assert.equal(status.trusted, false);
+  assert.equal(m.read(join(m.paths.stateRoot, 'agent', 'setups.json')), undefined);
+  assert.ok(!(await m.kinds()).includes('setup-trusted'));
 });
 
 test('setPolicy records the change once and answers under the new policy', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
     const agent = yield* startAgent(m.domains);
     yield* agent.setPolicy('auto-apply', 'cli');
@@ -39,6 +53,7 @@ test('setPolicy records the change once and answers under the new policy', async
 test('decide stores the decision, records who made it, and answers with the job that saw it', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   const synced = { ...accept(EFFORT), source: 'synced' as const, machineId: 'machine-2' };
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
     const agent = yield* startAgent(m.domains);
@@ -56,6 +71,7 @@ test('decide stores the decision, records who made it, and answers with the job 
 test('resume clears a pause and runs a job', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, paused: { reason: 'a step failed', at: '2026-10-06T00:00:00.000Z' } }))));
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
     const agent = yield* startAgent(m.domains);
@@ -68,6 +84,7 @@ test('resume clears a pause and runs a job', async () => {
 test('a job that fails reports JOB_FAILED and the loop keeps running', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   let fail = false;
   const flaky = Layer.succeed(SetupSource, {
     ...fixture.service,
@@ -89,6 +106,7 @@ test('a job that fails reports JOB_FAILED and the loop keeps running', async () 
 test('runAgent builds its services from paths and runs until interrupted', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -166,6 +184,7 @@ test('an aborted signal ends the agent, and no later job runs', async () => {
 test('a request after the agent closed fails promptly', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
   const exit = await m.run(Effect.gen(function* () {
     const scope = yield* Scope.make();
     const agent = yield* startAgent(m.domains).pipe(Scope.provide(scope));
@@ -174,4 +193,38 @@ test('a request after the agent closed fails promptly', async () => {
     return yield* Effect.exit(agent.request('inspect').pipe(Effect.timeoutOption('1 second')));
   }), fixture.source);
   assert.ok(Exit.isFailure(exit), 'the request hung or answered after close');
+});
+
+const lockPath = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoot, 'agent', 'agent.lock');
+const writeLock = (path: string, pid: number) => {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ pid, startedAt: 'x' }));
+};
+
+test('a second agent fails LockHeld before it writes anything', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), process.ppid);
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.deepEqual(await m.kinds(), []);
+  assert.equal(existsSync(lockPath(m)), true);
+});
+
+test('an agent takes over a dead agent\'s lock and removes its own on close', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), spawnSync(process.execPath, ['-e', '']).pid);
+  const controller = new AbortController();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source, signal: controller.signal }));
+  for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok((await m.kinds()).includes('revision-verified'));
+  assert.equal(existsSync(lockPath(m)), true);
+  controller.abort();
+  assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
+  assert.equal(existsSync(lockPath(m)), false);
 });

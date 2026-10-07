@@ -1,4 +1,4 @@
-export const VERBS = ['setup', 'status', 'apply', 'capture', 'sync', 'pull', 'push', 'update', 'uninstall'];
+export const VERBS = ['setup', 'status', 'apply', 'capture', 'sync', 'pull', 'push', 'update', 'uninstall', 'agent'];
 
 export const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
@@ -50,6 +50,10 @@ Installation (setup and apply --install):
                                     then switch this machine to skills-only mode
                                     integrations, skills and the repo stay installed;
                                     --target must be all
+  agent install [--linger]          run the local agent as a login service from this checkout
+                                    --linger (Linux) keeps it running with nobody logged in
+  agent uninstall                   stop the agent and remove its login service
+  agent run                         run the agent in the foreground (the service runs this)
 
 Examples:
   nortuscc status --target codex    report only what Codex owns

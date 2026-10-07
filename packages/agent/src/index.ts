@@ -1,5 +1,5 @@
 export {
-  entryOf, itemIdOf, LOCAL_SETUP, normalizeRepoUrl, RevisionMismatch, RevisionUnavailable, SetupSource, SetupsStore, setupsStore,
+  entryOf, itemIdOf, LOCAL_SETUP, normalizeRepoUrl, ownSetup, RevisionMismatch, RevisionUnavailable, SetupSource, SetupsStore, setupsStore,
   type Effective, type Entry, type Revision, type Snapshot, type TrustedSetup,
 } from '@nortuscc/sync';
 export * from './classifier.ts';
@@ -14,3 +14,5 @@ export * from './job.ts';
 export * from './scheduler.ts';
 export * from './policy.ts';
 export * from './agent.ts';
+export * from './service/units.ts';
+export * from './service/register.ts';
