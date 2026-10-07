@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MachineController, advance, type RunView } from '../src/controller.ts';
+import { MachineController, advance, canCancel, type RunView } from '../src/controller.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
 
 const step = (key: string) => ({ key, domain: 'config', action: 'write-file', summary: `write ${key}`, touches: [key], interruptible: false });
@@ -529,4 +529,87 @@ for (const refusal of [false, true]) test(`apply settlement respects a live exte
   await c.previewPlan();
   assert.equal(f.calls.filter(([name]) => name === 'apply_plan').length, 1);
   assert.equal(f.calls.filter(([name]) => name === 'preview_plan').length, 1);
+});
+
+test('a fresh app cancels a surviving manual apply without inventing a local run', async () => {
+  let applying = true;
+  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => ({ cancelled: true }), inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.cancel();
+  assert.deepEqual(f.calls.filter(([name]) => name === 'cancel_apply'), [['cancel_apply', undefined]]);
+  assert.equal(c.state.run, null);
+  assert.equal(c.state.status?.applying, true);
+  assert.match(c.state.detail, /requested|waiting/i);
+  f.emit(event('surviving', { type: 'cancelled', remaining: [] }));
+  assert.equal(c.state.run, null);
+  assert.equal(c.state.status?.applying, true);
+  applying = false;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
+  await new Promise((done) => setTimeout(done, 0));
+  assert.equal(c.state.inspection?.items.length, 1);
+  assert.equal(c.state.pending, false);
+});
+
+test('a false cancel leaves external activity visible until authoritative idle status', async () => {
+  let applying = false;
+  let inspects = 0;
+  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => ({ cancelled: false }), inspect_machine: () => (++inspects, inspection(['config:a'])) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  applying = true;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+  await c.cancel();
+  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
+  assert.equal(c.state.status?.applying, true);
+  assert.equal(c.state.run, null);
+  assert.doesNotMatch(c.state.detail, /cancelled/i);
+  await c.previewPlan();
+  await c.restart();
+  assert.equal(f.calls.some(([name]) => name === 'preview_plan' || name === 'restart_agent'), false);
+  f.emit({ generation: 0, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
+  assert.equal(c.state.status?.applying, true);
+  applying = false;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
+  await new Promise((done) => setTimeout(done, 0));
+  assert.equal(inspects, 2, 'idle refreshes an inspection from before the external apply');
+  assert.equal(c.state.status?.applying, undefined);
+});
+
+test('an external cancel reply cannot overwrite idle recovery that superseded it', async () => {
+  let applying = true;
+  const cancelled = deferred<unknown>();
+  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => cancelled.promise, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  const cancelling = c.cancel();
+  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
+  applying = false;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
+  await new Promise((done) => setTimeout(done, 0));
+  const before = c.state;
+  cancelled.resolve({ cancelled: true });
+  await cancelling;
+  assert.equal(c.state, before);
+});
+
+test('an external cancel reply from another generation is ignored', async () => {
+  const f = fake({ agent_status: () => status({ applying: true }), cancel_apply: () => ({ cancelled: true }) });
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation: command === 'cancel_apply' ? 0 : 1 }) };
+  const c = new MachineController(bridge);
+  await c.connect();
+  const before = c.state;
+  await c.cancel();
+  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
+  assert.equal(c.state, before);
+});
+
+test('the shared Cancel button gate enables connected external activity and refuses idle or offline state', () => {
+  const c = new MachineController(null);
+  for (const [connection, applying, expected] of [
+    ['connected', true, true], ['connected', false, false], ['connecting', true, false],
+    ['disconnected', true, false], ['browser', true, false],
+  ] as const) {
+    assert.equal(canCancel({ ...c.state, connection, status: { ...status({ applying }), policy: 'notify' }, run: null }), expected);
+  }
 });

@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
-import { MachineController, type StepStatus } from './controller.ts';
+import { MachineController, canCancel, type StepStatus } from './controller.ts';
 import { nativeAvailable, nativeBridge } from './bridge.ts';
 import './style.css';
 
@@ -187,7 +187,7 @@ function App() {
               <button className="primary" disabled={!ready || steps.length === 0} onClick={() => void controller.apply()}>
                 Apply {steps.length} steps
               </button>
-              <button disabled={!running} onClick={() => void controller.cancel()}>Cancel</button>
+              <button disabled={!canCancel(state)} onClick={() => void controller.cancel()}>Cancel</button>
             </div>
           </section>
         </div>

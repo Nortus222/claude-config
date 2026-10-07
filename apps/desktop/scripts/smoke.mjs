@@ -12,7 +12,8 @@ import { MAX_RECORD_BYTES, decodeMessage } from '@nortuscc/agent/ipc/protocol';
 // Only foreground agents run here. Service registration and the owner's checkout are never used.
 const root = fileURLToPath(new URL('..', import.meta.url));
 const app = process.argv[2] ? resolve(process.argv[2]) : null;
-const resources = app ? join(app, 'Contents/Resources/agent-runtime') : join(root, 'src-tauri/resources/darwin-arm64');
+const resources = app ? join(app, 'Contents/Resources/agent-runtime')
+  : resolve(process.env.DESKTOP_AGENT_RESOURCES ?? join(root, 'src-tauri/resources/darwin-arm64'));
 const temporaryRoot = realpathSync(tmpdir());
 const home = realpathSync(mkdtempSync(join(temporaryRoot, 'ncc-')));
 const cwd = join(home, 'cwd');
@@ -87,6 +88,16 @@ async function connect() {
 
 let child;
 let exited;
+let native;
+let nativeExited;
+const ownedPids = [];
+const recordChild = (child) => {
+  if (child.pid === undefined) return;
+  ownedPids.push(child.pid);
+  if (process.env.NORTUSCC_DESKTOP_SMOKE_RECORD) {
+    writeFileSync(process.env.NORTUSCC_DESKTOP_SMOKE_RECORD, JSON.stringify({ home, pids: ownedPids }));
+  }
+};
 let launchError;
 let stderr = '';
 let stdout = '';
@@ -96,9 +107,7 @@ async function releaseGate() {
   gateReached = false;
   await writeFile(fifo, 'release\n');
 }
-async function stop() {
-  await releaseGate();
-  for (const socket of sockets) socket.destroy();
+async function stopChild(child, exited) {
   if (!child) return;
   let timer;
   if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
@@ -106,6 +115,12 @@ async function stop() {
     timer = setTimeout(() => child.kill('SIGKILL'), 5000);
   }
   try { await exited; } finally { clearTimeout(timer); }
+}
+async function stop() {
+  await releaseGate();
+  for (const socket of sockets) socket.destroy();
+  await stopChild(native, nativeExited);
+  await stopChild(child, exited);
 }
 
 try {
@@ -143,6 +158,7 @@ try {
   child.once('error', (error) => { launchError = error; });
   // Close always follows spawn error or exit. Its join cannot reject before startup is awaited.
   exited = new Promise((done) => child.once('close', (...result) => done(result)));
+  recordChild(child);
   await until(() => {
     if (launchError) throw launchError;
     assert.equal(child.exitCode, null, stderr);
@@ -212,13 +228,19 @@ try {
   await client.hello();
   await client.request('inspect');
   if (app) {
-    const native = spawn(join(app, 'Contents/MacOS/nortuscc-desktop-validation'), ['--smoke', home], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    native = spawn(join(app, 'Contents/MacOS/nortuscc-desktop-validation'), ['--smoke', home], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let nativeError;
+    native.once('error', (error) => { nativeError = error; });
+    nativeExited = new Promise((done) => native.once('close', (...result) => done(result)));
+    recordChild(native);
     let output = '';
     native.stdout.on('data', (chunk) => { output += chunk; });
     native.stderr.on('data', (chunk) => { output += chunk; });
     const timer = setTimeout(() => native.kill('SIGKILL'), 180_000);
     try {
-      assert.equal((await once(native, 'exit'))[0], 0, output);
+      const result = await nativeExited;
+      if (nativeError) throw nativeError;
+      assert.equal(result[0], 0, output);
       assert.match(output, /Packaged Rust owner smoke passed/);
     } finally { clearTimeout(timer); }
     client.socket.destroy();

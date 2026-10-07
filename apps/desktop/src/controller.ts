@@ -25,6 +25,10 @@ export type ViewState = {
   readonly detail: string;
 };
 
+// The agent can own a manual run that began before this window connected.
+export const canCancel = (state: ViewState) => state.connection === 'connected'
+  && (state.run?.outcome === 'running' || state.status?.applying === true);
+
 const MAX_EARLY_EVENTS = 10_000;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -269,10 +273,16 @@ export class MachineController {
 
   // Asks the agent to stop the run; a failure is shown unless a disconnect or restart superseded it.
   async cancel() {
-    if (!this.bridge || this.state.connection !== 'connected' || this.state.run?.outcome !== 'running') return;
+    if (!this.bridge || !canCancel(this.state)) return;
     const revision = this.revision;
     try {
-      await this.bridge.invoke('cancel_apply');
+      const reply = await this.bridge.invoke('cancel_apply');
+      if (!this.current(revision, reply)) return;
+      if (this.state.run?.outcome !== 'running') {
+        const cancelled = typeof reply.data === 'object' && reply.data !== null && 'cancelled' in reply.data
+          && reply.data.cancelled === true;
+        this.update({ detail: cancelled ? 'Cancellation requested; waiting for the agent' : 'No manual apply is available to cancel' });
+      }
     } catch (error) {
       if (this.owns(revision)) this.refused(error);
     }
@@ -326,8 +336,9 @@ export class MachineController {
     }
     if (this.state.connection !== 'connected') return;
     if (event.event === 'status') {
+      const externalApplyEnded = this.state.status?.applying === true && this.state.run?.outcome !== 'running' && event.status.applying === false;
       this.showStatus(event.status);
-      if (!this.state.inspection && !event.status.applying && !this.state.pending) void this.inspect();
+      if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
       return;
     }
     if (this.starting) {
