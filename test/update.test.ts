@@ -1,9 +1,10 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
@@ -215,19 +216,20 @@ test('seedKeys with neither flag seeds nothing', () => {
 // ---- orchestration: a temp machine, real git sources, a fake installer ----
 
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
 
 // A local source repo with one folder per skill under s/.
 function sourceRepo(dir: string, folders: string[]) {
   mkdirSync(dir, { recursive: true });
   git(dir, 'init', '-q');
+  git(dir, 'config', 'core.autocrlf', 'false');
   for (const name of folders) {
     mkdirSync(join(dir, 's', name), { recursive: true });
     writeFileSync(join(dir, 's', name, 'SKILL.md'), `# ${name}\n`);
   }
   git(dir, 'add', '.');
   git(dir, 'commit', '-qm', 'skills');
-  return { url: `file://${dir}`, tree: (name: string) => git(dir, 'rev-parse', `HEAD:s/${name}`) };
+  return { url: pathToFileURL(dir).href, tree: (name: string) => git(dir, 'rev-parse', `HEAD:s/${name}`) };
 }
 
 const CURRENT = '<current upstream tree>';
@@ -253,8 +255,11 @@ type Options = {
   readonly lockOverride?: Record<string, object>;
 };
 
+const homes: string[] = [];
+after(() => { for (const home of homes) rmSync(home, { recursive: true, force: true }); });
 function machine(options: Options = {}) {
   const home = mkdtempSync(join(tmpdir(), 'nortuscc-update-ts-'));
+  homes.push(home);
   const paths: MachinePathsValue = {
     repo: join(home, 'repo'), claude: join(home, '.claude'), codex: join(home, '.codex'),
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
@@ -265,7 +270,7 @@ function machine(options: Options = {}) {
   if (options.manifest !== undefined) writeFileSync(manifestFile, options.manifest);
 
   const src = sourceRepo(join(home, 'upstream'), options.upstream ?? ['stale', 'fresh']);
-  const sourceUrl = options.unreachable ? `file://${join(home, 'missing')}` : src.url;
+  const sourceUrl = options.unreachable ? pathToFileURL(join(home, 'missing')).href : src.url;
   const entry = (name: string, hash: string) => ({ source: 'o/r', sourceUrl, skillPath: `s/${name}/SKILL.md`, skillFolderHash: hash });
   const lockFile = join(home, '.agents', '.skill-lock.json');
   const readLock = (): Record<string, Record<string, unknown>> => JSON.parse(readFileSync(lockFile, 'utf8')).skills;
@@ -426,7 +431,7 @@ test('a confirmed run backs up and updates only the outdated skills', async () =
   assert.equal(m.backupOf('stale'), true);
   assert.equal(m.backupOf('fresh'), false);
   assert.match(result.out, /\nupdating 1 skill\(s\)\n/);
-  assert.match(result.out, new RegExp(`backed up -> ${m.paths.backups}/nortuscc-`));
+  assert.ok(result.out.includes(`backed up -> ${join(m.paths.backups, 'nortuscc-')}`));
 });
 
 test('--yes skips the prompt entirely', async () => {
@@ -485,7 +490,7 @@ test('an unmoved lock (no writer touched it) still reports unchanged', async () 
 test('two sources: an unreachable one only marks its own skills unknown', async () => {
   const m = machine({
     lockOverride: {
-      fresh: { source: 'o/other', sourceUrl: 'file:///nonexistent/other', skillPath: 's/fresh/SKILL.md', skillFolderHash: 'same' },
+      fresh: { source: 'o/other', sourceUrl: pathToFileURL(join(tmpdir(), 'nonexistent', 'other')).href, skillPath: 's/fresh/SKILL.md', skillFolderHash: 'same' },
     },
   });
   const result = await go(['--check'], m.deps());

@@ -350,7 +350,7 @@ const hashText = (text: string) => 'sha256:' + createHash('sha256').update(text,
 test('apply --target codex installs the restricted OpenRouter home without a secret', async () => {
   const m = machine();
   assert.equal((await apply(m, '--target', 'codex')).code, 0);
-  assert.equal(read(localToml(m)), OPENROUTER);
+  assert.equal(read(localToml(m)).replace(/\r\n/g, '\n'), OPENROUTER);
   assert.doesNotMatch(read(localToml(m)), /sk-or-/);
   const models = readJson(join(m.openrouter, 'models-static.json')).models;
   assert.deepEqual(
@@ -366,7 +366,7 @@ test('skills-only skips the OpenRouter home; --with-config installs it without c
   assert.equal((await apply(m, '--target', 'codex', '--skills-only')).code, 0);
   assert.ok(isEmpty(m.openrouter));
   assert.equal((await apply(m, '--target', 'codex', '--with-config')).code, 0);
-  assert.equal(read(localToml(m)), OPENROUTER);
+  assert.equal(read(localToml(m)).replace(/\r\n/g, '\n'), OPENROUTER);
   assert.ok(existsSync(join(m.openrouter, 'models-static.json')));
   assert.equal(recordedChoice(m).manageConfig, false);
 });
@@ -460,7 +460,7 @@ test('replacing an unmanaged OpenRouter config keeps its project tables', async 
   const projects = '[projects]\n"/work/example" = { trust_level = "trusted" }\n';
   writeFileSync(localToml(m), 'model = "old-model"\n\n' + projects);
   assert.equal((await apply(m, '--target', 'codex')).code, 0);
-  assert.equal(read(localToml(m)), OPENROUTER + '\n' + projects);
+  assert.equal(read(localToml(m)).replace(/\r\n/g, '\n'), OPENROUTER + '\n' + projects);
   assert.equal(await tomlState(m), 'clean');
 });
 
