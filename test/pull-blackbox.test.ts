@@ -59,7 +59,7 @@ test('a fast-forward applies main when Git defaults to another branch', async (t
 
   const result = await pull(m);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), '# from main\n');
+  assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8').replace(/\r\n/g, '\n'), '# from main\n');
   assert.equal(git(m.repo, 'rev-parse', 'HEAD'), git(origin(m), 'rev-parse', 'main'));
 });
 
