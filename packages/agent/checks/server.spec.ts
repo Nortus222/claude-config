@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
-import { Effect, Exit, Scope } from 'effect';
+import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
 import {
-  AgentStateStore, makeSession, MAX_RECORD_BYTES, serveIpc, startAgent, ServeFailed,
+  AgentStateStore, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
   type AgentDomain, type AgentDomains,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -83,11 +83,17 @@ const ask = async (client: Client, command: object) => {
   return client.waitFor((r) => r.id === id, from);
 };
 
-type Options = { readonly paused?: boolean; readonly config?: AgentDomain; readonly handshakeMs?: number };
+type Options = {
+  readonly paused?: boolean;
+  readonly config?: AgentDomain;
+  readonly handshakeMs?: number;
+  // The start job's fetch waits for this, so the agent has no status until it opens.
+  readonly starting?: Deferred.Deferred<void>;
+};
 
-// The session spec's machine, served on a socket under a short temp root. `open` starts the agent,
-// the session and the server in a scope the test closes.
-const serverMachine = async (options: Options = {}) => {
+// A trusted machine whose head adds two accepted settings keys, as in the session spec, under a
+// short temp root for its socket.
+const prepare = async (options: Options = {}) => {
   const m = agentMachine('/tmp');
   const fixture = setupFixture(join(m.root, 'setup'), {
     headFiles: { 'claude/settings.keys.json': JSON.stringify({ theme: 'dark', effortLevel: 'high', model: 'opus' }) + '\n' },
@@ -99,9 +105,18 @@ const serverMachine = async (options: Options = {}) => {
   }
   for (const itemId of [EFFORT, MODEL]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
   const domains: AgentDomains = (paths) => [options.config ?? configDomain, integrationsDomain({ paths, env: {} })];
+  const starting = options.starting;
+  const source = starting === undefined ? fixture.source
+    : Layer.succeed(SetupSource, { ...fixture.service, fetch: Effect.andThen(Deferred.await(starting), fixture.service.fetch) });
   const dir = join(m.paths.stateRoot, 'agent');
-  const socketPath = join(dir, 'agent.sock');
-  const tokenPath = join(dir, 'agent.token');
+  return { m, fixture, domains, source, dir, socketPath: join(dir, 'agent.sock'), tokenPath: join(dir, 'agent.token') };
+};
+
+// `prepare`'s machine served on its socket. `open` connects and says hello. The agent, the session
+// and the server run in a scope the test closes; unless `starting` holds it back, the start job has
+// finished before this answers.
+const serverMachine = async (options: Options = {}) => {
+  const { m, domains, source, dir, socketPath, tokenPath } = await prepare(options);
   let shutdowns = 0;
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
@@ -111,7 +126,8 @@ const serverMachine = async (options: Options = {}) => {
       paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
       ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
     });
-  }).pipe(Scope.provide(scope)), fixture.source);
+    if (options.starting === undefined) while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
+  }).pipe(Scope.provide(scope)), source);
   const token = readFileSync(tokenPath, 'utf8');
   const clients: Array<Client> = [];
   const open = async (client: 'app' | 'cli' = 'app') => {
@@ -324,6 +340,8 @@ test('shutdown answers, then calls onShutdown', async () => {
     const c = await s.open();
     const reply = await ask(c, { command: 'shutdown' });
     assert.deepEqual(reply.result, { shutdown: true });
+    // onShutdown runs once the reply is flushed, which may be after the client has read it.
+    for (let i = 0; i < 100 && s.shutdowns() === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(s.shutdowns(), 1);
     assert.equal((await ask(c, { command: 'status' })).error.code, 'SHUTDOWN');
   });
@@ -355,4 +373,79 @@ test('a leftover socket is replaced, and a state root too deep for a socket path
     yield* serveIpc({ paths: m.paths, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} });
     assert.equal(statSync(join(dir, 'agent.sock')).isSocket(), true);
   })));
+});
+
+test('status before the first job answers NO_REPORT at once, without waiting for a job', async () => {
+  const starting = Deferred.makeUnsafe<void>();
+  await withServer({ starting }, async (s) => {
+    const c = await s.open('cli');
+    const early = await ask(c, { command: 'status' });
+    assert.equal(early.ok, false, JSON.stringify(early));
+    assert.deepEqual(early.error, { code: 'NO_REPORT', message: 'the agent is still starting' });
+    Deferred.doneUnsafe(starting, Effect.void);
+    let later = early;
+    for (let i = 0; i < 200 && !later.ok; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      later = await ask(c, { command: 'status' });
+    }
+    assert.equal(later.ok, true, JSON.stringify(later));
+  });
+});
+
+const pendingKeys = (status: Wire) => status.pending.map((p: Wire) => p.key);
+
+test('after an apply, a status event and the status reply no longer list the applied items', async () => {
+  await withServer({}, async (s) => {
+    const watcher = await s.open();
+    await ask(watcher, { command: 'subscribe' });
+    const c = await s.open();
+    const before = await ask(c, { command: 'status' });
+    assert.ok(pendingKeys(before.result).includes(EFFORT_KEY) && pendingKeys(before.result).includes(MODEL_KEY), JSON.stringify(before));
+    const inspected = await ask(c, { command: 'inspect' });
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    const watched = watcher.records.length;
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.result.status, 'started');
+    const done = await watcher.waitFor((r) => r.event === 'progress' && r.progress.type === 'done', watched);
+    const event = await watcher.waitFor((r) => r.event === 'status', watcher.records.indexOf(done) + 1);
+    assert.deepEqual(pendingKeys(event.status).filter((k: string) => k === EFFORT_KEY || k === MODEL_KEY), []);
+    const after = await ask(c, { command: 'status' });
+    assert.deepEqual(pendingKeys(after.result).filter((k: string) => k === EFFORT_KEY || k === MODEL_KEY), []);
+  });
+});
+
+test('shutdown mid-apply answers, cancels the run, releases apply.lock and removes the socket and token', { skip: process.platform === 'win32' }, async () => {
+  // Each step takes a while, so the run is still going when shutdown arrives.
+  const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Effect.sleep('200 millis'), configDomain.run(step, report)) };
+  const { m, domains, source, socketPath, tokenPath } = await prepare({ config: slow });
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains, source, agentVersion: '1.0.0', ipc: true }));
+  let c: Client | undefined;
+  try {
+    for (let i = 0; i < 500 && !existsSync(socketPath); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    c = await connect(socketPath);
+    assert.equal((await ask(c, { command: 'hello', token: readFileSync(tokenPath, 'utf8'), client: 'cli' })).ok, true);
+    const inspected = await ask(c, { command: 'inspect' });
+    assert.equal(inspected.ok, true, JSON.stringify(inspected));
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    const from = c.records.length;
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.result.status, 'started', JSON.stringify(applied));
+    await c.waitFor((r) => r.event === 'progress' && r.progress.type === 'started', from);
+
+    const reply = await ask(c, { command: 'shutdown' });
+    assert.deepEqual(reply.result, { shutdown: true });
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('10 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'the agent kept running after shutdown');
+    assert.equal(existsSync(join(m.paths.stateRoot, 'apply.lock')), false);
+    const finished = (await m.events()).filter((e) => e.kind === 'apply-finished');
+    assert.equal(finished.length, 1);
+    assert.ok(finished[0]?.kind === 'apply-finished' && finished[0].result === 'cancelled', JSON.stringify(finished));
+    assert.equal(existsSync(socketPath), false);
+    assert.equal(existsSync(tokenPath), false);
+  } finally {
+    c?.socket.destroy();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
 });

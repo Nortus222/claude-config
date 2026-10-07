@@ -37,8 +37,8 @@ type Connection = {
   subscribed: boolean;
   timer: ReturnType<typeof setTimeout> | undefined;
 };
-// A handler's result, and what to do once its reply is written.
-type Handled = { readonly result: unknown; readonly after?: () => void };
+// A handler's result, what to do once its reply is written, and what to do once it is flushed.
+type Handled = { readonly result: unknown; readonly after?: () => void; readonly flushed?: () => void };
 
 // Cuts `text` to at most `max` UTF-16 units without splitting a surrogate pair.
 const truncate = (text: string, max: number): string => {
@@ -108,14 +108,16 @@ export const serveIpc = (input: {
     let closing = false;
     let stopped = false;
 
-    const write = (conn: Connection, message: unknown): boolean => {
+    // `flushed` runs once the line is handed to the OS, or at once when it cannot be written.
+    const write = (conn: Connection, message: unknown, flushed?: () => void): boolean => {
       let line: string;
       try {
         line = JSON.stringify(decodeMessage(message)) + '\n';
       } catch {
         return false;
       }
-      if (!conn.socket.destroyed && conn.socket.writable) conn.socket.write(line);
+      if (!conn.socket.destroyed && conn.socket.writable) conn.socket.write(line, () => flushed?.());
+      else flushed?.();
       return true;
     };
     // Events over the record limit are dropped, never written.
@@ -127,12 +129,12 @@ export const serveIpc = (input: {
       }
       write(conn, JSON.parse(line));
     };
-    const reject = (conn: Connection, id: string, code: ErrorCode, message: string) =>
-      void write(conn, { version: PROTOCOL_VERSION, id, ok: false, error: { code, message: truncate(message, 500) } });
-    const reply = (conn: Connection, id: string, result: unknown) => {
+    const reject = (conn: Connection, id: string, code: ErrorCode, message: string, flushed?: () => void) =>
+      void write(conn, { version: PROTOCOL_VERSION, id, ok: false, error: { code, message: truncate(message, 500) } }, flushed);
+    const reply = (conn: Connection, id: string, result: unknown, flushed?: () => void) => {
       const line = JSON.stringify({ version: PROTOCOL_VERSION, id, ok: true, result });
-      if (Buffer.byteLength(line) + 1 > MAX_RECORD_BYTES) return reject(conn, id, 'OVERSIZED', `Result exceeds ${MAX_RECORD_BYTES} bytes`);
-      if (!write(conn, JSON.parse(line))) reject(conn, id, 'INTERNAL', 'The result does not match the protocol');
+      if (Buffer.byteLength(line) + 1 > MAX_RECORD_BYTES) return reject(conn, id, 'OVERSIZED', `Result exceeds ${MAX_RECORD_BYTES} bytes`, flushed);
+      if (!write(conn, JSON.parse(line), flushed)) reject(conn, id, 'INTERNAL', 'The result does not match the protocol', flushed);
     };
     const refuse = (conn: Connection, id: string) => {
       reject(conn, id, 'UNAUTHORIZED', 'Send hello with the token from agent.token first');
@@ -170,7 +172,9 @@ export const serveIpc = (input: {
       };
       return result;
     });
-    const latest = Effect.flatMap(handle.status, (status) => (status === undefined ? handle.request('inspect') : Effect.succeed(status)));
+    // Until the start job finishes there is no status; answering at once beats making a client wait for a job.
+    const latest = Effect.flatMap(handle.status, (status) =>
+      (status === undefined ? Effect.fail(new SessionError('NO_REPORT', 'the agent is still starting')) : Effect.succeed(status)));
     const wire = <R>(effect: Effect.Effect<AgentStatus, unknown, R>): Effect.Effect<Handled, unknown, R> =>
       Effect.map(effect, (status) => ({ result: toWireStatus(status) }));
 
@@ -233,7 +237,8 @@ export const serveIpc = (input: {
         case 'shutdown':
           return Effect.sync(() => {
             closing = true;
-            return { result: { shutdown: true }, after: input.onShutdown };
+            // Shutting down closes every socket, so it waits for the reply to be flushed.
+            return { result: { shutdown: true }, flushed: input.onShutdown };
           });
       }
     };
@@ -242,7 +247,7 @@ export const serveIpc = (input: {
       void run(dispatch(conn, request, client).pipe(
         Effect.matchCause({
           onSuccess: (handled) => {
-            reply(conn, request.id, handled.result);
+            reply(conn, request.id, handled.result, handled.flushed);
             handled.after?.();
           },
           onFailure: (cause) => {

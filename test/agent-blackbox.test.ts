@@ -174,6 +174,14 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   return check();
 }
 
+// `agent status` once the agent has finished its start job; until then it says it is still starting.
+async function statusOnceStarted(m: Machine) {
+  for (const end = Date.now() + 15_000; ; await wait(100)) {
+    const result = await runCli(m, ['agent', 'status']);
+    if (!result.stderr.includes('still starting') || Date.now() >= end) return result;
+  }
+}
+
 const checkoutHead = () => execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
 // A service machine whose state root is short: `agent run` serves <state>/agent/agent.sock, and
@@ -275,7 +283,7 @@ test('agent status, policy and resume talk to the running agent', { skip }, asyn
   try {
     assert.ok(await until(() => existsSync(join(dir, 'agent.sock')), 15_000), `agent.sock never appeared: ${stderr}`);
 
-    const status = await runCli(m, ['agent', 'status']);
+    const status = await statusOnceStarted(m);
     assert.match(status.stdout, /^policy: notify$/m, status.stderr);
     assert.match(status.stdout, /^paused: no$/m);
     assert.match(status.stdout, /^trusted: (yes|no)$/m);
@@ -316,7 +324,7 @@ test('agent resume resumes a paused agent', { skip }, async () => {
   const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
   try {
     assert.ok(await until(() => existsSync(join(dir, 'agent.sock')), 15_000), `agent.sock never appeared: ${stderr}`);
-    const status = await runCli(m, ['agent', 'status']);
+    const status = await statusOnceStarted(m);
     assert.match(status.stdout, /^paused: yes, since 2026-10-06T12:00:00.000Z: a step failed$/m, status.stderr);
     const resume = await runCli(m, ['agent', 'resume']);
     assert.equal(resume.code, 0, resume.stderr);
