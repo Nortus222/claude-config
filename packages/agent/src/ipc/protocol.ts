@@ -1,7 +1,7 @@
 import { Schema } from 'effect';
 import type { HistoryEvent } from '@nortuscc/machine';
 import type { AgentStatus, StatusError } from '../job.ts';
-import { POLICIES } from '../state.ts';
+import { POLICIES } from '../policy-values.ts';
 
 // Protocol v3: JSON lines on the agent's socket. It is protocol v2 from the desktop backend,
 // unchanged, plus the `hello` handshake, the agent's own commands and status events. Every
@@ -82,7 +82,6 @@ export const ObservedSchema = Schema.Struct({
 });
 const IssueSchema = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String });
 const ProfileSchema = Schema.Struct({ repo: Schema.String, revision: Schema.NullOr(Schema.String), overrides: Schema.String, issues: Schema.Array(IssueSchema) });
-export const InspectResultSchema = Schema.Struct({ profile: ProfileSchema, items: Schema.Array(ObservedSchema), probeErrors: Schema.Array(Schema.String) });
 
 const StepSchema = Schema.Struct({
   key: Schema.String,
@@ -121,6 +120,7 @@ export const WireStatusSchema = Schema.Struct({
   policy: Policy,
   paused: WirePausedSchema,
   trusted: Schema.Boolean,
+  applying: Schema.optionalKey(Schema.Boolean),
   pending: Schema.Array(Schema.Struct({
     key: Schema.String,
     itemId: Schema.String,
@@ -134,6 +134,8 @@ export const WireStatusSchema = Schema.Struct({
   detail: Schema.optionalKey(Schema.String),
   counts: Schema.Struct({ pending: Count, held: Count, ready: Count, drift: Count }),
 });
+export const InspectResultSchema = Schema.Struct({ profile: ProfileSchema, items: Schema.Array(ObservedSchema), probeErrors: Schema.Array(Schema.String), status: Schema.optionalKey(WireStatusSchema) });
+export const decodeWireStatus = Schema.decodeUnknownSync(WireStatusSchema, { onExcessProperty: 'error' });
 export const StatusEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('status'), status: WireStatusSchema });
 
 export const ResponseSchema = Schema.Union([

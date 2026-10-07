@@ -6,8 +6,9 @@ status: accepted (core built in #77; login service built in #79; IPC and app cut
 
 Accepted items must apply while the app is closed and on headless machines. `packages/agent` runs
 as a per-user login service (LaunchAgent, `systemd --user`, a logon Scheduled Task) and replaces
-the app's Bun sidecar; the app becomes its client over a user-only socket or named pipe with a
-per-start token. The CLI keeps running in-process and shares only `apply.lock`. The agent
+the app's Bun sidecar; the app is its client over a user-only Unix socket with a per-start token
+(ADR 0019). The app bundles the agent and owns installation and upgrades through a short-lived
+helper (ADR 0021). The CLI keeps running in-process and shares only `apply.lock`. The agent
 schedules by timer plus events, pauses auto-apply after any failed or interrupted run until a
 person resumes it, and never downloads code; whoever installed it upgrades it.
 

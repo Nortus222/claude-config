@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
@@ -586,4 +586,37 @@ test('shutdown mid-apply answers, cancels the run, releases apply.lock and remov
     c?.socket.destroy();
     await Effect.runPromise(Fiber.interrupt(fiber));
   }
+});
+
+test('status observes an automatic apply lock rather than the cached job report', async () => {
+  await withServer({}, async (s) => {
+    const c = await s.open();
+    assert.equal((await ask(c, { command: 'status' })).result.applying, false);
+    const lock = join(s.m.paths.stateRoot, 'apply.lock');
+    writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    assert.equal((await ask(c, { command: 'status' })).result.applying, true);
+    rmSync(lock);
+    assert.equal((await ask(c, { command: 'status' })).result.applying, false);
+    writeFileSync(lock, JSON.stringify({ pid: 2147483647 }));
+    assert.equal((await ask(c, { command: 'status' })).result.applying, false);
+  });
+});
+
+test('status observes a manual apply while its first step is blocked and becomes idle after completion', async () => {
+  const started = Deferred.makeUnsafe<void>();
+  const release = Deferred.makeUnsafe<void>();
+  const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Deferred.succeed(started, undefined), Effect.andThen(Deferred.await(release), configDomain.run(step, report))) };
+  await withServer({ config: slow }, async (s) => {
+    const c = await s.open();
+    const inspected = await ask(c, { command: 'inspect' });
+    assert.equal(inspected.result.status.applying, false);
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    assert.equal((await ask(c, { command: 'apply', planId: preview.result.planId })).result.status, 'started');
+    await Effect.runPromise(Deferred.await(started));
+    assert.equal((await ask(c, { command: 'status' })).result.applying, true);
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    await c.waitFor((record) => record.event === 'progress' && record.progress.type === 'done');
+    assert.equal((await ask(c, { command: 'status' })).result.applying, false);
+  });
 });

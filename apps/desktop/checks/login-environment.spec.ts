@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { missingTools, probeLoginEnvironment } from '../backend/login-environment.ts';
+import { missingTools, probeLoginEnvironment } from '../agent/login-environment.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'nortuscc-login-env-'));
 test.after(() => rmSync(dir, { recursive: true, force: true }));

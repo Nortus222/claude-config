@@ -1,7 +1,7 @@
 import {
-  decodeApplyResult, decodeInspectResult, decodePreviewResult,
-  type InspectResult, type PreviewResult, type RunEvent, type RunProgress,
-} from '../backend/protocol.ts';
+  decodeApplyResult, decodeInspectResult, decodePreviewResult, decodeHelloResult, decodeWireStatus,
+  type HelloResult, type InspectResult, type PreviewResult, type RunEvent, type RunProgress, type WireStatus,
+} from '@nortuscc/agent/ipc/protocol';
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'cancelled';
@@ -16,12 +16,18 @@ export type RunView = {
 export type ViewState = {
   readonly connection: 'connecting' | 'connected' | 'disconnected' | 'browser';
   readonly inspection: InspectResult | null;
+  readonly status: WireStatus | null;
+  readonly hello: HelloResult | null;
   readonly excluded: ReadonlyArray<string>;
   readonly preview: PreviewResult | null;
   readonly run: RunView | null;
   readonly pending: boolean;
   readonly detail: string;
 };
+
+// The agent can own a manual run that began before this window connected.
+export const canCancel = (state: ViewState) => state.connection === 'connected'
+  && (state.run?.outcome === 'running' || state.status?.applying === true);
 
 const MAX_EARLY_EVENTS = 10_000;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
@@ -46,11 +52,11 @@ export function advance(run: RunView, progress: RunProgress): RunView {
   }
 }
 
-// Drives the narrow bridge: ignores events from old backends, old runs and superseded replies.
+// Drives the narrow bridge: ignores events from old agent connections, old runs and superseded replies.
 export class MachineController {
   state: ViewState = {
-    connection: 'connecting', inspection: null, excluded: [], preview: null, run: null, pending: false,
-    detail: 'Connecting to the bundled backend',
+    connection: 'connecting', inspection: null, status: null, hello: null, excluded: [], preview: null, run: null, pending: false,
+    detail: 'Connecting to the local agent',
   };
   private bridge: Bridge | null;
   private generation: number | null = null;
@@ -60,6 +66,7 @@ export class MachineController {
   private revision = 0;
   private starting = false;
   private early: RunEvent[] = [];
+  private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
 
   constructor(bridge: Bridge | null) {
@@ -85,13 +92,15 @@ export class MachineController {
     return this.owns(revision) && reply.generation === this.generation && this.state.connection === 'connected';
   }
   private ready() {
-    return this.bridge !== null && this.state.connection === 'connected' && !this.state.pending && this.state.run?.outcome !== 'running';
+    return this.bridge !== null && this.state.connection === 'connected' && !this.state.pending && this.state.run?.outcome !== 'running' && this.state.status?.applying !== true;
   }
 
-  // Adopts a backend generation; a disconnect for it that arrived first wins.
+  // Adopts an agent connection generation; a disconnect for it that arrived first wins.
   private establish(reply: Envelope, detail: string, revision: number) {
     if (!this.owns(revision)) return false;
     this.generation = reply.generation;
+    const status = this.earlyStatuses.get(reply.generation) ?? null;
+    this.earlyStatuses.clear();
     const disconnected = this.earlyDisconnects.get(reply.generation);
     this.earlyDisconnects.clear();
     if (disconnected) {
@@ -99,7 +108,12 @@ export class MachineController {
       this.update({ connection: 'disconnected', pending: false, detail: disconnected.detail });
       return false;
     }
-    this.update({ connection: 'connected', detail });
+    let hello: HelloResult | null = null;
+    if (typeof reply.data === 'object' && reply.data !== null && 'hello' in reply.data) {
+      try { hello = decodeHelloResult(reply.data.hello); }
+      catch { throw new Error('Incompatible agent protocol. Restart or reinstall the agent explicitly.'); }
+    }
+    this.update({ connection: 'connected', detail, hello, status });
     return true;
   }
 
@@ -108,6 +122,7 @@ export class MachineController {
     const revision = ++this.revision;
     this.generation = null;
     this.earlyDisconnects.clear();
+    this.earlyStatuses.clear();
     this.update({ pending: true });
     try {
       const unlisten = await this.bridge.subscribe((event) => this.receive(event));
@@ -116,12 +131,45 @@ export class MachineController {
         return;
       }
       this.unlisten = unlisten;
-      if (!this.establish(await this.bridge.invoke('backend_generation'), 'Bundled backend connected', revision)) return;
-      await this.load(revision);
+      if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
+      if (await this.loadStatus(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
     } finally {
       if (this.owns(revision)) this.update({ pending: false });
+    }
+  }
+
+  private showStatus(status: WireStatus) {
+    const detail = status.error ? `${status.error}${status.detail ? `: ${status.detail}` : ''}`
+      : status.applying ? 'The agent is applying changes'
+      : status.paused ? `Automatic apply paused: ${status.paused.reason}` : undefined;
+    this.update({ status, ...(detail && this.state.run?.outcome !== 'running' ? { detail } : {}) });
+  }
+
+  private refused(error: unknown, update: Partial<ViewState> = {}) {
+    const detail = message(error);
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : detail;
+    const offline = /UNAUTHORIZED|MALFORMED|OVERSIZED|CLOSED|disconnected|closed the connection|incompatible|protocol/i.test(code);
+    this.update({ ...update, detail, ...(offline ? { connection: 'disconnected' } : {}) });
+  }
+
+  private async loadStatus(revision: number): Promise<boolean> {
+    try {
+      const reply = await this.bridge!.invoke('agent_status');
+      if (!this.current(revision, reply)) return false;
+      let status: WireStatus;
+      try { status = decodeWireStatus(reply.data); }
+      catch { throw new Error('MALFORMED: incompatible agent status. Restart or reinstall the agent explicitly.'); }
+      this.showStatus(status);
+      return !status.applying;
+    } catch (error) {
+      if (!this.owns(revision)) return false;
+      this.refused(error);
+      const noReport = typeof error === 'object' && error !== null && 'code' in error
+        ? error.code === 'NO_REPORT' : /^NO_REPORT\b/.test(message(error));
+      return noReport && this.state.inspection === null && this.state.connection === 'connected'
+        && this.state.status !== null && !this.state.status.applying;
     }
   }
 
@@ -134,20 +182,20 @@ export class MachineController {
       const inspection = decodeInspectResult(reply.data);
       const keys = new Set(inspection.items.map((item) => item.key));
       this.update({
-        inspection, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
-        detail: `Inspected ${inspection.items.length} items`,
+        inspection, status: inspection.status ?? this.state.status, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
+        detail: inspection.status?.error ? `${inspection.status.error}: ${inspection.status.detail ?? ''}` : `Inspected ${inspection.items.length} items`,
       });
     } catch (error) {
-      if (this.owns(revision)) this.update({ inspection: null, preview: null, detail: message(error) });
+      if (this.owns(revision)) this.refused(error, { inspection: null, preview: null });
     }
   }
 
   async inspect() {
-    if (!this.ready()) return;
+    if (!this.bridge || this.state.connection !== 'connected' || this.state.pending || this.state.run?.outcome === 'running') return;
     const revision = ++this.revision;
     this.update({ pending: true });
     try {
-      await this.load(revision);
+      if (await this.loadStatus(revision)) await this.load(revision);
     } finally {
       if (this.owns(revision)) this.update({ pending: false });
     }
@@ -169,10 +217,15 @@ export class MachineController {
       const preview = decodePreviewResult(reply.data);
       this.update({ preview, detail: `${preview.plan.steps.length} steps, ${preview.plan.skipped.length} skipped` });
     } catch (error) {
-      if (this.owns(revision)) this.update({ detail: message(error) });
+      if (this.owns(revision)) this.refused(error);
     } finally {
       if (this.owns(revision)) this.update({ pending: false });
     }
+  }
+
+  // Refreshes activity after preparation ends without discarding the preview.
+  private async settlePreparation(revision: number, detail: string) {
+    if (await this.loadStatus(revision) && this.owns(revision) && !this.state.status?.error) this.update({ detail });
   }
 
   async apply() {
@@ -189,6 +242,7 @@ export class MachineController {
       const result = decodeApplyResult(reply.data);
       if (result.status === 'stale') {
         this.update({ preview: { planId: result.planId, plan: result.plan }, detail: STALE });
+        await this.settlePreparation(revision, STALE);
         return;
       }
       const buffered = this.early.filter((event) => event.runId === result.runId);
@@ -200,9 +254,12 @@ export class MachineController {
       };
       const run = buffered.reduce((view, event) => (view.outcome === 'running' ? advance(view, event.progress) : view), initial);
       finished = run.outcome !== 'running';
-      this.update({ run, detail: run.summary, ...(finished ? { preview: null } : {}) });
+      this.update({ run, detail: run.summary, ...(finished ? { preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null } : {}) });
     } catch (error) {
-      if (this.owns(revision)) this.update({ detail: message(error) });
+      if (this.owns(revision)) {
+        this.refused(error);
+        if (this.state.connection === 'connected') await this.settlePreparation(revision, message(error));
+      }
     } finally {
       if (this.owns(revision)) {
         this.starting = false;
@@ -214,28 +271,35 @@ export class MachineController {
     if (finished && this.owns(revision)) await this.inspect();
   }
 
-  // Asks the backend to stop the run; a failure is shown unless a disconnect or restart superseded it.
+  // Asks the agent to stop the run; a failure is shown unless a disconnect or restart superseded it.
   async cancel() {
-    if (!this.bridge || this.state.connection !== 'connected' || this.state.run?.outcome !== 'running') return;
+    if (!this.bridge || !canCancel(this.state)) return;
     const revision = this.revision;
     try {
-      await this.bridge.invoke('cancel_apply');
+      const reply = await this.bridge.invoke('cancel_apply');
+      if (!this.current(revision, reply)) return;
+      if (this.state.run?.outcome !== 'running') {
+        const cancelled = typeof reply.data === 'object' && reply.data !== null && 'cancelled' in reply.data
+          && reply.data.cancelled === true;
+        this.update({ detail: cancelled ? 'Cancellation requested; waiting for the agent' : 'No manual apply is available to cancel' });
+      }
     } catch (error) {
-      if (this.owns(revision)) this.update({ detail: message(error) });
+      if (this.owns(revision)) this.refused(error);
     }
   }
 
   async restart() {
-    if (!this.bridge || this.state.pending || this.state.run?.outcome === 'running') return;
+    if (!this.bridge || this.state.pending || (this.state.connection === 'connected' && (this.state.run?.outcome === 'running' || this.state.status?.applying === true))) return;
     const revision = ++this.revision;
     this.generation = null;
     this.starting = false;
     this.early = [];
     this.earlyDisconnects.clear();
-    this.update({ pending: true, connection: 'connecting', run: null, preview: null, detail: 'Starting a fresh backend' });
+    this.earlyStatuses.clear();
+    this.update({ pending: true, connection: 'connecting', run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
     try {
-      if (!this.establish(await this.bridge.invoke('restart_backend'), 'Fresh backend connected', revision)) return;
-      await this.load(revision);
+      if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
+      if (await this.loadStatus(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
     } finally {
@@ -247,6 +311,7 @@ export class MachineController {
     this.disposed = true;
     this.revision++;
     this.earlyDisconnects.clear();
+    this.earlyStatuses.clear();
     this.unlisten?.();
     this.listeners.clear();
   }
@@ -255,6 +320,7 @@ export class MachineController {
     if (this.disposed) return;
     if (this.generation === null) {
       if (event.event === 'disconnected' && this.earlyDisconnects.size < 16) this.earlyDisconnects.set(event.generation, event);
+      if (event.event === 'status' && this.earlyStatuses.size < 16) this.earlyStatuses.set(event.generation, event.status);
       return;
     }
     if (event.generation !== this.generation) return;
@@ -263,12 +329,18 @@ export class MachineController {
       this.starting = false;
       this.early = [];
       const run = this.state.run?.outcome === 'running'
-        ? { ...this.state.run, outcome: 'failed' as const, summary: 'Backend disconnected during the run' }
+        ? { ...this.state.run, outcome: 'failed' as const, summary: 'Agent disconnected during the run' }
         : this.state.run;
       this.update({ connection: 'disconnected', pending: false, detail: event.detail, run });
       return;
     }
     if (this.state.connection !== 'connected') return;
+    if (event.event === 'status') {
+      const externalApplyEnded = this.state.status?.applying === true && this.state.run?.outcome !== 'running' && event.status.applying === false;
+      this.showStatus(event.status);
+      if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
+      return;
+    }
     if (this.starting) {
       if (this.early.length < MAX_EARLY_EVENTS) this.early.push(event);
       return;
@@ -281,7 +353,7 @@ export class MachineController {
       return;
     }
     // The preview is spent and the machine has changed: look again.
-    this.update({ run: next, detail: next.summary, preview: null });
+    this.update({ run: next, detail: next.summary, preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null });
     void this.inspect();
   }
 }

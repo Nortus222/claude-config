@@ -1,6 +1,6 @@
 # One `@nortuscc/machine` core inspects, plans and executes for the CLI and the desktop app
 
-Every change to a machine goes through one package that both the CLI and the app backend use
+Every change to a machine goes through one package that both the CLI and the local agent use
 in-process. `inspect` produces a report, a pure `plan` produces steps and skipped items with
 reasons, and `execute` is the only executor. It holds `<stateRoot>/apply.lock`, backs up to
 `<stateRoot>/backups/` before every destructive step, and persists each file step's baseline

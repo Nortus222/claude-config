@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { Cause, Effect, Exit, Layer, Ref, Semaphore } from 'effect';
 import {
-  acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
+  acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
@@ -122,6 +122,7 @@ export const runAgent = (input: {
   readonly domains: AgentDomains;
   readonly source: Layer.Layer<SetupSource>;
   readonly agentVersion: string;
+  readonly processes?: Layer.Layer<Processes>;
   readonly ipc?: boolean;
   readonly logOutput?: AgentLogOutput;
   readonly onStarted?: () => void;
@@ -151,4 +152,4 @@ export const runAgent = (input: {
       yield* serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, onShutdown: () => shutdown.abort() });
     }
     yield* untilAborted(signal);
-  })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths), input.source)));
+  })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes }), input.source)));

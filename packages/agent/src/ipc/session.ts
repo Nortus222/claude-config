@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
 import {
-  acquireApplyLock, backupsForRun, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
+  acquireApplyLock, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
 import type { SetupSource } from '@nortuscc/sync';
@@ -122,7 +122,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           },
           items: inspection.report.items.map(wireItem),
           probeErrors: [...inspection.report.probeErrors],
-          status: toWireStatus(status),
+          status: { ...toWireStatus(status), applying: active !== undefined || liveLockHolder(join(stateRoot, 'apply.lock')) !== undefined },
         };
         return result;
       });

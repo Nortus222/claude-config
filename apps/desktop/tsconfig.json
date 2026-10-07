@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "backend", "checks", "vite.config.ts"]
+  "include": ["src", "agent", "checks", "vite.config.ts"]
 }

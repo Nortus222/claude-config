@@ -23,7 +23,7 @@ const ok = (socket: Socket, id: unknown, result: unknown) => send(socket, { vers
 
 // Answers hello with the token check, then hands every other request to `answer`. A short /tmp
 // state root keeps the socket path under the Unix limit.
-async function fake(answer: Answer = () => {}, options: { token?: boolean; listen?: boolean } = {}): Promise<Fake> {
+async function fake(answer: Answer = () => {}, options: { token?: boolean; listen?: boolean; hello?: unknown } = {}): Promise<Fake> {
   const stateRoot = mkdtempSync('/tmp/nac-');
   const dir = join(stateRoot, 'agent');
   mkdirSync(dir);
@@ -47,7 +47,7 @@ async function fake(answer: Answer = () => {}, options: { token?: boolean; liste
           else if (request.token !== TOKEN) {
             send(socket, { version: 3, id: request.id, ok: false, error: { code: 'UNAUTHORIZED', message: 'no' } });
             socket.end();
-          } else ok(socket, request.id, { agentVersion: 'v', protocol: 3, policy: 'notify', paused: null });
+          } else ok(socket, request.id, options.hello ?? { agentVersion: 'v', protocol: 3, policy: 'notify', paused: null });
         }
       });
     });
@@ -231,7 +231,7 @@ test('a closed connection rejects what is still pending as AgentUnavailable and 
   }
 });
 
-test('connectAgent is AgentUnavailable with no token, no socket, a refused hello or a silent agent', { skip }, async () => {
+test('connectAgent is AgentUnavailable with no token, no socket or a silent agent', { skip }, async () => {
   const noToken = await fake(undefined, { token: false });
   const noSocket = await fake(undefined, { listen: false });
   const refused = await fake();
@@ -244,7 +244,8 @@ test('connectAgent is AgentUnavailable with no token, no socket, a refused hello
   const silent = createServer((socket) => void sockets.add(socket));
   await new Promise<void>((resolve) => silent.listen(join(silentRoot, 'agent', 'agent.sock'), resolve));
   try {
-    for (const f of [noToken, noSocket, refused]) await assert.rejects(connectAgent(f.paths), AgentUnavailable);
+    for (const f of [noToken, noSocket]) await assert.rejects(connectAgent(f.paths), AgentUnavailable);
+    await assert.rejects(connectAgent(refused.paths), (error) => error instanceof AgentError && error.code === 'UNAUTHORIZED');
     const started = Date.now();
     await assert.rejects(connectAgent({ ...noToken.paths, stateRoot: silentRoot }, { timeoutMs: 100 }), AgentUnavailable);
     assert.ok(Date.now() - started < 2000, 'gave up at its timeout');
@@ -253,5 +254,51 @@ test('connectAgent is AgentUnavailable with no token, no socket, a refused hello
     await new Promise<void>((resolve) => silent.close(() => resolve()));
     rmSync(silentRoot, { recursive: true, force: true });
     for (const f of [noToken, noSocket, refused]) await f.close();
+  }
+});
+
+test('connectAgent can identify the desktop app', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, STATUS));
+  try {
+    const conn = await connectAgent(f.paths, { client: 'app' });
+    assert.equal(f.seen[0]?.client, 'app');
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('outgoing records are bounded by UTF-8 bytes before writing', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, null));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'preview', exclude: ['é'.repeat(524288)] }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    assert.equal(f.seen.length, 1);
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('incoming records exceeding the byte limit close the connection', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, 'é'.repeat(524288)));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'status' }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('an unterminated incoming record is bounded before a newline arrives', { skip }, async () => {
+  const f = await fake((_request, socket) => socket.write('x'.repeat(1048576)));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'status' }, { timeoutMs: 1000 }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('hello protocol mismatch is a typed error instead of an unreachable agent', { skip }, async () => {
+  const f = await fake(undefined, { hello: { agentVersion: 'old', protocol: 2, policy: 'notify', paused: null } });
+  try {
+    await assert.rejects(connectAgent(f.paths, { client: 'app' }), (error) => error instanceof AgentError && error.code === 'MALFORMED');
+  } finally {
+    await f.close();
   }
 });

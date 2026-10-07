@@ -202,3 +202,12 @@ export const restartService = (target: ServiceTarget, program: ServiceProgram, o
 
 /** Whether the unit file is present. */
 export const serviceInstalled = (target: ServiceTarget) => Fs.use((fs) => fs.exists(unitPath(target)));
+
+/** Stops the loaded job without deleting its unit, for recovery when IPC cannot shut it down. */
+export const stopService = (target: ServiceTarget) => {
+  switch (target.platform) {
+    case 'darwin': return exec(['launchctl', 'bootout', service(target)], true);
+    case 'linux': return exec(systemctl('stop', SYSTEMD_UNIT));
+    case 'win32': return exec(schtasks('/End', '/TN', SCHEDULED_TASK), true);
+  }
+};

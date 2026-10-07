@@ -1,9 +1,8 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer, Semaphore } from 'effect';
 import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
-
-export type Policy = 'auto-apply' | 'notify' | 'manual';
-export const POLICIES: ReadonlyArray<Policy> = ['auto-apply', 'notify', 'manual'];
+import { POLICIES, type Policy } from './policy-values.ts';
+export { POLICIES, type Policy } from './policy-values.ts';
 export type Paused = { readonly reason: string; readonly at: string; readonly runId?: string };
 export type AgentState = {
   readonly version: 1;

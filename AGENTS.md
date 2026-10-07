@@ -29,7 +29,7 @@ Feature branches target **`main`**.
 | `packages/source-watch/` | Author-side watcher of the skill sources a setup uses: upstream revisions, `SKILL.md` diffs, pins and ignores |
 | `packages/agent/` | The local agent: scheduler, job, fail-closed classifier and apply policy, run as a per-user login service (`nortuscc agent install`) that serves IPC on `agent/agent.sock` (Unix only; `nortuscc agent status`, `review`, `resume`, `policy`) |
 | `packages/sync/` | Machine sync: setup items, held items (`sync.json`) composed over the checkout with `desiredFor`, and the agent's `SetupSource` (`setupSourceLayer`). Owns the contract the agent codes against; the CLI depends on it, never on the agent |
-| `apps/desktop/` | Tauri 2 desktop app with a bundled Bun backend over `@nortuscc/machine` |
+| `apps/desktop/` | Tauri 2 desktop app that connects to the local agent over authenticated Unix IPC; bundles Bun and the agent, with a short-lived login-service lifecycle helper |
 | `docs/adr/` | Architecture decision records: one short file per decision |
 
 Nothing is synced by symlink. Directory links were retired once native installers

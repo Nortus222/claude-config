@@ -26,7 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "resources": { "resources/darwin-arm64/": "backend-runtime/" },
+    "resources": { "resources/darwin-arm64/": "agent-runtime/" },
     "icon": ["icons/icon.png", "icons/icon.icns"]
   }
 }
