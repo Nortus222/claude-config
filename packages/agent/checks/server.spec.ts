@@ -170,7 +170,22 @@ const blockedShutdown = async (s: Awaited<ReturnType<typeof serverMachine>>) => 
   return { c, id };
 };
 
-test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', async () => {
+test('a state root too deep for a socket path fails clearly before listening', async () => {
+  const m = agentMachine();
+  const deep = { ...m.paths, stateRoot: join(m.root, 'd'.repeat(120)) };
+  const handle = { onStatus: () => () => {} } as never;
+  const exit = await m.run(Effect.exit(Effect.scoped(serveIpc({ paths: deep, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} }))));
+  assert.ok(Exit.isFailure(exit));
+  const error = exit.cause.reasons.map((r) => (r._tag === 'Fail' ? r.error : undefined)).find((e) => e !== undefined);
+  assert.ok(error instanceof ServeFailed);
+  assert.match(error.message, /socket path .* too long/);
+});
+
+const unixOnly = {
+  skip: process.platform === 'win32' ? 'ADR 0019: Windows IPC is unsupported' : false,
+};
+
+test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', unixOnly, async () => {
   await withServer({}, async (s) => {
     const good = await connect(s.socketPath);
     const hello = await ask(good, { command: 'hello', token: s.token, client: 'app' });
@@ -195,7 +210,7 @@ test('hello with the right token answers the agent; a wrong token or no hello is
   });
 });
 
-test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a usable connection, a path as a key is UNKNOWN_KEY', async () => {
+test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a usable connection, a path as a key is UNKNOWN_KEY', unixOnly, async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const extra = await ask(c, { command: 'status', path: '/etc' });
@@ -216,7 +231,7 @@ test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a 
   });
 });
 
-test('status, setPolicy, resume and decide answer the resulting status', async () => {
+test('status, setPolicy, resume and decide answer the resulting status', unixOnly, async () => {
   await withServer({ paused: true }, async (s) => {
     const c = await s.open();
     const status = await ask(c, { command: 'status' });
@@ -239,7 +254,7 @@ test('status, setPolicy, resume and decide answer the resulting status', async (
   });
 });
 
-test('a multi-item decide records every decision and runs one job', async () => {
+test('a multi-item decide records every decision and runs one job', unixOnly, async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     await ask(c, { command: 'status' });
@@ -256,7 +271,7 @@ test('a multi-item decide records every decision and runs one job', async () => 
   });
 });
 
-test('history answers newest first, at most limit, before a cursor', async () => {
+test('history answers newest first, at most limit, before a cursor', unixOnly, async () => {
   await withServer({}, async (s) => {
     const old = ['2020-01-01', '2020-01-02', '2020-01-03'].map((day) =>
       JSON.stringify({ v: 1, at: `${day}T00:00:00.000Z`, kind: 'resumed', actor: 'cli', reason: day }));
@@ -287,7 +302,7 @@ const historyPage = async (c: Client, before: { at: string; seq: number }, limit
   return response.result;
 };
 
-test('history pages every same-millisecond event with exclusive cursors and reports exhaustion', async () => {
+test('history pages every same-millisecond event with exclusive cursors and reports exhaustion', unixOnly, async () => {
   await withServer({}, async (s) => {
     const at = '2020-01-02T00:00:00.000Z';
     historyFixture(s, '2020-01', [
@@ -309,7 +324,7 @@ test('history pages every same-millisecond event with exclusive cursors and repo
   });
 });
 
-test('same-millisecond appends between history pages do not repeat or skip existing events', async () => {
+test('same-millisecond appends between history pages do not repeat or skip existing events', unixOnly, async () => {
   await withServer({}, async (s) => {
     const at = '2020-01-02T00:00:00.000Z';
     historyFixture(s, '2020-01', [{ at, reason: 'first' }, { at, reason: 'second' }, { at, reason: 'third' }]);
@@ -328,7 +343,7 @@ test('same-millisecond appends between history pages do not repeat or skip exist
   });
 });
 
-test('history cursors survive a clock rollback append into an older month', async () => {
+test('history cursors survive a clock rollback append into an older month', unixOnly, async () => {
   await withServer({}, async (s) => {
     historyFixture(s, '2020-01', [{ at: '2020-01-01T00:00:00.000Z', reason: 'january' }]);
     historyFixture(s, '2020-02', [
@@ -346,7 +361,7 @@ test('history cursors survive a clock rollback append into an older month', asyn
   });
 });
 
-test('history groups equivalent timestamp instants and skips invalid timestamps', async () => {
+test('history groups equivalent timestamp instants and skips invalid timestamps', unixOnly, async () => {
   await withServer({}, async (s) => {
     historyFixture(s, '2020-01', [
       { at: '2020-01-02T00:00:00Z', reason: 'utc' },
@@ -365,7 +380,7 @@ test('history groups equivalent timestamp instants and skips invalid timestamps'
   });
 });
 
-test('a subscriber receives a status event after another client inspects', async () => {
+test('a subscriber receives a status event after another client inspects', unixOnly, async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     const subscribed = await ask(watcher, { command: 'subscribe' });
@@ -381,7 +396,7 @@ test('a subscriber receives a status event after another client inspects', async
   });
 });
 
-test('apply answers started, then streams progress to the client and to subscribers', async () => {
+test('apply answers started, then streams progress to the client and to subscribers', unixOnly, async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     await ask(watcher, { command: 'subscribe' });
@@ -407,7 +422,7 @@ test('apply answers started, then streams progress to the client and to subscrib
   });
 });
 
-test('an apply whose plan changed since the preview answers stale with the new preview', async () => {
+test('an apply whose plan changed since the preview answers stale with the new preview', unixOnly, async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const inspected = await ask(c, { command: 'inspect' });
@@ -421,7 +436,7 @@ test('an apply whose plan changed since the preview answers stale with the new p
   });
 });
 
-test('a silent client does not block another; the directory is 0700, the socket and token 0600', async () => {
+test('a silent client does not block another; the directory is 0700, the socket and token 0600', unixOnly, async () => {
   await withServer({}, async (s) => {
     const silent = await connect(s.socketPath);
     silent.sendRaw('{"version":3');
@@ -434,7 +449,7 @@ test('a silent client does not block another; the directory is 0700, the socket 
   });
 });
 
-test('a connection that sends no complete record in time is closed', async () => {
+test('a connection that sends no complete record in time is closed', unixOnly, async () => {
   await withServer({ handshakeMs: 50 }, async (s) => {
     const silent = await connect(s.socketPath);
     await silent.closed;
@@ -442,7 +457,7 @@ test('a connection that sends no complete record in time is closed', async () =>
   });
 });
 
-test('shutdown answers, then calls onShutdown', async () => {
+test('shutdown answers, then calls onShutdown', unixOnly, async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const reply = await ask(c, { command: 'shutdown' });
@@ -456,7 +471,7 @@ test('shutdown answers, then calls onShutdown', async () => {
   });
 });
 
-test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', async () => {
+test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', unixOnly, async () => {
   await withServer({}, async (s) => {
     const { c, id } = await blockedShutdown(s);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -473,7 +488,7 @@ test('shutdown bounds a blocked reply even after refused follow-up traffic, and 
   });
 });
 
-test('closing the scope cancels a blocked shutdown callback', async () => {
+test('closing the scope cancels a blocked shutdown callback', unixOnly, async () => {
   await withServer({}, async (s) => {
     const { c } = await blockedShutdown(s);
     await s.close();
@@ -485,7 +500,7 @@ test('closing the scope cancels a blocked shutdown callback', async () => {
   });
 });
 
-test('closing the scope closes connections and removes the socket and token', async () => {
+test('closing the scope closes connections and removes the socket and token', unixOnly, async () => {
   const s = await serverMachine();
   const c = await s.open();
   await s.close();
@@ -494,16 +509,9 @@ test('closing the scope closes connections and removes the socket and token', as
   assert.equal(existsSync(s.tokenPath), false);
 });
 
-test('a leftover socket is replaced, and a state root too deep for a socket path fails clearly', async () => {
+test('a leftover socket is replaced', unixOnly, async () => {
   const m = agentMachine('/tmp');
-  const deep = { ...m.paths, stateRoot: join(m.root, 'd'.repeat(120)) };
   const handle = { onStatus: () => () => {} } as never;
-  const exit = await m.run(Effect.exit(Effect.scoped(serveIpc({ paths: deep, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} }))));
-  assert.ok(Exit.isFailure(exit));
-  const error = exit.cause.reasons.map((r) => (r._tag === 'Fail' ? r.error : undefined)).find((e) => e !== undefined);
-  assert.ok(error instanceof ServeFailed);
-  assert.match(error.message, /socket path .* too long/);
-
   const dir = join(m.paths.stateRoot, 'agent');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'agent.sock'), 'stale');
@@ -513,7 +521,7 @@ test('a leftover socket is replaced, and a state root too deep for a socket path
   })));
 });
 
-test('status before the first job answers NO_REPORT at once, without waiting for a job', async () => {
+test('status before the first job answers NO_REPORT at once, without waiting for a job', unixOnly, async () => {
   const starting = Deferred.makeUnsafe<void>();
   await withServer({ starting }, async (s) => {
     const c = await s.open('cli');
@@ -532,7 +540,7 @@ test('status before the first job answers NO_REPORT at once, without waiting for
 
 const pendingKeys = (status: Wire) => status.pending.map((p: Wire) => p.key);
 
-test('after an apply, a status event and the status reply no longer list the applied items', async () => {
+test('after an apply, a status event and the status reply no longer list the applied items', unixOnly, async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     await ask(watcher, { command: 'subscribe' });
@@ -553,7 +561,7 @@ test('after an apply, a status event and the status reply no longer list the app
   });
 });
 
-test('shutdown mid-apply answers, cancels the run, releases apply.lock and removes the socket and token', { skip: process.platform === 'win32' }, async () => {
+test('shutdown mid-apply answers, cancels the run, releases apply.lock and removes the socket and token', unixOnly, async () => {
   // Each step takes a while, so the run is still going when shutdown arrives.
   const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Effect.sleep('200 millis'), configDomain.run(step, report)) };
   const { m, domains, source, socketPath, tokenPath } = await prepare({ config: slow });

@@ -14,7 +14,7 @@ const awkward: ServiceProgram = { ...program, argv: ['/opt/node/bin/node', 'a"b%
 const matches = (name: string, actual: string) => {
   const file = new URL(`./snapshots/${name}`, import.meta.url);
   if (process.env.UPDATE_SNAPSHOTS === '1') writeFileSync(file, actual);
-  assert.equal(actual, readFileSync(file, 'utf8'));
+  assert.equal(actual, readFileSync(file, 'utf8').replace(/\r\n/g, '\n'));
 };
 
 test('the LaunchAgent plist matches its snapshot', () => matches('launch-agent.plist', renderLaunchAgent('com.nortuscc.agent', program)));
