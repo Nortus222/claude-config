@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
@@ -129,4 +129,45 @@ test('registered service hands selected SHELL and startup directory to its foreg
   });
   assert.equal(await foreground, 0, f.stderr.join(''));
   assert.equal(probed, true);
+});
+
+test('startup selectors introduced by the helper probe remain absent before the foreground probe', async (t) => {
+  const f = fixture(t);
+  const bin = join(f.home, 'bin');
+  mkdirSync(bin);
+  const observed = join(f.home, 'machine.env');
+  const git = join(bin, 'git');
+  writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$ZDOTDIR" "$XDG_CONFIG_HOME" "$ENV" "$SOURCE_PREREQUISITE" > "${observed}"\nexit 1\n`);
+  chmodSync(git, 0o755);
+  const exported = {
+    HOME: f.home, PATH: bin, NORTUSCC_STATE_DIR: f.stateRoot, SHELL: '/fake/post-probe-shell',
+    ZDOTDIR: join(f.home, 'alternate'), XDG_CONFIG_HOME: join(f.home, 'alternate-config'), ENV: join(f.home, 'alternate-rc'),
+    SOURCE_PREREQUISITE: 'provided by original startup',
+  };
+  assert.equal(await runDesktopEntry({ ...f.input, probe: async () => ({ env: exported }) }), 0);
+  const unit = readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8');
+  const handoff = Object.fromEntries([...unit.matchAll(/<key>(SHELL|ZDOTDIR|XDG_CONFIG_HOME|ENV)<\/key>\s*<string>(.*?)<\/string>/g)].map((match) => [match[1]!, match[2]!]));
+  assert.deepEqual(handoff, { SHELL: f.input.env.SHELL });
+  const controller = new AbortController();
+  let probed = false;
+  const foreground = runDesktopEntry({
+    ...f.input, args: [], processes: undefined, signal: controller.signal,
+    env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
+    probe: async (input) => {
+      assert.equal(input.env.ZDOTDIR, undefined);
+      assert.equal(input.env.XDG_CONFIG_HOME, undefined);
+      assert.equal(input.env.ENV, undefined);
+      probed = true;
+      return { env: exported };
+    },
+  });
+  try {
+    const deadline = Date.now() + 3000;
+    while (!existsSync(observed) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+    assert.equal(probed, true);
+    assert.equal(readFileSync(observed, 'utf8'), [exported.ZDOTDIR, exported.XDG_CONFIG_HOME, exported.ENV, exported.SOURCE_PREREQUISITE, ''].join('\n'));
+  } finally {
+    controller.abort();
+    assert.equal(await foreground, 0, f.stderr.join(''));
+  }
 });

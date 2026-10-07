@@ -15,6 +15,8 @@ export type LifecycleInput = {
   readonly resources: string;
   readonly agentVersion: string;
   readonly env: Readonly<Record<string, string | undefined>>;
+  // Pre-probe selection; absent startup variables must remain absent on the next service start.
+  readonly shellEnvironment?: Readonly<Record<string, string | undefined>>;
 };
 export type LifecycleOptions = {
   readonly restart?: boolean;
@@ -26,9 +28,10 @@ export type LifecycleOptions = {
 
 // Fixed resource argv and resolved machine paths, independent of renderer input.
 export const resourceProgram = (input: LifecycleInput): ServiceProgram => {
-  const env: Record<string, string> = { HOME: input.target.home, PATH: input.env.PATH ?? '', SHELL: loginShell(input.env) };
+  const shellEnvironment = input.shellEnvironment ?? input.env;
+  const env: Record<string, string> = { HOME: input.target.home, PATH: input.env.PATH ?? '', SHELL: loginShell(shellEnvironment) };
   for (const key of SHELL_STARTUP_VARIABLES) {
-    const value = input.env[key];
+    const value = shellEnvironment[key];
     if (value !== undefined) env[key] = value;
   }
   for (const [key, value] of Object.entries(input.env)) {

@@ -9,7 +9,7 @@ import {
 } from '@nortuscc/machine';
 import { setupSourceLayer } from '@nortuscc/sync';
 import { ensureAgent } from './lifecycle.ts';
-import { loginShell, probeLoginEnvironment, SHELL_STARTUP_VARIABLES } from './login-environment.ts';
+import { probeLoginEnvironment } from './login-environment.ts';
 
 export type DesktopEntryInput = {
   readonly args: ReadonlyArray<string>;
@@ -52,11 +52,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
         try: () => (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath }), catch: (error) => error,
       });
       if (login.error) stderr(`nortuscc agent: ${login.error}\n`);
-      const env: Record<string, string> = { ...login.env, SHELL: loginShell(input.env) };
-      for (const key of SHELL_STARTUP_VARIABLES) {
-        const value = input.env[key];
-        if (value !== undefined) env[key] = value;
-      }
+      const env = login.env;
       const home = env.HOME ?? input.env.HOME ?? homedir();
       const platform = input.platform ?? process.platform;
       const paths = yield* pathsFromEnvironment({ env, home, platform });
@@ -64,7 +60,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       if (arg !== undefined) {
         if (platform !== 'darwin' && platform !== 'linux') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
         const result = yield* ensureAgent({
-          paths, env, resources: input.resources, agentVersion,
+          paths, env, shellEnvironment: input.env, resources: input.resources, agentVersion,
           target: { platform, home, uid: input.uid ?? process.getuid?.() ?? 0, user: input.user ?? userInfo().username, stateRoot: paths.stateRoot },
         }, { restart: arg === '--restart' }).pipe(
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))),
