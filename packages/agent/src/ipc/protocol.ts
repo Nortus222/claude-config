@@ -31,6 +31,11 @@ export const HistoryCursorSchema = Schema.Struct({
   at: IsoTime,
   seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
 });
+const NotificationId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+const Receipt = Schema.String.check(Schema.isBetweenLength(1, 200));
+export const NotificationSchema = Schema.Struct({ id: NotificationId, title: Schema.String.check(Schema.isMaxLength(100)), body: Schema.String.check(Schema.isMaxLength(500)) });
+export const NotificationEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('notification'), notification: NotificationSchema, receipt: Receipt });
+export const NotificationResultSchema = Schema.Struct({ notification: Schema.NullOr(NotificationSchema), receipt: Schema.NullOr(Receipt) });
 const Client = Schema.Literals(['app', 'cli']);
 const Policy = Schema.Literals(POLICIES);
 const STATUS_ERRORS = ['PROFILE_INVALID', 'DECISIONS_INVALID', 'REVISION_UNAVAILABLE', 'JOB_FAILED'] as const satisfies ReadonlyArray<StatusError>;
@@ -43,6 +48,8 @@ const DecisionSchema = Schema.Struct({
 });
 
 export const RequestSchema = Schema.Union([
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notification'), notificationId: NotificationId }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notificationAck'), notificationId: NotificationId, receipt: Receipt, delivered: Schema.Boolean }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Client }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['status', 'inspect', 'cancel', 'resume', 'shutdown', 'subscribe']) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('preview'), exclude: Schema.Array(Key).check(Schema.isMaxLength(MAX_EXCLUDED)) }),
@@ -145,7 +152,7 @@ export const ResponseSchema = Schema.Union([
 
 const strict = { onExcessProperty: 'error' } as const;
 export const decodeRequest = Schema.decodeUnknownSync(RequestSchema, strict);
-export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, ResponseSchema]), strict);
+export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
 export const decodeHelloResult = Schema.decodeUnknownSync(HelloResultSchema, strict);
 export const decodeInspectResult = Schema.decodeUnknownSync(InspectResultSchema, strict);
 export const decodePreviewResult = Schema.decodeUnknownSync(PreviewResultSchema, strict);
@@ -173,7 +180,8 @@ export type WireStatus = typeof WireStatusSchema.Type;
 export type StatusErrorCode = NonNullable<WireStatus['error']>;
 export type StatusEvent = typeof StatusEventSchema.Type;
 export type Response = typeof ResponseSchema.Type;
-export type Message = RunEvent | StatusEvent | Response;
+export type NotificationEvent = typeof NotificationEventSchema.Type;
+export type Message = RunEvent | StatusEvent | NotificationEvent | Response;
 
 // A job's status for clients: verdicts flattened, the pause without its run id, no auto-apply
 // outcome, and counts. `ready` counts inert pending items this machine leaves to a person: on

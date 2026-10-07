@@ -76,3 +76,14 @@ test('a malformed installedBy or agentVersion reads as absent', async () => {
   assert.equal('installedBy' in state, false);
   assert.equal('agentVersion' in state, false);
 });
+
+test('registered app path survives policy updates, validates absolute paths and can be removed', async () => {
+  const m = agentMachine();
+  await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, installedBy: 'app', appPath: '/Applications/Test.app/Contents/MacOS/Test' }))));
+  await m.run(changePolicy('manual', 'cli'));
+  assert.equal((await m.run(AgentStateStore.use((s) => s.read))).appPath, '/Applications/Test.app/Contents/MacOS/Test');
+  await m.run(AgentStateStore.use((s) => s.update(({ appPath: _p, ...rest }) => rest)));
+  assert.equal('appPath' in m.agentJson(), false);
+  m.write(agentJsonPath(m), JSON.stringify({ ...DEFAULT_STATE, appPath: 'relative/Test' }));
+  assert.equal((await m.run(AgentStateStore.use((s) => s.read))).appPath, undefined);
+});

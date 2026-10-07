@@ -41,6 +41,8 @@ Every JSON line is bounded to 1,048,576 bytes. Inspect/apply time out after 60 s
 
 The root test suite can modify `skills-manifest.txt`; inspect its diff after running. A successful native build does not establish that tests pass.
 
+The `macos` CI workflow runs on macOS arm64 for pull requests and pushes to `main`. It prepares resources with Bun 1.3.14 and its matching license, runs the resource-enabled Node checks, Bun checks and locked Rust tests using the runner's installed toolchain, then builds the release app and runs the packaged temporary-HOME smoke. It does not open a window, register a service or post OS notifications.
+
 ## Release package
 
 ```sh
@@ -59,3 +61,13 @@ Packaged mode uses Rust's `--smoke <temporary HOME>` without registering a login
 The agent resolves configuration from HOME, machine overrides and `state.json`'s recorded repository without a bundled-checkout fallback. The login shell environment supplies installer tools; its output and installer diagnostics stay off the helper's stdout and the socket protocol. Each job builds domains from its own verified snapshot, as ADR 0016 requires.
 
 On a disposable machine, verify inspect, selection, preview, apply, cancellation, offline recovery and Restart agent. Close the window during apply and reconnect to the continuing service. Check relocation and an upgrade while a run is active. Real launchd behavior, notifications and GUI interaction need manual verification; socket fixtures and fake Processes do not exercise the OS service manager.
+
+## Agent notifications
+
+The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the existing Review & apply view. A pending review request survives renderer startup; clicks refresh and focus that view without previewing or applying automatically.
+
+Hidden delivery branches before Tauri creates a window. Its fixed `--paths` helper resolves the same configured state root without registering or restarting the service. It reads the current token, authenticates as an app without subscribing, fetches the exact id and active receipt, posts, acknowledges and exits. Invalid ids, expired receipts and malformed payloads fail closed. Unbundled executables decline native posting. Native posting on non-macOS platforms returns unavailable so the agent can try Linux `notify-send`; packaging remains macOS arm64 only.
+
+Native work has a three-second budget from event enqueue or hidden-mode entry, including authorization settings and submission, followed by a bounded acknowledgment. The agent allows five seconds for each connected app's receipt and tries a fixed snapshot of subscribers sequentially. The total delivery deadline allows those per-app budgets plus five seconds for scheduling and cleanup. Late native completions cannot acknowledge an expired generation. OS acceptance followed by a lost acknowledgment can still cause a later repeat; acceptance does not prove a banner appeared.
+
+Rust checks exercise fake posting success/refusal, strict payloads, direct hidden connections, the read-only helper, startup events before session publication, off-reader acknowledgments, stale generations and queued clicks. They never initialize the notification center or show a window. On a disposable macOS machine, manually verify permission grant/denial, Notification Center with banners disabled, foreground presentation, warm and cold clicks, hidden posting with the app closed, no permission dialog in hidden mode, and exit after posting. Also verify the hidden path leaves service registration and machine state unchanged. These OS behaviors are not established by automated tests or a successful native build.

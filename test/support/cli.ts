@@ -90,6 +90,8 @@ export function machine(options: { repo?: 'checkout' | 'copy'; codexUnavailable?
 // no network, no real installer.
 function fakeNativeInstallers({ codexUnavailable }: { codexUnavailable: boolean }): string {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
+  // Foreground agents may notify on Linux; keep fixture delivery unavailable and inert.
+  writeFakeBin(dir, 'notify-send', '#!/usr/bin/env node\nprocess.exit(1);\n');
 
   const script = (name: string) => `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';

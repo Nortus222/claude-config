@@ -79,3 +79,14 @@ test('the host accepts generation-scoped v3 status and rejects unknown fields an
   assert.throws(() => decodeHostEvent({ ...event, status: { ...status, extra: 1 } }));
   assert.throws(() => decodeHostEvent({ generation: 2, version: 3, id: 'r1', ok: true, result: null }));
 });
+
+test('native notification events never enter renderer progress handling', () => {
+  assert.throws(() => decodeHostEvent({ generation: 1, version: 3, event: 'notification', notification: { id: 'a'.repeat(64), title: 'Review', body: 'Held items' }, receipt: 'native-owned' }));
+});
+
+test('native review routes have only a positive generation and fixed event', () => {
+  const event = { generation: 1, event: 'review-requested' };
+  assert.deepEqual(decodeHostEvent(event), event);
+  for (const bad of [{ ...event, version: 3 }, { ...event, path: '/x' }, { ...event, generation: 0 }, { ...event, generation: 1.5 }])
+    assert.throws(() => decodeHostEvent(bad));
+});
