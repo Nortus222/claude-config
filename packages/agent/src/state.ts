@@ -10,6 +10,9 @@ export type AgentState = {
   readonly policy: Policy;
   readonly policySource: 'default' | 'person';
   readonly paused: Paused | null;
+  // Who installed the login service, and the agent version it runs; absent until an install.
+  readonly installedBy?: 'app' | 'cli';
+  readonly agentVersion?: string;
 };
 
 // Before sign-in a machine notifies, and records that nobody chose that yet.
@@ -32,6 +35,8 @@ const decode = (raw: Readonly<Record<string, unknown>>): AgentState => ({
   policy: POLICIES.includes(raw.policy as Policy) ? (raw.policy as Policy) : DEFAULT_STATE.policy,
   policySource: raw.policySource === 'person' ? 'person' : 'default',
   paused: pausedOf(raw.paused),
+  ...(raw.installedBy === 'app' || raw.installedBy === 'cli' ? { installedBy: raw.installedBy } : {}),
+  ...(typeof raw.agentVersion === 'string' ? { agentVersion: raw.agentVersion } : {}),
 });
 
 export class AgentStateStore extends Context.Service<
@@ -43,8 +48,8 @@ export class AgentStateStore extends Context.Service<
 >()('agent/AgentStateStore') {}
 
 // <stateRoot>/agent/agent.json. A corrupt file reads as the default, as state.json does. Writes keep
-// the fields other parts own (installedBy and agentVersion, written by the installer). Updates run
-// one at a time, so the job's pause and a caller's policy change never overwrite each other.
+// unknown fields; an update that leaves out installedBy or agentVersion removes it. Updates run one
+// at a time, so the job's pause and a caller's policy change never overwrite each other.
 export const agentStateStore = Layer.effect(
   AgentStateStore,
   Effect.gen(function* () {
@@ -67,7 +72,9 @@ export const agentStateStore = Layer.effect(
         Effect.gen(function* () {
           const before = yield* raw;
           const next = f(decode(before));
-          yield* fs.writeTextAtomic(path, JSON.stringify({ ...before, ...next }, null, 2) + '\n');
+          // Owned optional fields come only from `next`, so leaving one out deletes it.
+          const { installedBy: _installedBy, agentVersion: _agentVersion, ...kept } = before;
+          yield* fs.writeTextAtomic(path, JSON.stringify({ ...kept, ...next }, null, 2) + '\n');
           return next;
         }).pipe(lock.withPermit),
     };

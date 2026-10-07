@@ -15,3 +15,4 @@ export * from './scheduler.ts';
 export * from './policy.ts';
 export * from './agent.ts';
 export * from './service/units.ts';
+export * from './service/register.ts';

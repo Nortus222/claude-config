@@ -54,3 +54,25 @@ test('a pause survives a concurrent policy change', async () => {
     assert.equal(state.policy, i % 2 ? 'auto-apply' : 'manual');
   }
 });
+
+test('installedBy and agentVersion round-trip through update and can be removed', async () => {
+  const m = agentMachine();
+  await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, installedBy: 'cli', agentVersion: '0.2.0' }))));
+  const read = await m.run(AgentStateStore.use((s) => s.read));
+  assert.equal(read.installedBy, 'cli');
+  assert.equal(read.agentVersion, '0.2.0');
+  await m.run(AgentStateStore.use((s) => s.update(({ installedBy: _i, agentVersion: _v, ...rest }) => rest)));
+  const after = await m.run(AgentStateStore.use((s) => s.read));
+  assert.equal('installedBy' in after, false);
+  assert.equal('agentVersion' in after, false);
+  assert.equal('installedBy' in m.agentJson(), false);
+  assert.equal('agentVersion' in m.agentJson(), false);
+});
+
+test('a malformed installedBy or agentVersion reads as absent', async () => {
+  const m = agentMachine();
+  m.write(agentJsonPath(m), JSON.stringify({ version: 1, policy: 'notify', policySource: 'default', paused: null, installedBy: 'robot', agentVersion: 3 }));
+  const state = await m.run(AgentStateStore.use((s) => s.read));
+  assert.equal('installedBy' in state, false);
+  assert.equal('agentVersion' in state, false);
+});
