@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Effect, type Scope } from 'effect';
 import { LockHeld } from './errors.ts';
@@ -31,12 +32,32 @@ const holderOf = (text: string): number | undefined => {
   }
 };
 
-// The live process holding the pid lock at `path`, or undefined when it is absent, unreadable or
-// left by a dead process.
+// Slack for uptime's and the clock's granularity, so a lock taken just after boot is not stale.
+const BOOT_TOLERANCE_MS = 5_000;
+
+// Whether the lock in `text` was taken before this boot. After an unclean shutdown its pid may name
+// an unrelated process, so such a lock is stale whatever its pid. No parseable startedAt: false.
+const fromEarlierBoot = (text: string): boolean => {
+  let started: number;
+  try {
+    started = Date.parse(JSON.parse(text).startedAt);
+  } catch {
+    return false;
+  }
+  return Number.isFinite(started) && started < Date.now() - uptime() * 1000 - BOOT_TOLERANCE_MS;
+};
+
+// The pid holding the lock in `text`, or undefined when the lock is stale or unreadable.
+const liveHolderOf = (text: string): number | undefined => {
+  const pid = holderOf(text);
+  return pid !== undefined && alive(pid) && !fromEarlierBoot(text) ? pid : undefined;
+};
+
+// The live process holding the pid lock at `path`, or undefined when it is absent, unreadable, left
+// by a dead process or taken before this boot.
 export const liveLockHolder = (path: string): number | undefined => {
   const text = read(path);
-  const pid = text === undefined ? undefined : holderOf(text);
-  return pid !== undefined && alive(pid) ? pid : undefined;
+  return text === undefined ? undefined : liveHolderOf(text);
 };
 
 // Removes the lock at `path` only if it still reads `seen`, and reports whether the path is free to
@@ -65,7 +86,7 @@ export const takeOver = (path: string, seen: string): boolean => {
 };
 
 // Holds a pid lock at `path` for the current scope, creating its directory. A lock whose owner died
-// is taken over; one held by a live process fails with LockHeld.
+// or taken before this boot is taken over; one held by a live process fails with LockHeld.
 export const acquirePidLock = (path: string): Effect.Effect<void, LockHeld, Scope.Scope> =>
   Effect.gen(function* () {
     // Link a fully written temp file into place: the lock is atomic to create and never seen half-written.
@@ -91,9 +112,9 @@ export const acquirePidLock = (path: string): Effect.Effect<void, LockHeld, Scop
             if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return Effect.die(err);
             const seen = read(path);
             if (seen === undefined) continue; // released meanwhile
-            const pid = holderOf(seen);
-            last = pid ?? 0;
-            if (pid !== undefined && alive(pid)) return Effect.fail(new LockHeld({ path, pid }));
+            last = holderOf(seen) ?? 0;
+            const pid = liveHolderOf(seen);
+            if (pid !== undefined) return Effect.fail(new LockHeld({ path, pid }));
             takeOver(path, seen);
           }
         }

@@ -137,3 +137,21 @@ test('liveLockHolder names a live holder only', () => {
   writeFileSync(lock, JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid, startedAt: 'x' }));
   assert.equal(liveLockHolder(lock), undefined);
 });
+
+// After an unclean shutdown the recorded pid may belong to an unrelated process of this boot.
+test('a lock started before this boot is taken over even when its pid is live', async () => {
+  const { lock, run } = setup();
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: '2000-01-01T00:00:00.000Z' }));
+  assert.equal(liveLockHolder(lock), undefined);
+  assert.ok(Exit.isSuccess(await run(acquireApplyLock)));
+  assert.equal(existsSync(lock), false);
+});
+
+test('a lock started during this boot by a live pid is held', async () => {
+  const { lock, run } = setup();
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
+  assert.equal(liveLockHolder(lock), process.ppid);
+  const exit = await run(acquireApplyLock);
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.equal(existsSync(lock), true);
+});
