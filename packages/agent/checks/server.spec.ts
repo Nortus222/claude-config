@@ -153,6 +153,23 @@ const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof 
   }
 };
 
+// Queues a shutdown reply behind enough output to fill a paused Unix socket's buffers.
+const blockedShutdown = async (s: Awaited<ReturnType<typeof serverMachine>>) => {
+  const c = await s.open();
+  const observer = await s.open();
+  c.socket.pause();
+  const id = `r${++ids}`;
+  c.sendRaw('{\n'.repeat(32_768) + JSON.stringify({ version: 3, id, command: 'shutdown' }) + '\n');
+  let status = await ask(observer, { command: 'status' });
+  for (let i = 0; i < 100 && status.ok; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    status = await ask(observer, { command: 'status' });
+  }
+  assert.equal(status.error?.code, 'SHUTDOWN', 'the shutdown request was not handled');
+  assert.equal(s.shutdowns(), 0, 'the reply flushed despite the paused client');
+  return { c, id };
+};
+
 test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', async () => {
   await withServer({}, async (s) => {
     const good = await connect(s.socketPath);
@@ -344,6 +361,37 @@ test('shutdown answers, then calls onShutdown', async () => {
     for (let i = 0; i < 100 && s.shutdowns() === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(s.shutdowns(), 1);
     assert.equal((await ask(c, { command: 'status' })).error.code, 'SHUTDOWN');
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 1, 'a flushed reply left a second shutdown scheduled');
+  });
+});
+
+test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', async () => {
+  await withServer({}, async (s) => {
+    const { c, id } = await blockedShutdown(s);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const laterId = `r${++ids}`;
+    c.send({ version: 3, id: laterId, command: 'shutdown' });
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 1, 'shutdown waited indefinitely for a client that never reads');
+
+    c.socket.resume();
+    assert.deepEqual((await c.waitFor((r) => r.id === id)).result, { shutdown: true });
+    assert.equal((await c.waitFor((r) => r.id === laterId)).error.code, 'SHUTDOWN');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(s.shutdowns(), 1, 'the eventual flush called onShutdown again');
+  });
+});
+
+test('closing the scope cancels a blocked shutdown callback', async () => {
+  await withServer({}, async (s) => {
+    const { c } = await blockedShutdown(s);
+    await s.close();
+    await c.closed;
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 0, 'shutdown ran after its scope was closed');
+    assert.equal(existsSync(s.socketPath), false);
+    assert.equal(existsSync(s.tokenPath), false);
   });
 });
 

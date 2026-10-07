@@ -27,6 +27,8 @@ export const HANDSHAKE_MS = 10_000;
 const MAX_NOTE_LENGTH = 4096;
 // How long a refused connection may take to read its refusal.
 const REFUSED_MS = 1000;
+// How long shutdown may wait for its reply to reach a client that never reads.
+const SHUTDOWN_MS = 1000;
 // sun_path holds 104 bytes on macOS and the BSDs and 108 on Linux, including the terminating NUL.
 const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103;
 
@@ -107,6 +109,15 @@ export const serveIpc = (input: {
     // `closing` after a shutdown request; `stopped` once the scope closes.
     let closing = false;
     let stopped = false;
+    let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+    let shutdownCalled = false;
+    const finishShutdown = () => {
+      clearTimeout(shutdownTimer);
+      shutdownTimer = undefined;
+      if (stopped || shutdownCalled) return;
+      shutdownCalled = true;
+      input.onShutdown();
+    };
 
     // `flushed` runs once the line is handed to the OS, or at once when it cannot be written.
     const write = (conn: Connection, message: unknown, flushed?: () => void): boolean => {
@@ -237,8 +248,9 @@ export const serveIpc = (input: {
         case 'shutdown':
           return Effect.sync(() => {
             closing = true;
-            // Shutting down closes every socket, so it waits for the reply to be flushed.
-            return { result: { shutdown: true }, flushed: input.onShutdown };
+            // Give the reply time to flush before shutdown closes every socket.
+            shutdownTimer = setTimeout(finishShutdown, SHUTDOWN_MS);
+            return { result: { shutdown: true }, flushed: finishShutdown };
           });
       }
     };
@@ -328,6 +340,8 @@ export const serveIpc = (input: {
       Effect.callback<void>((resume) => {
         closing = true;
         stopped = true;
+        clearTimeout(shutdownTimer);
+        shutdownTimer = undefined;
         for (const conn of connections) {
           clearTimeout(conn.timer);
           conn.socket.destroy();
