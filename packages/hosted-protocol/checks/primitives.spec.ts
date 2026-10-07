@@ -39,3 +39,8 @@ test('names and enumerations are bounded user metadata', () => {
   cases(P.AgentKindSchema, ['claude', 'codex'], ['other']);
   cases(P.OsSchema, ['macos', 'linux', 'windows'], ['darwin']);
 });
+
+test('display names require visible text and exclude Unicode line separators', () => {
+  cases(P.DisplayNameSchema, ['机器', 'Café', 'Cafe\u0301', '☕\ufe0f', '😀 Work'],
+    ['\u034f', '\ufe0f', '\u0301\ufe0f', '\u034f \ufe0f', 'a\u2028b', 'a\u2029b']);
+});

@@ -14,7 +14,8 @@ export const CountSchema = RevisionCursorSchema;
 export const CommitShaSchema = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/));
 export const EnvNameSchema = Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/));
 export const DisplayNameSchema = Schema.String.check(Schema.makeFilter((name) =>
-  name === name.trim() && [...name].length >= 1 && [...name].length <= 100 && !/\p{C}/u.test(name)));
+  name === name.trim() && [...name].length >= 1 && [...name].length <= 100
+  && /[\p{L}\p{N}\p{P}\p{S}]/u.test(name) && !/[\p{C}\p{Zl}\p{Zp}]/u.test(name)));
 
 const validIsoTime = (value: string): boolean => {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(value);
