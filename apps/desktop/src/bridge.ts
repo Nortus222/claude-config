@@ -1,11 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Schema } from 'effect';
-import { decodeMessage, type RunEvent } from '../backend/protocol.ts';
+import { decodeMessage, type RunEvent, type StatusEvent } from '@nortuscc/agent/ipc/protocol';
 
 // The renderer's whole reach: these commands, with opaque keys and plan ids as their only arguments.
-export type Command = 'backend_generation' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_backend';
-export type HostEvent = (RunEvent | { event: 'disconnected'; detail: string }) & { generation: number };
+export type Command = 'agent_generation' | 'agent_status' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_agent';
+export type HostEvent = (RunEvent | StatusEvent | { event: 'disconnected'; detail: string }) & { generation: number };
 export type Envelope = { generation: number; data: unknown };
 export interface Bridge {
   subscribe(receive: (event: HostEvent) => void): Promise<() => void>;
@@ -23,14 +23,14 @@ export function decodeHostEvent(value: unknown): HostEvent {
   if ('event' in message && message.event === 'disconnected')
     return { ...Schema.decodeUnknownSync(Disconnected, { onExcessProperty: 'error' })(message), generation: checked };
   const decoded = decodeMessage(message);
-  if (!('event' in decoded)) throw new Error('Expected a run event');
+  if (!('event' in decoded)) throw new Error('Expected an agent event');
   return { ...decoded, generation: checked };
 }
 
 export const nativeAvailable = () => '__TAURI_INTERNALS__' in window;
 export const nativeBridge: Bridge = {
   subscribe: (receive) =>
-    listen<unknown>('machine-backend', (event) => {
+    listen<unknown>('machine-agent', (event) => {
       try {
         receive(decodeHostEvent(event.payload));
       } catch (error) {

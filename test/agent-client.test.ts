@@ -255,3 +255,40 @@ test('connectAgent is AgentUnavailable with no token, no socket, a refused hello
     for (const f of [noToken, noSocket, refused]) await f.close();
   }
 });
+
+test('connectAgent can identify the desktop app', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, STATUS));
+  try {
+    const conn = await connectAgent(f.paths, { client: 'app' });
+    assert.equal(f.seen[0]?.client, 'app');
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('outgoing records are bounded by UTF-8 bytes before writing', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, null));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'preview', exclude: ['é'.repeat(524288)] }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    assert.equal(f.seen.length, 1);
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('incoming records exceeding the byte limit close the connection', { skip }, async () => {
+  const f = await fake((request, socket) => ok(socket, request.id, 'é'.repeat(524288)));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'status' }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    conn.close();
+  } finally { await f.close(); }
+});
+
+test('an unterminated incoming record is bounded before a newline arrives', { skip }, async () => {
+  const f = await fake((_request, socket) => socket.write('x'.repeat(1048576)));
+  try {
+    const conn = await connectAgent(f.paths);
+    await assert.rejects(conn.request({ command: 'status' }, { timeoutMs: 1000 }), (error) => error instanceof AgentError && error.code === 'OVERSIZED');
+    conn.close();
+  } finally { await f.close(); }
+});

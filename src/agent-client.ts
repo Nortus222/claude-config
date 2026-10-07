@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import type { MachinePathsValue } from '@nortuscc/machine';
-import { decodeHelloResult, decodeMessage, PROTOCOL_VERSION, type HelloResult } from '@nortuscc/agent';
+import { decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
 
 // The agent answered a request with an error, sent a record outside the protocol, or did not answer
 // in time (code TIMEOUT).
@@ -49,7 +49,7 @@ type Pending = { readonly resolve: (result: unknown) => void; readonly reject: (
 // time out after `requestTimeoutMs` (30 s), or `inspectTimeoutMs` (120 s) for inspect and apply.
 export const connectAgent = async (
   paths: MachinePathsValue,
-  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'cli' } = {},
+  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' } = {},
 ): Promise<AgentConnection> => {
   const dir = join(paths.stateRoot, 'agent');
   let token: string;
@@ -104,16 +104,17 @@ export const connectAgent = async (
     else p.reject(new AgentError(message.error.code, message.error.message));
   };
 
-  let buffer = '';
-  socket.setEncoding('utf8');
-  socket.on('data', (chunk: string) => {
-    buffer += chunk;
+  let buffer = Buffer.alloc(0);
+  socket.on('data', (chunk: Buffer) => {
+    buffer = Buffer.concat([buffer, chunk]);
     let newline;
     while ((newline = buffer.indexOf('\n')) >= 0 && failure === undefined) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
+      if (newline + 1 > MAX_RECORD_BYTES) return fail(new AgentError('OVERSIZED', 'the agent sent an oversized record'));
+      const line = buffer.subarray(0, newline).toString('utf8');
+      buffer = buffer.subarray(newline + 1);
       onRecord(line);
     }
+    if (buffer.length >= MAX_RECORD_BYTES) fail(new AgentError('OVERSIZED', 'the agent sent an oversized record'));
   });
   // As with event listeners: one failing listener must not stop the others.
   const tell = (listener: () => void) => {
@@ -135,6 +136,8 @@ export const connectAgent = async (
     new Promise<A>((resolve, reject) => {
       if (failure !== undefined) return reject(failure);
       const id = String(++next);
+      const line = JSON.stringify({ ...command, version: PROTOCOL_VERSION, id }) + '\n';
+      if (Buffer.byteLength(line) > MAX_RECORD_BYTES) return reject(new AgentError('OVERSIZED', 'the request exceeds the record limit'));
       const entry: Pending = { resolve: resolve as (result: unknown) => void, reject };
       const name = (command as { command?: unknown }).command;
       const timeout = opts.timeoutMs
@@ -144,7 +147,7 @@ export const connectAgent = async (
         reject(new AgentError('TIMEOUT', 'the agent did not answer in time'));
       }, timeout);
       pending.set(id, entry);
-      socket.write(JSON.stringify({ ...command, version: PROTOCOL_VERSION, id }) + '\n');
+      socket.write(line);
     });
 
   const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;

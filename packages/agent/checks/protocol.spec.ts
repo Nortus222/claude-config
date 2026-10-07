@@ -163,3 +163,12 @@ test('the hello result names the protocol, the agent version, the policy and the
   assert.throws(() => decodeHelloResult({ ...hello, protocol: 2 }));
   assert.throws(() => decodeHelloResult({ ...hello, token: 't' }));
 });
+
+test('inspect accepts its agent status and rejects unknown status and inspect fields', async () => {
+  const { decodeInspectResult } = await import('../src/ipc/protocol.ts');
+  const inspected = { profile: { repo: '/r', revision: null, overrides: '/s/overrides.json', issues: [] }, items: [], probeErrors: [], status: { ...toWireStatus(status()), applying: true } };
+  assert.deepEqual(decodeInspectResult(inspected), inspected);
+  assert.throws(() => decodeInspectResult({ ...inspected, extra: 1 }));
+  assert.throws(() => decodeInspectResult({ ...inspected, status: { ...inspected.status, extra: 1 } }));
+  assert.throws(() => decodeInspectResult({ ...inspected, status: { ...inspected.status, applying: 'yes' } }));
+});

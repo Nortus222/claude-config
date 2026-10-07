@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { WireObserved } from '../backend/protocol.ts';
+import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
 import { MachineController, type StepStatus } from './controller.ts';
 import { nativeAvailable, nativeBridge } from './bridge.ts';
 import './style.css';
@@ -17,7 +17,8 @@ function App() {
     return () => controller.dispose();
   }, [controller]);
   const running = state.run?.outcome === 'running';
-  const ready = state.connection === 'connected' && !state.pending && !running;
+  const applying = running || state.status?.applying === true;
+  const ready = state.connection === 'connected' && !state.pending && !applying;
   const inspection = state.inspection;
   const excluded = new Set(state.excluded);
   const groups = DOMAINS.map(([domain, title]) => ({ domain, title, items: inspection?.items.filter((i) => i.domain === domain) ?? [] }))
@@ -64,8 +65,20 @@ function App() {
               <ul>{inspection.probeErrors.map((error, n) => <li key={n}>{error}</li>)}</ul>
             </div>
           ) : null}
-          <button className="restart" disabled={state.connection === 'browser' || state.pending || running} onClick={() => void controller.restart()}>
-            Restart backend
+          {state.hello ? <p className="muted">Agent {state.hello.agentVersion} · protocol {state.hello.protocol}</p> : null}
+          {state.status ? (
+            <div className="agent-status">
+              <p>Policy: {state.status.policy}</p>
+              <p>{state.status.trusted ? 'Trusted machine' : 'Machine not trusted'}</p>
+              <p>{state.status.counts.pending} pending · {state.status.counts.held} held · {state.status.counts.ready} ready · {state.status.counts.drift} drift</p>
+              {state.status.applying ? <p role="status">The agent is applying changes</p> : null}
+              {state.status.paused ? <p role="status">Automatic apply paused: {state.status.paused.reason}. You can still review and apply changes here.</p> : null}
+              {state.status.error ? <p role="alert">{state.status.error}: {state.status.detail}</p> : null}
+              {state.status.probeErrors.length ? <ul>{state.status.probeErrors.map((error, n) => <li key={n}>{error}</li>)}</ul> : null}
+            </div>
+          ) : null}
+          <button className="restart" disabled={state.connection === 'browser' || state.pending || (state.connection === 'connected' && applying)} onClick={() => void controller.restart()}>
+            Restart / reinstall agent
           </button>
         </aside>
         <div className="content">
@@ -75,7 +88,7 @@ function App() {
                 <p className="eyebrow">INSPECT</p>
                 <h2>What this machine has</h2>
               </div>
-              <button disabled={!ready} onClick={() => void controller.inspect()}>Inspect again</button>
+              <button disabled={state.connection !== 'connected' || state.pending || running} onClick={() => void controller.inspect()}>Inspect again</button>
             </div>
             {inspection === null ? (
               <p className="muted pad">{state.detail}</p>

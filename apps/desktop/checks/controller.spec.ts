@@ -4,13 +4,15 @@ import { MachineController, advance, type RunView } from '../src/controller.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
 
 const step = (key: string) => ({ key, domain: 'config', action: 'write-file', summary: `write ${key}`, touches: [key], interruptible: false });
+const status = (fields = {}) => ({ at: 'now', policy: 'notify', paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 }, ...fields });
 const inspection = (keys: string[]) => ({
   profile: { repo: '/r', revision: 'abc', overrides: '/s/overrides.json', issues: [] },
   items: keys.map((key) => ({ key, domain: 'config', target: 'claude', label: key, group: 'Files', state: 'repo-ahead', disposition: 'apply' })),
   probeErrors: [],
+  status: status(),
 });
 const plan = (keys: string[]) => ({ kind: 'apply', steps: keys.map(step), skipped: [] });
-const event = (runId: string, progress: unknown, generation = 1): HostEvent => ({ generation, version: 2, event: 'progress', runId, progress } as HostEvent);
+const event = (runId: string, progress: unknown, generation = 1): HostEvent => ({ generation, version: 3, event: 'progress', runId, progress } as HostEvent);
 
 type Handler = (args?: Readonly<Record<string, unknown>>) => unknown;
 function fake(handlers: Partial<Record<Command, Handler>>, generation = 1) {
@@ -25,7 +27,7 @@ function fake(handlers: Partial<Record<Command, Handler>>, generation = 1) {
     invoke: async (command, args) => {
       calls.push([command, args]);
       const handler = handlers[command];
-      const data = handler ? await handler(args) : null;
+      const data = handler ? await handler(args) : command === 'agent_status' ? status() : null;
       return { generation, data };
     },
   };
@@ -36,9 +38,9 @@ test('connect subscribes, learns the generation, then inspects', async () => {
   const f = fake({ inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  assert.deepEqual(f.calls.map(([name]) => name), ['subscribe', 'backend_generation', 'inspect_machine']);
+  assert.deepEqual(f.calls.map(([name]) => name), ['subscribe', 'agent_generation', 'agent_status', 'inspect_machine']);
   assert.equal(c.state.connection, 'connected');
-  assert.equal(c.state.inspection?.items.length, 1);
+  assert.equal(c.snapshot().inspection?.items.length, 1);
 });
 
 test('a failed inspect keeps the app connected and shows why', async () => {
@@ -157,7 +159,7 @@ test('a disconnect fails the running run; restart clears it and ignores the old 
     inspect_machine: () => inspection(['config:a']),
     preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
     apply_plan: () => ({ status: 'started', runId: 'r1' }),
-    restart_backend: () => ((generation = 2), null),
+    restart_agent: () => ((generation = 2), null),
   });
   const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
   const c = new MachineController(bridge);
@@ -184,7 +186,7 @@ function deferred<T>() {
 
 test('a disconnect that arrives before connect learns its generation wins and skips the inspect', async () => {
   const f = fake({
-    backend_generation: () => (f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' }), null),
+    agent_generation: () => (f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' }), null),
     inspect_machine: () => inspection(['config:a']),
   });
   const c = new MachineController(f.bridge);
@@ -199,7 +201,7 @@ test('a disconnect that arrives before restart learns its generation wins and sk
   let generation = 1;
   const f = fake({
     inspect_machine: () => inspection(['config:a']),
-    restart_backend: () => {
+    restart_agent: () => {
       generation = 2;
       f.emit({ generation: 2, event: 'disconnected', detail: 'Fresh backend exited' });
       return null;
@@ -239,7 +241,7 @@ test('a superseded preview reply does not change state', async () => {
   const f = fake({
     inspect_machine: () => inspection(['config:a', 'config:b']),
     preview_plan: () => (++previews === 1 ? slow.promise : { planId: 'p2', plan: plan(['config:a']) }),
-    restart_backend: () => ((generation = 2), null),
+    restart_agent: () => ((generation = 2), null),
   });
   // Replies carry the generation current when they return, so the late reply matches the new backend.
   const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
@@ -265,7 +267,7 @@ test('a cancel rejection that arrives after a restart does not change state', as
     preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
     apply_plan: () => ({ status: 'started', runId: 'r1' }),
     cancel_apply: () => cancelled.promise,
-    restart_backend: () => ((generation = 2), null),
+    restart_agent: () => ((generation = 2), null),
   });
   const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
   const c = new MachineController(bridge);
@@ -286,4 +288,153 @@ test('advance ignores nothing it should not', () => {
   const run: RunView = { runId: 'r', steps: [{ key: 'a', summary: 'a', status: 'pending', note: '' }], outcome: 'running', summary: '' };
   assert.equal(advance(run, { type: 'failed', message: 'another nortuscc run (pid 4) holds /s/apply.lock' }).summary, 'another nortuscc run (pid 4) holds /s/apply.lock');
   assert.equal(advance(run, { type: 'failed', message: 'x' }).outcome, 'failed');
+});
+
+test('startup NO_REPORT keeps the connection and a later status recovers inspection', async () => {
+  const f = fake({ agent_status: () => { throw new Error('NO_REPORT: starting'); }, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'connected');
+  assert.equal(c.state.inspection, null);
+  assert.match(c.state.detail, /starting/i);
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+  assert.equal(c.state.status?.policy, 'notify');
+});
+
+test('status events show pauses and errors and ignore old generations', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  f.emit({ generation: 0, version: 3, event: 'status', status: status({ policy: 'manual' }) } as HostEvent);
+  assert.equal(c.state.status?.policy, 'notify');
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ paused: { reason: 'failed run', at: 'now' }, error: 'JOB_FAILED', detail: 'disk full' }) } as HostEvent);
+  assert.equal(c.state.status?.paused?.reason, 'failed run');
+  assert.match(c.state.detail, /disk full/);
+});
+
+test('a paused auto-apply still permits a person to apply, and PAUSED is visible', async () => {
+  const f = fake({
+    inspect_machine: () => ({ ...inspection(['config:a']), status: status({ policy: 'auto-apply', paused: { reason: 'failed', at: 'now' } }) }),
+    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
+    apply_plan: () => { throw new Error('PAUSED: a person must review'); },
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  assert.ok(f.calls.some(([name]) => name === 'apply_plan'));
+  assert.equal(c.state.connection, 'connected');
+  assert.match(c.state.detail, /PAUSED/);
+});
+
+test('live applying status prevents preview and restart until idle', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+  await c.previewPlan();
+  await c.restart();
+  assert.equal(f.calls.some(([name]) => name === 'preview_plan' || name === 'restart_agent'), false);
+});
+
+test('UNAUTHORIZED makes the agent offline and explicit restart works', async () => {
+  let rejected = true;
+  const f = fake({
+    agent_status: () => { if (rejected) throw new Error('UNAUTHORIZED: token rotated'); return status(); },
+    restart_agent: () => { rejected = false; return { hello: { agentVersion: '0.1.0', protocol: 3, policy: 'notify', paused: null } }; },
+    inspect_machine: () => inspection(['config:a']),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'disconnected');
+  assert.match(c.state.detail, /UNAUTHORIZED/);
+  await c.restart();
+  assert.equal(c.state.connection, 'connected');
+  assert.equal(c.state.hello?.protocol, 3);
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+});
+
+test('incompatible establishment requires explicit restart or reinstall', async () => {
+  const f = fake({ agent_generation: () => ({ hello: { agentVersion: 'old', protocol: 2, policy: 'notify', paused: null } }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'disconnected');
+  assert.match(c.state.detail, /restart|reinstall/i);
+  assert.equal(f.calls.some(([name]) => name === 'inspect_machine'), false);
+});
+
+test('a usable status arriving during startup NO_REPORT recovers after pending settles', async () => {
+  const f = fake({
+    agent_status: () => {
+      f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent);
+      throw new Error('NO_REPORT: starting');
+    },
+    inspect_machine: () => inspection(['config:a']),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+});
+
+test('status updates retain progress detail while a manual run is active', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
+  const detail = c.state.detail;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+  assert.equal(c.state.detail, detail);
+});
+
+test('a manual terminal event re-inspects after status reported an active apply', async () => {
+  let inspects = 0;
+  const f = fake({ inspect_machine: () => (++inspects, inspection(['config:a'])), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+  f.emit(event('r1', { type: 'done', ok: 1, failed: 0 }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(inspects, 2);
+});
+
+test('a startup status before the generation reply survives a NO_REPORT reply', async () => {
+  const f = fake({
+    agent_generation: () => { f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent); return null; },
+    agent_status: () => { throw new Error('NO_REPORT: starting'); },
+    inspect_machine: () => inspection(['config:a']),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+});
+
+test('a status reply outside the strict v3 contract goes offline with recovery instructions', async () => {
+  const f = fake({ agent_status: () => status({ extra: 1 }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'disconnected');
+  assert.match(c.state.detail, /restart|reinstall/i);
+});
+
+test('explicit inspect refreshes an external apply status and recovers when its lock clears', async () => {
+  let applying = true;
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.status?.applying, true);
+  assert.equal(c.state.inspection, null);
+  await c.inspect();
+  assert.equal(f.calls.filter(([name]) => name === 'agent_status').length, 2);
+  assert.equal(c.state.inspection, null);
+  applying = false;
+  await c.inspect();
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+  assert.equal(c.state.status?.applying, undefined);
 });

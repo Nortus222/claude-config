@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Keeps a machine on its apply policy: schedules inspections, classifies accepted items and auto-applies only inert ones",
-  "exports": { ".": "./src/index.ts" },
+  "exports": { ".": "./src/index.ts", "./ipc/protocol": "./src/ipc/protocol.ts" },
   "scripts": {
     "test": "node --test \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit"

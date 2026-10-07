@@ -3,7 +3,7 @@ import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Cause, Data, Effect, FiberSet } from 'effect';
-import { HistoryStore, type Decision, type MachinePathsValue } from '@nortuscc/machine';
+import { HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
 import type { AgentStatus } from '../job.ts';
@@ -167,9 +167,15 @@ export const serveIpc = (input: {
       for (const conn of new Set([origin, ...subscribers()])) event(conn, message);
     };
 
+    const liveStatus = (status: AgentStatus) =>
+      Effect.map(session.running, (running) => ({
+        ...toWireStatus(status), applying: running || liveLockHolder(join(input.paths.stateRoot, 'apply.lock')) !== undefined,
+      }));
     const unsubscribe = handle.onStatus((status) => {
-      const message = { version: PROTOCOL_VERSION, event: 'status', status: toWireStatus(status) };
-      for (const conn of subscribers()) event(conn, message);
+      void run(Effect.map(liveStatus(status), (status) => {
+        const message = { version: PROTOCOL_VERSION, event: 'status', status };
+        for (const conn of subscribers()) event(conn, message);
+      }));
     });
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
 
@@ -187,7 +193,7 @@ export const serveIpc = (input: {
     const latest = Effect.flatMap(handle.status, (status) =>
       (status === undefined ? Effect.fail(new SessionError('NO_REPORT', 'the agent is still starting')) : Effect.succeed(status)));
     const wire = <R>(effect: Effect.Effect<AgentStatus, unknown, R>): Effect.Effect<Handled, unknown, R> =>
-      Effect.map(effect, (status) => ({ result: toWireStatus(status) }));
+      Effect.flatMap(effect, (status) => Effect.map(liveStatus(status), (result) => ({ result })));
 
     const dispatch = (conn: Connection, request: Request, client: Client): Effect.Effect<Handled, unknown, AgentServices> => {
       switch (request.command) {
