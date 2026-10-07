@@ -23,6 +23,7 @@ const fixture = async (t: TestContext) => {
   const paths = { repo: root, claude: root, codex: root, codexOpenRouter: root, agentsSkills: root, stateRoot: join(root, 'state'), backups: join(root, 'backups') };
   let clock = Date.parse('2026-10-07T00:00:00Z');
   let token: string | undefined;
+  let removeFailure = false;
   let account = 'account1';
   let policy: 'auto-apply' | 'notify' | 'manual' = 'notify';
   let policySource: 'person' | 'default' = 'default';
@@ -45,7 +46,7 @@ const fixture = async (t: TestContext) => {
     if (req.method === 'PATCH') return Effect.succeed({ status: 200, body: { machineId: 'machine1', name: 'Mac', os: 'macos', agents: ['claude'], policy: (req.body as any).policy ?? policy, reportStatus: (req.body as any).reportStatus ?? true, createdAt: '2026-10-07T00:00:00Z', lastSeenAt: '2026-10-07T00:00:00Z', status: null } });
     return Effect.succeed({ status: 204 });
   } });
-  const credentials = Layer.succeed(MachineTokenStore, { read: () => Effect.succeed(token), write: (value) => Effect.sync(() => { token = value; }), remove: () => Effect.sync(() => { token = undefined; }) });
+  const credentials = Layer.succeed(MachineTokenStore, { read: () => Effect.succeed(token), write: (value) => Effect.sync(() => { token = value; }), remove: () => removeFailure ? Effect.fail(new HostedFailure({ code: 'credential_storage' })) : Effect.sync(() => { token = undefined; }) });
   const layer = Layer.mergeAll(stores, transport, credentials);
   // Capture actual services once; restarts recreate only the client, retaining files and credential fake.
   const services = await Effect.runPromise(Effect.gen(function* () { return { store: yield* HostedStore, decisions: yield* DecisionsStore, history: yield* HistoryStore, transport: yield* HostedTransport, credentials: yield* MachineTokenStore }; }).pipe(Effect.provide(layer)));
@@ -56,7 +57,7 @@ const fixture = async (t: TestContext) => {
   const signIn = async () => { await Effect.runPromise(client.startSignIn({ os: 'macos', agents: ['claude'] })); clock += 5000; return Effect.runPromise(client.pollSignIn()); };
   return { root, paths, services, requests, actions, signIn, get client() { return client; }, restart: async () => { client = await create(); },
     advance: (ms: number) => { clock += ms; }, setResponse: (next: SyncResponse) => { response = next; }, setAccount: (next: string) => { account = next; },
-    person: () => { policy = 'manual'; policySource = 'person'; }, get policy() { return policy; }, setCrash: (next: boolean) => { crash = next; }, get token() { return token; }, setToken: (next: string) => { token = next; }, failWrite: (suffix?: string) => { failSuffix = suffix; } };
+    person: () => { policy = 'manual'; policySource = 'person'; }, get policy() { return policy; }, setCrash: (next: boolean) => { crash = next; }, get token() { return token; }, setToken: (next: string) => { token = next; }, failWrite: (suffix?: string) => { failSuffix = suffix; }, failRemove: (next: boolean) => { removeFailure = next; } };
 };
 const run = Effect.runPromise;
 
@@ -372,4 +373,118 @@ test('invalid machine policy removes its optimism before a later request fails',
   f.actions.push(() => Effect.fail(new HostedFailure({ code: 'network' })));
   await assert.rejects(run(f.client.sync()), /network/);
   assert.equal(f.policy, 'auto-apply');
+});
+
+for (const auth of ['signed-out', 'unauthenticated', 'retry', 'signed-in'] as const) test(`review recovery repairs durable choices and policy before ${auth} guards and HTTP`, async (t) => {
+  const f = await fixture(t); await f.signIn();
+  await run(f.services.store.update((doc) => ({ ...doc, accounts: doc.accounts.map((a) => ({ ...a,
+    auth: auth === 'retry' ? 'signed-in' : auth,
+    retryAt: auth === 'retry' ? '2026-10-08T00:00:00Z' : null,
+    outbox: [
+      { kind: 'machine' as const, patch: { policy: 'manual' as const } },
+      { kind: 'decision' as const, decision: { setupId: 'setup1', itemId: local().itemId, revision: 1, decision: 'skip' as const }, decidedAt: local().decidedAt },
+    ],
+  })) })));
+  await f.restart(); const count = f.requests.length;
+  if (auth === 'signed-in') {
+    f.actions.push(() => { assert.equal(f.policy, 'manual'); return Effect.fail(new HostedFailure({ code: 'network' })); });
+    await assert.rejects(run(f.client.sync()), /network/);
+  } else {
+    await run(f.client.sync()); assert.equal(f.requests.length, count);
+  }
+  assert.equal(f.policy, 'manual');
+  assert.equal((await run(f.services.decisions.read))[0]!.decision, 'skip');
+});
+
+test('review recovery removes inactive account projection after account checkpoint interruption', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.enqueueDecision(local({ setupId: 'setupA' })));
+  await run(f.client.signOut()); f.setAccount('account2'); f.failWrite('/decisions.json');
+  await assert.rejects(f.signIn(), /storage/);
+  assert.equal((await run(f.services.store.read)).activeAccountId, 'account2');
+  assert.equal((await run(f.services.decisions.read))[0]!.setupId, 'setupA');
+  f.failWrite(); await f.restart();
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'network' })));
+  await assert.rejects(run(f.client.sync()), /network/);
+  assert.deepEqual(await run(f.services.decisions.read), []);
+  assert.equal((await run(f.services.store.read)).accounts.find((a) => a.accountId === 'account1')!.outbox.length, 1);
+});
+
+test('review sign-out removes credentials despite corrupt metadata and preserves corrupt bytes', async (t) => {
+  const f = await fixture(t); await f.signIn(); const file = join(f.paths.stateRoot, 'agent', 'sync.json');
+  await writeFile(file, '{corrupt'); const count = f.requests.length;
+  await assert.rejects(run(f.client.signOut()), /storage/);
+  assert.equal(f.token, undefined); assert.equal(f.requests.length, count);
+  assert.equal(await readFile(file, 'utf8'), '{corrupt');
+});
+
+test('review stored duplicate results reject within-batch revision regression before removing any intent', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  await run(f.client.enqueueDecision(local({ revision: 2 }))); await run(f.client.enqueueDecision(local({ decision: 'skip' })));
+  f.actions.push(() => Effect.succeed({ status: 200, body: { seq: 2, results: [
+    { setupId: 'setup1', itemId: local().itemId, outcome: 'stored' }, { setupId: 'setup1', itemId: local().itemId, outcome: 'stored' },
+  ] } }));
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'network' })));
+  await assert.rejects(run(f.client.sync()), /invalid_response/);
+  const a = (await run(f.services.store.read)).accounts[0]!;
+  assert.equal(a.outbox.length, 2); assert.deepEqual(a.authoritative, []);
+  assert.equal(f.requests.filter((r) => r.path.startsWith('/sync?')).length, 0);
+});
+
+for (const [code, retryAfter] of [['unauthenticated', 2147484], ['unavailable', 2147484], ['rate_limited', Number.MAX_SAFE_INTEGER]] as const) test(`review oversized Retry-After preserves original ${code} and durable backoff`, async (t) => {
+  const f = await fixture(t); await f.signIn();
+  f.actions.push(() => Effect.fail(new HostedFailure({ code, retryAfter })));
+  await assert.rejects(run(f.client.sync()), new RegExp(code));
+  const a = (await run(f.services.store.read)).accounts[0]!;
+  assert.equal(a.error, code); assert.equal(a.auth, code === 'unauthenticated' ? 'unauthenticated' : 'signed-in');
+  assert.ok(Date.parse(a.retryAt!) > Date.parse('2026-10-07T00:00:05Z'));
+  const count = f.requests.length; await f.restart(); await run(f.client.sync()); assert.equal(f.requests.length, count);
+});
+
+test('review cache-ahead publications reject an older advertised head before checkpointing', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  f.setResponse(delta({ revisions: [revision(1), revision(2)], setups: [{ ...delta().setups[0]!, latestRevision: 2 }] }));
+  f.setCrash(true); await assert.rejects(run(f.client.sync()), /storage/); f.setCrash(false); await f.restart();
+  f.setResponse(delta()); await assert.rejects(run(f.client.sync()), /invalid_response/);
+  assert.equal((await run(f.services.store.read)).accounts[0]!.seq, 0);
+  assert.equal((await run(f.services.store.read)).accounts[0]!.setups.length, 0);
+  assert.equal((await run(f.client.revisions('setup1'))).length, 2);
+});
+
+test('review device Retry-After cannot shorten the current polling interval', async (t) => {
+  const f = await fixture(t); await run(f.client.startSignIn({ os: 'macos', agents: [] })); f.advance(5000);
+  f.actions.push(() => Effect.succeed({ status: 202, body: { interval: 10 } })); await run(f.client.pollSignIn()); f.advance(10000);
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'unavailable', retryAfter: 1 })));
+  await assert.rejects(run(f.client.pollSignIn()), /unavailable/); const count = f.requests.length;
+  assert.deepEqual(await run(f.client.pollSignIn()), { status: 'pending', pollAfter: 10 });
+  f.advance(1000); assert.deepEqual(await run(f.client.pollSignIn()), { status: 'pending', pollAfter: 9 });
+  assert.equal(f.requests.length, count);
+});
+
+test('review dropping the last unknown-setup intent cannot leave an orphan hosted projection', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.enqueueDecision(local({ setupId: 'unknownSetup' })));
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'invalid', status: 400 })));
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'network' })));
+  await assert.rejects(run(f.client.sync()), /network/);
+  assert.deepEqual(await run(f.services.decisions.read), []);
+  await f.restart(); await run(f.client.recover()); assert.deepEqual(await run(f.services.decisions.read), []);
+});
+
+test('review corrupt-metadata sign-out exposes credential deletion failure and permits deletion retry', async (t) => {
+  const f = await fixture(t); await f.signIn(); const file = join(f.paths.stateRoot, 'agent', 'sync.json');
+  await writeFile(file, '{corrupt'); f.failRemove(true);
+  await assert.rejects(run(f.client.signOut()), /credential_storage/); assert.ok(f.token);
+  assert.equal(await readFile(file, 'utf8'), '{corrupt'); f.failRemove(false);
+  await assert.rejects(run(f.client.signOut()), /storage/); assert.equal(f.token, undefined);
+});
+
+test('review explicit recovery repairs local policy without uploading and preserves local commit decisions', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  await run(f.services.decisions.record(local({ setupId: 'local', revision: null, commit: 'a'.repeat(40) })));
+  await run(f.services.store.update((doc) => ({ ...doc, accounts: doc.accounts.map((a) => ({ ...a,
+    outbox: [{ kind: 'machine' as const, patch: { policy: 'manual' as const } }],
+  })) })));
+  const count = f.requests.length; await f.restart(); const state = await run(f.client.recover());
+  assert.equal(f.requests.length, count); assert.equal(state.machine!.policy, 'manual'); assert.equal(f.policy, 'manual');
+  assert.equal((await run(f.services.decisions.read))[0]!.setupId, 'local');
+  assert.equal((await run(f.services.store.read)).accounts[0]!.outbox.length, 1);
 });

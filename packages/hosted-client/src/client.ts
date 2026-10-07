@@ -30,6 +30,8 @@ export type HostedClient = {
   readonly startSignIn: (request: SignInRequest) => Effect.Effect<SignInStarted, HostedFailure>;
   readonly pollSignIn: () => Effect.Effect<SignInPoll, HostedFailure>;
   readonly signOut: () => Effect.Effect<void, HostedFailure>;
+  // Repairs durable local decisions and policy before jobs, without making hosted requests.
+  readonly recover: () => Effect.Effect<HostedState, HostedFailure>;
   readonly sync: () => Effect.Effect<HostedState, HostedFailure>;
   readonly enqueueDecision: (decision: LocalDecision, actor?: Actor) => Effect.Effect<void, HostedFailure>;
   readonly enqueueMachine: (patch: MachinePatch, actor?: Actor) => Effect.Effect<void, HostedFailure>;
@@ -89,12 +91,18 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     const a = active(doc);
     return a ? Effect.succeed(a) : Effect.fail(new HostedFailure({ code: 'unauthenticated' }));
   });
-  const reconcile = (a: HostedAccount, previousIds: ReadonlyArray<string> = []) => {
+  const reconcile = (a: HostedAccount) => Effect.gen(function* () {
     const projection = new Map<string, LocalDecision>(a.authoritative.map((d) => [key(d), { ...d, commit: null, source: 'synced' }]));
     for (const e of a.outbox) if (e.kind === 'decision') projection.set(key(e.decision), { ...e.decision, decidedAt: e.decidedAt, commit: null, machineId: a.machineId, source: 'local' });
-    const ids = [...new Set([...previousIds, ...a.setups.map((s) => s.setupId), ...a.authoritative.map((d) => d.setupId), ...a.outbox.flatMap((e) => e.kind === 'decision' ? [e.decision.setupId] : [])])];
-    return decisions.replaceHosted(ids, [...projection.values()]).pipe(Effect.mapError(safeStorage));
-  };
+    const doc = yield* store.read;
+    const current = yield* decisions.read.pipe(Effect.mapError(safeStorage));
+    // Inactive account ownership survives a crash after switching the active checkpoint.
+    // Include orphaned numeric projections after the final invalid intent was durably removed.
+    const ids = [...new Set([...current.filter((d) => d.revision !== null && d.setupId !== 'local').map((d) => d.setupId),
+      ...doc.accounts.flatMap((account) => [...account.setups.map((s) => s.setupId),
+        ...account.authoritative.map((d) => d.setupId), ...account.outbox.flatMap((e) => e.kind === 'decision' ? [e.decision.setupId] : [])])])];
+    yield* decisions.replaceHosted(ids, [...projection.values()]).pipe(Effect.mapError(safeStorage));
+  });
   const applyPolicy = (a: HostedAccount, actor: Actor = 'agent') => Effect.gen(function* () {
     const chosen = [...a.outbox].reverse().find((e): e is Extract<OutboxEntry, { kind: 'machine' }> => e.kind === 'machine' && e.patch.policy !== undefined);
     const policy = chosen?.patch.policy ?? a.machine.policy;
@@ -104,11 +112,19 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     yield* options.onPolicy(policy, origin).pipe(Effect.mapError(safeStorage));
   });
   const persistFailure = (a: HostedAccount, failure: HostedFailure) => Effect.gen(function* () {
-    const retryAt = failure.retryAfter === undefined ? undefined : new Date(yield* deadline(failure.retryAfter)).toISOString();
+    // Durable backoff may exceed one timer wait. Saturate at the ISO schema's latest year.
+    const retryAt = failure.retryAfter === undefined ? undefined : new Date(Math.min(
+      Date.parse('9999-12-31T23:59:59.999Z'), now().getTime() + failure.retryAfter * 1000,
+    )).toISOString();
     yield* updateAccount(a.accountId, (current) => ({ ...current,
       auth: failure.code === 'unauthenticated' ? 'unauthenticated' : current.auth,
       error: failure.code, retryAt: retryAt ?? current.retryAt,
     }));
+  });
+  const recoverAccount = Effect.gen(function* () {
+    const a = active(yield* store.read);
+    if (a) { yield* reconcile(a); yield* applyPolicy(a); }
+    return a;
   });
   const request = (a: HostedAccount, req: Omit<HostedRequest, 'token'>) => Effect.gen(function* () {
     const token = yield* credentials.read();
@@ -162,7 +178,11 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
           const prefix = reply.results.findIndex((r) => r.outcome === 'unprocessed');
           const count = prefix === -1 ? sent.length : prefix;
           const stored = sent.slice(0, count).flatMap((e, i) => reply.results[i]!.outcome === 'stored' ? [{ ...e.decision, decidedAt: e.decidedAt, machineId: a.machineId }] : []);
-          if (stored.some((d) => d.revision < (a.authoritative.find((old) => key(old) === key(d))?.revision ?? 0))) return yield* Effect.fail(invalidResponse());
+          const confirmed = new Map(a.authoritative.map((d) => [key(d), d]));
+          for (const d of stored) {
+            if (d.revision < (confirmed.get(key(d))?.revision ?? 0)) return yield* Effect.fail(invalidResponse());
+            confirmed.set(key(d), d);
+          }
           // Response sequence is deliberately excluded from the GET checkpoint.
           const doc = yield* updateAccount(a.accountId, (current) => ({ ...current, outbox: current.outbox.slice(count), authoritative: mergeDecisions(current.authoritative, stored) }));
           a = active(doc)!;
@@ -177,10 +197,8 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     return a;
   });
   const sync = () => Effect.gen(function* () {
-    let a = active(yield* store.read);
+    let a = yield* recoverAccount;
     if (!a || a.auth !== 'signed-in' || (a.retryAt !== null && Date.parse(a.retryAt) > now().getTime())) return project(a);
-    // Repair optimistic state after a prior interruption between queue and projection writes.
-    yield* reconcile(a);
     const initial = a;
     const work = Effect.gen(function* () {
       a = yield* flush(initial);
@@ -202,7 +220,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
         const records = body.revisions.filter((r) => r.setupId === setup.setupId);
         if (records.length !== setup.latestRevision - since || records.some((r, i) => r.number !== since + i + 1)) return yield* Effect.fail(invalidResponse());
         const cache = yield* store.revisions(a.accountId, setup.setupId);
-        if (cache.length < since) return yield* Effect.fail(invalidResponse());
+        if (cache.length < since || cache.length > setup.latestRevision) return yield* Effect.fail(invalidResponse());
       }
       // Validate all ranges before any cache write; cache immutability handles cache-ahead replay.
       for (const setup of body.setups) yield* store.cache(a.accountId, setup.setupId, body.revisions.filter((r) => r.setupId === setup.setupId));
@@ -250,7 +268,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       const reply = yield* transport.request({ method: 'POST', path: '/auth/device/poll', body: { pendingId: flow.pendingId } }).pipe(Effect.catch((error) => {
         if (error.code === 'sign_in_expired' || error.code === 'not_allowlisted') pending = undefined;
         return Effect.gen(function* () {
-          if (error.retryAfter !== undefined) flow.nextAt = yield* deadline(error.retryAfter);
+          if (error.retryAfter !== undefined) flow.nextAt = Math.max(flow.nextAt, yield* deadline(error.retryAfter));
           return yield* Effect.fail(error);
         });
       }));
@@ -261,7 +279,6 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       if (reply.status !== 200) return yield* Effect.fail(invalidResponse());
       const result = yield* decode(DevicePollSuccessSchema, reply.body);
       const before = yield* store.read;
-      const old = active(before);
       const same = before.accounts.find((a) => a.accountId === result.accountId);
       const policy = yield* options.readPolicy.pipe(Effect.mapError(safeStorage));
       let next: HostedAccount = same ? { ...same, login: result.login, machineId: result.machineId, auth: 'signed-in', retryAt: null, error: null } : {
@@ -274,21 +291,26 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       yield* store.update((doc) => ({ ...doc, activeAccountId: next.accountId, accounts: [...doc.accounts.filter((a) => a.accountId !== next.accountId), next] }));
       yield* credentials.write(result.token);
       pending = undefined;
-      yield* reconcile(next, old && old.accountId !== next.accountId ? [...old.setups.map((s) => s.setupId), ...old.authoritative.map((d) => d.setupId), ...old.outbox.flatMap((e) => e.kind === 'decision' ? [e.decision.setupId] : [])] : []);
+      yield* reconcile(next);
       yield* applyPolicy(next);
       return { status: 'success' as const, accountId: result.accountId, login: result.login, machineId: result.machineId };
     }).pipe(lock.withPermit),
     signOut: () => Effect.gen(function* () {
       pending = undefined;
-      const a = active(yield* store.read);
+      const metadata = yield* store.read.pipe(Effect.match({
+        onFailure: (error) => ({ error, document: undefined }), onSuccess: (document) => ({ error: undefined, document }),
+      }));
+      const a = metadata.document ? active(metadata.document) : undefined;
       const revoke = a && a.auth === 'signed-in' ? request(a, { method: 'POST', path: '/auth/sign-out' }).pipe(Effect.flatMap((reply) => reply.status === 204 ? Effect.void : Effect.fail(invalidResponse()))) : Effect.void;
       // Local deletion always runs even when the service is offline. Its failure remains visible.
       const remoteError = yield* revoke.pipe(Effect.match({ onFailure: (e) => e, onSuccess: () => undefined }));
       yield* credentials.remove();
+      if (metadata.error) return yield* Effect.fail(metadata.error);
       if (a) yield* updateAccount(a.accountId, (current) => ({ ...current, auth: 'signed-out', retryAt: null, error: remoteError?.code ?? null }));
       if (remoteError) return yield* Effect.fail(remoteError);
     }).pipe(lock.withPermit),
     sync,
+    recover: () => recoverAccount.pipe(Effect.map(project), lock.withPermit),
     enqueueDecision: (decision, actor = 'agent') => Effect.gen(function* () {
       if (decision.commit !== null || decision.revision === null || decision.source !== 'local') return yield* Effect.fail(new HostedFailure({ code: 'invalid_request' }));
       yield* decode(IsoTimeSchema, decision.decidedAt, true);
