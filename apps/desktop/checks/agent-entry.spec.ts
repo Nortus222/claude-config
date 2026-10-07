@@ -137,7 +137,8 @@ test('startup selectors introduced by the helper probe remain absent before the 
   mkdirSync(bin);
   const observed = join(f.home, 'machine.env');
   const git = join(bin, 'git');
-  writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$ZDOTDIR" "$XDG_CONFIG_HOME" "$ENV" "$SOURCE_PREREQUISITE" > "${observed}"\nexit 1\n`);
+  // Readers must see a complete snapshot even while another Git probe runs.
+  writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' "$ZDOTDIR" "$XDG_CONFIG_HOME" "$ENV" "$SOURCE_PREREQUISITE" > "${observed}.$$"\n/bin/mv "${observed}.$$" "${observed}"\nexit 1\n`);
   chmodSync(git, 0o755);
   const exported = {
     HOME: f.home, PATH: bin, NORTUSCC_STATE_DIR: f.stateRoot, SHELL: '/fake/post-probe-shell',
