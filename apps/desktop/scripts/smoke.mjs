@@ -87,6 +87,7 @@ async function connect() {
 
 let child;
 let exited;
+let launchError;
 let stderr = '';
 let stdout = '';
 let gateReached = false;
@@ -98,11 +99,13 @@ async function releaseGate() {
 async function stop() {
   await releaseGate();
   for (const socket of sockets) socket.destroy();
-  if (child && child.exitCode === null && child.signalCode === null) {
+  if (!child) return;
+  let timer;
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
     child.kill('SIGTERM');
-    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
-    try { await exited; } finally { clearTimeout(timer); }
+    timer = setTimeout(() => child.kill('SIGKILL'), 5000);
   }
+  try { await exited; } finally { clearTimeout(timer); }
 }
 
 try {
@@ -137,8 +140,11 @@ try {
   child = spawn(join(resources, 'bun'), [join(resources, 'agent.mjs')], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  exited = once(child, 'exit');
+  child.once('error', (error) => { launchError = error; });
+  // Close always follows spawn error or exit. Its join cannot reject before startup is awaited.
+  exited = new Promise((done) => child.once('close', (...result) => done(result)));
   await until(() => {
+    if (launchError) throw launchError;
     assert.equal(child.exitCode, null, stderr);
     return existsSync(join(agentDir, 'agent.sock')) && existsSync(join(agentDir, 'agent.token'));
   });

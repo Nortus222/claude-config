@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -76,4 +76,59 @@ test('packaged smoke passes its resolved temporary root to the native child', {
   assert.equal(nativeTemporaryRoot, realpathSync(temporaryRoot));
   assert.ok(nativeHome.startsWith(nativeTemporaryRoot + '/ncc-'));
   assert.equal(existsSync(nativeHome), false);
+});
+
+for (const code of ['ENOENT', 'EACCES']) {
+  test(`smoke removes its temporary HOME when the bundled runtime cannot launch (${code})`, { timeout: 10_000 }, async (t) => {
+    const app = mkdtempSync('/tmp/nsm-');
+    t.after(() => rmSync(app, { recursive: true, force: true }));
+    const resources = join(app, 'Contents/Resources/agent-runtime');
+    const temporaryRoot = join(app, 'tmp');
+    mkdirSync(resources, { recursive: true });
+    mkdirSync(temporaryRoot);
+    if (code === 'EACCES') writeFileSync(join(resources, 'bun'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+    await assert.rejects(promisify(execFile)(process.execPath, ['scripts/smoke.mjs', app], {
+      cwd: new URL('..', import.meta.url), env: { ...process.env, TMPDIR: temporaryRoot }, timeout: 5000,
+    }), (error: unknown) => {
+      const failure = error as { code: number; stderr: string; killed: boolean };
+      assert.equal(failure.code, 1);
+      assert.equal(failure.killed, false);
+      assert.match(failure.stderr, new RegExp(code));
+      return true;
+    });
+    assert.deepEqual(readdirSync(temporaryRoot), [], 'smoke left its temporary HOME behind');
+  });
+}
+
+test('a missing native executable stops the foreground agent and removes HOME', {
+  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  timeout: 20_000,
+}, async (t) => {
+  const app = mkdtempSync('/tmp/nsm-');
+  const resources = join(app, 'Contents/Resources/agent-runtime');
+  const temporaryRoot = join(app, 'tmp');
+  const record = join(app, 'child.json');
+  let child: { pid: number; home: string } | undefined;
+  t.after(() => {
+    if (child) { try { process.kill(child.pid, 'SIGKILL'); } catch {} }
+    rmSync(app, { recursive: true, force: true });
+  });
+  mkdirSync(resources, { recursive: true });
+  mkdirSync(temporaryRoot);
+  for (const file of ['bun', 'runtime.json']) {
+    symlinkSync(join(resolve(process.env.DESKTOP_AGENT_RESOURCES!), file), join(resources, file));
+  }
+  writeFileSync(join(resources, 'agent.mjs'), `
+import { writeFileSync } from 'node:fs';
+import { runDesktopEntry } from ${JSON.stringify(join(resolve(process.env.DESKTOP_AGENT_RESOURCES!), 'agent.mjs'))};
+writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid, home: process.env.HOME }));
+process.exitCode = await runDesktopEntry({ args: [], env: process.env, resources: ${JSON.stringify(resources)} });
+`);
+  await assert.rejects(promisify(execFile)(process.execPath, ['scripts/smoke.mjs', app], {
+    cwd: new URL('..', import.meta.url), env: { ...process.env, TMPDIR: temporaryRoot }, timeout: 15_000,
+  }), /ENOENT/);
+  child = JSON.parse(readFileSync(record, 'utf8'));
+  assert.throws(() => process.kill(child!.pid, 0), { code: 'ESRCH' });
+  assert.equal(existsSync(child!.home), false);
+  assert.deepEqual(readdirSync(temporaryRoot), []);
 });
