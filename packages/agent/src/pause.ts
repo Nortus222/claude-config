@@ -24,7 +24,8 @@ export const resume = (actor: Actor) =>
   });
 
 // The newest automatic agent run History shows started and never finished, unless a pause already
-// names it: the agent died mid-apply. Naming the run in the pause keeps a crash loop to one pause.
+// names it: the agent died mid-apply. The agent's pid lock makes it the only agent, so a run
+// without a finish is never another live agent's. Naming the run in the pause keeps a crash loop to one pause.
 export const interruptedRun = (events: ReadonlyArray<HistoryEvent>): string | undefined => {
   const settled = new Set<string>();
   for (const e of events) {

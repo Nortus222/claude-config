@@ -1,6 +1,7 @@
+import { join } from 'node:path';
 import { Cause, Effect, Layer, Ref } from 'effect';
 import {
-  type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
+  acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus } from './job.ts';
@@ -78,6 +79,7 @@ const untilAborted = (signal?: AbortSignal): Effect.Effect<void> =>
 
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted or `signal` aborts; either closes the agent, cancelling an in-flight auto-apply.
+// A pid lock makes it the only agent per state root: a second fails LockHeld before touching state.
 // The caller builds `domains` and `source` at the same boundary as `paths`.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
@@ -85,6 +87,8 @@ export const runAgent = (input: {
   readonly source: Layer.Layer<SetupSource>;
   readonly signal?: AbortSignal;
 }) =>
-  Effect.scoped(Effect.andThen(startAgent(input.domains, { signal: input.signal }), untilAborted(input.signal))).pipe(
-    Effect.provide(Layer.merge(agentLayer(input.paths), input.source)),
-  );
+  Effect.scoped(Effect.gen(function* () {
+    yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
+    yield* startAgent(input.domains, { signal: input.signal });
+    yield* untilAborted(input.signal);
+  })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths), input.source)));

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { Effect, Exit, type Scope } from 'effect';
-import { acquireApplyLock, machinePaths, takeOver, type MachinePaths } from '../src/index.ts';
+import { acquireApplyLock, acquirePidLock, machinePaths, takeOver, type MachinePaths } from '../src/index.ts';
 
 const setup = () => {
   const stateRoot = mkdtempSync(join(tmpdir(), 'machine-lock-'));
@@ -110,4 +110,19 @@ test('concurrent takeovers of a dead lock admit exactly one run', async () => {
   assert.equal(outcomes.filter((o) => o === 'acquired').length, 1, outcomes.join(','));
   assert.equal(outcomes.filter((o) => o === 'held').length, 7, outcomes.join(','));
   assert.equal(existsSync(lock), false);
+});
+
+test('a pid lock on a custom path creates its parent, fails when a live pid holds it, and takes over a dead one', async () => {
+  const { lock, run } = setup();
+  const custom = join(dirname(lock), 'nested', 'x.lock');
+  const held = await run(Effect.andThen(acquirePidLock(custom), Effect.sync(() => existsSync(custom))));
+  assert.ok(Exit.isSuccess(held) && held.value === true);
+  assert.equal(existsSync(custom), false);
+  writeFileSync(custom, JSON.stringify({ pid: process.ppid, startedAt: 'x' }));
+  const exit = await run(acquirePidLock(custom));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  writeFileSync(custom, JSON.stringify({ pid: dead, startedAt: 'x' }));
+  assert.ok(Exit.isSuccess(await run(acquirePidLock(custom))));
+  assert.equal(existsSync(custom), false);
 });

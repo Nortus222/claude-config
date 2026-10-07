@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore } from '@nortuscc/machine';
 import { AgentStateStore, runAgent, SetupSource, startAgent, type AgentDomain } from '../src/index.ts';
@@ -191,4 +193,38 @@ test('a request after the agent closed fails promptly', async () => {
     return yield* Effect.exit(agent.request('inspect').pipe(Effect.timeoutOption('1 second')));
   }), fixture.source);
   assert.ok(Exit.isFailure(exit), 'the request hung or answered after close');
+});
+
+const lockPath = (m: ReturnType<typeof agentMachine>) => join(m.paths.stateRoot, 'agent', 'agent.lock');
+const writeLock = (path: string, pid: number) => {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ pid, startedAt: 'x' }));
+};
+
+test('a second agent fails LockHeld before it writes anything', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), process.ppid);
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.deepEqual(await m.kinds(), []);
+  assert.equal(existsSync(lockPath(m)), true);
+});
+
+test('an agent takes over a dead agent\'s lock and removes its own on close', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), spawnSync(process.execPath, ['-e', '']).pid);
+  const controller = new AbortController();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source, signal: controller.signal }));
+  for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok((await m.kinds()).includes('revision-verified'));
+  assert.equal(existsSync(lockPath(m)), true);
+  controller.abort();
+  assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
+  assert.equal(existsSync(lockPath(m)), false);
 });
