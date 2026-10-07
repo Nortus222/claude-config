@@ -280,7 +280,8 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     let anyFailed = false;
     let cancelled = false;
     let backups: string | undefined;
-    let manifestWritten = false;
+    // Reported after the run, once the manifest has reached the checkout.
+    let manifestNote: string | undefined;
 
     yield* Stream.runForEach(execute(p, report, [skillsDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
       switch (event.type) {
@@ -297,11 +298,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
           } else if (event.key === SKILL_STEP.expose && event.note) {
             write(`\n${event.note}\n`);
           } else if (event.key === SKILL_STEP.manifest) {
-            write(`\nskills-manifest.txt ${event.note}\n`);
-            if (event.note.startsWith('written')) {
-              manifestWritten = true;
-              write('Run: nortuscc push -m "..."   to share it\n');
-            }
+            manifestNote = event.note;
           }
           return;
         case 'done':
@@ -317,12 +314,19 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // The skills domain writes the manifest into paths.repo, which is the composed copy when items are
     // held: carry it to the checkout with each held skill as the checkout declares it, so the held
     // value is never published as an upstream change.
+    // The note then counts what reached the checkout.
+    const manifestWritten = manifestNote?.startsWith('written') ?? false;
     if (manifestWritten && holds) {
       const fs = yield* Fs;
       const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
       const target = join(holds.checkout, MANIFEST_FILE);
-      const declared = parseSkillsManifest(yield* fs.readText(target));
-      yield* fs.writeTextAtomic(target, emitManifest(checkoutGroups(composed, declared, holds.held)));
+      const groups = checkoutGroups(composed, parseSkillsManifest(yield* fs.readText(target)), holds.held);
+      yield* fs.writeTextAtomic(target, emitManifest(groups));
+      manifestNote = `written — ${groups.reduce((n, g) => n + g.skills.length, 0)} skill(s)`;
+    }
+    if (manifestNote !== undefined) {
+      write(`\nskills-manifest.txt ${manifestNote}\n`);
+      if (manifestWritten) write('Run: nortuscc push -m "..."   to share it\n');
     }
 
     if (backups) write(`\nbacked up -> ${backups}\n`);

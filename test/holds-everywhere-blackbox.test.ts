@@ -93,19 +93,28 @@ test('update leaves a skill held at an older pin alone', async () => {
   assert.doesNotMatch(result.stdout, /off-pin/);
 });
 
-test('update --prune keeps a held skill whose pin the checkout dropped and upstream deleted', async () => {
-  const m = machine();
+// Without the hold, pinme reads `gone`: the checkout dropped its pin, upstream deleted it, and the lock records no ref.
+function goneUnlessHeld(m: Machine): void {
   const { pinned, upstream } = pinnedSkill(m);
   git(upstream, 'rm', '-rq', 's/pinme');
   git(upstream, 'commit', '-qm', 'delete pinme');
-  writeFileSync(join(m.repo, 'skills-manifest.txt'), '');
   writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: {} }, null, 2) + '\n');
-  git(m.repo, 'commit', '-qam', 'drop pinme');
+  git(m.repo, 'commit', '-qam', 'drop the pin');
+  const lockPath = join(dirname(m.agents), '.skill-lock.json');
+  const lock = readJson(lockPath);
+  delete lock.skills.pinme.ref;
+  writeFileSync(lockPath, JSON.stringify(lock));
   hold(m, { 'skill:o/r/pinme': pinned });
-  const result = await runCli(m, ['update', '--yes', '--prune']);
-  assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.deepEqual(installerCalls(m).filter((c) => c.args.includes('remove')), []);
-  assert.ok(existsSync(join(m.agents, 'pinme')));
+}
+
+// --check, not --yes --prune: with the hold, pinme reads off-pin (the lock records no ref), and the default
+// fake npx cannot model the pinned reinstall that --yes would run.
+test('update --check does not report a held skill as gone, nor offer to prune it', async () => {
+  const m = machine();
+  goneUnlessHeld(m);
+  const result = await runCli(m, ['update', '--check']);
+  assert.doesNotMatch(result.stdout, /gone/);
+  assert.doesNotMatch(result.stdout, /--prune/);
 });
 
 test('an invalid sync.json refuses update', async () => {
@@ -174,7 +183,7 @@ test('update writes the manifest into the checkout, with a held skill as the che
   writeFakeBin(m.bin, 'npx', UV_NPX);
   const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /skills-manifest\.txt written/);
+  assert.match(result.stdout, /skills-manifest\.txt written — 2 skill\(s\)/);
   const manifest = readFileSync(join(m.repo, 'skills-manifest.txt'), 'utf8');
   assert.deepEqual(parseSkillsManifest(manifest).map((g) => [g.source, g.skills]), [['u/v', ['fresh', 'wizard']]]);
 });
