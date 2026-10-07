@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path';
 
 export type LoginEnvironment = { readonly env: Readonly<Record<string, string>>; readonly error?: string };
 export const DEFAULT_TOOLS = ['npx', 'claude', 'codex'] as const;
+export const SHELL_STARTUP_VARIABLES = ['ZDOTDIR', 'XDG_CONFIG_HOME', 'ENV'] as const;
 
 const MARK = '__NORTUSCC_ENV__';
 const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
@@ -54,6 +55,10 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
     child.on('close', () => finish(() => resolve(out.match(FOUND)?.[1])));
   });
 
+// The shell selected for the probe and subsequent service starts.
+export const loginShell = (env: Readonly<Record<string, string | undefined>>): string =>
+  env.SHELL && isAbsolute(env.SHELL) ? env.SHELL : '/bin/zsh';
+
 // Reads the environment once from the user's login shell, so installers and MCP prerequisites see
 // what a terminal sees. Never rejects: on any failure it returns the inherited environment with the
 // reason as `error`.
@@ -63,7 +68,7 @@ export async function probeLoginEnvironment(input: {
   readonly runtime?: string;
 }): Promise<LoginEnvironment> {
   const fallback = strings(input.env);
-  const shell = input.env.SHELL && isAbsolute(input.env.SHELL) ? input.env.SHELL : '/bin/zsh';
+  const shell = loginShell(input.env);
   try {
     const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000));
     if (found) return { env: found };

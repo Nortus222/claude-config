@@ -27,10 +27,11 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   const events: string[] = [];
   const registrations: Array<Record<string, unknown>> = [];
   let fail = false;
+  let origin = 'https://github.com/example/setup.git';
   let onService: ((command: Command) => void) | undefined;
   const processes = Layer.succeed(Processes, {
     run: (command) => Effect.sync(() => {
-      if (command.cmd === 'git') return { code: 0, stdout: 'https://github.com/example/setup.git\n' };
+      if (command.cmd === 'git') return { code: 0, stdout: origin + '\n' };
       assert.equal(command.cmd, 'launchctl', 'only the injected service manager is called');
       events.push(command.args[0]!);
       onService?.(command);
@@ -44,7 +45,7 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   const write = (name: string, value: unknown) => writeFileSync(join(stateRoot, 'agent', name), JSON.stringify(value));
   const run = (changes: Partial<typeof input> = {}, options: Parameters<typeof ensureAgent>[1] = {}) =>
     Effect.runPromise(ensureAgent({ ...input, ...changes }, { connect: unavailable, pollMs: 1, timeoutMs: 300, retryDelayMs: 0, ...options }).pipe(Effect.provide(backupsForRun().pipe(Layer.provideMerge(base)))));
-  return { home, paths, target, input, events, registrations, run, read, write, onService: (f: (command: Command) => void) => { onService = f; }, fail: () => { fail = true; }, recover: () => { fail = false; } };
+  return { home, paths, target, input, events, registrations, run, read, write, origin: (url: string) => { origin = url; }, onService: (f: (command: Command) => void) => { onService = f; }, fail: () => { fail = true; }, recover: () => { fail = false; } };
 };
 const connection = (events: string[], version = 'v1', statuses: Array<WireStatus | Error> = [STATUS]): AgentConnection => ({
   hello: { agentVersion: version, protocol: 3, policy: 'notify', paused: null },
@@ -262,4 +263,60 @@ test('explicit restart of a reachable unchanged registration shuts down and kick
   f.events.length = 0;
   await f.run({}, { connect: async () => connection(f.events), restart: true });
   assert.deepEqual(f.events, ['status', 'shutdown', 'close', 'kickstart']);
+});
+
+test('app upgrades, moves and restarts preserve own trust after its origin changes', async (t) => {
+  const f = fixture(t);
+  await f.run();
+  const trust = readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8');
+  f.origin('https://github.com/other/setup.git');
+  await f.run({ agentVersion: 'v2' }, { connect: async () => connection(f.events) });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+  const resources = join(f.home, 'moved');
+  await f.run({ agentVersion: 'v2', resources }, { connect: async () => connection(f.events, 'v2') });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+  await f.run({ agentVersion: 'v2', resources }, { connect: async () => connection(f.events, 'v2'), restart: true });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+});
+
+test('removed own trust stays removed across app-owned upgrades and restarts', async (t) => {
+  const f = fixture(t);
+  await f.run();
+  f.write('setups.json', { version: 1, future: 'person removed trust', setups: [] });
+  const trust = readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8');
+  await f.run({ agentVersion: 'v2' }, { connect: async () => connection(f.events) });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+  await f.run({ agentVersion: 'v2' }, { connect: async () => connection(f.events, 'v2'), restart: true });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+});
+
+test('CLI takeover preserves an existing decision to leave own setup untrusted', async (t) => {
+  const f = fixture(t);
+  f.write('agent.json', { ...DEFAULT_STATE, installedBy: 'cli', agentVersion: 'cli' });
+  f.write('setups.json', { version: 1, setups: [] });
+  const trust = readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8');
+  await f.run({}, { connect: async () => connection(f.events, 'cli') });
+  assert.equal(f.read('agent.json').installedBy, 'app');
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+});
+
+test('first app registration preserves an existing own setup even when its origin differs', async (t) => {
+  const f = fixture(t);
+  f.write('setups.json', { version: 1, future: 'keep', setups: [{ setupId: null, repoUrl: 'github.com/original/setup', checkout: f.paths.repo, trustedAt: 'original', future: 7 }] });
+  const trust = readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8');
+  await f.run();
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+});
+
+test('failed app-owned registration and retry preserve mismatched own trust', async (t) => {
+  const f = fixture(t);
+  await f.run();
+  const trust = readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8');
+  f.origin('https://github.com/other/setup.git');
+  f.fail();
+  await assert.rejects(f.run({ agentVersion: 'v2' }, { connect: async () => connection(f.events) }), /registration failed/);
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+  f.recover();
+  await f.run({ agentVersion: 'v2' });
+  assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
 });

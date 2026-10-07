@@ -7,6 +7,7 @@ import {
 import { decodeWireStatus } from '@nortuscc/agent/ipc/protocol';
 import { acquirePidLock, Backups, Fs, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
+import { loginShell, SHELL_STARTUP_VARIABLES } from './login-environment.ts';
 
 export type LifecycleInput = {
   readonly paths: MachinePathsValue;
@@ -25,7 +26,11 @@ export type LifecycleOptions = {
 
 // Fixed resource argv and resolved machine paths, independent of renderer input.
 export const resourceProgram = (input: LifecycleInput): ServiceProgram => {
-  const env: Record<string, string> = { HOME: input.target.home, PATH: input.env.PATH ?? '' };
+  const env: Record<string, string> = { HOME: input.target.home, PATH: input.env.PATH ?? '', SHELL: loginShell(input.env) };
+  for (const key of SHELL_STARTUP_VARIABLES) {
+    const value = input.env[key];
+    if (value !== undefined) env[key] = value;
+  }
   for (const [key, value] of Object.entries(input.env)) {
     if (value !== undefined && key.startsWith('NORTUSCC_') && !key.startsWith('NORTUSCC_TEST_')) env[key] = value;
   }
@@ -60,8 +65,10 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
     ? renderLaunchAgent(target.label ?? LAUNCH_AGENT_LABEL, program) : renderSystemdUnit(program);
   const markerPath = join(paths.stateRoot, 'agent', 'app-service.json');
   const marker = JSON.stringify({ agentVersion: input.agentVersion, program });
-  const registered = (yield* fs.readText(markerPath))?.trim() === marker;
-  const unitMatches = (yield* fs.readText(unitPath(target))) === rendered;
+  const previousMarker = yield* fs.readText(markerPath);
+  const previousUnit = yield* fs.readText(unitPath(target));
+  const registered = previousMarker?.trim() === marker;
+  const unitMatches = previousUnit === rendered;
   const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(paths, { client: 'app' }))));
   let conn: AgentConnection | undefined;
   if (opened._tag === 'Success') conn = opened.success;
@@ -76,6 +83,11 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   if (!options.restart && conn?.hello.agentVersion === input.agentVersion && recorded.installedBy === 'app'
     && recorded.agentVersion === input.agentVersion && registered && unitMatches) return { stateRoot: paths.stateRoot };
   if ((yield* (yield* SetupsStore).read) === undefined) return yield* Effect.fail(new Error('agent/setups.json is invalid; repair it before installing'));
+  // Existing service metadata or a stored trust decision makes this an update or takeover. Only
+  // a first installation without either may establish trust; removal must stay a person's choice.
+  const firstInstallation = recorded.installedBy === undefined && recorded.agentVersion === undefined
+    && previousMarker === undefined && previousUnit === undefined && conn === undefined
+    && !(yield* fs.exists(join(paths.stateRoot, 'agent', 'setups.json')));
 
   const deadline = Date.now() + (options.timeoutMs ?? 60_000);
   const poll = options.pollMs ?? 500;
@@ -121,7 +133,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   for (const name of ['agent.json', 'setups.json', 'app-service.json']) {
     yield* backups.preserve(join(paths.stateRoot, 'agent', name), name, 'agent');
   }
-  yield* trustOwnSetup('app');
+  if (firstInstallation) yield* trustOwnSetup('app');
   yield* state.update((s) => ({ ...s, installedBy: 'app', agentVersion: input.agentVersion }));
   const serviceOptions = { retryDelayMs: options.retryDelayMs };
   // A reachable unchanged registration remains loaded after graceful shutdown. Recovery of an

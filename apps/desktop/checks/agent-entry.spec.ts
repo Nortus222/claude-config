@@ -99,3 +99,34 @@ test('foreground resource agent serves app hello and survives disconnect until s
     assert.equal(f.probes(), 1);
   } finally { second.close(); }
 });
+
+test('registered service hands selected SHELL and startup directory to its foreground probe', async (t) => {
+  const f = fixture(t);
+  const shell = '/fake/selected-shell';
+  const zdotdir = join(f.home, 'shell-startup');
+  const config = join(f.home, 'shell-config');
+  const startup = join(f.home, 'shell-rc');
+  const env = { ...f.input.env, SHELL: shell, ZDOTDIR: zdotdir, XDG_CONFIG_HOME: config, ENV: startup };
+  const helperProbe = async () => ({ env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, SHELL: '/fake/different-export' } });
+  assert.equal(await runDesktopEntry({ ...f.input, env, probe: helperProbe }), 0);
+  const unit = readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8');
+  const handoff = Object.fromEntries([...unit.matchAll(/<key>(SHELL|ZDOTDIR|XDG_CONFIG_HOME|ENV)<\/key>\s*<string>(.*?)<\/string>/g)].map((match) => [match[1]!, match[2]!]));
+  assert.deepEqual(handoff, { SHELL: shell, ZDOTDIR: zdotdir, XDG_CONFIG_HOME: config, ENV: startup });
+  const controller = new AbortController();
+  let probed = false;
+  const foreground = runDesktopEntry({
+    ...f.input, args: [], signal: controller.signal,
+    env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
+    probe: async (input) => {
+      assert.equal(input.env.SHELL, shell);
+      assert.equal(input.env.ZDOTDIR, zdotdir);
+      assert.equal(input.env.XDG_CONFIG_HOME, config);
+      assert.equal(input.env.ENV, startup);
+      probed = true;
+      controller.abort();
+      return { env: Object.fromEntries(Object.entries(input.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) };
+    },
+  });
+  assert.equal(await foreground, 0, f.stderr.join(''));
+  assert.equal(probed, true);
+});
