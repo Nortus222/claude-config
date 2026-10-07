@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Stream } from 'effect';
 import {
   acquireApplyLock, execute, HistoryStore, plan, pruneBackups, selectAll,
-  type MachineReport, type Plan, type StepRecord,
+  type Actor, type MachineReport, type Plan, type Progress, type StepRecord,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
@@ -23,21 +23,44 @@ export type AutoApplyOutcome =
 const NOTHING: AutoApplyOutcome = { kind: 'nothing' };
 const LOCK_HELD: AutoApplyOutcome = { kind: 'lock-held' };
 
-// Under apply.lock, History brackets the run, so a crash between the two events reads as interrupted.
-// The bracket is uninterruptible: shutdown stops it through `signal`, and it still records how it ended.
+// What a recorded run did, as apply-finished records it.
+export type RunRecord = { readonly steps: ReadonlyArray<StepRecord>; readonly result: 'done' | 'cancelled'; readonly backup: string | null };
+
+// Runs `planned` with apply.lock already held, bracketed in History by apply-started and
+// apply-finished, so a crash between the two reads as interrupted. `onProgress` sees every event.
+// Callers make it uninterruptible: `signal` stops it, and it still records how it ended.
+export const recordedRun = (
+  planned: Plan,
+  report: MachineReport,
+  domains: ReadonlyArray<AgentDomain>,
+  options: {
+    readonly runId: string; readonly actor: Actor; readonly automatic: boolean; readonly signal?: AbortSignal;
+    readonly onProgress?: (progress: Progress) => Effect.Effect<void>;
+  },
+) =>
+  Effect.gen(function* () {
+    const history = yield* HistoryStore;
+    const { runId, actor } = options;
+    yield* history.append({ kind: 'apply-started', actor, runId, automatic: options.automatic, keys: planned.steps.map((s) => s.key) });
+    const steps: StepRecord[] = [];
+    let result: RunRecord['result'] = 'done';
+    let backup: string | null = null;
+    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true }), (event) =>
+      Effect.andThen(Effect.sync(() => {
+        if (event.type === 'finished') steps.push({ key: event.key, outcome: event.outcome, note: event.note });
+        if (event.type === 'cancelled') result = 'cancelled';
+        if (event.type === 'cancelled' || event.type === 'done') backup = event.backups ?? null;
+      }), options.onProgress?.(event) ?? Effect.void));
+    const ran: RunRecord = { steps, result, backup };
+    yield* history.append({ kind: 'apply-finished', actor, runId, ...ran });
+    return ran;
+  });
+
+// Under apply.lock, an automatic recorded run; a failed step pauses auto-apply.
 const runUnderLock = (planned: Plan, report: MachineReport, domains: ReadonlyArray<AgentDomain>, signal?: AbortSignal) =>
   Effect.andThen(acquireApplyLock, Effect.uninterruptible(Effect.gen(function* () {
-    const history = yield* HistoryStore;
     const runId = randomUUID();
-    yield* history.append({ kind: 'apply-started', actor: 'agent', runId, automatic: true, keys: planned.steps.map((s) => s.key) });
-    const ran: { steps: StepRecord[]; result: 'done' | 'cancelled'; backup: string | null } = { steps: [], result: 'done', backup: null };
-    yield* Stream.runForEach(execute(planned, report, domains, { signal, lockHeld: true }), (event) =>
-      Effect.sync(() => {
-        if (event.type === 'finished') ran.steps.push({ key: event.key, outcome: event.outcome, note: event.note });
-        if (event.type === 'cancelled') ran.result = 'cancelled';
-        if (event.type === 'cancelled' || event.type === 'done') ran.backup = event.backups ?? null;
-      }));
-    yield* history.append({ kind: 'apply-finished', actor: 'agent', runId, steps: ran.steps, backup: ran.backup, result: ran.result });
+    const ran = yield* recordedRun(planned, report, domains, { runId, actor: 'agent', automatic: true, signal });
     const failed = ran.steps.filter((s) => s.outcome === 'failed').length;
     if (failed > 0) yield* pause(`${failed} step(s) failed in auto-apply run ${runId}`, runId);
     const outcome: AutoApplyOutcome = { kind: 'ran', runId, result: ran.result, failed, backup: ran.backup };

@@ -277,3 +277,13 @@ test('an unavailable effective configuration reports REVISION_UNAVAILABLE and ap
   assert.deepEqual(settings(), { theme: 'light' });
   assert.deepEqual(await m.kinds(), ['revision-verified']);
 });
+
+test('an inspect-only job records revision verdicts but no batches, and applies nothing', async () => {
+  const { m, fixture, settings } = await scenario({ policy: 'auto-apply' });
+  const { status, inspection } = await m.run(runJob(() => m.domains, { inspectOnly: true }), fixture.source);
+  assert.equal(status.autoApply, undefined);
+  assert.deepEqual(settings(), { theme: 'light' });
+  assert.deepEqual(await m.kinds(), ['revision-verified']);
+  assert.equal(inspection?.revision, HEAD);
+  assert.ok(inspection?.report.items.some((i) => i.key === EFFORT_KEY));
+});

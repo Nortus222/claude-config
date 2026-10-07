@@ -30,8 +30,10 @@ export type AgentStatus = {
 };
 
 // What a job inspected, and with what: its paths at the snapshot, and the domains built from them.
+// `revision` is the tracked branch head the effective configuration is built at, when the job fetched it.
 export type JobInspection = {
   readonly paths: MachinePathsValue;
+  readonly revision: Revision | null;
   readonly desired: DesiredConfig;
   readonly report: MachineReport;
   readonly domains: ReadonlyArray<AgentDomain>;
@@ -79,8 +81,9 @@ const recordBatch = (events: ReadonlyArray<HistoryEvent>, kind: 'held' | 'ready'
 // One job: refresh, resolve, inspect, sort, classify, act by policy. A checkout this machine does
 // not trust is only inspected for drift, against its own HEAD. Each inspection builds its domains
 // from paths whose `repo` is the snapshot inspected, and the auto-apply reuses them. It never fails
-// on what it reads from the setup; those outcomes are reported in the status.
-export const runJob = (domains: AgentDomains, options: { readonly signal?: AbortSignal } = {}) =>
+// on what it reads from the setup; those outcomes are reported in the status. `inspectOnly` resolves
+// and inspects (still recording revision verdicts) but records no batch and applies nothing.
+export const runJob = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly inspectOnly?: boolean } = {}) =>
   Effect.gen(function* () {
     const history = yield* HistoryStore;
     const agentState = yield* AgentStateStore;
@@ -102,12 +105,12 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
         return inspection ? { status, inspection } : { status };
       });
     // Inspects `desired` with domains built from paths at the snapshot in `repo`.
-    const inspectAt = (desired: DesiredConfig, repo: string) =>
+    const inspectAt = (desired: DesiredConfig, repo: string, revision: Revision | null) =>
       Effect.gen(function* () {
         const jobPaths = { ...paths, repo };
         const built = domains(jobPaths);
         const report = yield* inspect(desired, built);
-        const inspection: JobInspection = { paths: jobPaths, desired, report, domains: built, trusted };
+        const inspection: JobInspection = { paths: jobPaths, revision, desired, report, domains: built, trusted };
         return inspection;
       });
     // MachinePaths.repo at a snapshot's files, and a fresh backup folder.
@@ -117,7 +120,7 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
     if (!trusted) {
       const current = yield* source.current.pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)));
       if (current === undefined) return yield* finish({ error: 'REVISION_UNAVAILABLE' });
-      const inspection = yield* inspectAt(current.desired, current.repo).pipe(Effect.provide(at(current.repo)));
+      const inspection = yield* inspectAt(current.desired, current.repo, null).pipe(Effect.provide(at(current.repo)));
       const { report } = inspection;
       return yield* finish({ drift: report.items.filter(differs).map((i) => i.key), probeErrors: report.probeErrors }, inspection);
     }
@@ -149,7 +152,7 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
 
     // 3-6 at the effective revision's files.
     return yield* Effect.gen(function* () {
-      const inspection = yield* inspectAt(resolved.effective.desired, resolved.effective.repo);
+      const inspection = yield* inspectAt(resolved.effective.desired, resolved.effective.repo, head ?? null);
       const { report } = inspection;
       const base: Partial<AgentStatus> = { conflicts: resolved.conflicts, probeErrors: report.probeErrors, ...decisionsError };
       if (resolved.effective.desired.issues.length > 0) {
@@ -162,12 +165,12 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
       // A paused auto-apply machine leaves inert items to a person, as notify does. An unpaused one
       // applies them, so nothing stays ready and a stale ready batch is reset.
       const notifies = state.policy === 'notify' || (state.policy === 'auto-apply' && state.paused !== null);
-      if (state.policy !== 'manual') {
+      if (state.policy !== 'manual' && !options.inspectOnly) {
         yield* recordBatch(events, 'held', held.map(reasonOf));
         yield* recordBatch(events, 'ready', notifies ? inert.map(reasonOf) : []);
       }
       let applied: AutoApplyOutcome | undefined;
-      if (state.policy === 'auto-apply' && state.paused === null && inert.length > 0) {
+      if (!options.inspectOnly && state.policy === 'auto-apply' && state.paused === null && inert.length > 0) {
         applied = yield* autoApply(report, inert.map((p) => p.key), inspection.domains, options);
       }
       return yield* finish({ ...base, pending: sorted.pending, drift: sorted.drift, ...(applied ? { autoApply: applied } : {}) }, inspection);
