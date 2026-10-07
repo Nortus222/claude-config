@@ -108,9 +108,9 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
         child.stderr?.setEncoding('utf8');
         child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
-        // A tool may close stdin before consuming all input. Its exit still determines success.
+        // A closed stdin pipe reports EPIPE or EOF (Windows); the child's exit still determines success.
         child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
-          if (err.code !== 'EPIPE') resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'stdin write failed' })));
+          if (err.code !== 'EPIPE' && err.code !== 'EOF') resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'stdin write failed' })));
         });
         if (command.input !== undefined) child.stdin?.end(command.input, 'utf8');
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));

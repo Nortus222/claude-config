@@ -1,10 +1,11 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { spawnSync } from 'node:child_process';
+import childProcess, { spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { Effect, Exit, Fiber } from 'effect';
 import { nodeProcesses, Processes } from '../src/index.ts';
@@ -187,10 +188,49 @@ test('command input is delivered through stdin and then closed', async () => {
   assert.deepEqual(Exit.isSuccess(exit) && exit.value, { code: 0, stdout: 'secret é\n', stderr: '' });
 });
 
-test('a child closing stdin early does not turn EPIPE into an unhandled error', async () => {
+test('a child closing stdin early still returns its exit code', async () => {
   const exit = await run(Processes.use((p) => p.run({ cmd: node, args: ['-e', 'process.exit(0)'], input: 'x'.repeat(1024 * 1024), output: 'capture', stderr: 'capture' })));
-  assert.ok(Exit.isSuccess(exit));
+  assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
   assert.equal(Exit.isSuccess(exit) && exit.value.code, 0);
+});
+
+// Real child and streams; inject the platform's write error at the adapter's stdin boundary.
+const stdinFailure = async (t: TestContext, errorCode: string, exitCode: number) => {
+  const spawn = childProcess.spawn;
+  t.mock.method(childProcess, 'spawn', (...args: Parameters<typeof spawn>) => {
+    const child = spawn(...args);
+    if (args[0] !== node) return child;
+    const stdin = child.stdin;
+    assert.ok(stdin);
+    t.mock.method(stdin, 'end', () => {
+      stdin.destroy(Object.assign(new Error('write failed: stdin-secret-fixture'), { code: errorCode }));
+      return stdin;
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  return run(Processes.use((p) => p.run({
+    cmd: node, args: ['-e', `process.exit(${exitCode})`], input: 'stdin-secret-fixture', output: 'capture', stderr: 'capture',
+  })));
+};
+
+for (const errorCode of ['EPIPE', 'EOF']) {
+  for (const exitCode of [0, 7]) {
+    test(`stdin ${errorCode} preserves the child's exit code ${exitCode}`, async (t) => {
+      const exit = await stdinFailure(t, errorCode, exitCode);
+      assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
+      assert.deepEqual(exit.value, { code: exitCode, stdout: '', stderr: '' });
+    });
+  }
+}
+
+test('an unexpected stdin write error fails without exposing input or the error message', async (t) => {
+  const exit = await stdinFailure(t, 'EIO', 0);
+  assert.ok(Exit.isFailure(exit));
+  assert.match(String(exit.cause), /LaunchFailed/);
+  assert.match(String(exit.cause), /stdin write failed/);
+  assert.ok(!String(exit.cause).includes('stdin-secret-fixture'));
 });
 
 test('interrupting a command with piped stdin still waits for process cleanup', async (t) => {
