@@ -73,6 +73,7 @@ test('a hold on a commit the checkout lacks refuses apply', async () => {
   const result = await runCli(m, ['apply']);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /could not be fetched: no such commit in the checkout/);
+  assert.match(result.stderr, new RegExp(`${EFFORT} is held.*nortuscc sync --release ${EFFORT}`, 's'));
 });
 
 test('items a raw git pull brought in wait for nortuscc sync, and fail status', async () => {

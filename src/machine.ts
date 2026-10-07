@@ -106,7 +106,18 @@ export function openDesired(options: { mode?: ConfigMode } = {}) {
     const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
     const snapshot = yield* desiredFor({
       repo: opened.checkout, head: { kind: 'worktree' }, held, into, overrides: { ...opened.overrides, value },
-    }).pipe(Effect.provide(opened.layer));
+    }).pipe(
+      Effect.provide(opened.layer),
+      // A hold whose commit is gone cannot be composed; releasing it is the only way out.
+      Effect.catchTag('RevisionUnavailable', (err) => {
+        const items = Object.keys(held).filter((id) => held[id] === err.revision).sort();
+        const release = items.map((id) => `nortuscc sync --release ${id}`).join('\n  ');
+        return Effect.fail(new Error(
+          `${items.join(', ')} ${items.length === 1 ? 'is' : 'are'} held at ${err.revision}, which this checkout lacks `
+          + `(${err.message}). Take the checkout's value instead with:\n  ${release}`,
+        ));
+      }),
+    );
     const paths = { ...opened.paths, repo: snapshot.repo };
     const composed: Opened = { ...opened, paths, layer: cliLayer(paths), desired: snapshot.desired, held };
     return composed;
