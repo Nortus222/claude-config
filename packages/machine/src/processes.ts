@@ -8,6 +8,8 @@ export type Command = {
   readonly cmd: string;
   readonly args: readonly string[];
   readonly cwd?: string;
+  // Merged over the layer's environment for this command only.
+  readonly env?: Readonly<Record<string, string>>;
   readonly output: 'inherit' | 'capture';
 };
 export type Completed = { readonly code: number; readonly stdout: string };
@@ -31,6 +33,14 @@ type Env = Readonly<Record<string, string | undefined>>;
 
 // Windows variables are case-insensitive: `Path` and `PATH` name one variable.
 const lookup = (env: Env, name: string) => Object.entries(env).find(([key]) => key.toUpperCase() === name)?.[1];
+
+// `env` with `extra` set over it; on Windows an extra name replaces the same name in any case.
+const withVariables = (env: Env, extra: Readonly<Record<string, string>> | undefined): Env => {
+  if (extra === undefined) return env;
+  const names = new Set(Object.keys(extra).map((name) => (process.platform === 'win32' ? name.toUpperCase() : name)));
+  const kept = Object.entries(env).filter(([key]) => !names.has(process.platform === 'win32' ? key.toUpperCase() : key));
+  return { ...Object.fromEntries(kept), ...extra };
+};
 
 const isFile = (path: string) => statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
 
@@ -64,8 +74,8 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
     run: (command) =>
       Effect.callback<Completed, LaunchFailed>((resume) => {
         const base: Env = options.env ?? process.env;
-        const env = options.path === undefined ? base
-          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path };
+        const env = withVariables(options.path === undefined ? base
+          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path }, command.env);
         const batch = process.platform === 'win32' ? batchFile(command.cmd, command.cwd, env) : undefined;
         if (batch !== undefined && command.args.some((arg) => /[\r\n]/.test(arg))) {
           resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'a batch file cannot take an argument with a line break' })));

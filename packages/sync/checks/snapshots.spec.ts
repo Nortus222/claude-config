@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { pruneSnapshots, SNAPSHOT_FORMAT, snapshotFor, snapshotKey, SNAPSHOTS_KEPT } from '../src/index.ts';
+import { pruneSnapshots, SNAPSHOT_FORMAT, snapshotFor, snapshotKey, SNAPSHOTS_KEPT, STALE_STAGING_MS } from '../src/index.ts';
 import { runSync, tempRepo } from './support/repo.ts';
 
 const NONE = { value: {}, source: 'overrides.json', issues: [] };
@@ -34,12 +35,14 @@ test(`pruning keeps the ${SNAPSHOTS_KEPT} most recently used, the ones in use, a
     }));
     repos.push(snapshot.repo);
   }
-  writeFileSync(join(stateRoot, 'snapshots', '.staging-crashed'), 'x');
+  const now = new Date(Date.UTC(2026, 9, 8));
+  const crashed = `.staging-${'0'.repeat(32)}-${now.getTime() - 2 * STALE_STAGING_MS}-${randomUUID()}`;
+  mkdirSync(join(stateRoot, 'snapshots', crashed));
   mkdirSync(join(stateRoot, 'snapshots', 'not-a-snapshot'));
-  await runSync(pruneSnapshots(stateRoot, [repos[0]!]));
+  await runSync(pruneSnapshots(stateRoot, [repos[0]!], now));
   const left = readdirSync(join(stateRoot, 'snapshots')).sort();
   assert.deepEqual(left, [repos[0]!, ...repos.slice(2)].map((r) => r.split(/[\\/]/).pop()!).concat('not-a-snapshot').sort());
-  assert.equal(existsSync(join(stateRoot, 'snapshots', '.staging-crashed')), false);
+  assert.equal(existsSync(join(stateRoot, 'snapshots', crashed)), false);
 });
 
 test('the snapshot key covers the composition format, so a new format never reuses old folders', async () => {
@@ -49,4 +52,18 @@ test('the snapshot key covers the composition format, so a new format never reus
   const snapshot = await runSync(snapshotFor({ ...key, repo: repo.dir, stateRoot, overrides: NONE, now: new Date() }));
   assert.equal(snapshot.repo, join(stateRoot, 'snapshots', snapshotKey(key)));
   assert.notEqual(snapshotKey(key, SNAPSHOT_FORMAT + 1), snapshotKey(key));
+});
+
+test('pruning removes only a staging folder older than the stale age, never a fresh or undated one', async () => {
+  const repo = tempRepo();
+  const stateRoot = join(repo.root, 'state');
+  const root = join(stateRoot, 'snapshots');
+  const now = new Date('2026-10-07T12:00:00.000Z');
+  const key = snapshotKey({ commit: repo.first, held: {} });
+  const fresh = `.staging-${key}-${now.getTime()}-${randomUUID()}`;
+  const old = `.staging-${key}-${now.getTime() - 2 * 60 * 60 * 1000}-${randomUUID()}`;
+  const legacy = `.staging-${key}-${randomUUID()}`;
+  for (const name of [fresh, old, legacy]) mkdirSync(join(root, name), { recursive: true });
+  await runSync(pruneSnapshots(stateRoot, [], now));
+  assert.deepEqual(readdirSync(root).sort(), [fresh, legacy].sort());
 });

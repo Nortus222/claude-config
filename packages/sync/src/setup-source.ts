@@ -106,7 +106,7 @@ export const setupSourceLayer = (
         .map((d) => d.itemId));
       const appliedSnapshot = yield* snapshot(applied, holds);
       const effectiveSnapshot = yield* snapshot(head, nextHolds({ holds, changes, accepted, applied }));
-      yield* pruneSnapshots(paths.stateRoot, [appliedSnapshot.repo, effectiveSnapshot.repo]);
+      yield* pruneSnapshots(paths.stateRoot, [appliedSnapshot.repo, effectiveSnapshot.repo], now());
       const result: Effective = {
         applied: { ...appliedSnapshot, revision: applied },
         effective: effectiveSnapshot,

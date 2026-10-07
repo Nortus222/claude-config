@@ -97,6 +97,16 @@ test('the env option is the child\'s whole environment', async () => {
   assert.deepEqual(Exit.isSuccess(exit) && JSON.parse(exit.value.stdout), ['yes', null]);
 });
 
+test('a command\'s env is merged over the environment for that command only', async () => {
+  const probe = ['-e', 'process.stdout.write(process.env.NORTUSCC_PROBE ?? "")'];
+  const exit = await run(Effect.all([
+    Processes.use((p) => p.run({ cmd: node, args: probe, env: { NORTUSCC_PROBE: 'x' }, output: 'capture' })),
+    exec(probe),
+  ]));
+  assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
+  assert.deepEqual(Exit.isSuccess(exit) && exit.value.map((c) => c.stdout), ['x', '']);
+});
+
 test('inherit: stderr sends an inherit command\'s output to stderr and gives it no stdin', () => {
   const processes = pathToFileURL(join(import.meta.dirname, '..', 'src', 'processes.ts')).href;
   const script = `
