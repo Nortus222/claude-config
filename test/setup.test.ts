@@ -9,12 +9,14 @@ import { installerCalls, machine, readJson, type Machine } from './support/cli.t
 // The interactive setup, in process: a terminal is stood in for by deps, the machine is a temp one.
 
 const ORIGINAL_ENV = { ...process.env };
+const ORIGINAL_PATH = process.env.PATH;
 test.after(() => { process.env = ORIGINAL_ENV; });
 
 async function setup(m: Machine, args: string[], deps: SetupDeps): Promise<{ code: number; out: string }> {
   Object.assign(process.env, {
-    PATH: `${m.bin}${delimiter}${ORIGINAL_ENV.PATH}`,
+    PATH: `${m.bin}${delimiter}${ORIGINAL_PATH}`,
     HOME: m.home,
+    USERPROFILE: m.home,
     NORTUSCC_CLAUDE_DIR: m.claude,
     NORTUSCC_CODEX_DIR: m.codex,
     NORTUSCC_OPENROUTER_CODEX_DIR: m.openrouter,

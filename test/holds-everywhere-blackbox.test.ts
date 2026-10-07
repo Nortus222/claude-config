@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseSkillsManifest } from '@nortuscc/profile-engine';
 import { git, installerCalls, machine, readJson, runCli, writeFakeBin, type Machine } from './support/cli.ts';
 
@@ -59,7 +59,8 @@ test('an invalid sync.json refuses uninstall and is left as it was', async () =>
 
 // `pinme` from a local upstream `o/r`, installed at `sha` and pinned there in a committed checkout. Answers that commit.
 function pinnedSkill(m: Machine): { sha: string; upstream: string; pinned: string } {
-  const upstream = mkdtempSync(join(tmpdir(), 'nortuscc-holds-upstream-'));
+  const upstream = join(m.home, 'upstream');
+  mkdirSync(upstream);
   git(upstream, 'init', '-q');
   mkdirSync(join(upstream, 's', 'pinme'), { recursive: true });
   writeFileSync(join(upstream, 's', 'pinme', 'SKILL.md'), '# pinme\n');
@@ -77,7 +78,7 @@ function pinnedSkill(m: Machine): { sha: string; upstream: string; pinned: strin
   symlinkSync(stored, join(m.claude, 'skills', 'pinme'), 'dir');
   mkdirSync(join(m.codex, 'skills', 'pinme'), { recursive: true });
   writeFileSync(join(dirname(m.agents), '.skill-lock.json'), JSON.stringify({ skills: { pinme: {
-    source: 'o/r', sourceUrl: `file://${upstream}`, skillPath: 's/pinme/SKILL.md', skillFolderHash: 'x', ref: sha,
+    source: 'o/r', sourceUrl: pathToFileURL(upstream).href, skillPath: 's/pinme/SKILL.md', skillFolderHash: 'x', ref: sha,
   } } }));
   return { sha, upstream, pinned: git(m.repo, 'rev-parse', 'HEAD') };
 }
@@ -132,6 +133,7 @@ const UV_NPX = `#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 const argv = process.argv.slice(2);
 if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
   appendFileSync(process.env.NORTUSCC_TEST_LOG, JSON.stringify({ cmd: 'npx', args: argv }) + '\\n');
@@ -143,7 +145,7 @@ if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
   for (const n of after('--skill')) {
     mkdirSync(join(store, n), { recursive: true });
     writeFileSync(join(store, n, 'SKILL.md'), '# ' + n + '\\n');
-    const tree = execFileSync('git', ['-C', url.slice('file://'.length), 'rev-parse', 'HEAD:s/' + n], { encoding: 'utf8' }).trim();
+    const tree = execFileSync('git', ['-C', fileURLToPath(url), 'rev-parse', 'HEAD:s/' + n], { encoding: 'utf8' }).trim();
     lock.skills[n] = { source: 'u/v', sourceUrl: url, skillPath: 's/' + n + '/SKILL.md', skillFolderHash: tree };
     if (after('--agent').includes('claude-code')) {
       const placed = join(process.env.NORTUSCC_CLAUDE_DIR, 'skills', n);
@@ -158,7 +160,8 @@ if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
 
 // A local upstream `u/v` offering `fresh` and `wizard`, with `fresh` installed from it. Answers its path.
 function uvSource(m: Machine): string {
-  const uv = mkdtempSync(join(tmpdir(), 'nortuscc-holds-uv-'));
+  const uv = join(m.home, 'uv');
+  mkdirSync(uv);
   git(uv, 'init', '-q');
   for (const name of ['fresh', 'wizard']) {
     mkdirSync(join(uv, 's', name), { recursive: true });
@@ -174,7 +177,7 @@ function uvSource(m: Machine): string {
   mkdirSync(join(m.codex, 'skills', 'fresh'), { recursive: true });
   const lockPath = join(dirname(m.agents), '.skill-lock.json');
   const lock = existsSync(lockPath) ? readJson(lockPath) : { skills: {} };
-  lock.skills.fresh = { source: 'u/v', sourceUrl: `file://${uv}`, skillPath: 's/fresh/SKILL.md', skillFolderHash: git(uv, 'rev-parse', 'HEAD:s/fresh') };
+  lock.skills.fresh = { source: 'u/v', sourceUrl: pathToFileURL(uv).href, skillPath: 's/fresh/SKILL.md', skillFolderHash: git(uv, 'rev-parse', 'HEAD:s/fresh') };
   writeFileSync(lockPath, JSON.stringify(lock));
   writeFakeBin(m.bin, 'npx', UV_NPX);
   return uv;
@@ -188,14 +191,16 @@ test('update writes the manifest into the checkout, with a held skill as the che
   writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: {} }, null, 2) + '\n');
   git(m.repo, 'commit', '-qam', 'drop pinme, add u/v');
   hold(m, { 'skill:o/r/pinme': pinned });
-  const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
+  const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: pathToFileURL(uv).href } });
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /skills-manifest\.txt written — 2 skill\(s\)/);
   const manifest = readFileSync(join(m.repo, 'skills-manifest.txt'), 'utf8');
   assert.deepEqual(parseSkillsManifest(manifest).map((g) => [g.source, g.skills]), [['u/v', ['fresh', 'wizard']]]);
 });
 
-test('update reports a manifest it could not carry back to the checkout, and still closes its report', async () => {
+test('update reports a manifest it could not carry back to the checkout, and still closes its report', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory writes');
+  if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const m = machine();
   const { pinned } = pinnedSkill(m);
   const uv = uvSource(m);
@@ -206,7 +211,7 @@ test('update reports a manifest it could not carry back to the checkout, and sti
   // A read-only checkout directory refuses the atomic write's temp file.
   chmodSync(m.repo, 0o555);
   try {
-    const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
+    const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: pathToFileURL(uv).href } });
     assert.equal(result.code, 1, result.stdout + result.stderr);
     assert.match(result.stdout, /skills-manifest\.txt failed — /);
     assert.doesNotMatch(result.stdout, /nortuscc push/);
@@ -228,7 +233,7 @@ test('update does not offer or adopt a skill held absent', async () => {
   writeFileSync(manifest, '[u/v]\nfresh\nwizard\n');
   git(m.repo, 'commit', '-qam', 'add wizard');
   hold(m, { 'skill:u/v/wizard': without });
-  const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
+  const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: pathToFileURL(uv).href } });
   assert.equal(result.code, 1, result.stdout + result.stderr);
   assert.doesNotMatch(result.stdout, /available/);
   assert.match(result.stdout, /not found upstream.*wizard/s);

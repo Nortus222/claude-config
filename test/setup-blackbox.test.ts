@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { RUNTIME_INSTALL } from '../bin/launcher.mjs';
-import { git, machine, readJson, REPO, runCli, type Machine } from './support/cli.ts';
+import { git, machine, readJson, REPO, runCli, writeFakeBin, type Machine } from './support/cli.ts';
 
 // `nortuscc setup` from the outside: a temp machine, a temp repo, fake installers, and for the
 // clone paths a fake `git` and a fake npm, so nothing reaches the network or the real home.
@@ -15,15 +15,15 @@ const overridesPath = (m: Machine) => join(m.state, 'overrides.json');
 const read = (path: string) => readFileSync(path, 'utf8');
 const lines = (path: string) => existsSync(path) ? read(path).split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 
-const REAL_GIT = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+const REAL_GIT = execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', ['git'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0]!;
 
 // A `git` first on PATH that logs every argv, answers `clone <url> <dir>` by copying
 // FAKE_GIT_SOURCE into <dir>, and passes everything else to the real git.
 function fakeGit(m: Machine, source?: string): { env: Record<string, string>; calls: () => string[][] } {
-  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-git-'));
+  const dir = join(m.home, 'fake git');
+  mkdirSync(dir);
   const log = join(m.home, 'git.log');
-  const path = join(dir, 'git');
-  writeFileSync(path, `#!/usr/bin/env node
+  writeFakeBin(dir, 'git', `#!/usr/bin/env node
 import { appendFileSync, cpSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 const argv = process.argv.slice(2);
@@ -35,9 +35,23 @@ if (argv[0] === 'clone') {
 const real = spawnSync(${JSON.stringify(REAL_GIT)}, argv, { stdio: 'inherit' });
 process.exit(real.status ?? 1);
 `);
-  chmodSync(path, 0o755);
+  // The dependency-free launcher spawns native Git directly, so a .cmd shim cannot intercept it.
+  const preload = join(dir, 'git-preload.mjs');
+  if (process.platform === 'win32') writeFileSync(preload, `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawnSync = childProcess.spawnSync;
+childProcess.spawnSync = (command, args, options) => command === 'git'
+  ? spawnSync(process.execPath, [${JSON.stringify(join(dir, 'git'))}, ...args], options)
+  : spawnSync(command, args, options);
+syncBuiltinESMExports();
+`);
   return {
-    env: { PATH: `${dir}${delimiter}${m.bin}${delimiter}${process.env.PATH}`, ...(source ? { FAKE_GIT_SOURCE: source } : {}) },
+    env: {
+      PATH: `${dir}${delimiter}${m.bin}${delimiter}${process.env.PATH}`,
+      ...(process.platform === 'win32' ? { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(preload).href}` } : {}),
+      ...(source ? { FAKE_GIT_SOURCE: source } : {}),
+    },
     calls: () => lines(log),
   };
 }
@@ -99,7 +113,8 @@ test('--dir naming an existing directory that is not a checkout is refused and t
   const m = machine();
   mkdirSync(m.state, { recursive: true });
   writeFileSync(statePath(m), JSON.stringify({ version: 1, repo: m.repo, files: {} }));
-  const partial = mkdtempSync(join(tmpdir(), 'nortuscc-interrupted-clone-'));
+  const partial = join(m.home, 'interrupted-clone');
+  mkdirSync(partial);
   writeFileSync(join(partial, 'partial'), 'left behind by an interrupted clone\n');
 
   const result = await runCli(m, ['setup', '--yes', '--dir', partial, '--repo', 'file:///nortuscc-never-cloned']);
@@ -157,7 +172,7 @@ test('without a terminal and without --yes, setup refuses and changes nothing', 
 // An npx copy runs from npm's cache under node_modules: it clones a durable checkout, installs its
 // runtime and the global command from it, then hands the run to that checkout's own CLI.
 function npxCopy(m: Machine) {
-  const copy = join(mkdtempSync(join(tmpdir(), 'nortuscc-npx-')), 'node_modules', 'nortuscc');
+  const copy = join(m.home, 'npm-cache', 'node_modules', 'nortuscc');
   mkdirSync(copy, { recursive: true });
   cpSync(join(REPO, 'bin'), join(copy, 'bin'), { recursive: true });
   cpSync(join(REPO, 'package.json'), join(copy, 'package.json'));

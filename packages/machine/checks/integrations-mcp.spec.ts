@@ -62,7 +62,7 @@ test('the MCP list command is codex mcp list --json', () => {
 // A disabled server is still configured: re-adding it would overwrite the owner's choice.
 test('configured servers, enabled or not, are read by name from codex mcp list --json', async () => {
   const fake = fakeBin();
-  fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', [...SERVERS, { enabled: true }]);
+  fake.codex({ installed: [] }, { marketplaces: [] }, 'process.exit(0)', [...SERVERS, { enabled: true }]);
   const state = await mcpState(fake.path);
   assert.deepEqual([...state.servers], ['node_repl', 'code-review']);
   assert.equal(state.error, undefined);
@@ -72,7 +72,7 @@ test('configured servers, enabled or not, are read by name from codex mcp list -
 
 test('an empty list means nothing configured', async () => {
   const fake = fakeBin();
-  fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', []);
+  fake.codex({ installed: [] }, { marketplaces: [] }, 'process.exit(0)', []);
   assert.deepEqual(await mcpState(fake.path), { servers: new Set() });
 });
 
@@ -82,12 +82,12 @@ test('an absent codex, a non-zero exit or output of another shape is nothing con
   assert.equal(absent.servers.size, 0);
   assert.match(absent.error ?? '', /could not list Codex MCP servers: could not launch codex/);
   const exits = fakeBin();
-  exits.tool('codex', 'exit 3');
+  exits.tool('codex', 'process.exit(3)');
   assert.match((await mcpState(exits.path)).error ?? '', /could not list Codex MCP servers: exited 3/);
   const garbage = fakeBin();
-  garbage.tool('codex', 'echo not-json');
+  garbage.tool('codex', 'console.log("not-json")');
   assert.match((await mcpState(garbage.path)).error ?? '', /could not read the Codex MCP server list/);
   const object = fakeBin();
-  object.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', { servers: SERVERS });
+  object.codex({ installed: [] }, { marketplaces: [] }, 'process.exit(0)', { servers: SERVERS });
   assert.match((await mcpState(object.path)).error ?? '', /could not read the Codex MCP server list/);
 });

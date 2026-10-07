@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
@@ -8,7 +9,7 @@ import { AgentError, connectAgent, type AgentConnection } from '../../../src/age
 import { runDesktopEntry } from '../agent/main.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
-  const home = mkdtempSync('/tmp/nae-');
+  const home = mkdtempSync(join(tmpdir(), 'nae-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const resources = join(home, 'resources');
   const repo = join(home, 'repo');
@@ -70,7 +71,10 @@ test('entry rejects resource version errors and arbitrary arguments before regis
   assert.deepEqual(f.commands, []);
 });
 
-test('foreground resource agent serves app hello and survives disconnect until shutdown', { timeout: 10000 }, async (t) => {
+test('foreground resource agent serves app hello and survives disconnect until shutdown', {
+  skip: process.platform === 'win32' ? 'Windows agent IPC is unsupported (ADR 0019)' : false,
+  timeout: 10000,
+}, async (t) => {
   const f = fixture(t);
   const controller = new AbortController();
   t.after(() => controller.abort());
@@ -115,7 +119,7 @@ test('registered service hands selected SHELL and startup directory to its foreg
   const controller = new AbortController();
   let probed = false;
   const foreground = runDesktopEntry({
-    ...f.input, args: [], signal: controller.signal,
+    ...f.input, args: [], platform: process.platform, signal: controller.signal,
     env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
     probe: async (input) => {
       assert.equal(input.env.SHELL, shell);
@@ -131,7 +135,9 @@ test('registered service hands selected SHELL and startup directory to its foreg
   assert.equal(probed, true);
 });
 
-test('startup selectors introduced by the helper probe remain absent before the foreground probe', async (t) => {
+test('startup selectors introduced by the helper probe remain absent before the foreground probe', {
+  skip: process.platform === 'win32' ? 'requires a POSIX Git wrapper and Unix agent IPC (ADR 0019)' : false,
+}, async (t) => {
   const f = fixture(t);
   const bin = join(f.home, 'bin');
   mkdirSync(bin);

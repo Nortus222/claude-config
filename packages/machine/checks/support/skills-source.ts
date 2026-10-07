@@ -1,7 +1,8 @@
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '../../src/index.ts';
 
@@ -15,6 +16,7 @@ export const skillSource = (home: string) => {
   const dir = join(home, 'upstream');
   mkdirSync(dir, { recursive: true });
   git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'uploadpack.allowFilter', 'true');
   // Replaces the work tree's files with `files` and commits; returns the commit sha.
   const commit = (files: Files) => {
@@ -25,11 +27,15 @@ export const skillSource = (home: string) => {
       if (typeof content !== 'string') chmodSync(join(dir, path), content.mode);
     }
     git(dir, 'add', '-A');
+    // Windows chmod cannot set Git's executable bit; set the fixture's committed mode explicitly.
+    for (const [path, content] of Object.entries(files)) {
+      git(dir, 'update-index', typeof content === 'string' ? '--chmod=-x' : '--chmod=+x', '--', path);
+    }
     git(dir, 'commit', '-qm', 'c', '--allow-empty');
     return git(dir, 'rev-parse', 'HEAD');
   };
   const branch = (name: string, at: string) => git(dir, 'branch', name, at);
-  return { dir, url: `file://${dir}`, commit, branch };
+  return { dir, url: pathToFileURL(dir).href, commit, branch };
 };
 
 const lockFile = (paths: MachinePathsValue) => join(paths.agentsSkills, '..', '.skill-lock.json');
@@ -70,10 +76,15 @@ export const fakeInstaller = (
       for (const n of valuesOf('--skill')) {
         if (partial?.writes && !partial.writes.includes(n)) continue;
         const out = mkdtempSync(join(tmpdir(), 'fake-installer-'));
-        execSync(`git archive ${rev} skills/${n} | tar -x -C '${out}'`, { cwd: source.dir });
-        rmSync(join(paths.agentsSkills, n), { recursive: true, force: true });
-        mkdirSync(paths.agentsSkills, { recursive: true });
-        cpSync(join(out, 'skills', n), join(paths.agentsSkills, n), { recursive: true });
+        try {
+          const archive = execFileSync('git', ['archive', rev, `skills/${n}`], { cwd: source.dir });
+          execFileSync('tar', ['-x', '-C', out], { input: archive });
+          rmSync(join(paths.agentsSkills, n), { recursive: true, force: true });
+          mkdirSync(paths.agentsSkills, { recursive: true });
+          cpSync(join(out, 'skills', n), join(paths.agentsSkills, n), { recursive: true });
+        } finally {
+          rmSync(out, { recursive: true, force: true });
+        }
         lock[n] = { source: name, sourceUrl: source.url, skillPath: `skills/${n}/SKILL.md`, ...(hash < 0 ? {} : { ref }) };
         if (valuesOf('--agent').includes('claude-code')) mkdirSync(join(paths.claude, 'skills', n), { recursive: true });
       }

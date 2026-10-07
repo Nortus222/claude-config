@@ -6,6 +6,9 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { test, type TestContext } from 'node:test';
 
+const unixSmokeSkip = process.platform === 'win32' ? 'requires POSIX smoke tools and Unix agent IPC (ADR 0019)' : false;
+const resourceSkip = unixSmokeSkip || (process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false);
+
 type RecordedChild = { pid: number; home: string };
 
 async function stopRecordedChild(child: RecordedChild) {
@@ -38,7 +41,7 @@ async function cleanupRecordedFixture(app: string, record: string, child?: Recor
 
 // Ownership lives outside HOME, so parent timeouts and premature HOME removal cannot erase it.
 function smokeFixture(t: TestContext) {
-  const root = mkdtempSync('/tmp/nsm-');
+  const root = mkdtempSync(join(tmpdir(), 'nsm-'));
   const app = join(root, 'app');
   const temporaryRoot = join(root, 'tmp');
   const record = join(root, 'children.json');
@@ -62,7 +65,7 @@ function smokeFixture(t: TestContext) {
 }
 
 test('bundled smoke exercises authenticated socket operations and rejects unsafe records on an inert setup', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 60_000,
 }, async (t) => {
   const f = smokeFixture(t);
@@ -73,7 +76,7 @@ test('bundled smoke exercises authenticated socket operations and rejects unsafe
 });
 
 test('smoke waits for its foreground child to stop and removes HOME when a socket record fails validation', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
   const app = mkdtempSync(join(tmpdir(), 'nsm-'));
@@ -102,7 +105,7 @@ createServer((socket) => socket.on('data', () => socket.write('{"version":3,"une
 });
 
 test('packaged smoke passes its resolved temporary root to the native child', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 20_000,
 }, async (t) => {
   const f = smokeFixture(t);
@@ -127,8 +130,8 @@ test('packaged smoke passes its resolved temporary root to the native child', {
 });
 
 for (const code of ['ENOENT', 'EACCES']) {
-  test(`smoke removes its temporary HOME when the bundled runtime cannot launch (${code})`, { timeout: 10_000 }, async (t) => {
-    const app = mkdtempSync('/tmp/nsm-');
+  test(`smoke removes its temporary HOME when the bundled runtime cannot launch (${code})`, { skip: unixSmokeSkip, timeout: 10_000 }, async (t) => {
+    const app = mkdtempSync(join(tmpdir(), 'nsm-'));
     t.after(() => rmSync(app, { recursive: true, force: true }));
     const resources = join(app, 'Contents/Resources/agent-runtime');
     const temporaryRoot = join(app, 'tmp');
@@ -149,10 +152,10 @@ for (const code of ['ENOENT', 'EACCES']) {
 }
 
 test('a missing native executable stops the foreground agent and removes HOME', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 20_000,
 }, async (t) => {
-  const app = mkdtempSync('/tmp/nsm-');
+  const app = mkdtempSync(join(tmpdir(), 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
@@ -179,10 +182,10 @@ process.exitCode = await runDesktopEntry({ args: [], env: process.env, resources
 });
 
 test('fixture teardown discovers and joins its child after smoke times out', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
-  const app = mkdtempSync('/tmp/nsm-');
+  const app = mkdtempSync(join(tmpdir(), 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
@@ -214,7 +217,7 @@ createServer(() => {}).listen(join(dir, 'agent.sock'));
 });
 
 test('ordinary packaged smoke timeout discovers and stops both genuine agent and native child before removing files', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 20_000,
 }, async (t) => {
   const f = smokeFixture(t);
@@ -250,7 +253,7 @@ process.exitCode = await runDesktopEntry({ args: [], env: process.env, resources
 });
 
 test('ordinary bundled smoke teardown survives parent timeout and an assertion failure before child discovery', {
-  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
   const f = smokeFixture(t);

@@ -132,10 +132,10 @@ test('a codex CLI that cannot launch leaves both lists unknown with a reason', a
 
 test('a non-zero exit and unparseable output degrade the same way', async () => {
   const exits = fakeBin();
-  exits.tool('codex', 'exit 3');
+  exits.tool('codex', 'process.exit(3)');
   assert.match((await codexState(exits.path)).pluginError ?? '', /could not list Codex plugins: exited 3/);
   const garbage = fakeBin();
-  garbage.tool('codex', 'echo not-json');
+  garbage.tool('codex', 'console.log("not-json")');
   assert.match((await codexState(garbage.path)).pluginError ?? '', /could not read the Codex plugin list/);
 });
 

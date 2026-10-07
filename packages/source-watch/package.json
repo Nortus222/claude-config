@@ -6,7 +6,7 @@
   "description": "Watches the skill sources a setup uses: upstream revisions past each pin, changed skills with SKILL.md diffs, and unpushed local edits",
   "exports": { ".": "./src/index.ts" },
   "scripts": {
-    "test": "node --test \"checks/*.spec.ts\"",
+    "test": "node --test --test-concurrency=2 \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
