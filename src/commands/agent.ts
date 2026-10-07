@@ -3,19 +3,23 @@ import { Cause, Effect } from 'effect';
 import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
   agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
-  type Policy, type ServiceFailed, type ServiceTarget, type WireStatus,
+  type ApplyResult, type InspectResult, type Policy, type PreviewResult, type RunEvent, type RunProgress, type ServiceFailed,
+  type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
 import { setupSourceLayer } from '@nortuscc/sync';
 import { AgentUnavailable, connectAgent, type AgentConnection } from '../agent-client.ts';
 import { agentProgram, checkoutVersion, serviceTarget } from '../agent-service.ts';
 import { CHECKOUT, resolvePaths, runCommand } from '../machine.ts';
+import { confirm as realConfirm } from '../prompt.ts';
+import { select as realSelect, type Choice } from '../select.ts';
 
-const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run | status | resume | policy <p>
+const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run | status | review | resume | policy <p>
   agent install [--linger]   run the local agent as a login service from this checkout
                              --linger (Linux) keeps it running with nobody logged in
   agent uninstall            stop the agent and remove its login service
   agent run                  run the agent in the foreground (the service runs this)
   agent status               show the running agent's policy, pause and pending items
+  agent review               choose pending, held and drifted items and apply them (needs a terminal)
   agent resume               resume a paused agent
   agent policy <auto-apply|notify|manual>
                              set how the agent treats accepted items`;
@@ -132,22 +136,23 @@ async function runForeground(): Promise<number> {
 
 const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
 
-// Runs `body` over a connection to the running agent; no agent prints NOT_RUNNING and exits 1.
-const withAgent = (body: (conn: AgentConnection) => Promise<number>) =>
-  runCommand(() => Effect.gen(function* () {
-    const paths = yield* resolvePaths((m) => console.error(m));
+// Runs `body` over a connection to the running agent (this machine's, unless `connect` is given);
+// no agent prints NOT_RUNNING and exits 1. `signal` aborts on the first Ctrl-C.
+const withAgent = (body: (conn: AgentConnection, signal: AbortSignal) => Promise<number>, connect?: () => Promise<AgentConnection>) =>
+  runCommand((signal) => Effect.gen(function* () {
+    const open = connect ?? (yield* Effect.map(resolvePaths((m) => console.error(m)), (paths) => () => connectAgent(paths)));
     return yield* Effect.tryPromise({
       try: async () => {
         let conn: AgentConnection;
         try {
-          conn = await connectAgent(paths);
+          conn = await open();
         } catch (error) {
           if (!(error instanceof AgentUnavailable)) throw error;
           console.error(NOT_RUNNING);
           return 1;
         }
         try {
-          return await body(conn);
+          return await body(conn, signal);
         } finally {
           conn.close();
         }
@@ -172,7 +177,116 @@ const printStatus = (status: WireStatus): number => {
   return 1;
 };
 
-export async function run(args: string[] = []): Promise<number> {
+// Stand-ins for the terminal and the agent, so a test can drive `agent review`.
+export type AgentDeps = {
+  isTTY?: boolean;
+  select?: typeof realSelect;
+  confirm?: typeof realConfirm;
+  connect?: () => Promise<AgentConnection>;
+};
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const withBackups = (text: string, backups: string | undefined) => (backups === undefined ? text : `${text}; backups in ${backups}`);
+
+// One progress line; terminal events say how the run ended and where its backups are.
+const progressLine = (p: RunProgress): string => {
+  switch (p.type) {
+    case 'started':
+      return `started ${p.index + 1}/${p.total}: ${p.step.summary}`;
+    case 'finished':
+      return `finished ${p.index + 1}/${p.total}: ${p.key} ${p.outcome}${p.note ? `: ${p.note}` : ''}`;
+    case 'done':
+      return withBackups(`done: ${p.ok} ok, ${p.failed} failed`, p.backups);
+    case 'cancelled':
+      return withBackups(`cancelled: ${plural(p.remaining.length, 'step')} not run`, p.backups);
+    case 'failed':
+      return `failed: ${p.message}`;
+  }
+};
+
+// The picker rows: pending items (inert, and held with their reasons) checked, drift unchecked.
+const reviewChoices = (inspected: InspectResult & { readonly status: WireStatus }): Choice[] => {
+  const byKey = new Map(inspected.items.map((i) => [i.key, i]));
+  const label = (key: string) => byKey.get(key)?.label ?? key;
+  const note = (key: string) => byKey.get(key)?.note ?? byKey.get(key)?.state ?? '';
+  const { pending, drift } = inspected.status;
+  return [
+    ...pending.filter((p) => p.verdict === 'inert').map((p) => ({ key: p.key, group: 'pending', label: label(p.key), note: note(p.key), checked: true })),
+    ...pending.filter((p) => p.verdict === 'held').map((p) => ({ key: p.key, group: 'held', label: label(p.key), note: p.reason ?? note(p.key), checked: true })),
+    ...drift.map((key) => ({ key, group: 'drift', label: label(key), note: note(key), checked: false })),
+  ];
+};
+
+// Inspect through the agent, choose, preview, confirm, apply and stream the run. Exits 0 when the
+// run is done with no failures or the person applies nothing, 1 otherwise. Ctrl-C asks the agent
+// to cancel the run.
+const review = (deps: AgentDeps, isTTY: boolean) =>
+  withAgent(async (conn, signal) => {
+    const inspected = await conn.request<InspectResult & { status: WireStatus }>({ command: 'inspect' });
+    const choices = reviewChoices(inspected);
+    if (choices.length === 0) {
+      console.log('nothing to review');
+      return 0;
+    }
+    const picked = await (deps.select ?? realSelect)(choices, { title: 'choose what to apply', isTTY });
+    if (picked === null) {
+      console.log('cancelled; nothing was applied');
+      return 0;
+    }
+    const chosen = new Set(picked);
+    const exclude = choices.filter((c) => !chosen.has(c.key)).map((c) => c.key);
+    const preview = await conn.request<PreviewResult>({ command: 'preview', exclude });
+    const { steps, skipped } = preview.plan;
+    for (const step of steps) console.log(`  ${step.summary}`);
+    for (const skip of skipped) console.log(`  skipped ${skip.key}: ${skip.reason}`);
+    if (steps.length === 0) {
+      console.log('nothing to apply');
+      return 0;
+    }
+    if (!(await (deps.confirm ?? realConfirm)(`Apply these ${steps.length} step(s)?`, { isTTY }))) {
+      console.log('declined; nothing was applied');
+      return 0;
+    }
+
+    // Events can arrive before the apply answer is seen, so they wait for the run id.
+    let runId: string | undefined;
+    const early: RunEvent[] = [];
+    let end!: (p: RunProgress) => void;
+    const ended = new Promise<RunProgress>((resolve) => { end = resolve; });
+    const onProgress = (e: RunEvent) => {
+      if (e.runId !== runId) return;
+      console.log(progressLine(e.progress));
+      if (e.progress.type === 'done' || e.progress.type === 'cancelled' || e.progress.type === 'failed') end(e.progress);
+    };
+    const off = conn.onEvent((event) => {
+      const e = event as RunEvent;
+      if (e.event !== 'progress') return;
+      if (runId === undefined) early.push(e);
+      else onProgress(e);
+    });
+    const cancel = () => {
+      console.log('cancelling…');
+      conn.request({ command: 'cancel' }).catch(() => {});
+    };
+    try {
+      const applied = await conn.request<ApplyResult>({ command: 'apply', planId: preview.planId });
+      if (applied.status === 'stale') {
+        console.log('the machine changed; review again');
+        return 1;
+      }
+      runId = applied.runId;
+      for (const e of early.splice(0)) onProgress(e);
+      if (signal.aborted) cancel();
+      else signal.addEventListener('abort', cancel, { once: true });
+      const last = await ended;
+      return last.type === 'done' && last.failed === 0 ? 0 : 1;
+    } finally {
+      off();
+      signal.removeEventListener('abort', cancel);
+    }
+  }, deps.connect);
+
+export async function run(args: string[] = [], deps: AgentDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
     case 'install': {
@@ -194,6 +308,15 @@ export async function run(args: string[] = []): Promise<number> {
     case 'status':
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
       return withAgent(async (conn) => printStatus(await conn.request<WireStatus>({ command: 'status' })));
+    case 'review': {
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
+      if (!isTTY) {
+        console.error('nortuscc: agent review needs a terminal');
+        return 2;
+      }
+      return review(deps, isTTY);
+    }
     case 'resume':
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
       return withAgent(async (conn) => {
