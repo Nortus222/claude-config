@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { agentLayer, DEFAULT_STATE, unitPath, type ServiceTarget, type WireStatus } from '@nortuscc/agent';
@@ -14,7 +15,7 @@ const STATUS: WireStatus = {
 };
 const unavailable = async (): Promise<AgentConnection> => { throw new AgentUnavailable('no agent'); };
 const fixture = (t: { after: (f: () => void) => void }) => {
-  const home = mkdtempSync('/tmp/nal-');
+  const home = mkdtempSync(join(tmpdir(), 'nal-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stateRoot = join(home, 'state');
   const paths: MachinePathsValue = {

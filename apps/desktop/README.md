@@ -33,7 +33,16 @@ npm run test:packages
 npm test
 ```
 
-The desktop Node checks cover v3 schemas, renderer event ordering and recovery, lifecycle ownership and upgrades with fake Processes, and the login environment. `DESKTOP_AGENT_RESOURCES` enables the resource and smoke checks after bundling; without it these checks skip. `test:bun` runs schemas and controller checks under Bun, then enables the resource and smoke checks against the bundled Bun. Rust tests use fake Unix socket servers and helpers for handshake, framing, timeouts, disconnect and generation behavior.
+The desktop Node checks cover v3 schemas, renderer event ordering and recovery, lifecycle ownership and upgrades with fake Processes, and the login environment. `DESKTOP_AGENT_RESOURCES` enables the resource and smoke checks after bundling; without it these checks skip. `test:bun` runs schemas and controller checks under Bun, then runs `test:resources` against a temporary bundled Bun fixture. Rust tests use fake Unix socket servers and helpers for handshake, framing, timeouts, disconnect and generation behavior.
+
+On Windows and Linux, prepare temporary test resources independently of macOS release packaging:
+
+```sh
+npm test -w apps/desktop
+npm run test:resources -w apps/desktop
+```
+
+`test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and the agent hash, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
 
 `status` may answer `NO_REPORT` while startup is still inspecting; this remains connected, and a later status event loads the inspection. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
 
