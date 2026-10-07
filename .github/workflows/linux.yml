@@ -1,0 +1,45 @@
+name: linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suites:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.0
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # The backend suite needs a real Bun resource, independent of macOS packaging.
+      - name: Prepare bundled backend test fixture
+        run: |
+          node --input-type=module <<'NODE'
+          import { build } from 'esbuild';
+          import { mkdir, copyFile, chmod } from 'node:fs/promises';
+          import { execFileSync } from 'node:child_process';
+          import { resolve } from 'node:path';
+
+          const resources = resolve('apps/desktop/src-tauri/resources', `linux-${process.arch}`);
+          await mkdir(resources, { recursive: true });
+          await build({
+            entryPoints: ['apps/desktop/backend/main.ts'],
+            bundle: true,
+            platform: 'node',
+            format: 'esm',
+            target: 'esnext',
+            outfile: resolve(resources, 'backend.mjs'),
+          });
+          const bun = execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim();
+          await copyFile(bun, resolve(resources, 'bun'));
+          await chmod(resolve(resources, 'bun'), 0o755);
+          NODE
+      - run: npm run test:packages

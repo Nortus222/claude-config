@@ -200,7 +200,7 @@ test('agent run holds the agent lock, refuses a second agent and stops cleanly o
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
   try {
-    assert.ok(await until(() => existsSync(lock), 15_000), `agent.lock never appeared: ${stderr}`);
+    assert.ok(await until(() => existsSync(lock) && stderr.includes('nortuscc agent: running from'), 15_000), `agent never started: ${stderr}`);
     assert.match(stderr, new RegExp(`nortuscc agent: running from .* \\(pid ${child.pid}\\)`));
 
     const second = await runCli(m, ['agent', 'run']);
@@ -351,10 +351,10 @@ test('agent status, policy and resume with no agent running exit 1 and say so', 
 });
 
 // The restart argv: launchd kickstarts the unchanged unit; systemd restarts it.
-const restarted = (m: Machine) =>
+const restarted = (m: Machine, start = 0) =>
   linux
-    ? serviceCalls(m).some((c) => c.cmd === 'systemctl' && c.args.join(' ') === '--user restart nortuscc-agent.service')
-    : serviceCalls(m).some((c) => c.cmd === 'launchctl' && c.args.join(' ') === `kickstart -k gui/${process.getuid!()}/com.nortuscc.agent`);
+    ? serviceCalls(m).slice(start).some((c) => c.cmd === 'systemctl' && c.args.join(' ') === '--user restart nortuscc-agent.service')
+    : serviceCalls(m).slice(start).some((c) => c.cmd === 'launchctl' && c.args.join(' ') === `kickstart -k gui/${process.getuid!()}/com.nortuscc.agent`);
 
 // Records the installed agent as running `version`. The harness's pull moves the temp repo, not the
 // checkout the agent runs from, so a stale version stands in for the code the pull replaced.
@@ -364,12 +364,12 @@ const recordAgentVersion = (m: Machine, version: string) =>
 test('sync restarts a CLI-installed agent after a pull moves the checkout past it', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
-  assert.equal(restarted(m), false);
+  const installCalls = serviceCalls(m).length;
   recordAgentVersion(m, 'before-the-pull');
   pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);
-  assert.ok(restarted(m), JSON.stringify(serviceCalls(m)));
+  assert.ok(restarted(m, installCalls), JSON.stringify(serviceCalls(m)));
   assert.match(result.stdout, /^agent restarted on [0-9a-f]{7}$/m);
   assert.equal(agentJson(m).agentVersion, checkoutHead());
 });
@@ -399,10 +399,11 @@ test('sync leaves an agent already on the checkout\'s version alone, even after 
 test('sync restarts an agent left on a stale version even when nothing was pulled', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  const installCalls = serviceCalls(m).length;
   recordAgentVersion(m, 'stale');
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);
-  assert.ok(restarted(m), JSON.stringify(serviceCalls(m)));
+  assert.ok(restarted(m, installCalls), JSON.stringify(serviceCalls(m)));
   assert.equal(agentJson(m).agentVersion, checkoutHead());
 });
 

@@ -24,5 +24,13 @@ per-user login service. Decisions: `docs/adr/0011-local-agent-per-user-login-ser
 - IPC (#78, `docs/adr/0019-agent-ipc-unix-socket-only-for-now.md`): the agent serves protocol v3 on
   `<stateRoot>/agent/agent.sock`, after a `hello` carrying the per-start token in `agent.token`.
   Person-initiated inspect, preview and apply run inside the agent. Windows serves no IPC yet.
+  `history` takes `limit` from 1 to 500 and an optional exclusive `before: { at, seq }` cursor.
+  `at` is an ISO timestamp; `seq` is a nonnegative safe integer assigned by append order within
+  that exact millisecond, starting at zero. Events sort by timestamp then sequence, both newest
+  first. Equivalent ISO offsets share a sequence bucket. The reply is `{ events, nextBefore }`;
+  pass `nextBefore` to retrieve older events, or stop when it is `null`. Reply cursors use UTC
+  timestamps. Events keep their existing History values and stored format. Cursors assume
+  append-only History: hand editing or removing events can invalidate them. Backup pruning only
+  annotates events and preserves their positions within each timestamp bucket.
 - `nortuscc agent install [--linger] | uninstall | run` drives it; `agent status | review | resume | policy` talk to the running
   agent; `npm run smoke:agent` with `NORTUSCC_SMOKE=1` registers a throwaway LaunchAgent on a Mac and checks `hello` (`smoke/launchd.smoke.ts`).

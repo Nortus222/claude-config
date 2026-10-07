@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RUNTIME_INSTALL } from '../bin/launcher.mjs';
 import { git, installerCalls, machine, readJson, runCli, type Machine } from './support/cli.ts';
@@ -35,6 +35,33 @@ appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args: process.argv.slice
 }
 
 const pull = (m: Machine, args: string[] = [], env: Record<string, string> = {}) => runCli(m, ['pull', ...args], { env });
+
+test('a fast-forward applies main when Git defaults to another branch', async (t) => {
+  const env = {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'init.defaultBranch',
+    GIT_CONFIG_VALUE_0: 'alternate-main',
+  };
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, env);
+  const m = machine();
+  t.after(() => {
+    rmSync(m.home, { recursive: true, force: true });
+    rmSync(m.bin, { recursive: true, force: true });
+  });
+  upstream(m, { 'claude/CLAUDE.md': '# from main\n' });
+
+  const result = await pull(m);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), '# from main\n');
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), git(origin(m), 'rev-parse', 'main'));
+});
 
 test('a fast-forward from origin is applied to the machine', async () => {
   const m = machine();

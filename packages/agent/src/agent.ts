@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Cause, Effect, Layer, Ref, Semaphore } from 'effect';
+import { Cause, Effect, Exit, Layer, Ref, Semaphore } from 'effect';
 import {
   acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
 } from '@nortuscc/machine';
@@ -8,6 +8,7 @@ import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobRes
 import { agentLayer, type AgentDomains } from './layer.ts';
 import { serveIpc } from './ipc/server.ts';
 import { makeSession } from './ipc/session.ts';
+import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from './log.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
@@ -113,19 +114,35 @@ const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted, `signal` aborts or, with `ipc`, a client sends `shutdown`; each closes the agent,
 // cancelling an in-flight auto-apply. A pid lock makes it the only agent per state root: a second
-// fails LockHeld before touching state or the socket. The caller builds the per-job `domains`
-// factory and `source` at the same boundary as `paths`, and decides `ipc` (default off).
+// fails LockHeld before touching state, logs or the socket. The caller builds the per-job `domains`
+// factory and `source` at the same boundary as `paths`, and decides `ipc` (default off). Optional
+// `logOutput` captures both streams after the lock; `onStarted` runs once logging is ready.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
   readonly domains: AgentDomains;
   readonly source: Layer.Layer<SetupSource>;
   readonly agentVersion: string;
   readonly ipc?: boolean;
+  readonly logOutput?: AgentLogOutput;
+  readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
 }) =>
   Effect.scoped(Effect.gen(function* () {
-    // The lock comes first: serveIpc replaces a leftover socket, which is only safe while it is held.
+    // The lock comes first: logs and leftover sockets may only be changed by their owning agent.
     yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
+    const logPath = join(input.paths.stateRoot, 'agent', 'agent.log');
+    if (input.logOutput) {
+      const output = input.logOutput;
+      yield* captureAgentOutput(logPath, output);
+      // This finalizer runs before stream restoration, so a fatal exit remains in the log.
+      yield* Effect.addFinalizer((exit) => Effect.sync(() => {
+        if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+          try { output.stderr.write(`Agent failed: ${describe(exit.cause)}\n`); } catch {}
+        }
+      }));
+    }
+    yield* startAgentLogRotation(logPath);
+    if (input.onStarted) yield* Effect.sync(input.onStarted);
     const shutdown = new AbortController();
     const signal = input.signal ? AbortSignal.any([input.signal, shutdown.signal]) : shutdown.signal;
     const handle = yield* startAgent(input.domains, { signal });

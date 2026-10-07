@@ -11,7 +11,7 @@ import type { AgentServices } from '../layer.ts';
 import { AgentStateStore } from '../state.ts';
 import {
   decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
-  type ErrorCode, type HelloResult, type Request, type RunProgress,
+  type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
 } from './protocol.ts';
 import { SessionError, type AgentSession } from './session.ts';
 
@@ -27,6 +27,8 @@ export const HANDSHAKE_MS = 10_000;
 const MAX_NOTE_LENGTH = 4096;
 // How long a refused connection may take to read its refusal.
 const REFUSED_MS = 1000;
+// How long shutdown may wait for its reply to reach a client that never reads.
+const SHUTDOWN_MS = 1000;
 // sun_path holds 104 bytes on macOS and the BSDs and 108 on Linux, including the terminating NUL.
 const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103;
 
@@ -107,6 +109,15 @@ export const serveIpc = (input: {
     // `closing` after a shutdown request; `stopped` once the scope closes.
     let closing = false;
     let stopped = false;
+    let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+    let shutdownCalled = false;
+    const finishShutdown = () => {
+      clearTimeout(shutdownTimer);
+      shutdownTimer = undefined;
+      if (stopped || shutdownCalled) return;
+      shutdownCalled = true;
+      input.onShutdown();
+    };
 
     // `flushed` runs once the line is handed to the OS, or at once when it cannot be written.
     const write = (conn: Connection, message: unknown, flushed?: () => void): boolean => {
@@ -225,9 +236,27 @@ export const serveIpc = (input: {
         case 'history':
           return Effect.gen(function* () {
             const events = yield* (yield* HistoryStore).read;
-            const before = request.before === undefined ? Infinity : Date.parse(request.before);
-            const kept = events.filter((e) => Date.parse(e.at) < before).reverse().slice(0, request.limit);
-            return { result: { events: kept } };
+            // Per-instant append order stays stable when a clock rollback adds an older month.
+            const sequences = new Map<number, number>();
+            const ordered = events.flatMap((event) => {
+              const at = Date.parse(event.at);
+              if (!Number.isFinite(at)) return [];
+              const seq = sequences.get(at) ?? 0;
+              sequences.set(at, seq + 1);
+              return [{ event, at, seq }];
+            }).sort((a, b) => b.at - a.at || b.seq - a.seq);
+            const before = request.before;
+            const beforeAt = before === undefined ? Infinity : Date.parse(before.at);
+            const matching = ordered.filter((e) =>
+              e.at < beforeAt || (e.at === beforeAt && before !== undefined && e.seq < before.seq));
+            const kept = matching.slice(0, request.limit);
+            const last = kept.at(-1);
+            const result: HistoryResult = {
+              events: kept.map((e) => e.event),
+              nextBefore: matching.length > kept.length && last !== undefined
+                ? { at: new Date(last.at).toISOString(), seq: last.seq } : null,
+            };
+            return { result };
           });
         case 'subscribe':
           return Effect.sync(() => {
@@ -237,8 +266,9 @@ export const serveIpc = (input: {
         case 'shutdown':
           return Effect.sync(() => {
             closing = true;
-            // Shutting down closes every socket, so it waits for the reply to be flushed.
-            return { result: { shutdown: true }, flushed: input.onShutdown };
+            // Give the reply time to flush before shutdown closes every socket.
+            shutdownTimer = setTimeout(finishShutdown, SHUTDOWN_MS);
+            return { result: { shutdown: true }, flushed: finishShutdown };
           });
       }
     };
@@ -328,6 +358,8 @@ export const serveIpc = (input: {
       Effect.callback<void>((resume) => {
         closing = true;
         stopped = true;
+        clearTimeout(shutdownTimer);
+        shutdownTimer = undefined;
         for (const conn of connections) {
           clearTimeout(conn.timer);
           conn.socket.destroy();

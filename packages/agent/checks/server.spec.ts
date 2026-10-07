@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
-import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, HistoryStore, historyStore, integrationsDomain } from '@nortuscc/machine';
 import {
   AgentStateStore, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
   type AgentDomain, type AgentDomains,
@@ -153,6 +153,23 @@ const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof 
   }
 };
 
+// Queues a shutdown reply behind enough output to fill a paused Unix socket's buffers.
+const blockedShutdown = async (s: Awaited<ReturnType<typeof serverMachine>>) => {
+  const c = await s.open();
+  const observer = await s.open();
+  c.socket.pause();
+  const id = `r${++ids}`;
+  c.sendRaw('{\n'.repeat(32_768) + JSON.stringify({ version: 3, id, command: 'shutdown' }) + '\n');
+  let status = await ask(observer, { command: 'status' });
+  for (let i = 0; i < 100 && status.ok; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    status = await ask(observer, { command: 'status' });
+  }
+  assert.equal(status.error?.code, 'SHUTDOWN', 'the shutdown request was not handled');
+  assert.equal(s.shutdowns(), 0, 'the reply flushed despite the paused client');
+  return { c, id };
+};
+
 test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', async () => {
   await withServer({}, async (s) => {
     const good = await connect(s.socketPath);
@@ -239,7 +256,7 @@ test('a multi-item decide records every decision and runs one job', async () => 
   });
 });
 
-test('history answers newest first, at most limit, before a time', async () => {
+test('history answers newest first, at most limit, before a cursor', async () => {
   await withServer({}, async (s) => {
     const old = ['2020-01-01', '2020-01-02', '2020-01-03'].map((day) =>
       JSON.stringify({ v: 1, at: `${day}T00:00:00.000Z`, kind: 'resumed', actor: 'cli', reason: day }));
@@ -250,11 +267,101 @@ test('history answers newest first, at most limit, before a time', async () => {
 
     const all = await ask(c, { command: 'history', limit: 500 });
     assert.deepEqual(all.result.events, [...await s.m.events()].reverse());
+    assert.equal(all.result.nextBefore, null);
     assert.ok(all.result.events.some((e: Wire) => e.kind === 'policy-changed'));
     const newest = await ask(c, { command: 'history', limit: 1 });
     assert.deepEqual(newest.result.events, all.result.events.slice(0, 1));
-    const before = await ask(c, { command: 'history', before: '2020-01-03T00:00:00.000Z', limit: 500 });
+    const before = await ask(c, { command: 'history', before: { at: '2020-01-03T00:00:00.000Z', seq: 0 }, limit: 500 });
     assert.deepEqual(before.result.events.map((e: Wire) => e.reason), ['2020-01-02', '2020-01-01']);
+  });
+});
+
+const historyFixture = (s: Awaited<ReturnType<typeof serverMachine>>, month: string, events: ReadonlyArray<{ at: string; reason: string }>) => {
+  s.m.write(join(s.m.paths.stateRoot, 'history', `${month}.jsonl`), events.map((e) =>
+    JSON.stringify({ v: 1, kind: 'resumed', actor: 'cli', ...e })).join('\n') + '\n');
+};
+
+const historyPage = async (c: Client, before: { at: string; seq: number }, limit: number) => {
+  const response = await ask(c, { command: 'history', before, limit });
+  assert.equal(response.ok, true, JSON.stringify(response));
+  return response.result;
+};
+
+test('history pages every same-millisecond event with exclusive cursors and reports exhaustion', async () => {
+  await withServer({}, async (s) => {
+    const at = '2020-01-02T00:00:00.000Z';
+    historyFixture(s, '2020-01', [
+      { at: '2020-01-01T00:00:00.000Z', reason: 'older' },
+      { at, reason: 'first' }, { at, reason: 'second' }, { at, reason: 'third' },
+    ]);
+    const c = await s.open();
+    const first = await historyPage(c, { at: '2020-01-03T00:00:00.000Z', seq: 0 }, 1);
+    assert.deepEqual(first.events.map((e: Wire) => e.reason), ['third']);
+    assert.deepEqual(first.nextBefore, { at, seq: 2 });
+    const second = await historyPage(c, first.nextBefore, 2);
+    assert.deepEqual(second.events.map((e: Wire) => e.reason), ['second', 'first']);
+    assert.deepEqual(second.nextBefore, { at, seq: 0 });
+    const last = await historyPage(c, second.nextBefore, 1);
+    assert.deepEqual(last.events.map((e: Wire) => e.reason), ['older']);
+    assert.equal(last.nextBefore, null);
+    const empty = await historyPage(c, { at: '2020-01-01T00:00:00.000Z', seq: 0 }, 10);
+    assert.deepEqual(empty, { events: [], nextBefore: null });
+  });
+});
+
+test('same-millisecond appends between history pages do not repeat or skip existing events', async () => {
+  await withServer({}, async (s) => {
+    const at = '2020-01-02T00:00:00.000Z';
+    historyFixture(s, '2020-01', [{ at, reason: 'first' }, { at, reason: 'second' }, { at, reason: 'third' }]);
+    const c = await s.open();
+    const first = await historyPage(c, { at: '2020-01-03T00:00:00.000Z', seq: 0 }, 1);
+    assert.deepEqual(first.events.map((e: Wire) => e.reason), ['third']);
+    await Promise.all(['concurrent-a', 'concurrent-b'].map((reason) => s.m.run(
+      HistoryStore.use((h) => h.append({ kind: 'resumed', actor: 'cli', reason })).pipe(
+        Effect.provide(historyStore(() => new Date(at)))))));
+    const remaining = await historyPage(c, first.nextBefore, 10);
+    assert.deepEqual(remaining.events.map((e: Wire) => e.reason), ['second', 'first']);
+    assert.equal(remaining.nextBefore, null);
+    const fresh = await historyPage(c, { at: '2020-01-03T00:00:00.000Z', seq: 0 }, 2);
+    assert.deepEqual(fresh.events.map((e: Wire) => e.reason).sort(), ['concurrent-a', 'concurrent-b']);
+    assert.deepEqual(fresh.nextBefore, { at, seq: 3 });
+  });
+});
+
+test('history cursors survive a clock rollback append into an older month', async () => {
+  await withServer({}, async (s) => {
+    historyFixture(s, '2020-01', [{ at: '2020-01-01T00:00:00.000Z', reason: 'january' }]);
+    historyFixture(s, '2020-02', [
+      { at: '2020-02-02T00:00:00.000Z', reason: 'first-february' },
+      { at: '2020-02-02T00:00:00.000Z', reason: 'second-february' },
+    ]);
+    const c = await s.open();
+    const first = await historyPage(c, { at: '2020-03-01T00:00:00.000Z', seq: 0 }, 1);
+    assert.deepEqual(first.events.map((e: Wire) => e.reason), ['second-february']);
+    await s.m.run(HistoryStore.use((h) => h.append({ kind: 'resumed', actor: 'cli', reason: 'rollback' })).pipe(
+      Effect.provide(historyStore(() => new Date('2020-01-02T00:00:00.000Z')))));
+    const rest = await historyPage(c, first.nextBefore, 10);
+    assert.deepEqual(rest.events.map((e: Wire) => e.reason), ['first-february', 'rollback', 'january']);
+    assert.equal(rest.nextBefore, null);
+  });
+});
+
+test('history groups equivalent timestamp instants and skips invalid timestamps', async () => {
+  await withServer({}, async (s) => {
+    historyFixture(s, '2020-01', [
+      { at: '2020-01-02T00:00:00Z', reason: 'utc' },
+      { at: '2020-01-01T23:00:00Z', reason: 'older' },
+      { at: '2020-01-02T03:00:00+03:00', reason: 'offset' },
+      { at: 'invalid', reason: 'invalid' },
+    ]);
+    const c = await s.open();
+    const first = await historyPage(c, { at: '2020-01-03T00:00:00.000Z', seq: 0 }, 1);
+    assert.deepEqual(first.events.map((e: Wire) => e.reason), ['offset']);
+    assert.equal(first.events[0].at, '2020-01-02T03:00:00+03:00');
+    assert.deepEqual(first.nextBefore, { at: '2020-01-02T00:00:00.000Z', seq: 1 });
+    const rest = await historyPage(c, { at: '2020-01-02T01:00:00+01:00', seq: 1 }, 10);
+    assert.deepEqual(rest.events.map((e: Wire) => e.reason), ['utc', 'older']);
+    assert.equal(rest.nextBefore, null);
   });
 });
 
@@ -344,6 +451,37 @@ test('shutdown answers, then calls onShutdown', async () => {
     for (let i = 0; i < 100 && s.shutdowns() === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(s.shutdowns(), 1);
     assert.equal((await ask(c, { command: 'status' })).error.code, 'SHUTDOWN');
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 1, 'a flushed reply left a second shutdown scheduled');
+  });
+});
+
+test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', async () => {
+  await withServer({}, async (s) => {
+    const { c, id } = await blockedShutdown(s);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const laterId = `r${++ids}`;
+    c.send({ version: 3, id: laterId, command: 'shutdown' });
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 1, 'shutdown waited indefinitely for a client that never reads');
+
+    c.socket.resume();
+    assert.deepEqual((await c.waitFor((r) => r.id === id)).result, { shutdown: true });
+    assert.equal((await c.waitFor((r) => r.id === laterId)).error.code, 'SHUTDOWN');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(s.shutdowns(), 1, 'the eventual flush called onShutdown again');
+  });
+});
+
+test('closing the scope cancels a blocked shutdown callback', async () => {
+  await withServer({}, async (s) => {
+    const { c } = await blockedShutdown(s);
+    await s.close();
+    await c.closed;
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(s.shutdowns(), 0, 'shutdown ran after its scope was closed');
+    assert.equal(existsSync(s.socketPath), false);
+    assert.equal(existsSync(s.tokenPath), false);
   });
 });
 
