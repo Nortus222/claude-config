@@ -267,7 +267,7 @@ export class MachineController {
     if (finished && this.owns(revision)) await this.inspect();
   }
 
-  // Asks the backend to stop the run; a failure is shown unless a disconnect or restart superseded it.
+  // Asks the agent to stop the run; a failure is shown unless a disconnect or restart superseded it.
   async cancel() {
     if (!this.bridge || this.state.connection !== 'connected' || this.state.run?.outcome !== 'running') return;
     const revision = this.revision;

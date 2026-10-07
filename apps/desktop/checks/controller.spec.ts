@@ -133,7 +133,7 @@ test('a stale apply replaces the preview and starts nothing', async () => {
   assert.match(c.state.detail, /changed since this preview/);
 });
 
-test('cancel reaches the backend and a cancelled run keeps unstarted steps pending', async () => {
+test('cancel reaches the agent and a cancelled run keeps unstarted steps pending', async () => {
   const f = fake({
     inspect_machine: () => inspection(['config:a', 'config:b']),
     preview_plan: () => ({ planId: 'p1', plan: plan(['config:a', 'config:b']) }),

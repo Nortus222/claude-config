@@ -1,10 +1,11 @@
-# The desktop app is a Tauri 2 shell over a bundled Bun backend; the renderer never chooses paths or commands
+# The desktop app is a Tauri 2 client of the bundled local agent
 
-Research favoured Electron for reuse, but a packaged Tauri 2 spike passed every check: a React
-renderer, a small Rust host, and a backend owned by the host speaking strict, versioned JSON lines
-over stdio. Bundling Bun instead of Node cut the app from 127.5 to 71.9 MiB and idle backend
-memory from 68 to 45 MiB. The renderer sends only opaque item keys and plan ids; Rust allow-lists
-request names and the backend validates every key.
+Research favoured Electron for reuse, but a packaged Tauri 2 spike passed with a React renderer,
+a Rust host and a Bun stdio sidecar. The desktop now connects to the persistent local agent over
+authenticated protocol v3 Unix IPC (ADR 0011 and ADR 0019). It bundles standalone Bun and the
+agent, and a short-lived helper manages the app-owned login service (ADR 0021). Closing a window
+disconnects its socket while the service continues. The renderer sends only opaque item keys and
+plan ids; Rust allow-lists request names and the agent validates every key.
 
 ## Considered options
 
@@ -17,4 +18,4 @@ request names and the backend validates every key.
 - Core code must run on both Node 24 and Bun.
 - The app ships its own runtime and reads the login shell's PATH once to find `npx`, `claude`
   and `codex`.
-- Only macOS is validated.
+- Packaging is validated on macOS arm64; Windows IPC remains unsupported (ADR 0019).
