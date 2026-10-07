@@ -76,7 +76,7 @@ test('registered app payload and ACK waiter exist before launch; open exit alone
   const f = fixture(t, 'darwin', (c) => Effect.gen(function* () {
     commands.push(c); const id = c.args.at(-1)!;
     assert.ok(yield* notifier.get(id));
-    if (ack) assert.equal(notifier.acknowledge(id, true), true);
+    if (ack) assert.equal(notifier.acknowledge(id, true, notifier.receipt(id)!), true);
     return { code: 0, stdout: '' };
   }));
   await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'app', appPath: '/Applications/Test.app/Contents/MacOS/Test' }))));
@@ -85,7 +85,7 @@ test('registered app payload and ACK waiter exist before launch; open exit alone
   ack = true; await Effect.runPromise(notifier.notify(status([item('x')]))); assert.equal(commands.length, 2);
   await Effect.runPromise(notifier.notify(status([item('x')]))); assert.equal(commands.length, 2);
   assert.deepEqual(commands[0]!.args.slice(0, -1), ['-g', '-a', '/Applications/Test.app', '--args', '--notify']);
-  assert.equal(notifier.acknowledge(commands[0]!.args.at(-1)!, true), false);
+  assert.equal(notifier.acknowledge(commands[0]!.args.at(-1)!, true, 'expired'), false);
 });
 
 test('connected refusal or timeout falls through to Linux; successful delivery deduplicates', async (t) => {
@@ -113,7 +113,6 @@ test('concurrent identical batches serialize and corrupt stores are preserved', 
   assert.equal(f.m.read(f.path), '{broken'); assert.equal(delivered, 1);
 });
 
-
 test('unreadable and unwritable ledgers never fail jobs or post unpersisted payloads', async (t) => {
   for (const failure of ['read', 'write'] as const) {
     const f = fixture(t); let delivered = 0;
@@ -134,7 +133,7 @@ test('unreadable and unwritable ledgers never fail jobs or post unpersisted payl
 test('native app refusal and Linux nonzero stay retryable, connected success stops fallback', async (t) => {
   const calls: Command[] = []; let n: import('../src/notifier.ts').Notifier;
   const f = fixture(t, 'linux', (c) => Effect.sync(() => {
-    calls.push(c); if (c.cmd === '/opt/Test') assert.equal(n.acknowledge(c.args[1]!, false), true);
+    calls.push(c); if (c.cmd === '/opt/Test') assert.equal(n.acknowledge(c.args[1]!, false, n.receipt(c.args[1]!)!), true);
     return { code: c.cmd === '/opt/Test' ? 0 : 1, stdout: '' };
   }));
   await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'app', appPath: '/opt/Test' }))));
@@ -150,8 +149,9 @@ test('native app refusal and Linux nonzero stay retryable, connected success sto
 test('ACK deadline rejects late acknowledgments even while launch is stuck', async (t) => {
   let accepted: boolean | undefined; let n: import('../src/notifier.ts').Notifier;
   const f = fixture(t, 'darwin', (c) => Effect.promise(async () => {
+    const receipt = n.receipt(c.args.at(-1)!)!;
     await new Promise((resolve) => setTimeout(resolve, 30));
-    accepted = n.acknowledge(c.args.at(-1)!, true);
+    accepted = n.acknowledge(c.args.at(-1)!, true, receipt);
     return { code: 0, stdout: '' };
   }));
   await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'app', appPath: '/Applications/Test.app/Contents/MacOS/Test' }))));
@@ -193,4 +193,26 @@ test('an apply with failed steps notifies even when its run later cancels', asyn
   n.setConnected(() => Effect.sync(() => { delivered++; return true; }));
   await f.m.run(HistoryStore.use((h) => h.append({ actor: 'app', kind: 'apply-finished', runId: 'failed-then-cancelled', result: 'cancelled', backup: null, steps: [{ key: 'failed', outcome: 'failed', note: 'bad' }, { key: 'cancelled', outcome: 'cancelled', note: '' }] })));
   await Effect.runPromise(n.notify(status())); assert.equal(delivered, 1);
+});
+
+test('a late helper ACK cannot acknowledge a later retry of the same durable batch', async (t) => {
+  let n: import('../src/notifier.ts').Notifier; let firstReceipt: string | undefined; let launches = 0;
+  const receipts: string[] = []; const outcomes: boolean[] = [];
+  const f = fixture(t, 'darwin', (c) => Effect.sync(() => {
+    const id = c.args.at(-1)!; const active = n.receipt(id)!; launches++;
+    receipts.push(active);
+    if (launches === 1) firstReceipt = active;
+    else {
+      outcomes.push(n.acknowledge(id, true, firstReceipt!), n.acknowledge(id, true, active));
+    }
+    return { code: 0, stdout: '' };
+  }));
+  await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'app', appPath: '/Applications/Test.app/Contents/MacOS/Test' }))));
+  n = await f.create(); await Effect.runPromise(n.notify(status([item('x')])));
+  await Effect.runPromise(n.notify(status([item('x')])));
+  await Effect.runPromise(n.notify(status([item('x')])));
+  assert.equal(launches, 2);
+  assert.deepEqual(outcomes, [false, true]);
+  assert.notEqual(receipts[0], receipts[1]);
+  for (const receipt of receipts) assert.match(receipt, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
 });

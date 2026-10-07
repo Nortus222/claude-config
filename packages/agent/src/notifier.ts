@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { Effect, Semaphore } from 'effect';
 import { Fs, HistoryStore, MachinePaths, Processes } from '@nortuscc/machine';
@@ -9,7 +9,8 @@ export type Notification = { readonly id: string; readonly title: string; readon
 export type Notifier = {
   readonly notify: (status: AgentStatus) => Effect.Effect<void>;
   readonly get: (id: string) => Effect.Effect<Notification | undefined>;
-  readonly acknowledge: (id: string, delivered: boolean) => boolean;
+  readonly receipt: (id: string) => string | undefined;
+  readonly acknowledge: (id: string, delivered: boolean, receipt: string) => boolean;
   readonly setConnected: (deliver: ((notification: Notification) => Effect.Effect<boolean>) | undefined) => void;
 };
 type Batch = { notification: Notification; identities: string[]; delivered: boolean };
@@ -47,7 +48,7 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
   const path = join(paths.stateRoot, 'agent', 'notified.json');
   const timeoutMs = options.timeoutMs ?? 5000;
   let connected: ((notification: Notification) => Effect.Effect<boolean>) | undefined;
-  const waiters = new Map<string, (delivered: boolean) => void>();
+  const waiters = new Map<string, { receipt: string; deadline: number; resume: (delivered: boolean) => void }>();
   const read = Effect.map(fs.readText(path), decode);
   const save = (store: Store) => fs.writeTextAtomic(path, JSON.stringify(store, null, 2) + '\n');
   const attempt = <E>(effect: Effect.Effect<boolean, E>): Effect.Effect<boolean> => effect.pipe(
@@ -64,7 +65,7 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
         // Install the waiter synchronously before invoking Processes: a fast helper can ACK inside run.
         let timer: ReturnType<typeof setTimeout> | undefined;
         const acknowledged = new Promise<boolean>((resolve) => {
-          waiters.set(notification.id, resolve);
+          waiters.set(notification.id, { receipt: randomUUID(), deadline: Date.now() + timeoutMs, resume: resolve });
           timer = setTimeout(() => { waiters.delete(notification.id); resolve(false); }, timeoutMs);
         });
         const launch = processes.run({ cmd: bundle === undefined ? executable : 'open',
@@ -126,10 +127,14 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
   return {
     notify,
     get: (id: string) => Effect.map(read, (store) => store?.batches[id]?.notification).pipe(Effect.catchCause(() => Effect.succeed(undefined))),
-    acknowledge: (id: string, delivered: boolean) => {
-      const resume = waiters.get(id);
-      if (resume === undefined) return false;
-      waiters.delete(id); resume(delivered); return true;
+    receipt: (id: string) => {
+      const waiter = waiters.get(id);
+      return waiter !== undefined && Date.now() < waiter.deadline ? waiter.receipt : undefined;
+    },
+    acknowledge: (id: string, delivered: boolean, receipt: string) => {
+      const waiter = waiters.get(id);
+      if (waiter === undefined || waiter.receipt !== receipt || Date.now() >= waiter.deadline) return false;
+      waiters.delete(id); waiter.resume(delivered); return true;
     },
     setConnected: (callback) => { connected = callback; },
   } satisfies Notifier;
