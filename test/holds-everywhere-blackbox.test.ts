@@ -187,3 +187,49 @@ test('update writes the manifest into the checkout, with a held skill as the che
   const manifest = readFileSync(join(m.repo, 'skills-manifest.txt'), 'utf8');
   assert.deepEqual(parseSkillsManifest(manifest).map((g) => [g.source, g.skills]), [['u/v', ['fresh', 'wizard']]]);
 });
+
+test('capture --take-local never writes a held key back into the checkout', async () => {
+  const m = machine();
+  hold(m, { [EFFORT]: commitKeys(m, (k) => ({ ...k, effortLevel: 'medium' })) });
+  assert.equal((await runCli(m, ['apply'])).code, 0);
+  const settings = join(m.claude, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ ...readJson(settings), effortLevel: 'mine' }, null, 2) + '\n');
+  const result = await runCli(m, ['capture', '--take-local']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(readJson(KEYS(m)).effortLevel, 'medium');
+  assert.match(result.stdout, /settings\.json\s+held/);
+});
+
+test('push publishes nothing for a held key', async () => {
+  const m = machine();
+  hold(m, { [EFFORT]: commitKeys(m, (k) => ({ ...k, effortLevel: 'medium' })) });
+  git(m.repo, 'push', '-q');
+  assert.equal((await runCli(m, ['apply'])).code, 0);
+  const settings = join(m.claude, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ ...readJson(settings), effortLevel: 'mine' }, null, 2) + '\n');
+  const origin = git(m.repo, 'rev-parse', 'origin/main');
+  const result = await runCli(m, ['push', '--take-local', '-m', 'x']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(git(m.repo, 'rev-parse', 'origin/main'), origin);
+  assert.equal(readJson(KEYS(m)).effortLevel, 'medium');
+});
+
+test('capture lists each held skill in the manifest as the checkout declares it, without refusing a shrink', async () => {
+  const m = machine();
+  const manifest = join(m.repo, 'skills-manifest.txt');
+  writeFileSync(manifest, '[foo/bar]\nalpha\nold\n');
+  git(m.repo, 'commit', '-qam', 'alpha and old');
+  const earlier = git(m.repo, 'rev-parse', 'HEAD');
+  writeFileSync(manifest, '[foo/bar]\nalpha\nnew\n');
+  git(m.repo, 'commit', '-qam', 'old -> new');
+  // old: held, dropped by head, still installed. new: held, added by head, not installed here.
+  hold(m, { 'skill:foo/bar/old': earlier, 'skill:foo/bar/new': earlier });
+  for (const name of ['alpha', 'old']) mkdirSync(join(m.agents, name), { recursive: true });
+  writeFileSync(join(m.agents, '..', '.skill-lock.json'), JSON.stringify({ skills: { alpha: { source: 'foo/bar' }, old: { source: 'foo/bar' } } }));
+  const applied = await runCli(m, ['apply']);
+  assert.equal(applied.code, 0, applied.stdout + applied.stderr);
+  const result = await runCli(m, ['capture']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /refused/);
+  assert.deepEqual(parseSkillsManifest(readFileSync(manifest, 'utf8')).map((g) => [g.source, g.skills]), [['foo/bar', ['alpha', 'new']]]);
+});

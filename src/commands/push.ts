@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 import { parseConfigMode, resolveConfigMode } from '../config-mode.ts';
 import { runGit } from '../git.ts';
-import { openMachine, refuseInvalidOverrides, runCommand } from '../machine.ts';
+import { openCheckout, refuseInvalidOverrides, runCommand } from '../machine.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 import { capture } from './capture.ts';
 
@@ -34,7 +34,8 @@ export async function run(args: string[] = []): Promise<number> {
   }
 
   return runCommand((signal) => Effect.gen(function* () {
-    const opened = yield* openMachine({ mode });
+    // Holds are read, not composed: capture writes into the checkout, and keeps held items out of it.
+    const opened = yield* openCheckout({ mode });
     if (refuseInvalidOverrides(opened.overrides)) return 1;
     const { manageConfig } = resolveConfigMode(mode, opened.overrides.value);
     const repo = opened.paths.repo;
