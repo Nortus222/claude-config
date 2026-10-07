@@ -1,6 +1,8 @@
-export * from './item-ids.ts';
+export {
+  entryOf, itemIdOf, LOCAL_SETUP, normalizeRepoUrl, RevisionMismatch, RevisionUnavailable, SetupSource, SetupsStore, setupsStore,
+  type Effective, type Entry, type Revision, type Snapshot, type TrustedSetup,
+} from '@nortuscc/sync';
 export * from './classifier.ts';
-export * from './source.ts';
 export * from './sort.ts';
 export * from './clock.ts';
 export * from './state.ts';

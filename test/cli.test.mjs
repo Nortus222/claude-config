@@ -127,3 +127,12 @@ test('a repeated --target exits 2', () => {
     },
   );
 });
+
+test('usage lists sync, its flags, and pull as the same command', () => {
+  const out = usage();
+  assert.match(out, /\bsync \[--check\] \[--yes\]/);
+  assert.match(out, /--skip ID,ID/);
+  assert.match(out, /--take-theirs ID,ID/);
+  assert.match(out, /--release ID/);
+  assert.match(out, /pull\s+the same as sync/);
+});

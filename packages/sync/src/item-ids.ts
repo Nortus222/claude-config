@@ -2,7 +2,8 @@ import type { DesiredConfig } from '@nortuscc/profile-engine';
 
 // The setup item an observed key stands for, or undefined for a key that is no setup item
 // (machine-local fixes, undeclared extras, anything unrecognised). A key without an id is never
-// pending, so it is never auto-applied. #51's hosted-protocol takes this function over.
+// pending, so it is never auto-applied. Machine sync and the agent share this one definition;
+// #51's hosted-protocol takes it over.
 export const itemIdOf = (key: string, desired: DesiredConfig): string | undefined => {
   if (key.startsWith('config:')) {
     const rest = key.slice('config:'.length);

@@ -55,7 +55,7 @@ test('a diverged origin exits 1 with the two-line message, no stack trace, and n
 
   const result = await pull(m);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /\nnortuscc: git pull --ff-only failed\.\nThe remote has diverged; resolve it in the repo before applying\./);
+  assert.match(result.stderr, /\nnortuscc: the checkout cannot fast-forward to its upstream\.\nThe remote has diverged; resolve it in the repo before applying\./);
   assert.doesNotMatch(result.stderr, /at\s+.*:\d+:\d+/);
   assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
   assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false, 'apply must never run after a failed pull');

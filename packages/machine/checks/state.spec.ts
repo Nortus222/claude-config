@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  emptyState, hashText, machinePaths, nodeFs, parseState, StateStore, stateStore, withBaseline, withoutBaseline,
+  emptyState, hashText, machinePaths, nodeFs, parseState, StateStore, stateStore, withApplied, withBaseline, withoutBaseline,
 } from '../src/index.ts';
 
 const machine = () => {
@@ -120,4 +120,32 @@ test('update writes the legacy layout and baselines round-trip', async () => {
     version: 1, repo: null,
     files: { 'claude:CLAUDE.md': { hash: 'sha256:a', appliedAt: '2026-10-05T00:00:00.000Z' } },
   });
+});
+
+const APPLIED = 'c'.repeat(40);
+
+test('applied is written, read back, and kept by later baseline writes', async () => {
+  const { paths, run } = machine();
+  await run((s) => s.write(withApplied(emptyState, APPLIED, new Date('2026-10-07T00:00:00.000Z'))));
+  await run((s) => s.update((state) => withBaseline(state, 'claude:CLAUDE.md', 'sha256:1')));
+  const written = JSON.parse(readFileSync(join(paths.stateRoot, 'state.json'), 'utf8'));
+  assert.deepEqual(written.applied, { commit: APPLIED, at: '2026-10-07T00:00:00.000Z' });
+  assert.deepEqual((await run((s) => s.read)).applied, written.applied);
+});
+
+test('a state with no applied commit writes none', async () => {
+  const { paths, run } = machine();
+  await run((s) => s.write(emptyState));
+  assert.equal('applied' in JSON.parse(readFileSync(join(paths.stateRoot, 'state.json'), 'utf8')), false);
+});
+
+test('a malformed applied record is dropped and the rest of the state kept', () => {
+  for (const applied of [{ commit: 'main', at: '2026-10-07T00:00:00.000Z' }, { commit: APPLIED, at: 'yesterday' }, 'abc']) {
+    assert.deepEqual(parseState(JSON.stringify({ version: 1, repo: '/r', files: {}, applied })), { version: 1, repo: '/r', files: {} });
+  }
+});
+
+test('a SHA-256 applied commit is accepted', () => {
+  const applied = { commit: 'd'.repeat(64), at: '2026-10-07T00:00:00.000Z' };
+  assert.deepEqual(parseState(JSON.stringify({ version: 1, repo: null, files: {}, applied }))?.applied, applied);
 });

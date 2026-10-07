@@ -86,7 +86,9 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         });
         let stdout = '';
         let closed = false;
-        child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+        // Decoded as one stream, so a character split across chunks is not mangled.
+        child.stdout?.setEncoding('utf8');
+        child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
         child.on('close', (code, signal) => {
           closed = true;

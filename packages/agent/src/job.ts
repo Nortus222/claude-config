@@ -3,17 +3,13 @@ import {
   backupsForRun, DecisionsStore, HistoryStore, inspect, MachinePaths, machinePaths,
   type HistoryEvent, type ItemReason,
 } from '@nortuscc/machine';
+import { LOCAL_SETUP, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
 import { interruptedRun, pause } from './pause.ts';
-import { SetupsStore } from './setups.ts';
 import { differs, sortItems, type Pending } from './sort.ts';
-import { SetupSource, type Revision } from './source.ts';
 import { AgentStateStore, DEFAULT_STATE, type Paused, type Policy } from './state.ts';
-
-// P2: decisions about the user's own setup, not linked to the hosted service.
-export const LOCAL_SETUP = 'local';
 
 export type StatusError = 'PROFILE_INVALID' | 'DECISIONS_INVALID' | 'REVISION_UNAVAILABLE' | 'JOB_FAILED';
 

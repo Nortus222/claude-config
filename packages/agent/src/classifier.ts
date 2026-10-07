@@ -1,12 +1,4 @@
-// One setup item's value in one DesiredConfig, as the classifier needs it.
-export type Entry =
-  | {
-    readonly kind: 'file'; readonly fileId: string; readonly mode: 'copy' | 'merge-keys'; readonly dest: string;
-    readonly managed: boolean; readonly hash: string | undefined;
-  }
-  | { readonly kind: 'setting'; readonly fileId: string; readonly key: string; readonly managed: boolean; readonly value: unknown }
-  | { readonly kind: 'skill'; readonly value: unknown }
-  | { readonly kind: 'integration'; readonly value: unknown };
+import type { Entry } from '@nortuscc/sync';
 
 // An item's entry in the applied revision's configuration and in the effective one.
 export type Change = { readonly itemId: string; readonly before?: Entry; readonly after?: Entry };

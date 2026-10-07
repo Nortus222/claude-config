@@ -1,4 +1,4 @@
-export const VERBS = ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'update', 'uninstall'];
+export const VERBS = ['setup', 'status', 'apply', 'capture', 'sync', 'pull', 'push', 'update', 'uninstall'];
 
 export const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
@@ -38,7 +38,13 @@ Installation (setup and apply --install):
          [--add N,N] [--prune]      --check reports only; --add and --prune pre-tick rows
   capture [--take-local]            machine -> repo
                                     --take-local resolves a conflict by keeping the local version
-  pull                              git pull --ff-only, then apply
+  sync [--check] [--yes]            fetch the setup, preview what changed item by item,
+       [--skip ID,ID]               take what you tick (your overrides stay), then apply
+       [--take-theirs ID,ID]        --check previews only and exits 1 when items wait
+       [--release ID]               --skip holds items at their current value
+                                    --take-theirs drops the override an item conflicts with
+                                    --release takes a held item after all
+  pull                              the same as sync
   push -m MSG                       capture, then commit and push
   uninstall --yes [--force]         restore or remove managed configuration,
                                     then switch this machine to skills-only mode

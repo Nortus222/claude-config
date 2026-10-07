@@ -5,6 +5,9 @@ import type { Decision } from '@nortuscc/machine';
 // P2: a commit SHA on the setup's tracked branch. P3 adds hosted revision records.
 export type Revision = string;
 
+// P2: decisions about the user's own setup, not linked to the hosted service.
+export const LOCAL_SETUP = 'local';
+
 // A configuration and a directory holding its files. The config domain reads a copied file's
 // content from MachinePaths.repo, so the agent points that at `repo` while it inspects and applies.
 export type Snapshot = { readonly desired: DesiredConfig; readonly repo: string };
@@ -30,7 +33,7 @@ export class RevisionUnavailable extends Data.TaggedError('RevisionUnavailable')
   }
 }
 
-// Machine sync's contract (#43). The agent's tests fake it until #43 implements it.
+// Machine sync's contract (#43), implemented by setupSourceLayer; the agent's tests fake it.
 export class SetupSource extends Context.Service<
   SetupSource,
   {
@@ -42,4 +45,4 @@ export class SetupSource extends Context.Service<
     // This machine's desired configuration; skipped and undecided items stay at their applied value.
     readonly effective: (decisions: ReadonlyArray<Decision>) => Effect.Effect<Effective, RevisionUnavailable>;
   }
->()('agent/SetupSource') {}
+>()('sync/SetupSource') {}

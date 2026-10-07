@@ -1,4 +1,6 @@
-import { homedir } from 'node:os';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Cause, Effect, Layer, Stream } from 'effect';
 import {
@@ -11,6 +13,7 @@ import {
   type MachinePaths, type MachinePathsValue, type MachineReport, type Plan, type PluginState, type Processes, type RepoNotFound,
   type StateStore, type Step,
 } from '@nortuscc/machine';
+import { desiredFor, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
 import { resolveConfigMode, type ConfigMode } from './config-mode.ts';
 
 // The checkout this file belongs to: where a machine with no recorded checkout runs from.
@@ -24,6 +27,10 @@ export type Opened = {
   // As read from overrides.json, issues included; a command that changes anything refuses an invalid file.
   overrides: Input<MachineOverrides>;
   desired: DesiredConfig;
+  // The git checkout. paths.repo is a composed directory instead when items are held (openDesired).
+  checkout: string;
+  // This machine's held items (sync.json); empty from openMachine.
+  held: Holds;
 };
 
 // This machine's paths from the environment. `warn` hears about a recorded repo that is no longer a checkout.
@@ -65,7 +72,55 @@ export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsVa
     reportOverrideIssues(overrides);
     const value = options.mode ? resolveConfigMode(options.mode, overrides.value).overrides : overrides.value;
     const desired = yield* loadProfile(paths.repo, { overrides: { ...overrides, value } }).pipe(Effect.provide(nodeFiles));
-    return { paths, layer, overrides, desired };
+    return { paths, layer, overrides, desired, checkout: paths.repo, held: {} };
+  });
+}
+
+// openMachine with this machine's held items (sync.json) composed over the working tree, for the
+// commands that apply or report desired state. With holds, paths.repo is a temporary directory of the
+// composed documents, removed when the caller's scope closes, and `checkout` stays the git checkout.
+// An invalid sync.json fails with SyncStateInvalid, so the command changes nothing.
+export function openDesired(options: { mode?: ConfigMode } = {}) {
+  return Effect.gen(function* () {
+    const opened = yield* openMachine(options);
+    const held = yield* Effect.gen(function* () {
+      return yield* (yield* SyncStore).read;
+    }).pipe(Effect.provide(syncStore.pipe(Layer.provide(opened.layer))));
+    if (Object.keys(held).length === 0) return opened;
+    // desiredFor removes and recreates `into`, so it is a child of the private (0700) mkdtemp dir:
+    // recreated in a shared tmp under its own name, another user could plant documents in it.
+    // The exit hook removes the dir when the process exits before the scope closes.
+    const dir = yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const made = mkdtempSync(join(tmpdir(), 'nortuscc-desired-'));
+        const remove = () => rmSync(made, { recursive: true, force: true });
+        process.once('exit', remove);
+        return { made, remove };
+      }),
+      ({ remove }) => Effect.sync(() => {
+        process.off('exit', remove);
+        remove();
+      }),
+    );
+    const into = join(dir.made, 'repo');
+    const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
+    const snapshot = yield* desiredFor({
+      repo: opened.checkout, head: { kind: 'worktree' }, held, into, overrides: { ...opened.overrides, value },
+    }).pipe(
+      Effect.provide(opened.layer),
+      // A hold whose commit is gone cannot be composed; releasing it is the only way out.
+      Effect.catchTag('RevisionUnavailable', (err) => {
+        const items = Object.keys(held).filter((id) => held[id] === err.revision).sort();
+        const release = items.map((id) => `nortuscc sync --release ${id}`).join('\n  ');
+        return Effect.fail(new Error(
+          `${items.join(', ')} ${items.length === 1 ? 'is' : 'are'} held at ${err.revision}, which this checkout lacks `
+          + `(${err.message}). Take the checkout's value instead with:\n  ${release}`,
+        ));
+      }),
+    );
+    const paths = { ...opened.paths, repo: snapshot.repo };
+    const composed: Opened = { ...opened, paths, layer: cliLayer(paths), desired: snapshot.desired, held };
+    return composed;
   });
 }
 

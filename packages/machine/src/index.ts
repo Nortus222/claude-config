@@ -25,7 +25,7 @@ export {
 } from './integrations/index.ts';
 export { CHANGED_SINCE_APPLY, configDomain } from './config/domain.ts';
 export { splitOutcome } from './config/outcome.ts';
-export { configFileId } from './config/observe.ts';
+export { configFileId, contentHash } from './config/observe.ts';
 export { canonical } from './config/file-state.ts';
 export * from './skills/index.ts';
 export * from './undeclared/probe.ts';
