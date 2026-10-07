@@ -1,5 +1,5 @@
-// Opt-in macOS smoke: registers the agent as a real LaunchAgent, proves it starts and stops, and
-// removes it. Run with `npm run smoke:agent` and NORTUSCC_SMOKE=1 on a Mac; skipped otherwise.
+// Opt-in macOS smoke: registers the agent as a real LaunchAgent, proves it starts, that re-installing
+// and restarting replace the running agent, and that it stops when removed. Run with `npm run smoke:agent` and NORTUSCC_SMOKE=1 on a Mac; skipped otherwise.
 // Everything it touches is temporary: a unique label, a temp unit directory (never
 // ~/Library/LaunchAgents), and temp home, state, checkout and agent directories.
 import assert from 'node:assert/strict';
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { liveLockHolder, nodeFs, nodeProcesses } from '@nortuscc/machine';
-import { installService, uninstallService, unitPath, type ServiceProgram, type ServiceTarget } from '../src/index.ts';
+import { installService, restartService, uninstallService, unitPath, type ServiceProgram, type ServiceTarget } from '../src/index.ts';
 
 const CHECKOUT = fileURLToPath(new URL('../../..', import.meta.url));
 const enabled = process.platform === 'darwin' && process.env.NORTUSCC_SMOKE === '1';
@@ -51,7 +51,7 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
 
 const services = Layer.merge(nodeFs, nodeProcesses());
 
-test('the agent runs as a LaunchAgent and stops when it is uninstalled', { skip, timeout: 90_000 }, async () => {
+test('the agent runs as a LaunchAgent, is replaced on re-install and restart, and stops when uninstalled', { skip, timeout: 150_000 }, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'nortuscc-smoke-')));
   const label = `com.nortuscc.agent.smoke.${randomBytes(6).toString('hex')}`;
   const uid = process.getuid!();
@@ -91,6 +91,22 @@ test('the agent runs as a LaunchAgent and stops when it is uninstalled', { skip,
     // Until IPC's `hello` (#78), a live pid in agent.lock is the proof that the agent is up.
     assert.ok(await until(() => (pid = liveLockHolder(lock)) !== undefined, 30_000), `the agent never took agent.lock:\n${log()}`);
     assert.notEqual(pid, process.pid);
+
+    // A live agent.lock held by a pid other than `old`: the running agent was replaced.
+    const replaced = async (old: number, what: string) => {
+      const ok = await until(() => {
+        const holder = liveLockHolder(lock);
+        if (holder !== undefined) pid = holder;
+        return holder !== undefined && holder !== old;
+      }, 30_000);
+      assert.ok(ok, `${what} did not replace agent pid ${old}:\n${log()}`);
+    };
+
+    // Re-registering over a running agent exercises bootout racing the next bootstrap.
+    await Effect.runPromise(installService(target, program).pipe(Effect.provide(services)));
+    await replaced(pid!, 'a second install');
+    await Effect.runPromise(restartService(target, program).pipe(Effect.provide(services)));
+    await replaced(pid!, 'a restart');
 
     await Effect.runPromise(uninstallService(target).pipe(Effect.provide(services)));
     assert.equal(existsSync(unitPath(target)), false);
