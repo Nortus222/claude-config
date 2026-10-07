@@ -238,13 +238,9 @@ export function probeCalls(m: Machine): Array<Call & { readOnly: true }> {
   return readJsonl<Call & { readOnly: true }>(m.log + '.probe');
 }
 
-// Runs the CLI against `m`. `bin` launches another copy of bin/nortuscc.mjs, such as an npx copy.
-export function runCli(
-  m: Machine,
-  args: string[],
-  options: { env?: Record<string, string>; input?: string; bin?: string } = {},
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  const env = {
+// The environment a CLI run against `m` gets: fakes first on PATH, every directory inside `m`.
+export function cliEnv(m: Machine, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return {
     ...process.env,
     PATH: `${m.bin}${delimiter}${process.env.PATH}`,
     // Nothing may fall back to the developer's real home.
@@ -257,8 +253,17 @@ export function runCli(
     NORTUSCC_STATE_DIR: m.state,
     NORTUSCC_REPO_DIR: m.repo,
     NORTUSCC_TEST_LOG: m.log,
-    ...options.env,
+    ...extra,
   };
+}
+
+// Runs the CLI against `m`. `bin` launches another copy of bin/nortuscc.mjs, such as an npx copy.
+export function runCli(
+  m: Machine,
+  args: string[],
+  options: { env?: Record<string, string>; input?: string; bin?: string } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const env = cliEnv(m, options.env);
   return new Promise((resolve) => {
     const child = execFile(process.execPath, [options.bin ?? BIN, ...args], { env }, (err, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
