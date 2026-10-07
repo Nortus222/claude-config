@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseSkillsManifest } from '@nortuscc/profile-engine';
@@ -156,9 +156,8 @@ if (argv[0] === '-y' && argv[1] === 'skills' && argv[2] === 'add') {
 }
 `;
 
-test('update writes the manifest into the checkout, with a held skill as the checkout declares it', async () => {
-  const m = machine();
-  const { pinned } = pinnedSkill(m);
+// A local upstream `u/v` offering `fresh` and `wizard`, with `fresh` installed from it. Answers its path.
+function uvSource(m: Machine): string {
   const uv = mkdtempSync(join(tmpdir(), 'nortuscc-holds-uv-'));
   git(uv, 'init', '-q');
   for (const name of ['fresh', 'wizard']) {
@@ -170,22 +169,71 @@ test('update writes the manifest into the checkout, with a held skill as the che
   const stored = join(m.agents, 'fresh');
   mkdirSync(stored, { recursive: true });
   writeFileSync(join(stored, 'SKILL.md'), '# fresh\n');
+  mkdirSync(join(m.claude, 'skills'), { recursive: true });
   symlinkSync(stored, join(m.claude, 'skills', 'fresh'), 'dir');
   mkdirSync(join(m.codex, 'skills', 'fresh'), { recursive: true });
   const lockPath = join(dirname(m.agents), '.skill-lock.json');
-  const lock = readJson(lockPath);
+  const lock = existsSync(lockPath) ? readJson(lockPath) : { skills: {} };
   lock.skills.fresh = { source: 'u/v', sourceUrl: `file://${uv}`, skillPath: 's/fresh/SKILL.md', skillFolderHash: git(uv, 'rev-parse', 'HEAD:s/fresh') };
   writeFileSync(lockPath, JSON.stringify(lock));
+  writeFakeBin(m.bin, 'npx', UV_NPX);
+  return uv;
+}
+
+test('update writes the manifest into the checkout, with a held skill as the checkout declares it', async () => {
+  const m = machine();
+  const { pinned } = pinnedSkill(m);
+  const uv = uvSource(m);
   writeFileSync(join(m.repo, 'skills-manifest.txt'), '[u/v]\nfresh\n');
   writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: {} }, null, 2) + '\n');
   git(m.repo, 'commit', '-qam', 'drop pinme, add u/v');
   hold(m, { 'skill:o/r/pinme': pinned });
-  writeFakeBin(m.bin, 'npx', UV_NPX);
   const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /skills-manifest\.txt written — 2 skill\(s\)/);
   const manifest = readFileSync(join(m.repo, 'skills-manifest.txt'), 'utf8');
   assert.deepEqual(parseSkillsManifest(manifest).map((g) => [g.source, g.skills]), [['u/v', ['fresh', 'wizard']]]);
+});
+
+test('update reports a manifest it could not carry back to the checkout, and still closes its report', async () => {
+  const m = machine();
+  const { pinned } = pinnedSkill(m);
+  const uv = uvSource(m);
+  writeFileSync(join(m.repo, 'skills-manifest.txt'), '[u/v]\nfresh\n');
+  writeFileSync(join(m.repo, 'skill-pins.json'), JSON.stringify({ version: 1, pins: {} }, null, 2) + '\n');
+  git(m.repo, 'commit', '-qam', 'drop pinme, add u/v');
+  hold(m, { 'skill:o/r/pinme': pinned });
+  // A read-only checkout directory refuses the atomic write's temp file.
+  chmodSync(m.repo, 0o555);
+  try {
+    const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /skills-manifest\.txt failed — /);
+    assert.doesNotMatch(result.stdout, /nortuscc push/);
+    assert.match(result.stdout, /wizard\s+added/);
+  } finally {
+    chmodSync(m.repo, 0o755);
+  }
+  assert.equal(readFileSync(join(m.repo, 'skills-manifest.txt'), 'utf8'), '[u/v]\nfresh\n');
+});
+
+test('update does not offer or adopt a skill held absent', async () => {
+  const m = machine();
+  const uv = uvSource(m);
+  const manifest = join(m.repo, 'skills-manifest.txt');
+  writeFileSync(manifest, '[u/v]\nfresh\n');
+  git(m.repo, 'add', '.');
+  git(m.repo, 'commit', '-qm', 'u/v');
+  const without = git(m.repo, 'rev-parse', 'HEAD');
+  writeFileSync(manifest, '[u/v]\nfresh\nwizard\n');
+  git(m.repo, 'commit', '-qam', 'add wizard');
+  hold(m, { 'skill:u/v/wizard': without });
+  const result = await runCli(m, ['update', '--yes', '--add', 'wizard'], { env: { NORTUSCC_TEST_UV_URL: `file://${uv}` } });
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /available/);
+  assert.match(result.stdout, /not found upstream.*wizard/s);
+  assert.equal(existsSync(join(m.agents, 'wizard')), false);
+  assert.equal(readFileSync(manifest, 'utf8'), '[u/v]\nfresh\nwizard\n');
 });
 
 test('capture --take-local never writes a held key back into the checkout', async () => {
@@ -198,6 +246,18 @@ test('capture --take-local never writes a held key back into the checkout', asyn
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.equal(readJson(KEYS(m)).effortLevel, 'medium');
   assert.match(result.stdout, /settings\.json\s+held/);
+});
+
+test('capture leaves a held key that changed locally as the checkout declares it', async () => {
+  const m = machine();
+  hold(m, { [EFFORT]: commitKeys(m, (k) => ({ ...k, effortLevel: 'medium' })) });
+  assert.equal((await runCli(m, ['apply'])).code, 0);
+  const settings = join(m.claude, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ ...readJson(settings), effortLevel: 'mine' }, null, 2) + '\n');
+  const result = await runCli(m, ['capture']);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /settings\.json\s+held/);
+  assert.equal(readJson(KEYS(m)).effortLevel, 'medium');
 });
 
 test('push publishes nothing for a held key', async () => {

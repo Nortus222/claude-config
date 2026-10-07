@@ -214,7 +214,12 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
       write('\ncancelled\n');
       return 1;
     }
-    const { desired, items, probeErrors } = inspected;
+    const { desired, probeErrors } = inspected;
+    // The composed setup lacks a skill held absent, so its source still offers it as `available`;
+    // dropping those keeps --add and the picker from adopting what the person chose not to have.
+    const items = holds
+      ? inspected.items.filter((i) => !(i.state === 'available' && `skill:${i.group}/${i.label}` in holds.held))
+      : inspected.items;
     for (const message of probeErrors) console.error(message);
     write('\n' + section('update', reportLines(items)));
 
@@ -314,15 +319,24 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // The skills domain writes the manifest into paths.repo, which is the composed copy when items are
     // held: carry it to the checkout with each held skill as the checkout declares it, so the held
     // value is never published as an upstream change.
-    // The note then counts what reached the checkout.
-    const manifestWritten = manifestNote?.startsWith('written') ?? false;
+    // The note then counts what reached the checkout, or says why nothing did.
+    let manifestWritten = manifestNote?.startsWith('written') ?? false;
     if (manifestWritten && holds) {
-      const fs = yield* Fs;
-      const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
-      const target = join(holds.checkout, MANIFEST_FILE);
-      const groups = checkoutGroups(composed, parseSkillsManifest(yield* fs.readText(target)), holds.held);
-      yield* fs.writeTextAtomic(target, emitManifest(groups));
-      manifestNote = `written — ${groups.reduce((n, g) => n + g.skills.length, 0)} skill(s)`;
+      const checkout = holds;
+      // Skills are already installed by now, so a failed carry-back is reported here, not thrown:
+      // the closing report and the backup path still print.
+      manifestNote = yield* Effect.gen(function* () {
+        const fs = yield* Fs;
+        const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
+        const target = join(checkout.checkout, MANIFEST_FILE);
+        const groups = checkoutGroups(composed, parseSkillsManifest(yield* fs.readText(target)), checkout.held);
+        yield* fs.writeTextAtomic(target, emitManifest(groups));
+        return `written — ${groups.reduce((n, g) => n + g.skills.length, 0)} skill(s)`;
+      }).pipe(Effect.catch((error: unknown) => Effect.sync(() => {
+        manifestWritten = false;
+        anyFailed = true;
+        return `failed — ${messageOf(error)}`;
+      })));
     }
     if (manifestNote !== undefined) {
       write(`\nskills-manifest.txt ${manifestNote}\n`);
