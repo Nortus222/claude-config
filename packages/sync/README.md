@@ -1,7 +1,8 @@
 # @nortuscc/sync
 
 Machine sync (#43): keeps a machine on the shared setup item by item without losing its overrides.
-Spec: `docs/superpowers/specs/2026-10-07-machine-sync-design.md`. Decision: `docs/adr/0017-held-items-compose-over-the-checkout.md`.
+Decisions: [ADR 0017](../../docs/adr/0017-held-items-compose-over-the-checkout.md) (held items) and
+[ADR 0016](../../docs/adr/0016-agent-applies-from-a-verified-snapshot.md) (the agent's snapshots).
 
 - **Items.** `itemValues(documents)` maps every setup item (`setting:`, `file:`, `skill:`, `integration:`)
   to a comparable value, from the documents alone; `diffItems(from, to)` lists what differs.
