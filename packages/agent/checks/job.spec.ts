@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { canonical, DecisionsStore, hashText, HistoryStore } from '@nortuscc/machine';
-import { AgentStateStore, runJob, SetupsStore, type Policy } from '../src/index.ts';
+import { canonical, configDomain, DecisionsStore, hashText, HistoryStore, integrationsDomain, type MachinePathsValue } from '@nortuscc/machine';
+import { AgentStateStore, runJob, SetupsStore, type AgentDomains, type Policy } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, HOOK, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
 
@@ -17,6 +17,7 @@ type Scenario = {
   readonly decide?: boolean;
   readonly fixture?: FixtureOptions;
   readonly settings?: Readonly<Record<string, unknown>>;
+  readonly domains?: AgentDomains;
 };
 
 // A trusted machine with `theme: light` locally, the given policy, and both head items accepted.
@@ -34,9 +35,10 @@ const scenario = async (options: Scenario) => {
   if (options.decide !== false) {
     for (const itemId of [EFFORT, HOOK]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
   }
-  const job = () => m.run(runJob(m.domains), fixture.source);
+  const run = () => m.run(runJob(options.domains ?? (() => m.domains)), fixture.source);
+  const job = () => run().then((r) => r.status);
   const settings = () => JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!);
-  return { m, job, settings, fixture };
+  return { m, run, job, settings, fixture };
 };
 
 test('auto-apply applies the accepted inert key, holds the hook, and only reports drift', async () => {
@@ -50,6 +52,43 @@ test('auto-apply applies the accepted inert key, holds the hook, and only report
   const [held] = (await m.events()).filter((e) => e.kind === 'held');
   assert.ok(held?.kind === 'held');
   assert.deepEqual(held.items, [{ itemId: HOOK, reason: 'integration' }]);
+});
+
+// Builds the agent's domains from each job's paths, as `agent run` does, and records those paths.
+const recording = () => {
+  const seen: Array<MachinePathsValue> = [];
+  const domains: AgentDomains = (paths) => {
+    seen.push(paths);
+    return [configDomain, integrationsDomain({ paths, env: {} })];
+  };
+  return { seen, domains };
+};
+
+test('a trusted job builds its domains from paths at the effective snapshot, and keeps its inspection', async () => {
+  const factory = recording();
+  const { m, run, fixture } = await scenario({ policy: 'auto-apply', domains: factory.domains });
+  const { status, inspection } = await run();
+  const atSnapshot = { ...m.paths, repo: fixture.dirs[HEAD] };
+  assert.equal(status.autoApply?.kind, 'ran');
+  assert.ok(factory.seen.length > 0);
+  for (const paths of factory.seen) assert.deepEqual(paths, atSnapshot);
+  assert.deepEqual(inspection?.paths, atSnapshot);
+  assert.equal(inspection?.trusted, true);
+  assert.equal(inspection?.desired, inspection?.report.desired);
+  assert.ok(inspection?.report.items.some((i) => i.key === EFFORT_KEY));
+});
+
+test('an untrusted job builds its domains from paths at the checkout HEAD snapshot', async () => {
+  const factory = recording();
+  const { m, run, fixture } = await scenario({ policy: 'auto-apply', trusted: false, domains: factory.domains });
+  const { inspection } = await run();
+  assert.deepEqual(factory.seen, [{ ...m.paths, repo: fixture.dirs[HEAD] }]);
+  assert.equal(inspection?.trusted, false);
+});
+
+test('a job that cannot resolve a configuration keeps no inspection', async () => {
+  const { run } = await scenario({ policy: 'auto-apply', fixture: { unavailable: ['effective'] } });
+  assert.equal((await run()).inspection, undefined);
 });
 
 test('notify records ready and held once, and applies nothing', async () => {

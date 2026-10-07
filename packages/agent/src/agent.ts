@@ -4,8 +4,8 @@ import {
   acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
-import { failedStatus, runJob, type AgentStatus } from './job.ts';
-import { agentLayer, type AgentDomain } from './layer.ts';
+import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
+import { agentLayer, type AgentDomains } from './layer.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
@@ -13,9 +13,10 @@ import type { SetupSource } from '@nortuscc/sync';
 import type { AgentStateStore, Policy } from './state.ts';
 
 // What #78's IPC handlers and the CLI's agent commands call. Each change answers with the status
-// of the job that ran after it.
+// of the job that ran after it. `inspection` is what the latest job inspected, if it got that far.
 export type AgentHandle = {
   readonly status: Effect.Effect<AgentStatus | undefined>;
+  readonly inspection: Effect.Effect<JobInspection | undefined>;
   readonly request: (trigger: Trigger) => Effect.Effect<AgentStatus>;
   readonly decide: (decision: Decision, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid>;
   readonly resume: (actor: Actor) => Effect.Effect<AgentStatus, FsFailed>;
@@ -30,10 +31,11 @@ const describe = (cause: Cause.Cause<unknown>): string => {
 // Starts the scheduler and the timer in the current scope and queues the start job. It never
 // changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
-export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { readonly signal?: AbortSignal } = {}) =>
+export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal } = {}) =>
   Effect.gen(function* () {
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
+    const inspection = yield* Ref.make<JobInspection | undefined>(undefined);
     const shutdown = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, shutdown.signal]) : shutdown.signal;
     const job = (_triggers: ReadonlyArray<Trigger>) =>
@@ -41,9 +43,12 @@ export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { reado
         // A failed job is reported, never fatal: the loop must survive failures and defects alike.
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
-            return failedStatus((yield* clock.now).toISOString(), yield* Ref.get(latest), describe(cause));
+            const failed: JobResult = { status: failedStatus((yield* clock.now).toISOString(), yield* Ref.get(latest), describe(cause)) };
+            return failed;
           })),
-        Effect.tap((status) => Ref.set(latest, status)),
+        // The inspection always belongs to the latest status: a job that inspected nothing clears it.
+        Effect.tap((result) => Effect.andThen(Ref.set(latest, result.status), Ref.set(inspection, result.inspection))),
+        Effect.map((result) => result.status),
       );
     const scheduler = yield* makeScheduler(job);
     yield* Effect.forkScoped(scheduler.run);
@@ -58,6 +63,7 @@ export const startAgent = (domains: ReadonlyArray<AgentDomain>, options: { reado
       Effect.provideContext(effect, context);
     const handle: AgentHandle = {
       status: Ref.get(latest),
+      inspection: Ref.get(inspection),
       request: scheduler.request,
       decide: (decision, actor) => withServices(recordDecision(decision, actor)).pipe(Effect.andThen(scheduler.request('decide'))),
       resume: (actor) => withServices(resume(actor)).pipe(Effect.andThen(scheduler.request('resume'))),
@@ -80,10 +86,10 @@ const untilAborted = (signal?: AbortSignal): Effect.Effect<void> =>
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted or `signal` aborts; either closes the agent, cancelling an in-flight auto-apply.
 // A pid lock makes it the only agent per state root: a second fails LockHeld before touching state.
-// The caller builds `domains` and `source` at the same boundary as `paths`.
+// The caller builds the per-job `domains` factory and `source` at the same boundary as `paths`.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
-  readonly domains: ReadonlyArray<AgentDomain>;
+  readonly domains: AgentDomains;
   readonly source: Layer.Layer<SetupSource>;
   readonly signal?: AbortSignal;
 }) =>

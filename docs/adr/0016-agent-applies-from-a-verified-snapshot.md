@@ -20,5 +20,4 @@ construction.
 ## Consequences
 
 - #43 must materialise a directory per effective configuration.
-- The integrations domain still captures its paths at construction; #78 must fix that before
-  person-initiated applies.
+- The integrations domain is built per job from the job's paths, as every agent domain is.

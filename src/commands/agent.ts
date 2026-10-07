@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
-import { configDomain, Fs, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
+import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
   agentLayer, AgentStateStore, installService, runAgent, trustOwnSetup, uninstallService, unitPath, type ServiceFailed, type ServiceTarget,
 } from '@nortuscc/agent';
@@ -100,9 +100,10 @@ async function runForeground(): Promise<number> {
       const paths = yield* resolvePaths((m) => console.error(m));
       const lock = join(paths.stateRoot, 'agent', 'agent.lock');
       console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`);
-      // The integrations domain captures its paths at construction (ADR 0016), so it joins once #78
-      // can rebuild it per job.
-      return yield* runAgent({ paths, domains: [configDomain, skillsDomain], source: setupSourceLayer(paths), signal: controller.signal }).pipe(
+      // Each job builds its domains from its own paths, so the integrations domain reads the job's
+      // snapshot, as ADR 0016 requires.
+      const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env: process.env }), skillsDomain];
+      return yield* runAgent({ paths, domains, source: setupSourceLayer(paths), signal: controller.signal }).pipe(
         Effect.as(0),
         Effect.catchTag('LockHeld', (err) => Effect.sync(() => {
           console.error(err.path === lock ? `nortuscc: another agent (pid ${err.pid}) is running` : `nortuscc: ${err.message}`);

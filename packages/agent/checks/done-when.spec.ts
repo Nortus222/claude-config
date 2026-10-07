@@ -28,7 +28,7 @@ test('done when: on an auto-apply machine an accepted inert key is applied with 
   const { status, events } = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     // Installing the agent is the person's act that trusts this checkout.
     yield* trustOwnSetup('cli');
-    const agent = yield* startAgent(domains);
+    const agent = yield* startAgent(() => domains);
     yield* agent.setPolicy('auto-apply', 'cli');
     yield* agent.decide(accept(EFFORT), 'app');
     const status = yield* agent.decide(accept(HOOK), 'app');
