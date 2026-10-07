@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { test, type TestContext } from 'node:test';
@@ -39,9 +38,9 @@ async function cleanupRecordedFixture(app: string, record: string, child?: Recor
   rmSync(app, { recursive: true, force: true });
 }
 
-// Ownership lives outside HOME, so parent timeouts and premature HOME removal cannot erase it.
+// Unix socket paths need a short root; ownership stays outside HOME for reliable teardown.
 function smokeFixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), 'nsm-'));
+  const root = mkdtempSync('/tmp/nsm-');
   const app = join(root, 'app');
   const temporaryRoot = join(root, 'tmp');
   const record = join(root, 'children.json');
@@ -79,7 +78,7 @@ test('smoke waits for its foreground child to stop and removes HOME when a socke
   skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
-  const app = mkdtempSync(join(tmpdir(), 'nsm-'));
+  const app = mkdtempSync('/tmp/nsm-');
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const record = join(app, 'child.json');
   let child: RecordedChild | undefined;
@@ -131,7 +130,7 @@ test('packaged smoke passes its resolved temporary root to the native child', {
 
 for (const code of ['ENOENT', 'EACCES']) {
   test(`smoke removes its temporary HOME when the bundled runtime cannot launch (${code})`, { skip: unixSmokeSkip, timeout: 10_000 }, async (t) => {
-    const app = mkdtempSync(join(tmpdir(), 'nsm-'));
+    const app = mkdtempSync('/tmp/nsm-');
     t.after(() => rmSync(app, { recursive: true, force: true }));
     const resources = join(app, 'Contents/Resources/agent-runtime');
     const temporaryRoot = join(app, 'tmp');
@@ -155,7 +154,7 @@ test('a missing native executable stops the foreground agent and removes HOME', 
   skip: resourceSkip,
   timeout: 20_000,
 }, async (t) => {
-  const app = mkdtempSync(join(tmpdir(), 'nsm-'));
+  const app = mkdtempSync('/tmp/nsm-');
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
@@ -185,7 +184,7 @@ test('fixture teardown discovers and joins its child after smoke times out', {
   skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
-  const app = mkdtempSync(join(tmpdir(), 'nsm-'));
+  const app = mkdtempSync('/tmp/nsm-');
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
