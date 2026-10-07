@@ -16,5 +16,6 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
+      - run: npm test -w @nortuscc/hosted-protocol
       - run: node --test packages/machine/checks/processes.spec.ts
       - run: node --test --test-timeout=60000 test/fresh-machine.test.mjs
