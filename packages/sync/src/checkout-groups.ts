@@ -6,7 +6,8 @@ const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 // The manifest groups to write into the checkout: `machine` (what this machine implies) with every
 // held skill listed exactly as `checkout` declares it, so a command that regenerates the manifest
-// never publishes a held value as an upstream change. Groups and skills come out sorted.
+// never publishes a held value as an upstream change. Groups come out sorted by source; a group a
+// hold touched has its skills sorted.
 export const checkoutGroups = (
   machine: ReadonlyArray<SkillGroup>,
   checkout: ReadonlyArray<SkillGroup>,

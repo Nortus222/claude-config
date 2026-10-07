@@ -10,10 +10,10 @@ skipped item in `<stateRoot>/sync.json` as the commit whose value it keeps, and 
 `composeDocuments` (wrapped by `desiredFor`), builds what a machine should have: the documents at
 head (the working tree for the CLI, git objects for the agent) with every held item patched to its
 held value, resolved with this machine's overrides by `loadProfile`. Every command that acts on
-the machine composes it, and the agent does too, so they agree on what the machine should have. Items are compared
-from documents alone, never through overrides, so an override cannot hide an upstream change; an
-incoming item an override shadows is a conflict that is kept unless the person takes theirs, which
-removes that override after backing up `overrides.json`.
+the machine composes it, and the agent does too, so they agree on what the machine should have.
+Items are compared from documents alone, never through overrides, so an override cannot hide an
+upstream change; an incoming item an override shadows is a conflict that is kept unless the person
+takes theirs, which removes that override after backing up `overrides.json`.
 
 ## Considered options
 
