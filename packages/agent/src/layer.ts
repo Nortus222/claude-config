@@ -14,6 +14,9 @@ export type AgentServices =
 // The domains a job inspects and applies with; a fresh Backups is provided per job.
 export type AgentDomain = Domain<MachinePaths | Fs | Processes | StateStore | Backups>;
 
+// Builds a job's domains from that job's paths, whose `repo` is the snapshot it inspects (ADR 0016).
+export type AgentDomains = (paths: MachinePathsValue) => ReadonlyArray<AgentDomain>;
+
 // Every service the agent needs, built once from this machine's paths.
 export const agentLayer = (
   paths: MachinePathsValue,

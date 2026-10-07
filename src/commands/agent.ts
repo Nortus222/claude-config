@@ -1,18 +1,29 @@
+import { fstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
-import { configDomain, Fs, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
+import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
-  agentLayer, AgentStateStore, installService, runAgent, trustOwnSetup, uninstallService, unitPath, type ServiceFailed, type ServiceTarget,
+  agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
+  type ApplyResult, type InspectResult, type Policy, type PreviewResult, type RunEvent, type RunProgress, type ServiceFailed,
+  type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
 import { setupSourceLayer } from '@nortuscc/sync';
+import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../agent-client.ts';
 import { agentProgram, checkoutVersion, serviceTarget } from '../agent-service.ts';
 import { CHECKOUT, resolvePaths, runCommand } from '../machine.ts';
+import { confirm as realConfirm } from '../prompt.ts';
+import { select as realSelect, type Choice } from '../select.ts';
 
-const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run
+const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run | status | review | resume | policy <p>
   agent install [--linger]   run the local agent as a login service from this checkout
                              --linger (Linux) keeps it running with nobody logged in
   agent uninstall            stop the agent and remove its login service
-  agent run                  run the agent in the foreground (the service runs this)`;
+  agent run                  run the agent in the foreground (the service runs this)
+  agent status               show the running agent's policy, pause and pending items
+  agent review               choose pending, held and drifted items and apply them (needs a terminal)
+  agent resume               resume a paused agent
+  agent policy <auto-apply|notify|manual>
+                             set how the agent treats accepted items`;
 
 const APP_MANAGES = 'nortuscc: the desktop app manages the agent on this machine; manage it from the app.';
 
@@ -58,8 +69,7 @@ const install = (linger: boolean) =>
       yield* installService(target, program, { linger });
       yield* state.update((s) => ({ ...s, installedBy: 'cli', agentVersion: checkoutVersion() }));
       console.log(`agent installed: ${unitPath(target)}`);
-      // Task Scheduler cannot redirect the agent's output, so nothing writes the log on Windows.
-      if (target.platform !== 'win32') console.log(`log: ${program.logPath}`);
+      console.log(`log: ${program.logPath}`);
       return 0;
     }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
   });
@@ -89,7 +99,8 @@ const uninstall = Effect.gen(function* () {
   }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
 });
 
-// Runs the agent in the foreground until SIGTERM or SIGINT, which exit 0.
+// Runs the agent in the foreground, serving its socket off Windows, until SIGTERM, SIGINT or a
+// client's `shutdown`, each of which exits 0.
 async function runForeground(): Promise<number> {
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -99,10 +110,21 @@ async function runForeground(): Promise<number> {
     return await Effect.runPromise(Effect.gen(function* () {
       const paths = yield* resolvePaths((m) => console.error(m));
       const lock = join(paths.stateRoot, 'agent', 'agent.lock');
-      console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`);
-      // The integrations domain captures its paths at construction (ADR 0016), so it joins once #78
-      // can rebuild it per job.
-      return yield* runAgent({ paths, domains: [configDomain, skillsDomain], source: setupSourceLayer(paths), signal: controller.signal }).pipe(
+      // Each job builds its domains from its own paths, so the integrations domain reads the job's
+      // snapshot, as ADR 0016 requires.
+      const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env: process.env }), skillsDomain];
+      // Windows has no socket server yet; there the agent runs without IPC.
+      const ipc = process.platform !== 'win32';
+      let redirected = false;
+      if (!ipc) {
+        // Headless console handles may be absent; only a regular file proves existing redirection.
+        try { redirected = fstatSync(process.stdout.fd).isFile(); } catch {}
+      }
+      return yield* runAgent({
+        paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, signal: controller.signal,
+        ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
+        onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
+      }).pipe(
         Effect.as(0),
         Effect.catchTag('LockHeld', (err) => Effect.sync(() => {
           console.error(err.path === lock ? `nortuscc: another agent (pid ${err.pid}) is running` : `nortuscc: ${err.message}`);
@@ -120,7 +142,205 @@ async function runForeground(): Promise<number> {
   }
 }
 
-export async function run(args: string[] = []): Promise<number> {
+const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
+const NO_ANSWER = 'nortuscc: the agent did not answer in time';
+const LOST = 'nortuscc: lost the agent during the run; check nortuscc agent status';
+const STARTING = 'nortuscc: the agent is still starting; try again in a moment';
+
+// Runs `body` over a connection to the running agent (this machine's, unless `connect` is given);
+// no agent prints NOT_RUNNING and exits 1, and so does an unanswered request, with NO_ANSWER.
+// `signal` aborts on the first Ctrl-C, or when `injected` (a test's) aborts.
+const withAgent = (
+  body: (conn: AgentConnection, signal: AbortSignal) => Promise<number>, connect?: () => Promise<AgentConnection>, injected?: AbortSignal,
+) =>
+  runCommand((ctrlC) => Effect.gen(function* () {
+    const signal = injected ? AbortSignal.any([ctrlC, injected]) : ctrlC;
+    const open = connect ?? (yield* Effect.map(resolvePaths((m) => console.error(m)), (paths) => () => connectAgent(paths)));
+    return yield* Effect.tryPromise({
+      try: async () => {
+        let conn: AgentConnection;
+        try {
+          conn = await open();
+        } catch (error) {
+          if (!(error instanceof AgentUnavailable)) throw error;
+          console.error(NOT_RUNNING);
+          return 1;
+        }
+        try {
+          return await body(conn, signal);
+        } catch (error) {
+          if (!(error instanceof AgentError && error.code === 'TIMEOUT')) throw error;
+          console.error(NO_ANSWER);
+          return 1;
+        } finally {
+          conn.close();
+        }
+      },
+      catch: (error) => error,
+    });
+  }));
+
+const yesNo = (value: boolean) => (value ? 'yes' : 'no');
+
+// Prints the agent's last status; exits 1 when it carries an error.
+const printStatus = (status: WireStatus): number => {
+  const { counts } = status;
+  console.log(`policy: ${status.policy}`);
+  console.log(status.paused === null ? 'paused: no' : `paused: yes, since ${status.paused.at}: ${status.paused.reason}`);
+  console.log(`trusted: ${yesNo(status.trusted)}`);
+  console.log(`pending: ${counts.pending}, held: ${counts.held}, ready: ${counts.ready}, drift: ${counts.drift}`);
+  console.log(`conflicts: ${status.conflicts.length === 0 ? 'none' : status.conflicts.join(', ')}`);
+  console.log(`last inspection: ${status.at}`);
+  if (status.error === undefined) return 0;
+  console.log(`error: ${status.error}${status.detail === undefined ? '' : `: ${status.detail}`}`);
+  return 1;
+};
+
+// Stand-ins for the terminal, Ctrl-C and the agent, so a test can drive the commands that talk to the agent.
+export type AgentDeps = {
+  isTTY?: boolean;
+  select?: typeof realSelect;
+  confirm?: typeof realConfirm;
+  connect?: () => Promise<AgentConnection>;
+  signal?: AbortSignal;
+};
+
+// Ctrl-C before the apply starts: nothing was applied.
+class Cancelled extends Error {}
+
+// `request`'s answer, or Cancelled as soon as `signal` aborts.
+const unlessAborted = <A>(request: Promise<A>, signal: AbortSignal): Promise<A> => {
+  if (signal.aborted) return Promise.reject(new Cancelled());
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Cancelled());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([request, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+};
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const withBackups = (text: string, backups: string | undefined) => (backups === undefined ? text : `${text}; backups in ${backups}`);
+
+// One progress line; terminal events say how the run ended and where its backups are.
+const progressLine = (p: RunProgress): string => {
+  switch (p.type) {
+    case 'started':
+      return `started ${p.index + 1}/${p.total}: ${p.step.summary}`;
+    case 'finished':
+      return `finished ${p.index + 1}/${p.total}: ${p.key} ${p.outcome}${p.note ? `: ${p.note}` : ''}`;
+    case 'done':
+      return withBackups(`done: ${p.ok} ok, ${p.failed} failed`, p.backups);
+    case 'cancelled':
+      return withBackups(`cancelled: ${plural(p.remaining.length, 'step')} not run`, p.backups);
+    case 'failed':
+      return `failed: ${p.message}`;
+  }
+};
+
+// The picker rows: pending items (inert, and held with their reasons) checked, drift unchecked.
+const reviewChoices = (inspected: InspectResult & { readonly status: WireStatus }): Choice[] => {
+  const byKey = new Map(inspected.items.map((i) => [i.key, i]));
+  const label = (key: string) => byKey.get(key)?.label ?? key;
+  const note = (key: string) => byKey.get(key)?.note ?? byKey.get(key)?.state ?? '';
+  const { pending, drift } = inspected.status;
+  return [
+    ...pending.filter((p) => p.verdict === 'inert').map((p) => ({ key: p.key, group: 'pending', label: label(p.key), note: note(p.key), checked: true })),
+    ...pending.filter((p) => p.verdict === 'held').map((p) => ({ key: p.key, group: 'held', label: label(p.key), note: p.reason ?? note(p.key), checked: true })),
+    ...drift.map((key) => ({ key, group: 'drift', label: label(key), note: note(key), checked: false })),
+  ];
+};
+
+// Inspect through the agent, choose, preview, confirm, apply and stream the run. Exits 0 when the
+// run is done with no failures or the person applies nothing, 1 otherwise, including when the
+// connection closes before the run ends. Ctrl-C before the apply exits 130 with nothing applied;
+// during the run it asks the agent to cancel.
+const review = (deps: AgentDeps, isTTY: boolean) =>
+  withAgent(async (conn, signal) => {
+    try {
+      return await reviewWith(conn, signal, deps, isTTY);
+    } catch (error) {
+      if (!(error instanceof Cancelled)) throw error;
+      console.log('cancelled; nothing was applied');
+      return 130;
+    }
+  }, deps.connect, deps.signal);
+
+// The review itself; throws Cancelled when Ctrl-C comes before the apply.
+const reviewWith = async (conn: AgentConnection, signal: AbortSignal, deps: AgentDeps, isTTY: boolean): Promise<number> => {
+  const inspected = await unlessAborted(conn.request<InspectResult & { status: WireStatus }>({ command: 'inspect' }), signal);
+  const choices = reviewChoices(inspected);
+  if (choices.length === 0) {
+    console.log('nothing to review');
+    return 0;
+  }
+  const picked = await (deps.select ?? realSelect)(choices, { title: 'choose what to apply', isTTY });
+  if (picked === null) {
+    console.log('cancelled; nothing was applied');
+    return 0;
+  }
+  const chosen = new Set(picked);
+  const exclude = choices.filter((c) => !chosen.has(c.key)).map((c) => c.key);
+  const preview = await unlessAborted(conn.request<PreviewResult>({ command: 'preview', exclude }), signal);
+  const { steps, skipped } = preview.plan;
+  for (const step of steps) console.log(`  ${step.summary}`);
+  for (const skip of skipped) console.log(`  skipped ${skip.key}: ${skip.reason}`);
+  if (steps.length === 0) {
+    console.log('nothing to apply');
+    return 0;
+  }
+  if (!(await (deps.confirm ?? realConfirm)(`Apply these ${steps.length} step(s)?`, { isTTY }))) {
+    console.log('declined; nothing was applied');
+    return 0;
+  }
+  if (signal.aborted) throw new Cancelled();
+
+  // Events can arrive before the apply answer is seen, so they wait for the run id.
+  let runId: string | undefined;
+  const early: RunEvent[] = [];
+  let end!: (p: RunProgress) => void;
+  const ended = new Promise<RunProgress>((resolve) => { end = resolve; });
+  let offClose = () => {};
+  const lost = new Promise<'lost'>((resolve) => { offClose = conn.onClose(() => resolve('lost')); });
+  const onProgress = (e: RunEvent) => {
+    if (e.runId !== runId) return;
+    console.log(progressLine(e.progress));
+    if (e.progress.type === 'done' || e.progress.type === 'cancelled' || e.progress.type === 'failed') end(e.progress);
+  };
+  const off = conn.onEvent((event) => {
+    const e = event as RunEvent;
+    if (e.event !== 'progress') return;
+    if (runId === undefined) early.push(e);
+    else onProgress(e);
+  });
+  const cancel = () => {
+    console.log('cancelling…');
+    conn.request({ command: 'cancel' }).catch(() => {});
+  };
+  try {
+    const applied = await conn.request<ApplyResult>({ command: 'apply', planId: preview.planId });
+    if (applied.status === 'stale') {
+      console.log('the machine changed; review again');
+      return 1;
+    }
+    runId = applied.runId;
+    for (const e of early.splice(0)) onProgress(e);
+    if (signal.aborted) cancel();
+    else signal.addEventListener('abort', cancel, { once: true });
+    const last = await Promise.race([ended, lost]);
+    if (last === 'lost') {
+      console.error(LOST);
+      return 1;
+    }
+    return last.type === 'done' && last.failed === 0 ? 0 : 1;
+  } finally {
+    off();
+    offClose();
+    signal.removeEventListener('abort', cancel);
+  }
+};
+
+export async function run(args: string[] = [], deps: AgentDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
     case 'install': {
@@ -139,6 +359,49 @@ export async function run(args: string[] = []): Promise<number> {
     case 'run':
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
       return runForeground();
+    case 'status':
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      return withAgent(async (conn) => {
+        try {
+          return printStatus(await conn.request<WireStatus>({ command: 'status' }));
+        } catch (error) {
+          if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error;
+          console.error(STARTING);
+          return 1;
+        }
+      }, deps.connect);
+    case 'review': {
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
+      if (!isTTY) {
+        console.error('nortuscc: agent review needs a terminal');
+        return 2;
+      }
+      return review(deps, isTTY);
+    }
+    case 'resume':
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      return withAgent(async (conn) => {
+        if (conn.hello.paused === null) {
+          console.log('not paused');
+          return 0;
+        }
+        await conn.request<WireStatus>({ command: 'resume' });
+        console.log('resumed');
+        return 0;
+      }, deps.connect);
+    case 'policy': {
+      const [policy, ...extra] = rest;
+      if (policy === undefined || !POLICIES.includes(policy as Policy)) {
+        return usage(policy === undefined ? 'agent policy needs one of auto-apply, notify, manual' : `unknown policy '${policy}'`);
+      }
+      if (extra.length > 0) return usage(`unknown option ${extra[0]}`);
+      return withAgent(async (conn) => {
+        const status = await conn.request<WireStatus>({ command: 'setPolicy', policy });
+        console.log(`policy: ${status.policy}`);
+        return 0;
+      }, deps.connect);
+    }
     default:
       return usage(sub === undefined ? undefined : `unknown agent command '${sub}'`);
   }

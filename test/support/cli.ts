@@ -51,7 +51,7 @@ function copyRepo(home: string): string {
   git(repo, 'init', '-q', '-b', 'main');
   git(repo, 'add', '.');
   git(repo, 'commit', '-qm', 'initial');
-  git(home, 'init', '-q', '--bare', origin);
+  git(home, 'init', '-q', '--bare', '-b', 'main', origin);
   git(repo, 'remote', 'add', 'origin', origin);
   git(repo, 'push', '-q', '-u', 'origin', 'main');
   return repo;

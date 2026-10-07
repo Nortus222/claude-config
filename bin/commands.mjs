@@ -54,6 +54,11 @@ Installation (setup and apply --install):
                                     --linger (Linux) keeps it running with nobody logged in
   agent uninstall                   stop the agent and remove its login service
   agent run                         run the agent in the foreground (the service runs this)
+  agent status                      show the running agent's policy, pause and pending items
+  agent review                      choose pending, held and drifted items and apply them
+  agent resume                      resume a paused agent
+  agent policy <auto-apply|notify|manual>
+                                    set how the agent treats accepted items
 
 Examples:
   nortuscc status --target codex    report only what Codex owns

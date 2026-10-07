@@ -1,24 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Writable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore } from '@nortuscc/machine';
 import { AgentStateStore, runAgent, SetupSource, startAgent, type AgentDomain } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
-import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
+import { accept, APPLIED, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
 
 test('startAgent runs a start job on a trusted machine', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
-  const status = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
-    return yield* agent.request('inspect');
+  const { status, inspection } = await m.run(Effect.scoped(Effect.gen(function* () {
+    const agent = yield* startAgent(() => m.domains);
+    const status = yield* agent.request('inspect');
+    return { status, inspection: yield* agent.inspection };
   })), fixture.source);
   assert.equal(status.policy, 'notify');
   assert.equal(status.trusted, true);
+  assert.equal(inspection?.trusted, true);
+  assert.equal(inspection?.paths.repo, fixture.dirs[APPLIED]);
   assert.deepEqual(await m.kinds(), ['revision-verified']);
 });
 
@@ -26,7 +31,7 @@ test('startAgent never trusts the checkout itself', async () => {
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
+    const agent = yield* startAgent(() => m.domains);
     return yield* agent.request('inspect');
   })), fixture.source);
   assert.equal(status.trusted, false);
@@ -39,7 +44,7 @@ test('setPolicy records the change once and answers under the new policy', async
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
+    const agent = yield* startAgent(() => m.domains);
     yield* agent.setPolicy('auto-apply', 'cli');
     return yield* agent.setPolicy('auto-apply', 'cli');
   })), fixture.source);
@@ -56,7 +61,7 @@ test('decide stores the decision, records who made it, and answers with the job 
   await m.trust();
   const synced = { ...accept(EFFORT), source: 'synced' as const, machineId: 'machine-2' };
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
+    const agent = yield* startAgent(() => m.domains);
     return yield* agent.decide(synced, 'sync');
   })), fixture.source);
   assert.ok(status.pending.some((p) => p.itemId === EFFORT));
@@ -74,7 +79,7 @@ test('resume clears a pause and runs a job', async () => {
   await m.trust();
   await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, paused: { reason: 'a step failed', at: '2026-10-06T00:00:00.000Z' } }))));
   const status = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
+    const agent = yield* startAgent(() => m.domains);
     return yield* agent.resume('cli');
   })), fixture.source);
   assert.equal(status.paused, null);
@@ -91,7 +96,7 @@ test('a job that fails reports JOB_FAILED and the loop keeps running', async () 
     effective: (decisions) => (fail ? Effect.die(new Error('boom')) : fixture.service.effective(decisions)),
   });
   const [failed, recovered] = await m.run(Effect.scoped(Effect.gen(function* () {
-    const agent = yield* startAgent(m.domains);
+    const agent = yield* startAgent(() => m.domains);
     yield* agent.request('inspect');
     fail = true;
     const failed = yield* agent.request('inspect');
@@ -107,7 +112,7 @@ test('runAgent builds its services from paths and runs until interrupted', async
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0' }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -144,7 +149,7 @@ test('closing the agent cancels an in-flight auto-apply, which records cancelled
   };
   await m.run(Effect.gen(function* () {
     const scope = yield* Scope.make();
-    yield* startAgent([gated, m.domains[1]!]).pipe(Scope.provide(scope));
+    yield* startAgent(() => [gated, m.domains[1]!]).pipe(Scope.provide(scope));
     yield* Deferred.await(started);
     const closing = yield* Effect.forkChild(Scope.close(scope, Exit.void));
     // The abort is closing's first, synchronous finalizer; let it run before the step finishes.
@@ -164,7 +169,7 @@ test('closing the agent cancels an in-flight auto-apply, which records cancelled
 test('an aborted signal ends the agent, and no later job runs', async () => {
   const { m, fixture } = await autoApplyMachine();
   const controller = new AbortController();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source, signal: controller.signal }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('apply-finished'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -187,7 +192,7 @@ test('a request after the agent closed fails promptly', async () => {
   await m.trust();
   const exit = await m.run(Effect.gen(function* () {
     const scope = yield* Scope.make();
-    const agent = yield* startAgent(m.domains).pipe(Scope.provide(scope));
+    const agent = yield* startAgent(() => m.domains).pipe(Scope.provide(scope));
     yield* agent.request('inspect');
     yield* Scope.close(scope, Exit.void);
     return yield* Effect.exit(agent.request('inspect').pipe(Effect.timeoutOption('1 second')));
@@ -206,10 +211,51 @@ test('a second agent fails LockHeld before it writes anything', async () => {
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   writeLock(lockPath(m), process.ppid);
-  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source }));
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const content = 'active'.repeat(200_000);
+  writeFileSync(logPath, content);
+  for (const suffix of ['1', '2', '3']) writeFileSync(logPath + '.' + suffix, 'archive ' + suffix);
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const original = stdout.write;
+  let started = false;
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    logOutput: { stdout, stderr }, onStarted: () => { started = true; },
+  }));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.equal(stdout.write, original);
+  assert.equal(started, false);
   assert.deepEqual(await m.kinds(), []);
   assert.equal(existsSync(lockPath(m)), true);
+  assert.equal(readFileSync(logPath, 'utf8'), content);
+  for (const suffix of ['1', '2', '3']) assert.equal(readFileSync(logPath + '.' + suffix, 'utf8'), 'archive ' + suffix);
+});
+
+test('runAgent rotates the service log before starting jobs', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const content = 'a'.repeat(1_048_576);
+  m.write(logPath, content);
+  const controller = new AbortController();
+  const source = Layer.succeed(SetupSource, {
+    ...fixture.service,
+    fetch: Effect.sync(() => {
+      assert.equal(readFileSync(logPath, 'utf8'), '');
+      assert.equal(readFileSync(logPath + '.1', 'utf8'), content);
+    }).pipe(Effect.andThen(fixture.service.fetch)),
+  });
+  await m.trust();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source, agentVersion: '1.0.0', signal: controller.signal }));
+  try {
+    for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok((await m.kinds()).includes('revision-verified'));
+    assert.equal(readFileSync(logPath, 'utf8'), '');
+    assert.equal(readFileSync(logPath + '.1', 'utf8'), content);
+  } finally {
+    controller.abort();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
 });
 
 test('an agent takes over a dead agent\'s lock and removes its own on close', async () => {
@@ -218,7 +264,7 @@ test('an agent takes over a dead agent\'s lock and removes its own on close', as
   await m.trust();
   writeLock(lockPath(m), spawnSync(process.execPath, ['-e', '']).pid);
   const controller = new AbortController();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: m.domains, source: fixture.source, signal: controller.signal }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -226,5 +272,133 @@ test('an agent takes over a dead agent\'s lock and removes its own on close', as
   assert.equal(existsSync(lockPath(m)), true);
   controller.abort();
   assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
+  assert.equal(existsSync(lockPath(m)), false);
+});
+
+// Sends each record in turn over one connection, waiting for its reply; answers the replies.
+const converse = (path: string, records: ReadonlyArray<object>) =>
+  new Promise<Array<{ readonly [key: string]: any }>>((resolve, reject) => {
+    const socket = createConnection(path);
+    const replies: Array<{ readonly [key: string]: any }> = [];
+    let pending = '';
+    const next = () => {
+      const record = records[replies.length];
+      if (record === undefined) {
+        socket.end();
+        return resolve(replies);
+      }
+      socket.write(JSON.stringify(record) + '\n');
+    };
+    socket.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const record = JSON.parse(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (record.id === undefined) continue;
+        replies.push(record);
+        next();
+      }
+    });
+    socket.once('connect', next);
+    socket.once('error', reject);
+  });
+
+test('with ipc, runAgent serves the socket, and a shutdown request ends it like an abort', { skip: process.platform === 'win32' }, async () => {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  const dir = join(m.paths.stateRoot, 'agent');
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.2.3', ipc: true }));
+  try {
+    for (let i = 0; i < 500 && !existsSync(join(dir, 'agent.sock')); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+      { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
+      { version: 3, id: 's', command: 'shutdown' },
+    ]);
+    assert.deepEqual(hello?.result, { agentVersion: '1.2.3', protocol: 3, policy: 'notify', paused: null });
+    assert.deepEqual(shutdown?.result, { shutdown: true });
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'the agent kept running after shutdown');
+    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+  } finally {
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
+});
+
+test('without ipc, runAgent writes no socket or token', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  const controller = new AbortController();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
+  for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const dir = join(m.paths.stateRoot, 'agent');
+  assert.equal(existsSync(join(dir, 'agent.sock')), false);
+  assert.equal(existsSync(join(dir, 'agent.token')), false);
+  controller.abort();
+  assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
+});
+
+test('a second agent with ipc fails LockHeld and leaves the running agent\'s socket and token', async () => {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), process.ppid);
+  const dir = join(m.paths.stateRoot, 'agent');
+  writeFileSync(join(dir, 'agent.sock'), 'live');
+  writeFileSync(join(dir, 'agent.token'), 'live');
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', ipc: true }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.equal(readFileSync(join(dir, 'agent.sock'), 'utf8'), 'live');
+  assert.equal(readFileSync(join(dir, 'agent.token'), 'utf8'), 'live');
+});
+
+test('runAgent captures startup output under its lock and restores writers when aborted', async (t) => {
+  const m = agentMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const controller = new AbortController();
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const original = stdout.write;
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    signal: controller.signal, logOutput: { stdout, stderr },
+    onStarted: () => {
+      assert.ok(existsSync(lockPath(m)));
+      stdout.write('started stdout\n');
+      stderr.write('started stderr\n');
+      controller.abort();
+    },
+  }));
+  try {
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('2 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'startup did not capture and finish');
+    assert.equal(readFileSync(logPath, 'utf8'), 'started stdout\nstarted stderr\n');
+    assert.equal(stdout.write, original);
+    assert.equal(existsSync(lockPath(m)), false);
+  } finally {
+    controller.abort();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
+});
+
+test('runAgent records a fatal startup failure before restoring captured output', async (t) => {
+  const m = agentMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const stdout = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const stderr = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const originalOut = stdout.write;
+  const originalErr = stderr.write;
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0',
+    logOutput: { stdout, stderr }, onStarted: () => { throw new Error('startup failed'); },
+  }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('startup failed'));
+  assert.match(readFileSync(join(m.paths.stateRoot, 'agent', 'agent.log'), 'utf8'), /Agent failed: startup failed/);
+  assert.equal(stdout.write, originalOut);
+  assert.equal(stderr.write, originalErr);
   assert.equal(existsSync(lockPath(m)), false);
 });

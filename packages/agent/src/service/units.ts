@@ -87,12 +87,11 @@ export const renderSystemdUnit = (program: ServiceProgram): string => [
 const windowsArgument = (arg: string) => `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')}"`;
 
 /**
- * Task Scheduler XML for a per-user logon task. Task XML has no environment block, so
+ * Task Scheduler XML for a headless per-user logon task. Task XML has no environment block, so
  * `program.env` is ignored on Windows. The declared UTF-16 encoding is for the caller, which
  * must write these bytes as UTF-16 for `schtasks /Create /XML`.
  */
 export const renderScheduledTask = (program: ServiceProgram, user: string): string => {
-  const [command = '', ...args] = program.argv;
   return [
     '<?xml version="1.0" encoding="UTF-16"?>',
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
@@ -121,8 +120,8 @@ export const renderScheduledTask = (program: ServiceProgram, user: string): stri
     '  </Settings>',
     '  <Actions Context="Author">',
     '    <Exec>',
-    `      <Command>${xml(command)}</Command>`,
-    ...(args.length === 0 ? [] : [`      <Arguments>${xml(args.map(windowsArgument).join(' '))}</Arguments>`]),
+    '      <Command>%SystemRoot%\\System32\\conhost.exe</Command>',
+    `      <Arguments>--headless ${xml(program.argv.map(windowsArgument).join(' '))}</Arguments>`,
     `      <WorkingDirectory>${xml(program.workingDirectory)}</WorkingDirectory>`,
     '    </Exec>',
     '  </Actions>',

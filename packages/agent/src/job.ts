@@ -1,12 +1,13 @@
 import { Effect, Layer } from 'effect';
 import {
   backupsForRun, DecisionsStore, HistoryStore, inspect, MachinePaths, machinePaths,
-  type HistoryEvent, type ItemReason,
+  type HistoryEvent, type ItemReason, type MachinePathsValue, type MachineReport,
 } from '@nortuscc/machine';
+import type { DesiredConfig } from '@nortuscc/profile-engine';
 import { LOCAL_SETUP, ownSetup, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
-import type { AgentDomain } from './layer.ts';
+import type { AgentDomain, AgentDomains } from './layer.ts';
 import { interruptedRun, pause } from './pause.ts';
 import { differs, sortItems, type Pending } from './sort.ts';
 import { AgentStateStore, DEFAULT_STATE, type Paused, type Policy } from './state.ts';
@@ -27,6 +28,20 @@ export type AgentStatus = {
   readonly detail?: string;
   readonly autoApply?: AutoApplyOutcome;
 };
+
+// What a job inspected, and with what: its paths at the snapshot, and the domains built from them.
+// `revision` is the tracked branch head the effective configuration is built at, when the job fetched it.
+export type JobInspection = {
+  readonly paths: MachinePathsValue;
+  readonly revision: Revision | null;
+  readonly desired: DesiredConfig;
+  readonly report: MachineReport;
+  readonly domains: ReadonlyArray<AgentDomain>;
+  readonly trusted: boolean;
+};
+
+// A job's status, and its inspection when it got as far as inspecting.
+export type JobResult = { readonly status: AgentStatus; readonly inspection?: JobInspection };
 
 // The status of a job that failed outright: the last known policy and pause, nothing listed.
 export const failedStatus = (at: string, previous: AgentStatus | undefined, detail: string): AgentStatus => ({
@@ -64,9 +79,11 @@ const recordBatch = (events: ReadonlyArray<HistoryEvent>, kind: 'held' | 'ready'
   });
 
 // One job: refresh, resolve, inspect, sort, classify, act by policy. A checkout this machine does
-// not trust is only inspected for drift, against its own HEAD. It never fails on what it reads
-// from the setup; those outcomes are reported in the status.
-export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly signal?: AbortSignal } = {}) =>
+// not trust is only inspected for drift, against its own HEAD. Each inspection builds its domains
+// from paths whose `repo` is the snapshot inspected, and the auto-apply reuses them. It never fails
+// on what it reads from the setup; those outcomes are reported in the status. `inspectOnly` resolves
+// and inspects (still recording revision verdicts) but records no batch and applies nothing.
+export const runJob = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly inspectOnly?: boolean } = {}) =>
   Effect.gen(function* () {
     const history = yield* HistoryStore;
     const agentState = yield* AgentStateStore;
@@ -79,11 +96,23 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
 
     const state = yield* agentState.read;
     const trusted = ownSetup(yield* (yield* SetupsStore).read, paths.repo) !== undefined;
-    const finish = (fields: Partial<AgentStatus> = {}) =>
-      Effect.map(agentState.read, (current): AgentStatus => ({
-        at: now.toISOString(), policy: current.policy, paused: current.paused, trusted,
-        pending: [], drift: [], conflicts: [], probeErrors: [], ...fields,
-      }));
+    const finish = (fields: Partial<AgentStatus> = {}, inspection?: JobInspection) =>
+      Effect.map(agentState.read, (current): JobResult => {
+        const status: AgentStatus = {
+          at: now.toISOString(), policy: current.policy, paused: current.paused, trusted,
+          pending: [], drift: [], conflicts: [], probeErrors: [], ...fields,
+        };
+        return inspection ? { status, inspection } : { status };
+      });
+    // Inspects `desired` with domains built from paths at the snapshot in `repo`.
+    const inspectAt = (desired: DesiredConfig, repo: string, revision: Revision | null) =>
+      Effect.gen(function* () {
+        const jobPaths = { ...paths, repo };
+        const built = domains(jobPaths);
+        const report = yield* inspect(desired, built);
+        const inspection: JobInspection = { paths: jobPaths, revision, desired, report, domains: built, trusted };
+        return inspection;
+      });
     // MachinePaths.repo at a snapshot's files, and a fresh backup folder.
     const at = (repo: string) => backupsForRun(now).pipe(Layer.provideMerge(machinePaths({ ...paths, repo })));
 
@@ -91,8 +120,9 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
     if (!trusted) {
       const current = yield* source.current.pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)));
       if (current === undefined) return yield* finish({ error: 'REVISION_UNAVAILABLE' });
-      const report = yield* inspect(current.desired, domains).pipe(Effect.provide(at(current.repo)));
-      return yield* finish({ drift: report.items.filter(differs).map((i) => i.key), probeErrors: report.probeErrors });
+      const inspection = yield* inspectAt(current.desired, current.repo, null).pipe(Effect.provide(at(current.repo)));
+      const { report } = inspection;
+      return yield* finish({ drift: report.items.filter(differs).map((i) => i.key), probeErrors: report.probeErrors }, inspection);
     }
 
     // 1. Refresh: verify the tracked branch's head once. A mismatch blocks only that revision; an
@@ -122,11 +152,12 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
 
     // 3-6 at the effective revision's files.
     return yield* Effect.gen(function* () {
-      const report = yield* inspect(resolved.effective.desired, domains);
+      const inspection = yield* inspectAt(resolved.effective.desired, resolved.effective.repo, head ?? null);
+      const { report } = inspection;
       const base: Partial<AgentStatus> = { conflicts: resolved.conflicts, probeErrors: report.probeErrors, ...decisionsError };
       if (resolved.effective.desired.issues.length > 0) {
         // Inspect-only: report every difference, record nothing, apply nothing.
-        return yield* finish({ ...base, drift: report.items.filter(differs).map((i) => i.key), error: 'PROFILE_INVALID' });
+        return yield* finish({ ...base, drift: report.items.filter(differs).map((i) => i.key), error: 'PROFILE_INVALID' }, inspection);
       }
       const sorted = yield* sortItems(report, resolved.applied, resolved.effective);
       const inert = sorted.pending.filter((p) => p.verdict.kind === 'inert');
@@ -134,14 +165,14 @@ export const runJob = (domains: ReadonlyArray<AgentDomain>, options: { readonly 
       // A paused auto-apply machine leaves inert items to a person, as notify does. An unpaused one
       // applies them, so nothing stays ready and a stale ready batch is reset.
       const notifies = state.policy === 'notify' || (state.policy === 'auto-apply' && state.paused !== null);
-      if (state.policy !== 'manual') {
+      if (state.policy !== 'manual' && !options.inspectOnly) {
         yield* recordBatch(events, 'held', held.map(reasonOf));
         yield* recordBatch(events, 'ready', notifies ? inert.map(reasonOf) : []);
       }
       let applied: AutoApplyOutcome | undefined;
-      if (state.policy === 'auto-apply' && state.paused === null && inert.length > 0) {
-        applied = yield* autoApply(report, inert.map((p) => p.key), domains, options);
+      if (!options.inspectOnly && state.policy === 'auto-apply' && state.paused === null && inert.length > 0) {
+        applied = yield* autoApply(report, inert.map((p) => p.key), inspection.domains, options);
       }
-      return yield* finish({ ...base, pending: sorted.pending, drift: sorted.drift, ...(applied ? { autoApply: applied } : {}) });
+      return yield* finish({ ...base, pending: sorted.pending, drift: sorted.drift, ...(applied ? { autoApply: applied } : {}) }, inspection);
     }).pipe(Effect.provide(at(resolved.effective.repo)));
   });
