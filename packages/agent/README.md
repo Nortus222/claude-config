@@ -21,5 +21,8 @@ per-user login service. Decisions: `docs/adr/0011-local-agent-per-user-login-ser
   Decisions and History live in `@nortuscc/machine`.
 - `src/service/` renders the LaunchAgent, `systemd --user` unit and Scheduled Task, and
   `installService`, `uninstallService` and `restartService` register them through `Processes`.
-- `nortuscc agent install [--linger] | uninstall | run` drives it; `npm run smoke:agent` with
-  `NORTUSCC_SMOKE=1` registers a throwaway LaunchAgent on a Mac (`smoke/launchd.smoke.ts`).
+- IPC (#78, `docs/adr/0019-agent-ipc-unix-socket-only-for-now.md`): the agent serves protocol v3 on
+  `<stateRoot>/agent/agent.sock`, after a `hello` carrying the per-start token in `agent.token`.
+  Person-initiated inspect, preview and apply run inside the agent. Windows serves no IPC yet.
+- `nortuscc agent install [--linger] | uninstall | run` drives it; `agent status | review | resume | policy` talk to the running
+  agent; `npm run smoke:agent` with `NORTUSCC_SMOKE=1` registers a throwaway LaunchAgent on a Mac and checks `hello` (`smoke/launchd.smoke.ts`).

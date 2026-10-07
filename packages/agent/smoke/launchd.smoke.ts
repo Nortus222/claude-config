@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { liveLockHolder, nodeFs, nodeProcesses } from '@nortuscc/machine';
+import type { MachinePathsValue } from '@nortuscc/machine';
+import { connectAgent } from '../../../src/agent-client.ts';
 import { installService, restartService, uninstallService, unitPath, type ServiceProgram, type ServiceTarget } from '../src/index.ts';
 
 const CHECKOUT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -88,9 +90,20 @@ test('the agent runs as a LaunchAgent, is replaced on re-install and restart, an
     assert.ok(unitPath(target).startsWith(root), `the unit must stay in the temp dir: ${unitPath(target)}`);
     await Effect.runPromise(installService(target, program).pipe(Effect.provide(services)));
 
-    // Until IPC's `hello` (#78), a live pid in agent.lock is the proof that the agent is up.
     assert.ok(await until(() => (pid = liveLockHolder(lock)) !== undefined, 30_000), `the agent never took agent.lock:\n${log()}`);
     assert.notEqual(pid, process.pid);
+
+    // The lock is live, so the agent must also answer `hello` on its socket (protocol v3). The socket
+    // appears a moment after the lock, so retry briefly.
+    let protocol: number | undefined;
+    await until(() => {
+      void connectAgent({ stateRoot: state } as MachinePathsValue).then((c) => {
+        protocol = c.hello.protocol;
+        c.close();
+      }, () => undefined);
+      return protocol !== undefined;
+    }, 15_000);
+    assert.equal(protocol, 3, `the agent did not answer hello with protocol 3:\n${log()}`);
 
     // A live agent.lock held by a pid other than `old`: the running agent was replaced.
     const replaced = async (old: number, what: string) => {
