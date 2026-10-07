@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { test, type TestContext } from 'node:test';
 
 const unixSmokeSkip = process.platform === 'win32' ? 'requires POSIX smoke tools and Unix agent IPC (ADR 0019)' : false;
 const resourceSkip = unixSmokeSkip || (process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false);
+// Keep nested smoke socket paths within Darwin's sockaddr_un limit.
+const smokeTemporaryRoot = process.platform === 'darwin' ? '/tmp' : tmpdir();
 
 type RecordedChild = { pid: number; home: string };
 
@@ -38,9 +41,9 @@ async function cleanupRecordedFixture(app: string, record: string, child?: Recor
   rmSync(app, { recursive: true, force: true });
 }
 
-// Unix socket paths need a short root; ownership stays outside HOME for reliable teardown.
+// Ownership lives outside HOME, so parent timeouts and premature HOME removal cannot erase it.
 function smokeFixture(t: TestContext) {
-  const root = mkdtempSync('/tmp/nsm-');
+  const root = mkdtempSync(join(smokeTemporaryRoot, 'nsm-'));
   const app = join(root, 'app');
   const temporaryRoot = join(root, 'tmp');
   const record = join(root, 'children.json');
@@ -78,7 +81,7 @@ test('smoke waits for its foreground child to stop and removes HOME when a socke
   skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
-  const app = mkdtempSync('/tmp/nsm-');
+  const app = mkdtempSync(join(smokeTemporaryRoot, 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const record = join(app, 'child.json');
   let child: RecordedChild | undefined;
@@ -130,7 +133,7 @@ test('packaged smoke passes its resolved temporary root to the native child', {
 
 for (const code of ['ENOENT', 'EACCES']) {
   test(`smoke removes its temporary HOME when the bundled runtime cannot launch (${code})`, { skip: unixSmokeSkip, timeout: 10_000 }, async (t) => {
-    const app = mkdtempSync('/tmp/nsm-');
+    const app = mkdtempSync(join(smokeTemporaryRoot, 'nsm-'));
     t.after(() => rmSync(app, { recursive: true, force: true }));
     const resources = join(app, 'Contents/Resources/agent-runtime');
     const temporaryRoot = join(app, 'tmp');
@@ -154,7 +157,7 @@ test('a missing native executable stops the foreground agent and removes HOME', 
   skip: resourceSkip,
   timeout: 20_000,
 }, async (t) => {
-  const app = mkdtempSync('/tmp/nsm-');
+  const app = mkdtempSync(join(smokeTemporaryRoot, 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
@@ -184,7 +187,7 @@ test('fixture teardown discovers and joins its child after smoke times out', {
   skip: resourceSkip,
   timeout: 15_000,
 }, async (t) => {
-  const app = mkdtempSync('/tmp/nsm-');
+  const app = mkdtempSync(join(smokeTemporaryRoot, 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
