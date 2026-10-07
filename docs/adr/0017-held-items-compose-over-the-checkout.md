@@ -9,8 +9,8 @@ upstream change cannot simply stay on an older commit. Machine sync (#43) theref
 skipped item in `<stateRoot>/sync.json` as the commit whose value it keeps, and one composition,
 `composeDocuments` (wrapped by `desiredFor`), builds what a machine should have: the documents at
 head (the working tree for the CLI, git objects for the agent) with every held item patched to its
-held value, resolved with this machine's overrides by `loadProfile`. `apply`, `status`, `sync`
-and the agent compose it, so those four agree on what the machine should have. Items are compared
+held value, resolved with this machine's overrides by `loadProfile`. Every command that acts on
+the machine composes it, and the agent does too, so they agree on what the machine should have. Items are compared
 from documents alone, never through overrides, so an override cannot hide an upstream change; an
 incoming item an override shadows is a conflict that is kept unless the person takes theirs, which
 removes that override after backing up `overrides.json`.
@@ -25,11 +25,11 @@ removes that override after backing up `overrides.json`.
 ## Consequences
 
 - A skill hold moves its source's pin, because pins are per source (ADR 0006).
-- `update`, `setup`, `uninstall`, `capture` and `push` do not see holds yet; they read the checkout
-  directly. `update` can reinstall a skill held at an older pin, and `update --prune` can remove a
-  skill upstream deleted that the person skipped. `capture` and `push` can publish a held item
-  back to the repo. Teaching them to compose is a known follow-up.
+- `update`, `setup` and `uninstall` act on the composed setup too. `capture` and `push` write into
+  the checkout itself, so they skip held items and regenerate the skills manifest with each held
+  skill as the checkout declares it; a hold is never published as an upstream change (#115).
 - The applied commit lives in `state.json` (`applied`), written only after a successful apply.
-- An invalid `sync.json` refuses `sync`, `apply` and `status` and is never rewritten.
+- An invalid `sync.json` refuses `sync`, `apply`, `status`, `update`, `setup`, `uninstall`,
+  `capture` and `push`, and is never rewritten.
 - The CLI composes into a private per-command temp directory; the agent composes snapshots keyed by
   (format version, commit, holds) and re-checks the origin's trust on every `effective`.
