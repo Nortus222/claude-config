@@ -438,3 +438,95 @@ test('explicit inspect refreshes an external apply status and recovers when its 
   assert.equal(c.snapshot().inspection?.items.length, 1);
   assert.equal(c.state.status?.applying, undefined);
 });
+
+test('a failed status refresh remains visible instead of using a cached idle status', async () => {
+  let statuses = 0;
+  let inspects = 0;
+  const f = fake({
+    agent_status: () => { if (++statuses > 1) throw new Error('INTERNAL: status unavailable'); return status(); },
+    inspect_machine: () => (++inspects, inspection(['config:a'])),
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.inspect();
+  assert.match(c.state.detail, /INTERNAL: status unavailable/);
+  assert.equal(c.state.connection, 'connected');
+  assert.equal(inspects, 1);
+  assert.equal(c.state.pending, false);
+});
+
+test('a stale apply refreshes live activity and preserves its replacement preview for another apply', async () => {
+  let applies = 0;
+  const f = fake({
+    agent_status: () => status({ applying: false }),
+    inspect_machine: () => inspection(['config:a']),
+    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
+    apply_plan: () => {
+      if (++applies > 1) return { status: 'started', runId: 'r2' };
+      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+      return { status: 'stale', planId: 'p2', plan: plan(['config:a', 'config:new']) };
+    },
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  assert.equal(c.state.status?.applying, false);
+  assert.equal(c.state.preview?.planId, 'p2');
+  assert.match(c.state.detail, /changed since this preview/);
+  await c.apply();
+  assert.deepEqual(f.calls.filter(([name]) => name === 'apply_plan').map(([, args]) => args), [{ planId: 'p1' }, { planId: 'p2' }]);
+  assert.equal(f.calls.filter(([name]) => name === 'preview_plan').length, 1);
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
+  assert.equal(c.state.run?.runId, 'r2');
+});
+
+test('an apply preparation refusal refreshes live activity without discarding the preview or refusal', async () => {
+  let applies = 0;
+  const f = fake({
+    agent_status: () => status({ applying: false }),
+    inspect_machine: () => inspection(['config:a']),
+    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
+    apply_plan: () => {
+      if (++applies > 1) return { status: 'started', runId: 'r2' };
+      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+      throw new Error('INSPECT_FAILED: preparation failed');
+    },
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  assert.equal(c.state.status?.applying, false);
+  assert.equal(c.state.preview?.planId, 'p1');
+  assert.match(c.state.detail, /INSPECT_FAILED: preparation failed/);
+  await c.apply();
+  assert.equal(applies, 2);
+  assert.equal(c.state.run?.runId, 'r2');
+});
+
+for (const refusal of [false, true]) test(`apply settlement respects a live external lock after ${refusal ? 'refusal' : 'stale preview'}`, async () => {
+  let applying = false;
+  const f = fake({
+    agent_status: () => status({ applying }),
+    inspect_machine: () => inspection(['config:a']),
+    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
+    apply_plan: () => {
+      applying = true;
+      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+      if (refusal) throw new Error('LOCKED: external process holds the apply lock');
+      return { status: 'stale', planId: 'p2', plan: plan(['config:new']) };
+    },
+  });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  await c.previewPlan();
+  await c.apply();
+  assert.equal(f.calls.filter(([name]) => name === 'agent_status').length, 2);
+  assert.equal(c.state.status?.applying, true);
+  assert.equal(c.state.preview?.planId, refusal ? 'p1' : 'p2');
+  await c.apply();
+  await c.previewPlan();
+  assert.equal(f.calls.filter(([name]) => name === 'apply_plan').length, 1);
+  assert.equal(f.calls.filter(([name]) => name === 'preview_plan').length, 1);
+});

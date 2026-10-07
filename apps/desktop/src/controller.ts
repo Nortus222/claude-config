@@ -162,7 +162,10 @@ export class MachineController {
     } catch (error) {
       if (!this.owns(revision)) return false;
       this.refused(error);
-      return this.state.connection === 'connected' && this.state.status !== null && !this.state.status.applying;
+      const noReport = typeof error === 'object' && error !== null && 'code' in error
+        ? error.code === 'NO_REPORT' : /^NO_REPORT\b/.test(message(error));
+      return noReport && this.state.inspection === null && this.state.connection === 'connected'
+        && this.state.status !== null && !this.state.status.applying;
     }
   }
 
@@ -216,6 +219,11 @@ export class MachineController {
     }
   }
 
+  // Refreshes activity after preparation ends without discarding the preview.
+  private async settlePreparation(revision: number, detail: string) {
+    if (await this.loadStatus(revision) && this.owns(revision) && !this.state.status?.error) this.update({ detail });
+  }
+
   async apply() {
     const preview = this.state.preview;
     if (!this.ready() || !preview) return;
@@ -230,6 +238,7 @@ export class MachineController {
       const result = decodeApplyResult(reply.data);
       if (result.status === 'stale') {
         this.update({ preview: { planId: result.planId, plan: result.plan }, detail: STALE });
+        await this.settlePreparation(revision, STALE);
         return;
       }
       const buffered = this.early.filter((event) => event.runId === result.runId);
@@ -243,7 +252,10 @@ export class MachineController {
       finished = run.outcome !== 'running';
       this.update({ run, detail: run.summary, ...(finished ? { preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null } : {}) });
     } catch (error) {
-      if (this.owns(revision)) this.refused(error);
+      if (this.owns(revision)) {
+        this.refused(error);
+        if (this.state.connection === 'connected') await this.settlePreparation(revision, message(error));
+      }
     } finally {
       if (this.owns(revision)) {
         this.starting = false;
