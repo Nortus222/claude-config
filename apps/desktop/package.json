@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "test": "tsx --test checks/*.spec.ts",
+    "test": "tsx --test --test-concurrency=2 checks/*.spec.ts",
     "test:resources": "node scripts/resource-check.mjs",
     "test:bun": "bun test ./checks/protocol.spec.ts ./checks/controller.spec.ts && npm run test:resources",
     "typecheck": "tsc --noEmit",
