@@ -1,0 +1,16 @@
+[Unit]
+Description=nortuscc agent
+
+[Service]
+Type=simple
+ExecStart="/opt/node/bin/node" "/Users/me/claude config/bin/nortuscc.mjs" "agent" "run"
+Environment="NORTUSCC_STATE_DIR=/Users/me/.config/nortuscc"
+Environment="PATH=/usr/bin:/bin"
+WorkingDirectory=/Users/me/claude config
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/Users/me/.config/nortuscc/agent/agent.log
+StandardError=append:/Users/me/.config/nortuscc/agent/agent.log
+
+[Install]
+WantedBy=default.target

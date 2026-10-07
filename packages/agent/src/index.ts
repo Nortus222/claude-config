@@ -14,3 +14,4 @@ export * from './job.ts';
 export * from './scheduler.ts';
 export * from './policy.ts';
 export * from './agent.ts';
+export * from './service/units.ts';
