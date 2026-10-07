@@ -1,0 +1,101 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { Effect, Layer } from 'effect';
+import { Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
+import { AgentError, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
+import { runDesktopEntry } from '../agent/main.ts';
+
+const fixture = (t: { after: (f: () => void) => void }) => {
+  const home = mkdtempSync('/tmp/nae-');
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const resources = join(home, 'resources');
+  const repo = join(home, 'repo');
+  const stateRoot = join(home, 'state');
+  mkdirSync(resources);
+  mkdirSync(join(repo, '.git'), { recursive: true });
+  mkdirSync(stateRoot);
+  writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash' }));
+  writeFileSync(join(stateRoot, 'state.json'), JSON.stringify({ repo }));
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const commands: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => {
+    commands.push(command);
+    if (command.cmd === 'launchctl') return { code: 0, stdout: '', stderr: '' };
+    assert.equal(command.cmd, 'git');
+    return { code: 1, stdout: '', stderr: 'fixture has no commit' };
+  }) });
+  let probes = 0;
+  const input = {
+    args: ['--ensure'], resources,
+    env: { HOME: home, SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
+    platform: 'darwin' as const, uid: 501, user: 'fixture', processes,
+    probe: async () => { probes++; return { env: { HOME: home, PATH: '/login/bin', NORTUSCC_STATE_DIR: stateRoot } }; },
+    stdout: (line: string) => stdout.push(line), stderr: (line: string) => stderr.push(line),
+  };
+  const paths: MachinePathsValue = { repo, stateRoot, backups: join(stateRoot, 'backups'), claude: join(home, '.claude'), codex: join(home, '.codex'), codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents/skills') };
+  return { input, home, repo, stateRoot, paths, stdout, stderr, commands, probes: () => probes };
+};
+
+test('the ensure helper resolves recorded checkout from login environment and prints exactly one result', async (t) => {
+  const f = fixture(t);
+  assert.equal(await runDesktopEntry(f.input), 0);
+  assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
+  assert.deepEqual(f.stderr, []);
+  assert.equal(f.probes(), 1);
+  assert.ok(f.commands.some((c) => c.cmd === 'launchctl'));
+  assert.equal(JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8')).agentVersion, 'bundle-hash');
+  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('/login/bin'));
+});
+
+test('missing recorded checkout refuses helper install instead of using bundled resource directory', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.stateRoot, 'state.json'));
+  assert.equal(await runDesktopEntry(f.input), 1);
+  assert.deepEqual(f.stdout, []);
+  assert.deepEqual(f.commands, []);
+  assert.ok(f.stderr.join('').includes('checkout') || f.stderr.join('').includes('repo'));
+});
+
+test('entry rejects resource version errors and arbitrary arguments before registration', async (t) => {
+  const f = fixture(t);
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--ensure', '/renderer/path'] }), 1);
+  assert.deepEqual(f.commands, []);
+  assert.equal(f.probes(), 0);
+  writeFileSync(join(f.input.resources, 'runtime.json'), '{}');
+  assert.equal(await runDesktopEntry(f.input), 1);
+  assert.deepEqual(f.stdout, []);
+  assert.deepEqual(f.commands, []);
+});
+
+test('foreground resource agent serves app hello and survives disconnect until shutdown', { timeout: 10000 }, async (t) => {
+  const f = fixture(t);
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal });
+  let conn: AgentConnection | undefined;
+  const until = Date.now() + 5000;
+  while (!conn && Date.now() < until) {
+    try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); } catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  }
+  assert.ok(conn, f.stderr.join(''));
+  assert.equal(conn.hello.agentVersion, 'bundle-hash');
+  assert.equal(conn.hello.protocol, 3);
+  conn.close();
+  const second = await connectAgent(f.paths, { client: 'app' });
+  try {
+    let status: { applying?: boolean } | undefined;
+    while (!status && Date.now() < until) {
+      try { status = await second.request({ command: 'status' }); }
+      catch (error) { if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error; await new Promise((resolve) => setTimeout(resolve, 10)); }
+    }
+    assert.equal(status?.applying, false);
+    await second.request({ command: 'shutdown' });
+    assert.equal(await running, 0);
+    assert.deepEqual(f.stdout, [], 'foreground stdout contains no lifecycle helper record');
+    assert.ok(f.commands.every((c) => c.cmd !== 'launchctl'), 'foreground does not register a service');
+    assert.equal(f.probes(), 1);
+  } finally { second.close(); }
+});

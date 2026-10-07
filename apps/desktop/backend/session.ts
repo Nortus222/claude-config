@@ -8,7 +8,7 @@ import {
   samePlan, selectAll, stateStore,
   type Domain, type MachinePathsValue, type MachineReport, type PathsEnvironment, type Plan, type Progress,
 } from '@nortuscc/machine';
-import { DEFAULT_TOOLS, missingTools } from './login-environment.ts';
+import { DEFAULT_TOOLS, missingTools } from '../agent/login-environment.ts';
 import type { ApplyResult, ErrorCode, InspectResult, PreviewResult, RunProgress, WireObserved, WirePlan } from './protocol.ts';
 
 export type DesktopServices = MachinePaths | Fs | Processes | StateStore | OverridesStore | Backups;

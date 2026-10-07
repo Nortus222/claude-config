@@ -15,7 +15,7 @@ export class AgentError extends Error {
   }
 }
 
-// No socket, no token, a refused hello, no answer within the connect timeout, or the connection
+// No socket, no token, no answer within the connect timeout, or the connection
 // closed while a request was pending.
 export class AgentUnavailable extends Error {
   constructor(message: string) {
@@ -153,9 +153,15 @@ export const connectAgent = async (
   const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;
   let hello: HelloResult;
   try {
-    hello = decodeHelloResult(await request({ command: 'hello', token, client: options.client ?? 'cli' }, { timeoutMs }));
+    const result = await request({ command: 'hello', token, client: options.client ?? 'cli' }, { timeoutMs });
+    try {
+      hello = decodeHelloResult(result);
+    } catch {
+      throw new AgentError('MALFORMED', 'the agent hello is outside protocol v3');
+    }
   } catch (error) {
     fail(new AgentError('CLOSED', 'the connection was abandoned'));
+    if (error instanceof AgentError && error.code !== 'TIMEOUT') throw error;
     throw new AgentUnavailable(`the agent did not accept the connection: ${error instanceof Error ? error.message : String(error)}`);
   }
 

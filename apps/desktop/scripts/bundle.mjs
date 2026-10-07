@@ -1,9 +1,10 @@
 import { build } from 'esbuild';
-import { mkdir, copyFile, chmod, writeFile, rm } from 'node:fs/promises';
+import { mkdir, copyFile, chmod, writeFile, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const target = `${process.platform}-${process.arch}`;
 if (target !== 'darwin-arm64')
@@ -13,12 +14,12 @@ const resources = resolve(root, 'src-tauri/resources', target);
 await rm(resources, { recursive: true, force: true });
 await mkdir(resources, { recursive: true });
 await build({
-  entryPoints: [resolve(root, 'backend/main.ts')],
+  entryPoints: [resolve(root, 'agent/main.ts')],
   bundle: true,
   platform: 'node',
   format: 'esm',
   target: 'esnext',
-  outfile: resolve(resources, 'backend.mjs'),
+  outfile: resolve(resources, 'agent.mjs'),
 });
 const sourceRuntime =
   process.env.DESKTOP_BUN_RUNTIME ||
@@ -51,6 +52,6 @@ const effectRoot = dirname(createRequire(import.meta.url).resolve('effect/packag
 await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
 await writeFile(
   resolve(resources, 'runtime.json'),
-  JSON.stringify({ target, bun: bunVersion, executable: 'bun' }, null, 2),
+  JSON.stringify({ target, bun: bunVersion, executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
 );
-console.log(`Bundled backend and Bun ${bunVersion} for ${target}`);
+console.log(`Bundled agent and Bun ${bunVersion} for ${target}`);

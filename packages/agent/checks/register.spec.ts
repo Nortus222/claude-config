@@ -7,7 +7,7 @@ import { Effect, Exit, Layer } from 'effect';
 import { nodeFs, Processes, type Command } from '@nortuscc/machine';
 import {
   installService, renderLaunchAgent, renderScheduledTask, renderSystemdUnit, restartService, ServiceFailed, serviceInstalled,
-  uninstallService, unitPath, type ServiceProgram, type ServiceTarget,
+  stopService, uninstallService, unitPath, type ServiceProgram, type ServiceTarget,
 } from '../src/index.ts';
 
 const program: ServiceProgram = {
@@ -213,4 +213,16 @@ test('win32 restart ends and runs an unchanged task, and re-creates a changed on
     'schtasks /End /TN nortuscc-agent', `schtasks /Create /TN nortuscc-agent /XML ${P} /F`, 'schtasks /Run /TN nortuscc-agent',
   ]);
   assert.equal(utf16(P), renderScheduledTask(changed, 'me'));
+});
+
+test('stopService stops a loaded job without removing its registration', async () => {
+  for (const platform of ['darwin', 'linux', 'win32'] as const) {
+    const t = targetFor(platform);
+    await ok(installService(t, program), fakeProcesses().layer);
+    const p = fakeProcesses();
+    await ok(stopService(t), p.layer);
+    assert.deepEqual(p.calls, platform === 'darwin' ? [`launchctl bootout ${D}/${L}`]
+      : platform === 'linux' ? ['systemctl --user stop nortuscc-agent.service'] : ['schtasks /End /TN nortuscc-agent']);
+    assert.ok(existsSync(unitPath(t)));
+  }
 });

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { probeLoginEnvironment } from './login-environment.ts';
+import { probeLoginEnvironment } from '../agent/login-environment.ts';
 import { MAX_RECORD_BYTES, PROTOCOL_VERSION, decodeMessage, decodeRequest, type ErrorCode, type RunProgress } from './protocol.ts';
 import { Session, SessionError, type SessionOptions } from './session.ts';
 import { truncate } from './text.ts';
