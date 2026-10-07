@@ -195,3 +195,26 @@ test('an invalid sync.json refuses sync before the repo moves', async () => {
   assert.match(result.stderr, /sync\.json is not valid/);
   assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
 });
+
+test('an id both skipped and taken theirs is refused before the repo moves', async () => {
+  const m = machine();
+  const head = git(m.repo, 'rev-parse', 'HEAD');
+  pushUpstream(m, { 'claude/settings.keys.json': settingsWith(m, { effortLevel: 'medium' }) });
+  const result = await sync(m, '--skip', EFFORT, '--take-theirs', EFFORT);
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /setting:claude:settings\.json#effortLevel.*both --skip and --take-theirs/);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(existsSync(join(m.state, 'decisions.json')), false);
+});
+
+test('an unknown flag is refused before the repo moves, not forwarded to apply', async () => {
+  const m = machine();
+  const head = git(m.repo, 'rev-parse', 'HEAD');
+  pushUpstream(m, { 'claude/CLAUDE.md': '# from another machine\n' });
+  const result = await sync(m, '--chek');
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /unknown option --chek/);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), head);
+  assert.equal(existsSync(join(m.state, 'state.json')), false);
+  assert.equal(existsSync(join(m.state, 'decisions.json')), false);
+});

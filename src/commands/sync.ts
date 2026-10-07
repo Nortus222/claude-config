@@ -16,6 +16,8 @@ import {
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
 import { runGit } from '../git.ts';
 import { CHECKOUT, cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
+import { parseConfigMode } from '../config-mode.ts';
+import { parseInstallFlags } from '../install.ts';
 import { formatRow, labelWidth, section, short } from '../report.ts';
 import { select as realSelect, type Choice } from '../select.ts';
 import { parseTarget, selectedTargets, type TargetChoice } from '../targets.ts';
@@ -35,6 +37,9 @@ export type SyncFlags = {
   error: string | null;
 };
 
+// The apply flags sync forwards beyond those parseConfigMode, parseInstallFlags and parseTarget own.
+const APPLY_FLAGS = ['--install', '--skills', '--take-repo'];
+
 const LISTS = ['--release', '--skip', '--take-theirs'] as const;
 
 export function parseSyncFlags(args: string[]): SyncFlags {
@@ -51,6 +56,13 @@ export function parseSyncFlags(args: string[]): SyncFlags {
     if (flag === '--release') out.release = value;
     else (flag === '--skip' ? out.skip : out.takeTheirs).push(...value.split(',').filter(Boolean));
   }
+  const both = out.skip.filter((id) => out.takeTheirs.includes(id));
+  if (both.length > 0) return { ...out, error: `${[...new Set(both)].join(', ')} named in both --skip and --take-theirs` };
+  // The child apply ignores what it does not know, so a typo is caught here, before the repo moves.
+  const installFlags = parseInstallFlags(parseConfigMode(out.rest).rest);
+  if (installFlags.error) return { ...out, error: installFlags.error };
+  const unknown = installFlags.rest.find((arg) => !APPLY_FLAGS.includes(arg));
+  if (unknown !== undefined) return { ...out, error: `unknown option ${unknown}` };
   if (out.check && (out.release !== undefined || out.skip.length > 0 || out.takeTheirs.length > 0)) {
     return { ...out, error: '--check reports only; it takes no --release, --skip or --take-theirs' };
   }
