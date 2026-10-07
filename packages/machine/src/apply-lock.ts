@@ -32,19 +32,22 @@ const holderOf = (text: string): number | undefined => {
   }
 };
 
-// Slack for uptime's and the clock's granularity, so a lock taken just after boot is not stale.
-const BOOT_TOLERANCE_MS = 5_000;
+// Slack for uptime's granularity, so a lock taken a moment ago never reads as from an earlier boot.
+const BOOT_TOLERANCE_S = 5;
 
-// Whether the lock in `text` was taken before this boot. After an unclean shutdown its pid may name
-// an unrelated process, so such a lock is stale whatever its pid. No parseable startedAt: false.
+// Whether the lock in `text` was taken in an earlier boot, so its pid may name an unrelated process
+// after an unclean shutdown. Uptime only grows within a boot, so a recorded uptime above the current
+// one means a reboot; this never consults the wall clock, which can step. A reboot that outlasted the
+// recorded uptime, or a lock without one, falls back to the pid rule: it can only miss, never declare
+// a live holder stale.
 const fromEarlierBoot = (text: string): boolean => {
-  let started: number;
+  let recorded: unknown;
   try {
-    started = Date.parse(JSON.parse(text).startedAt);
+    recorded = JSON.parse(text).uptime;
   } catch {
     return false;
   }
-  return Number.isFinite(started) && started < Date.now() - uptime() * 1000 - BOOT_TOLERANCE_MS;
+  return typeof recorded === 'number' && Number.isFinite(recorded) && recorded > uptime() + BOOT_TOLERANCE_S;
 };
 
 // The pid holding the lock in `text`, or undefined when the lock is stale or unreadable.
@@ -54,7 +57,7 @@ const liveHolderOf = (text: string): number | undefined => {
 };
 
 // The live process holding the pid lock at `path`, or undefined when it is absent, unreadable, left
-// by a dead process or taken before this boot.
+// by a dead process or from an earlier boot by its recorded uptime.
 export const liveLockHolder = (path: string): number | undefined => {
   const text = read(path);
   return text === undefined ? undefined : liveHolderOf(text);
@@ -85,15 +88,16 @@ export const takeOver = (path: string, seen: string): boolean => {
   }
 };
 
-// Holds a pid lock at `path` for the current scope, creating its directory. A lock whose owner died
-// or taken before this boot is taken over; one held by a live process fails with LockHeld.
+// Holds a pid lock at `path` for the current scope, creating its directory. A lock whose owner died,
+// or that its recorded uptime places in an earlier boot, is taken over; one held by a live process
+// fails with LockHeld.
 export const acquirePidLock = (path: string): Effect.Effect<void, LockHeld, Scope.Scope> =>
   Effect.gen(function* () {
     // Link a fully written temp file into place: the lock is atomic to create and never seen half-written.
     const claim = () => {
       const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        writeFileSync(temp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+        writeFileSync(temp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), uptime: uptime() }));
         linkSync(temp, path);
       } finally {
         rmSync(temp, { force: true });

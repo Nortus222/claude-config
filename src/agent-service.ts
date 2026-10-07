@@ -64,8 +64,9 @@ export const restartAfterPull = (paths: MachinePathsValue, options: RestartOptio
   return Effect.gen(function* () {
     const state = yield* AgentStateStore;
     const recorded = yield* state.read;
+    if (recorded.installedBy !== 'cli') return;
     const version = checkoutVersion();
-    if (recorded.installedBy !== 'cli' || recorded.agentVersion === version || !(yield* serviceInstalled(target))) return;
+    if (recorded.agentVersion === version || !(yield* serviceInstalled(target))) return;
     const lock = join(paths.stateRoot, 'apply.lock');
     for (const deadline = Date.now() + timeoutMs; liveLockHolder(lock) !== undefined;) {
       if (Date.now() >= deadline) return yield* notRestarted('an apply is running');
