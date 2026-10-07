@@ -7,7 +7,7 @@ import { isGitCheckout, OverridesStore, StateStore } from '@nortuscc/machine';
 import { parseConfigMode, persisted, resolveConfigMode } from '../config-mode.ts';
 import { runGit } from '../git.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
-import { cliLayer, openMachine, refuseInvalidOverrides, reportOverrideIssues, resolvePaths, runCommand } from '../machine.ts';
+import { cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, resolvePaths, runCommand } from '../machine.ts';
 import { setupPrerequisites, type PrerequisiteDeps } from '../prerequisites.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { select as realSelect, type Choice } from '../select.ts';
@@ -81,7 +81,7 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
     console.log('cancelled; nothing was recorded');
     return 130;
   };
-  const code = await runCommand((signal) => Effect.gen(function* () {
+  const code = await runCommand((signal) => Effect.scoped(Effect.gen(function* () {
     // setup repairs a stale record itself, so the "re-run setup" warning would prescribe this very run.
     const paths = yield* resolvePaths();
     const layer = cliLayer(paths);
@@ -154,7 +154,7 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
       if (next !== undefined) yield* (yield* OverridesStore).write(next);
     }), layer);
 
-    const opened = yield* openMachine({ mode, paths: { ...paths, repo: root } });
+    const opened = yield* openDesired({ mode, paths: { ...paths, repo: root } });
     return yield* Effect.gen(function* () {
       const { manageConfig, configTargets } = resolveConfigMode(mode, opened.overrides.value);
       if (!manageConfig) console.log('skills-only: this machine keeps its own agent configuration');
@@ -181,7 +181,7 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
       finished = true;
       return 0;
     }).pipe(Effect.provide(opened.layer));
-  }));
+  })));
   if (!finished) return code;
 
   console.log('\n--- status ---');

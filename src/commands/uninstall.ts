@@ -1,28 +1,18 @@
-import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
-import { Cause, Effect, Layer, Stream } from 'effect';
-import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { Cause, Effect, Stream } from 'effect';
 import {
-  backupsForRun, CHANGED_SINCE_APPLY, configDomain, configFileId, execute, inspect, machinePaths, nodeFs,
-  OverridesStore, overridesStore, pathsFromEnvironment, plan, selectAll, splitOutcome, stateStore,
+  CHANGED_SINCE_APPLY, configDomain, configFileId, execute, inspect, OverridesStore, plan, selectAll, splitOutcome,
 } from '@nortuscc/machine';
+import { openDesired } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget } from '../targets.ts';
 
-const CHECKOUT = fileURLToPath(new URL('../..', import.meta.url));
-
 // Restores or removes every file nortuscc recorded, then records this machine as skills-only.
 const uninstall = (force: boolean, signal: AbortSignal) =>
-  Effect.gen(function* () {
-    const paths = yield* pathsFromEnvironment({
-      env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
-    });
-    const services = Layer.mergeAll(stateStore, overridesStore, backupsForRun())
-      .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs)));
-
+  Effect.scoped(Effect.gen(function* () {
+    const opened = yield* openDesired();
+    const { desired } = opened;
     return yield* Effect.gen(function* () {
       const overridesFile = yield* OverridesStore;
-      const desired = yield* loadProfile(paths.repo, { overrides: yield* overridesFile.read }).pipe(Effect.provide(nodeFiles));
       const report = yield* inspect(desired, [configDomain]);
       if (report.probeErrors.length > 0) {
         for (const error of report.probeErrors) console.error(`nortuscc: ${error}`);
@@ -73,8 +63,8 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
         return 1;
       }
       return 0;
-    }).pipe(Effect.provide(services));
-  });
+    }).pipe(Effect.provide(opened.layer));
+  }));
 
 export async function run(args: string[] = []): Promise<number> {
   const { target, rest, error } = parseTarget(args);
