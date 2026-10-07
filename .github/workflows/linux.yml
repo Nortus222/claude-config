@@ -19,27 +19,39 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      # The backend suite needs a real Bun resource, independent of macOS packaging.
-      - name: Prepare bundled backend test fixture
+      # Socket/resource checks need a complete agent fixture, independent of macOS packaging.
+      - name: Prepare bundled agent test fixture
         run: |
           node --input-type=module <<'NODE'
           import { build } from 'esbuild';
-          import { mkdir, copyFile, chmod } from 'node:fs/promises';
+          import { mkdir, copyFile, chmod, readFile, writeFile, appendFile } from 'node:fs/promises';
           import { execFileSync } from 'node:child_process';
-          import { resolve } from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { createRequire } from 'node:module';
+          import { dirname, resolve } from 'node:path';
 
-          const resources = resolve('apps/desktop/src-tauri/resources', `linux-${process.arch}`);
+          const target = `${process.platform}-${process.arch}`;
+          const resources = resolve(process.env.RUNNER_TEMP, 'desktop-agent-resources');
           await mkdir(resources, { recursive: true });
           await build({
-            entryPoints: ['apps/desktop/backend/main.ts'],
+            entryPoints: ['apps/desktop/agent/main.ts'],
             bundle: true,
             platform: 'node',
             format: 'esm',
             target: 'esnext',
-            outfile: resolve(resources, 'backend.mjs'),
+            outfile: resolve(resources, 'agent.mjs'),
           });
           const bun = execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim();
+          const bunVersion = execFileSync(bun, ['--version'], { encoding: 'utf8' }).trim();
           await copyFile(bun, resolve(resources, 'bun'));
           await chmod(resolve(resources, 'bun'), 0o755);
+          const license = await fetch(`https://raw.githubusercontent.com/oven-sh/bun/bun-v${bunVersion}/LICENSE.md`);
+          if (!license.ok) throw new Error(`Bun ${bunVersion} license download failed: ${license.status}`);
+          await writeFile(resolve(resources, 'BUN-LICENSE.md'), await license.text());
+          const effectRoot = dirname(createRequire(resolve('package.json')).resolve('effect/package.json'));
+          await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
+          const agentVersion = createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex');
+          await writeFile(resolve(resources, 'runtime.json'), JSON.stringify({ target, bun: bunVersion, executable: 'bun', agentVersion }, null, 2));
+          await appendFile(process.env.GITHUB_ENV, `DESKTOP_AGENT_RESOURCES=${resources}\n`);
           NODE
       - run: npm run test:packages
