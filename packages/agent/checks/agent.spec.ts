@@ -210,10 +210,43 @@ test('a second agent fails LockHeld before it writes anything', async () => {
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   writeLock(lockPath(m), process.ppid);
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const content = 'active'.repeat(200_000);
+  writeFileSync(logPath, content);
+  for (const suffix of ['1', '2', '3']) writeFileSync(logPath + '.' + suffix, 'archive ' + suffix);
   const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0' }));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
   assert.deepEqual(await m.kinds(), []);
   assert.equal(existsSync(lockPath(m)), true);
+  assert.equal(readFileSync(logPath, 'utf8'), content);
+  for (const suffix of ['1', '2', '3']) assert.equal(readFileSync(logPath + '.' + suffix, 'utf8'), 'archive ' + suffix);
+});
+
+test('runAgent rotates the service log before starting jobs', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const logPath = join(m.paths.stateRoot, 'agent', 'agent.log');
+  const content = 'a'.repeat(1_048_576);
+  m.write(logPath, content);
+  const controller = new AbortController();
+  const source = Layer.succeed(SetupSource, {
+    ...fixture.service,
+    fetch: Effect.sync(() => {
+      assert.equal(readFileSync(logPath, 'utf8'), '');
+      assert.equal(readFileSync(logPath + '.1', 'utf8'), content);
+    }).pipe(Effect.andThen(fixture.service.fetch)),
+  });
+  await m.trust();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source, agentVersion: '1.0.0', signal: controller.signal }));
+  try {
+    for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok((await m.kinds()).includes('revision-verified'));
+    assert.equal(readFileSync(logPath, 'utf8'), '');
+    assert.equal(readFileSync(logPath + '.1', 'utf8'), content);
+  } finally {
+    controller.abort();
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
 });
 
 test('an agent takes over a dead agent\'s lock and removes its own on close', async () => {

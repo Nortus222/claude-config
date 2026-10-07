@@ -8,6 +8,7 @@ import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobRes
 import { agentLayer, type AgentDomains } from './layer.ts';
 import { serveIpc } from './ipc/server.ts';
 import { makeSession } from './ipc/session.ts';
+import { startAgentLogRotation } from './log.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
@@ -113,7 +114,7 @@ const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted, `signal` aborts or, with `ipc`, a client sends `shutdown`; each closes the agent,
 // cancelling an in-flight auto-apply. A pid lock makes it the only agent per state root: a second
-// fails LockHeld before touching state or the socket. The caller builds the per-job `domains`
+// fails LockHeld before touching state, logs or the socket. The caller builds the per-job `domains`
 // factory and `source` at the same boundary as `paths`, and decides `ipc` (default off).
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
@@ -124,8 +125,9 @@ export const runAgent = (input: {
   readonly signal?: AbortSignal;
 }) =>
   Effect.scoped(Effect.gen(function* () {
-    // The lock comes first: serveIpc replaces a leftover socket, which is only safe while it is held.
+    // The lock comes first: logs and leftover sockets may only be changed by their owning agent.
     yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
+    yield* startAgentLogRotation(join(input.paths.stateRoot, 'agent', 'agent.log'));
     const shutdown = new AbortController();
     const signal = input.signal ? AbortSignal.any([input.signal, shutdown.signal]) : shutdown.signal;
     const handle = yield* startAgent(input.domains, { signal });
