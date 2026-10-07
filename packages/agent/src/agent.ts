@@ -21,6 +21,8 @@ export type AgentHandle = {
   readonly decide: (decision: Decision, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid>;
   readonly resume: (actor: Actor) => Effect.Effect<AgentStatus, FsFailed>;
   readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<AgentStatus, FsFailed>;
+  // Calls `listener` with each job's status once it is the latest; answers the unsubscribe.
+  readonly onStatus: (listener: (status: AgentStatus) => void) => () => void;
 };
 
 const describe = (cause: Cause.Cause<unknown>): string => {
@@ -36,6 +38,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
     const inspection = yield* Ref.make<JobInspection | undefined>(undefined);
+    const listeners = new Set<(status: AgentStatus) => void>();
     const shutdown = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, shutdown.signal]) : shutdown.signal;
     const job = (_triggers: ReadonlyArray<Trigger>) =>
@@ -48,6 +51,14 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
           })),
         // The inspection always belongs to the latest status: a job that inspected nothing clears it.
         Effect.tap((result) => Effect.andThen(Ref.set(latest, result.status), Ref.set(inspection, result.inspection))),
+        // A listener's failure must not break the loop.
+        Effect.tap((result) => Effect.sync(() => {
+          for (const listener of listeners) {
+            try {
+              listener(result.status);
+            } catch {}
+          }
+        })),
         Effect.map((result) => result.status),
       );
     const scheduler = yield* makeScheduler(job);
@@ -68,6 +79,10 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       decide: (decision, actor) => withServices(recordDecision(decision, actor)).pipe(Effect.andThen(scheduler.request('decide'))),
       resume: (actor) => withServices(resume(actor)).pipe(Effect.andThen(scheduler.request('resume'))),
       setPolicy: (policy, actor) => withServices(changePolicy(policy, actor)).pipe(Effect.andThen(scheduler.request('policy'))),
+      onStatus: (listener) => {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
     };
     return handle;
   });

@@ -1,0 +1,336 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createConnection, type Socket } from 'node:net';
+import { join } from 'node:path';
+import { Effect, Exit, Scope } from 'effect';
+import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
+import {
+  AgentStateStore, makeSession, MAX_RECORD_BYTES, serveIpc, startAgent, ServeFailed,
+  type AgentDomain, type AgentDomains,
+} from '../src/index.ts';
+import { agentMachine } from './support/agent-machine.ts';
+import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
+
+const MODEL = 'setting:claude:settings.json#model';
+const THEME_KEY = 'config:claude:settings.json#theme';
+const EFFORT_KEY = 'config:claude:settings.json#effortLevel';
+const MODEL_KEY = 'config:claude:settings.json#model';
+
+type Record = { readonly [key: string]: any };
+
+// One client connection: every record it received, in order.
+type Client = {
+  readonly socket: Socket;
+  readonly records: Array<Record>;
+  readonly send: (record: unknown) => void;
+  readonly sendRaw: (text: string) => void;
+  // The first record from index `from` on that matches.
+  readonly waitFor: (match: (record: Record) => boolean, from?: number) => Promise<Record>;
+  readonly closed: Promise<void>;
+};
+
+const connect = (path: string) =>
+  new Promise<Client>((resolve, reject) => {
+    const socket = createConnection(path);
+    const records: Array<Record> = [];
+    let pending = '';
+    let notify = () => {};
+    let ended = false;
+    const closed = new Promise<void>((done) => socket.once('close', () => {
+      ended = true;
+      notify();
+      done();
+    }));
+    socket.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        records.push(JSON.parse(pending.slice(0, newline)));
+        pending = pending.slice(newline + 1);
+      }
+      notify();
+    });
+    const waitFor = (match: (record: Record) => boolean, from = 0) =>
+      new Promise<Record>((done, fail) => {
+        const timer = setTimeout(() => fail(new Error(`no matching record; got ${JSON.stringify(records.slice(from))}`)), 20_000);
+        const check = () => {
+          const found = records.slice(from).find(match);
+          if (found) {
+            clearTimeout(timer);
+            done(found);
+          } else if (ended) {
+            clearTimeout(timer);
+            fail(new Error(`closed without a matching record; got ${JSON.stringify(records.slice(from))}`));
+          } else notify = check;
+        };
+        check();
+      });
+    socket.once('connect', () => resolve({
+      socket, records, waitFor, closed,
+      send: (record) => socket.write(JSON.stringify(record) + '\n'),
+      sendRaw: (text) => socket.write(text),
+    }));
+    socket.once('error', reject);
+  });
+
+let ids = 0;
+// Sends `command` and answers its response.
+const ask = async (client: Client, command: object) => {
+  const id = `r${++ids}`;
+  const from = client.records.length;
+  client.send({ version: 3, id, ...command });
+  return client.waitFor((r) => r.id === id, from);
+};
+
+type Options = { readonly paused?: boolean; readonly config?: AgentDomain; readonly handshakeMs?: number };
+
+// The session spec's machine, served on a socket under a short temp root. `open` starts the agent,
+// the session and the server in a scope the test closes.
+const serverMachine = async (options: Options = {}) => {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'), {
+    headFiles: { 'claude/settings.keys.json': JSON.stringify({ theme: 'dark', effortLevel: 'high', model: 'opus' }) + '\n' },
+  });
+  m.write(join(m.paths.claude, 'settings.json'), JSON.stringify({ theme: 'dark' }) + '\n');
+  await m.trust();
+  if (options.paused) {
+    await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, paused: { reason: 'test pause', at: '2026-10-06T00:00:00.000Z' } }))));
+  }
+  for (const itemId of [EFFORT, MODEL]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
+  const domains: AgentDomains = (paths) => [options.config ?? configDomain, integrationsDomain({ paths, env: {} })];
+  const dir = join(m.paths.stateRoot, 'agent');
+  const socketPath = join(dir, 'agent.sock');
+  const tokenPath = join(dir, 'agent.token');
+  let shutdowns = 0;
+  const scope = Scope.makeUnsafe();
+  await m.run(Effect.gen(function* () {
+    const agent = yield* startAgent(domains);
+    const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
+    yield* serveIpc({
+      paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
+      ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
+    });
+  }).pipe(Scope.provide(scope)), fixture.source);
+  const token = readFileSync(tokenPath, 'utf8');
+  const clients: Array<Client> = [];
+  const open = async (client: 'app' | 'cli' = 'app') => {
+    const c = await connect(socketPath);
+    clients.push(c);
+    const hello = await ask(c, { command: 'hello', token, client });
+    assert.equal(hello.ok, true, JSON.stringify(hello));
+    return c;
+  };
+  const close = async () => {
+    for (const c of clients) c.socket.destroy();
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+  };
+  return { m, dir, socketPath, tokenPath, token, open, clients, close, shutdowns: () => shutdowns };
+};
+
+const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof serverMachine>>) => Promise<void>) => {
+  const s = await serverMachine(options);
+  try {
+    await body(s);
+  } finally {
+    await s.close();
+  }
+};
+
+test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', async () => {
+  await withServer({}, async (s) => {
+    const good = await connect(s.socketPath);
+    const hello = await ask(good, { command: 'hello', token: s.token, client: 'app' });
+    assert.deepEqual(hello, { version: 3, id: hello.id, ok: true, result: { agentVersion: '9.9.9', protocol: 3, policy: 'notify', paused: null } });
+    good.socket.destroy();
+
+    const wrong = await connect(s.socketPath);
+    const refused = await ask(wrong, { command: 'hello', token: 'x'.repeat(s.token.length), client: 'cli' });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, 'UNAUTHORIZED');
+    await wrong.closed;
+
+    const early = await connect(s.socketPath);
+    const before = await ask(early, { command: 'status' });
+    assert.equal(before.error.code, 'UNAUTHORIZED');
+    await early.closed;
+  });
+});
+
+test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a usable connection, a path as a key is UNKNOWN_KEY', async () => {
+  await withServer({}, async (s) => {
+    const c = await s.open();
+    const extra = await ask(c, { command: 'status', path: '/etc' });
+    assert.equal(extra.error.code, 'INVALID_REQUEST');
+
+    const from = c.records.length;
+    c.sendRaw('x'.repeat(MAX_RECORD_BYTES + 10) + '\n');
+    const oversized = await c.waitFor((r) => r.ok === false, from);
+    assert.equal(oversized.error.code, 'OVERSIZED');
+    const garbled = c.records.length;
+    c.sendRaw('{not json\n');
+    assert.equal((await c.waitFor((r) => r.ok === false, garbled)).error.code, 'MALFORMED');
+
+    const inspected = await ask(c, { command: 'inspect' });
+    assert.equal(inspected.ok, true, JSON.stringify(inspected));
+    const path = await ask(c, { command: 'preview', exclude: [join(s.m.paths.claude, 'settings.json')] });
+    assert.equal(path.error.code, 'UNKNOWN_KEY');
+  });
+});
+
+test('status, setPolicy, resume and decide answer the resulting status', async () => {
+  await withServer({ paused: true }, async (s) => {
+    const c = await s.open();
+    const status = await ask(c, { command: 'status' });
+    assert.equal(status.ok, true, JSON.stringify(status));
+    assert.equal(status.result.trusted, true);
+    assert.equal(status.result.paused.reason, 'test pause');
+
+    const policy = await ask(c, { command: 'setPolicy', policy: 'manual' });
+    assert.equal(policy.result.policy, 'manual');
+    const resumed = await ask(c, { command: 'resume' });
+    assert.equal(resumed.result.paused, null);
+
+    const decided = await ask(c, { command: 'decide', items: [{ setupId: 'local', id: MODEL, revision: HEAD, decision: 'skip' }] });
+    assert.equal(decided.ok, true, JSON.stringify(decided));
+    assert.equal(typeof decided.result.counts.pending, 'number');
+    const stored = await s.m.run(DecisionsStore.use((d) => d.read));
+    assert.equal(stored.find((d) => d.itemId === MODEL)?.decision, 'skip');
+    const kinds = (await s.m.events()).filter((e) => e.kind === 'decided' || e.kind === 'policy-changed' || e.kind === 'resumed');
+    assert.deepEqual(kinds.map((e) => [e.kind, e.actor]), [['policy-changed', 'app'], ['resumed', 'app'], ['decided', 'app']]);
+  });
+});
+
+test('history answers newest first, at most limit, before a time', async () => {
+  await withServer({}, async (s) => {
+    const old = ['2020-01-01', '2020-01-02', '2020-01-03'].map((day) =>
+      JSON.stringify({ v: 1, at: `${day}T00:00:00.000Z`, kind: 'resumed', actor: 'cli', reason: day }));
+    mkdirSync(join(s.m.paths.stateRoot, 'history'), { recursive: true });
+    writeFileSync(join(s.m.paths.stateRoot, 'history', '2020-01.jsonl'), old.join('\n') + '\n');
+    const c = await s.open();
+    await ask(c, { command: 'setPolicy', policy: 'manual' });
+
+    const all = await ask(c, { command: 'history', limit: 500 });
+    assert.deepEqual(all.result.events, [...await s.m.events()].reverse());
+    assert.ok(all.result.events.some((e: Record) => e.kind === 'policy-changed'));
+    const newest = await ask(c, { command: 'history', limit: 1 });
+    assert.deepEqual(newest.result.events, all.result.events.slice(0, 1));
+    const before = await ask(c, { command: 'history', before: '2020-01-03T00:00:00.000Z', limit: 500 });
+    assert.deepEqual(before.result.events.map((e: Record) => e.reason), ['2020-01-02', '2020-01-01']);
+  });
+});
+
+test('a subscriber receives a status event after another client inspects', async () => {
+  await withServer({}, async (s) => {
+    const watcher = await s.open();
+    const subscribed = await ask(watcher, { command: 'subscribe' });
+    assert.deepEqual(subscribed.result, { subscribed: true });
+    const from = watcher.records.length;
+    const other = await s.open('cli');
+    const inspected = await ask(other, { command: 'inspect' });
+    assert.equal(inspected.ok, true);
+    const event = await watcher.waitFor((r) => r.event === 'status', from);
+    assert.equal(event.version, 3);
+    assert.equal(event.status.trusted, true);
+    assert.equal(other.records.some((r) => r.event !== undefined), false);
+  });
+});
+
+test('apply answers started, then streams progress to the client and to subscribers', async () => {
+  await withServer({}, async (s) => {
+    const watcher = await s.open();
+    await ask(watcher, { command: 'subscribe' });
+    const c = await s.open();
+    const inspected = await ask(c, { command: 'inspect' });
+    const exclude = inspected.result.items.filter((i: Record) => i.domain !== 'config').map((i: Record) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    const from = c.records.length;
+    const watched = watcher.records.length;
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.result.status, 'started');
+    const runId = applied.result.runId;
+    await c.waitFor((r) => r.event === 'progress' && r.progress.type === 'done', from);
+    const records = c.records.slice(from);
+    assert.equal(records[0]!.id, applied.id);
+    assert.deepEqual(records.slice(1).filter((r) => r.event === 'progress').map((r) => [r.runId, r.progress.type]),
+      ['started', 'finished', 'started', 'finished', 'started', 'finished', 'done'].map((t) => [runId, t]));
+    const done = await watcher.waitFor((r) => r.event === 'progress' && r.progress.type === 'done', watched);
+    assert.equal(done.runId, runId);
+    const started = records.find((r) => r.event === 'progress' && r.progress.type === 'started');
+    assert.deepEqual(started!.progress.step.key, THEME_KEY);
+    assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark', effortLevel: 'high', model: 'opus' });
+  });
+});
+
+test('an apply whose plan changed since the preview answers stale with the new preview', async () => {
+  await withServer({}, async (s) => {
+    const c = await s.open();
+    const inspected = await ask(c, { command: 'inspect' });
+    const exclude = inspected.result.items.filter((i: Record) => i.domain !== 'config').map((i: Record) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    assert.deepEqual(preview.result.plan.steps.map((st: Record) => st.key), [THEME_KEY, EFFORT_KEY, MODEL_KEY]);
+    await ask(c, { command: 'decide', items: [EFFORT, MODEL].map((id) => ({ setupId: 'local', id, revision: HEAD, decision: 'skip' })) });
+    const stale = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(stale.result.status, 'stale', JSON.stringify(stale));
+    assert.deepEqual(stale.result.plan.steps.map((st: Record) => st.key), [THEME_KEY]);
+  });
+});
+
+test('a silent client does not block another; the directory is 0700, the socket and token 0600', async () => {
+  await withServer({}, async (s) => {
+    const silent = await connect(s.socketPath);
+    silent.sendRaw('{"version":3');
+    const c = await s.open('cli');
+    assert.equal((await ask(c, { command: 'status' })).ok, true);
+    assert.equal(statSync(s.dir).mode & 0o777, 0o700);
+    assert.equal(statSync(s.socketPath).mode & 0o777, 0o600);
+    assert.equal(statSync(s.tokenPath).mode & 0o777, 0o600);
+    assert.match(s.token, /^[A-Za-z0-9_-]{43}$/);
+  });
+});
+
+test('a connection that sends no complete record in time is closed', async () => {
+  await withServer({ handshakeMs: 50 }, async (s) => {
+    const silent = await connect(s.socketPath);
+    await silent.closed;
+    assert.deepEqual(silent.records, []);
+  });
+});
+
+test('shutdown answers, then calls onShutdown', async () => {
+  await withServer({}, async (s) => {
+    const c = await s.open();
+    const reply = await ask(c, { command: 'shutdown' });
+    assert.deepEqual(reply.result, { shutdown: true });
+    assert.equal(s.shutdowns(), 1);
+    assert.equal((await ask(c, { command: 'status' })).error.code, 'SHUTDOWN');
+  });
+});
+
+test('closing the scope closes connections and removes the socket and token', async () => {
+  const s = await serverMachine();
+  const c = await s.open();
+  await s.close();
+  await c.closed;
+  assert.equal(existsSync(s.socketPath), false);
+  assert.equal(existsSync(s.tokenPath), false);
+});
+
+test('a leftover socket is replaced, and a state root too deep for a socket path fails clearly', async () => {
+  const m = agentMachine('/tmp');
+  const deep = { ...m.paths, stateRoot: join(m.root, 'd'.repeat(120)) };
+  const handle = { onStatus: () => () => {} } as never;
+  const exit = await m.run(Effect.exit(Effect.scoped(serveIpc({ paths: deep, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} }))));
+  assert.ok(Exit.isFailure(exit));
+  const error = exit.cause.reasons.map((r) => (r._tag === 'Fail' ? r.error : undefined)).find((e) => e !== undefined);
+  assert.ok(error instanceof ServeFailed);
+  assert.match(error.message, /socket path .* too long/);
+
+  const dir = join(m.paths.stateRoot, 'agent');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent.sock'), 'stale');
+  await m.run(Effect.scoped(Effect.gen(function* () {
+    yield* serveIpc({ paths: m.paths, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} });
+    assert.equal(statSync(join(dir, 'agent.sock')).isSocket(), true);
+  })));
+});

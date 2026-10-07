@@ -11,9 +11,10 @@ const NO_SOURCE = () => Effect.die(new Error('this test has no setup source'));
 // For tests that never refresh or resolve.
 const noSource = Layer.succeed(SetupSource, { fetch: NO_SOURCE(), load: NO_SOURCE, effective: NO_SOURCE, current: NO_SOURCE() });
 
-// A temporary HOME, git checkout and state root, with the agent's services over them.
-export const agentMachine = () => {
-  const root = mkdtempSync(join(tmpdir(), 'agent-'));
+// A temporary HOME, git checkout and state root, with the agent's services over them. `base` is
+// where the temp root goes: a socket test passes a short one, since socket paths are capped near 104 bytes.
+export const agentMachine = (base: string = tmpdir()) => {
+  const root = mkdtempSync(join(base, 'agent-'));
   const home = join(root, 'home');
   const stateRoot = join(home, '.config', 'nortuscc');
   const paths: MachinePathsValue = {
