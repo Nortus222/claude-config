@@ -1,8 +1,9 @@
 import { Context, Data, Effect, Layer } from 'effect';
-import { decodeHosted, ErrorResponseSchema, ERROR_STATUS, MAX_REQUEST_BODY_BYTES, type ErrorCode } from '@nortuscc/hosted-protocol';
+import { decodeHosted, ErrorResponseSchema, ERROR_CODES, ERROR_STATUS, MAX_REQUEST_BODY_BYTES } from '@nortuscc/hosted-protocol';
 
-export type HostedFailureCode = ErrorCode | 'invalid_url' | 'invalid_request' | 'invalid_response'
-  | 'redirect' | 'network' | 'timeout' | 'credential_storage' | 'keychain_unavailable';
+export const HOSTED_FAILURE_CODES = [...ERROR_CODES, 'invalid_url', 'invalid_request', 'invalid_response',
+  'redirect', 'network', 'timeout', 'credential_storage', 'keychain_unavailable', 'storage'] as const;
+export type HostedFailureCode = typeof HOSTED_FAILURE_CODES[number];
 
 // Safe to project into status or IPC. Never attach a rejected value, message or underlying cause.
 export class HostedFailure extends Data.TaggedError('HostedFailure')<{

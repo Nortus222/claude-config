@@ -29,7 +29,8 @@ export type HistoryEventBody =
   | { readonly kind: 'paused'; readonly reason: string; readonly runId?: string }
   | { readonly kind: 'resumed'; readonly reason: string }
   | { readonly kind: 'revision-verified' | 'revision-rejected'; readonly setupId: string; readonly revision: string; readonly error?: string }
-  | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> };
+  | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> }
+  | { readonly kind: 'outbox-dropped'; readonly accountId: string; readonly count: number; readonly code: 'invalid' };
 
 export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string };
 export type HistoryEvent = HistoryInput & { readonly v: 1; readonly at: string };
