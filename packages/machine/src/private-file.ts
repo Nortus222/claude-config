@@ -8,7 +8,6 @@ import { FsFailed } from './errors.ts';
 
 const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 const info = (path: string) => lstat(path).catch((error) => { if (absent(error)) return undefined; throw error; });
-const refuse = () => { throw new Error('unsafe private file'); };
 
 // Fixed ACL helper uses stdin for the path and action, never for file contents.
 const windowsAclHelper = `
@@ -44,69 +43,93 @@ try {
 
 export type PrivateFileOptions = { readonly platform?: NodeJS.Platform; readonly processes?: Layer.Layer<Processes> };
 
-// Credentials use this boundary instead of Fs, whose normal writes intentionally follow links.
+// Credentials require owner-controlled ancestors. Path checks cannot prevent a hostile ancestor replacement.
+// Filesystem steps finish before interruption returns; helper processes remain in the caller's Effect scope.
 export const privateFile = (path: string, options: PrivateFileOptions = {}) => {
   const platform = options.platform ?? process.platform;
-  const secure = async (target: string, action: 'protect' | 'check') => {
-    if (platform !== 'win32') return;
-    const result = await Effect.runPromise(Processes.use((processes) => processes.run({
+  const failure = (operation: string) => new FsFailed({ op: operation, path, reason: 'private file operation failed' });
+  const attempt = <A>(operation: string, run: () => Promise<A>) => Effect.tryPromise({
+    try: run, catch: () => failure(operation),
+  }).pipe(Effect.uninterruptible);
+  const secure = (target: string, action: 'protect' | 'check') => platform !== 'win32' ? Effect.void
+    : Processes.use((processes) => processes.run({
       cmd: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsAclHelper, 'utf16le').toString('base64')],
       input: JSON.stringify({ path: target, action }), output: 'capture', stderr: 'capture',
-    })).pipe(Effect.provide(options.processes ?? nodeProcesses())));
-    if (result.code !== 0) refuse();
-  };
+    })).pipe(
+      Effect.provide(options.processes ?? nodeProcesses()),
+      Effect.mapError(() => failure('permissions')),
+      Effect.flatMap((result) => result.code === 0 ? Effect.void : Effect.fail(failure('permissions'))),
+    );
   const directory = dirname(path);
-  const inspectDirectories = async (create: boolean, requirePrivate = true) => {
-    if (!isAbsolute(path)) refuse();
+  const inspectDirectories = (create: boolean, requirePrivate = true) => Effect.gen(function* () {
+    if (!isAbsolute(path)) return yield* Effect.fail(failure('inspect'));
     const root = parse(directory).root;
     let current = root;
     for (const part of directory.slice(root.length).split(/[\\/]/).filter(Boolean)) {
       current = join(current, part);
-      let entry = await info(current);
-      if (!entry && create) { await mkdir(current, { mode: 0o700 }).catch((error) => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }); entry = await info(current); }
+      let entry = yield* attempt('inspect', () => info(current));
+      if (!entry && create) {
+        yield* attempt('mkdir', () => mkdir(current, { mode: 0o700 }).catch((error) => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }));
+        entry = yield* attempt('inspect', () => info(current));
+      }
       if (!entry) return false;
-      if (!entry.isDirectory() || entry.isSymbolicLink()) refuse();
+      if (!entry.isDirectory() || entry.isSymbolicLink()) return yield* Effect.fail(failure('inspect'));
     }
-    if (create) { await chmod(directory, 0o700); await secure(directory, 'protect'); }
-    else if (requirePrivate && platform !== 'win32' && ((await lstat(directory)).mode & 0o777) !== 0o700) refuse();
-    if (requirePrivate) await secure(directory, 'check');
+    if (create) {
+      yield* attempt('permissions', () => chmod(directory, 0o700));
+      yield* secure(directory, 'protect');
+    } else if (requirePrivate && platform !== 'win32') {
+      const entry = yield* attempt('inspect', () => lstat(directory));
+      if ((entry.mode & 0o777) !== 0o700) return yield* Effect.fail(failure('inspect'));
+    }
+    if (requirePrivate) yield* secure(directory, 'check');
     return true;
-  };
-  const inspectFile = async () => {
-    const entry = await info(path);
+  });
+  const inspectFile = () => Effect.gen(function* () {
+    const entry = yield* attempt('inspect', () => info(path));
     if (entry && (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1
-      || platform !== 'win32' && (entry.mode & 0o777) !== 0o600)) refuse();
-    if (entry) await secure(path, 'check');
+      || platform !== 'win32' && (entry.mode & 0o777) !== 0o600)) return yield* Effect.fail(failure('inspect'));
+    if (entry) yield* secure(path, 'check');
     return entry;
-  };
-  const attempt = <A>(operation: string, run: () => Promise<A>) => Effect.tryPromise({
-    try: run, catch: () => new FsFailed({ op: operation, path, reason: 'private file operation failed' }),
   });
   return {
-    read: () => attempt('read', async () => {
-      if (!await inspectDirectories(false, false) || !await inspectFile()) return undefined;
-      await inspectDirectories(false);
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        const entry = await handle.stat();
-        if (!entry.isFile() || entry.nlink !== 1 || platform !== 'win32' && (entry.mode & 0o777) !== 0o600) refuse();
-        return await handle.readFile('utf8');
-      } finally { await handle.close(); }
+    read: () => Effect.gen(function* () {
+      if (! (yield* inspectDirectories(false, false)) || ! (yield* inspectFile())) return undefined;
+      yield* inspectDirectories(false);
+      return yield* Effect.acquireUseRelease(
+        attempt('read', () => open(path, constants.O_RDONLY | constants.O_NOFOLLOW)),
+        (handle) => Effect.gen(function* () {
+          const entry = yield* attempt('inspect', () => handle.stat());
+          if (!entry.isFile() || entry.nlink !== 1 || platform !== 'win32' && (entry.mode & 0o777) !== 0o600) return yield* Effect.fail(failure('inspect'));
+          return yield* attempt('read', () => handle.readFile('utf8'));
+        }),
+        (handle) => attempt('close', () => handle.close()),
+      );
     }),
-    write: (text: string) => attempt('write', async () => {
-      await inspectDirectories(true); await inspectFile();
+    write: (text: string) => Effect.gen(function* () {
+      yield* inspectDirectories(true); yield* inspectFile();
       const temporary = join(directory, `.machine-token.${randomUUID()}.tmp`);
-      try {
-        const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-        try { await secure(temporary, 'protect'); await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
-        await inspectDirectories(false); await inspectFile();
-        await rename(temporary, path);
-      } finally { await unlink(temporary).catch((error) => { if (!absent(error)) throw error; }); }
+      yield* Effect.acquireUseRelease(
+        attempt('write', () => open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)),
+        (handle) => Effect.gen(function* () {
+          yield* secure(temporary, 'protect');
+          yield* attempt('write', () => handle.writeFile(text, 'utf8'));
+          yield* attempt('sync', () => handle.sync());
+          yield* attempt('close', () => handle.close());
+          yield* inspectDirectories(false); yield* inspectFile();
+          yield* attempt('write', () => rename(temporary, path));
+        }),
+        (handle) => Effect.gen(function* () {
+          const closed = yield* Effect.exit(attempt('close', () => handle.close()));
+          yield* attempt('remove', () => unlink(temporary).catch((error) => { if (!absent(error)) throw error; }));
+          if (closed._tag === 'Failure') yield* Effect.failCause(closed.cause);
+        }),
+      );
     }),
-    remove: () => attempt('remove', async () => {
-      if (!await inspectDirectories(false, false) || !await inspectFile()) return;
-      await inspectDirectories(false);
-      await unlink(path);
+    remove: () => Effect.gen(function* () {
+      if (! (yield* inspectDirectories(false, false)) || ! (yield* inspectFile())) return;
+      yield* inspectDirectories(false);
+      yield* attempt('remove', () => unlink(path));
     }),
   };
 };

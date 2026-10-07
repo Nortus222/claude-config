@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -191,4 +191,23 @@ test('a child closing stdin early does not turn EPIPE into an unhandled error', 
   const exit = await run(Processes.use((p) => p.run({ cmd: node, args: ['-e', 'process.exit(0)'], input: 'x'.repeat(1024 * 1024), output: 'capture', stderr: 'capture' })));
   assert.ok(Exit.isSuccess(exit));
   assert.equal(Exit.isSuccess(exit) && exit.value.code, 0);
+});
+
+test('interrupting a command with piped stdin still waits for process cleanup', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'machine-stdin-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const marker = join(directory, 'stdin');
+  const script = `let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => input += c); process.stdin.on('end', () => {
+    require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, input }));
+    setInterval(() => {}, 1000);
+  });`;
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(Processes.use((processes) => processes.run({ cmd: node, args: ['-e', script], input: 'stdin-fixture', output: 'capture', stderr: 'capture' })));
+    for (let i = 0; i < 100 && !existsSync(marker); i++) yield* Effect.promise(() => sleep(20));
+    assert.equal(existsSync(marker), true);
+    const result = JSON.parse(readFileSync(marker, 'utf8'));
+    assert.equal(result.input, 'stdin-fixture');
+    yield* Fiber.interrupt(fiber);
+    assert.equal(pidAlive(result.pid), false);
+  }).pipe(Effect.provide(nodeProcesses({ env: {} }))));
 });

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer } from 'effect';
+import { Effect, Fiber, Layer } from 'effect';
 import { Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
 import { HostedFailure, MachineTokenStore, machineTokenStore } from '../src/index.ts';
 
@@ -155,4 +155,62 @@ test('an existing ordinary agent directory without a fallback does not block nat
   } });
   await Effect.runPromise(MachineTokenStore.use((store) => store.write('private-token')).pipe(Effect.provide(layer)));
   assert.equal(await Effect.runPromise(MachineTokenStore.use((store) => store.read()).pipe(Effect.provide(layer))), 'private-token');
+});
+
+for (const fallback of [false, true]) {
+  test(`unavailable native deletion suppresses recovered credentials across restart, fallback=${fallback}`, async (t) => {
+    const m = await temp(t);
+    let available = true;
+    let native: string | undefined = 'old-native-token';
+    const keychain = {
+      read: () => Effect.succeed(native),
+      write: (token: string) => available ? Effect.sync(() => { native = token; }) : Effect.fail(new HostedFailure({ code: 'keychain_unavailable' })),
+      remove: () => available ? Effect.sync(() => { native = undefined; }) : Effect.fail(new HostedFailure({ code: 'keychain_unavailable' })),
+    };
+    const layer = machineTokenStore(m.paths, { platform: 'linux', keychain });
+    available = false;
+    if (fallback) await Effect.runPromise(MachineTokenStore.use((store) => store.write('new-fallback-token')).pipe(Effect.provide(layer)));
+    await Effect.runPromise(MachineTokenStore.use((store) => store.remove()).pipe(Effect.provide(layer)));
+    available = true;
+    const restarted = machineTokenStore(m.paths, { platform: 'linux', keychain });
+    assert.equal(await Effect.runPromise(MachineTokenStore.use((store) => store.read()).pipe(Effect.provide(restarted))), undefined);
+    assert.equal(await readFile(m.file, 'utf8'), '');
+    await Effect.runPromise(MachineTokenStore.use((store) => store.write('new-native-token')).pipe(Effect.provide(restarted)));
+    assert.equal(await Effect.runPromise(MachineTokenStore.use((store) => store.read()).pipe(Effect.provide(restarted))), 'new-native-token');
+    await assert.rejects(lstat(m.file), { code: 'ENOENT' });
+    available = false;
+    await Effect.runPromise(MachineTokenStore.use((store) => store.remove()).pipe(Effect.provide(restarted)));
+    await Effect.runPromise(MachineTokenStore.use((store) => store.write('new-outage-token')).pipe(Effect.provide(restarted)));
+    available = true;
+    const again = machineTokenStore(m.paths, { platform: 'linux', keychain });
+    assert.equal(await Effect.runPromise(MachineTokenStore.use((store) => store.read()).pipe(Effect.provide(again))), 'new-outage-token');
+  });
+}
+
+test('interrupted Windows fallback cancels its blocked helper and cannot later restore a signed-out token', async (t) => {
+  const m = await temp(t);
+  let ready!: () => void;
+  const started = new Promise<void>((resolve) => { ready = resolve; });
+  let release!: () => void;
+  let cancelled = false;
+  const processes = Layer.succeed(Processes, { run: (command) => {
+    const operation = JSON.parse(command.input!);
+    if (operation.action === 'protect' && operation.path.endsWith('.tmp')) {
+      return Effect.callback((resume) => {
+        release = () => resume(Effect.succeed({ code: 0, stdout: '', stderr: '' }));
+        ready();
+        return Effect.sync(() => { cancelled = true; });
+      });
+    }
+    return Effect.succeed({ code: 0, stdout: '', stderr: '' });
+  } });
+  const keychain = { read: () => Effect.succeed(undefined), write: () => Effect.fail(new HostedFailure({ code: 'keychain_unavailable' })), remove: () => Effect.void };
+  const layer = machineTokenStore(m.paths, { platform: 'win32', processes, keychain });
+  const fiber = Effect.runFork(MachineTokenStore.use((store) => store.write('private-token')).pipe(Effect.provide(layer)));
+  await started;
+  await Effect.runPromise(Fiber.interrupt(fiber));
+  await Effect.runPromise(MachineTokenStore.use((store) => store.remove()).pipe(Effect.provide(layer)));
+  release();
+  assert.equal(cancelled, true);
+  await assert.rejects(lstat(m.file), { code: 'ENOENT' });
 });

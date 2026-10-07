@@ -106,9 +106,10 @@ export type MachineTokenStoreOptions = {
   readonly keychain?: TokenKeychain;
 };
 
-// A fallback is authoritative until a successful native write removes it, so stale native values cannot resurface.
+// A fallback is authoritative; an empty file records deletion while native storage is unavailable.
 export const machineTokenStore = (paths: MachinePathsValue, options: MachineTokenStoreOptions) => {
   const file = privateFile(join(paths.stateRoot, 'agent', 'machine-token'), { platform: options.platform, processes: options.processes });
+  const nativeSupported = options.keychain !== undefined || ['darwin', 'linux', 'win32'].includes(options.platform);
   const keychain = options.keychain ?? nativeKeychain(options.platform, options.processes ?? nodeProcesses());
   const fallbackRead = () => file.read().pipe(Effect.mapError(storageFailure));
   const fallbackRemove = () => file.remove().pipe(Effect.mapError(storageFailure));
@@ -117,7 +118,7 @@ export const machineTokenStore = (paths: MachinePathsValue, options: MachineToke
   return Layer.succeed(MachineTokenStore, {
     read: () => Effect.gen(function* () {
       const token = yield* fallbackRead();
-      if (token !== undefined) return token;
+      if (token !== undefined) return token || undefined;
       return yield* tolerateUnavailable(keychain.read(), () => Effect.succeed(undefined));
     }),
     write: (token) => Effect.gen(function* () {
@@ -130,8 +131,9 @@ export const machineTokenStore = (paths: MachinePathsValue, options: MachineToke
     }),
     remove: () => Effect.gen(function* () {
       yield* fallbackRead();
-      yield* tolerateUnavailable(keychain.remove(), () => Effect.void);
-      yield* fallbackRemove();
+      const removed = yield* tolerateUnavailable(keychain.remove().pipe(Effect.as(true)), () => Effect.succeed(false));
+      if (removed || !nativeSupported) yield* fallbackRemove();
+      else yield* file.write('').pipe(Effect.mapError(storageFailure));
     }),
   });
 };
