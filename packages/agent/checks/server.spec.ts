@@ -7,7 +7,7 @@ import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore, HistoryStore, historyStore, integrationsDomain } from '@nortuscc/machine';
 import {
   AgentStateStore, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
-  type AgentDomain, type AgentDomains,
+  type AgentDomain, type AgentDomains, type Notifier,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
@@ -84,6 +84,7 @@ const ask = async (client: Client, command: object) => {
 };
 
 type Options = {
+  readonly notifier?: Notifier;
   readonly paused?: boolean;
   readonly config?: AgentDomain;
   readonly handshakeMs?: number;
@@ -123,7 +124,7 @@ const serverMachine = async (options: Options = {}) => {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
+      notifier: options.notifier, notificationTimeoutMs: 80, paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
       ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
     });
     if (options.starting === undefined) while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
@@ -626,5 +627,79 @@ test('status observes a manual apply while its first step is blocked and becomes
     await Effect.runPromise(Deferred.succeed(release, undefined));
     await c.waitFor((record) => record.event === 'progress' && record.progress.type === 'done');
     assert.equal((await ask(c, { command: 'status' })).result.applying, false);
+  });
+});
+
+test('notification delivery binds fresh receipts to one authenticated app and falls through on refusal', unixOnly, async () => {
+  const notification = { id: 'a'.repeat(64), title: 'Review', body: 'Held items' };
+  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(notification), receipt: () => 'launch-receipt', acknowledge: (_id, _ok, receipt) => receipt === 'launch-receipt', setConnected: (value) => { deliver = value; } };
+  await withServer({ notifier }, async (s) => {
+    const cli = await s.open('cli');
+    const first = await s.open();
+    const second = await s.open();
+    for (const c of [cli, first, second]) await ask(c, { command: 'subscribe' });
+    assert.equal((await ask(cli, { command: 'notification', notificationId: notification.id })).error.code, 'UNAUTHORIZED');
+    const pending = Effect.runPromise(deliver!(notification));
+    const event = await first.waitFor((r) => r.event === 'notification');
+    assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted, false);
+    assert.equal((await ask(cli, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).error.code, 'UNAUTHORIZED');
+    assert.equal((await ask(first, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: false })).result.accepted, true);
+    const next = await second.waitFor((r) => r.event === 'notification');
+    assert.notEqual(next.receipt, event.receipt);
+    assert.equal((await ask(first, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted, false);
+    await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: next.receipt, delivered: true });
+    assert.equal(await pending, true);
+    assert.equal(cli.records.some((r) => r.event === 'notification'), false);
+    const lookup = await ask(first, { command: 'notification', notificationId: notification.id });
+    assert.equal(lookup.result.receipt, 'launch-receipt');
+    assert.equal((await ask(second, { command: 'notification', notificationId: notification.id })).result.receipt, null);
+    assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: 'launch-receipt', delivered: true })).result.accepted, false);
+    assert.equal((await ask(first, { command: 'notificationAck', notificationId: notification.id, receipt: 'launch-receipt', delivered: true })).result.accepted, true);
+  });
+});
+
+test('notification disconnect and timeout reject late ACK and try the next app', unixOnly, async () => {
+  const notification = { id: 'b'.repeat(64), title: 'Review', body: 'Held items' };
+  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
+  await withServer({ notifier }, async (s) => {
+    const first = await s.open();
+    const second = await s.open();
+    for (const c of [first, second]) await ask(c, { command: 'subscribe' });
+    assert.deepEqual((await ask(second, { command: 'notification', notificationId: notification.id })).result, { notification: null, receipt: null });
+    const pending = Effect.runPromise(deliver!(notification));
+    await first.waitFor((r) => r.event === 'notification');
+    first.socket.destroy();
+    const event = await second.waitFor((r) => r.event === 'notification');
+    assert.equal(await pending, false);
+    assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted, false);
+    const from = second.records.length;
+    const retry = Effect.runPromise(deliver!(notification));
+    const next = await second.waitFor((r) => r.event === 'notification', from);
+    assert.notEqual(next.receipt, event.receipt);
+    assert.equal((await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: false })).result.accepted, false);
+    await ask(second, { command: 'notificationAck', notificationId: notification.id, receipt: next.receipt, delivered: true });
+    assert.equal(await retry, true);
+  });
+});
+
+test('a connected ACK past its deadline is rejected before its timer runs', unixOnly, async () => {
+  const notification = { id: 'c'.repeat(64), title: 'Review', body: 'Held items' };
+  let deliver: ((n: typeof notification) => Effect.Effect<boolean>) | undefined;
+  const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
+  await withServer({ notifier }, async (s) => {
+    const app = await s.open();
+    await ask(app, { command: 'subscribe' });
+    const pending = Effect.runPromise(deliver!(notification));
+    const event = await app.waitFor((r) => r.event === 'notification');
+    const now = Date.now;
+    let accepted: boolean;
+    try {
+      Date.now = () => now() + 1000;
+      accepted = (await ask(app, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true })).result.accepted;
+    } finally { Date.now = now; }
+    assert.equal(accepted, false);
+    assert.equal(await pending, false);
   });
 });

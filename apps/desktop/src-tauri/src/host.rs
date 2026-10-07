@@ -463,7 +463,7 @@ fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result
     let script = resources.join("agent.mjs");
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
-    command.arg(script).arg(setup.argument()).current_dir(resources)
+    command.arg(script).arg(setup.argument()).arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?).current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(home) = home {
@@ -924,7 +924,9 @@ mod helper_tests {
     fn fixed_helper_arguments_and_strict_output_determine_the_state_root() {
         let root = resources(r#"[ "$1" = "$PWD/agent.mjs" ] || exit 9
 case "$2" in --ensure|--restart) ;; *) exit 8;; esac
-[ "$#" = 2 ] || exit 7
+[ "$#" = 4 ] || exit 7
+[ "$3" = --app ] || exit 6
+case "$4" in /*) ;; *) exit 5;; esac
 printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         for mode in [Setup::Ensure, Setup::Restart] {
             assert_eq!(run_helper(helper_command(&root, mode, None).unwrap(), Duration::from_secs(1)).unwrap(), PathBuf::from("/tmp/fake-state"));

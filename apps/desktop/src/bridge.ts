@@ -23,7 +23,7 @@ export function decodeHostEvent(value: unknown): HostEvent {
   if ('event' in message && message.event === 'disconnected')
     return { ...Schema.decodeUnknownSync(Disconnected, { onExcessProperty: 'error' })(message), generation: checked };
   const decoded = decodeMessage(message);
-  if (!('event' in decoded)) throw new Error('Expected an agent event');
+  if (!('event' in decoded) || decoded.event === 'notification') throw new Error('Expected an agent event');
   return { ...decoded, generation: checked };
 }
 

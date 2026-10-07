@@ -6,6 +6,7 @@ import { Cause, Data, Effect, FiberSet } from 'effect';
 import { HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
+import type { Notifier, Notification } from '../notifier.ts';
 import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { AgentStateStore } from '../state.ts';
@@ -37,6 +38,8 @@ type Connection = {
   readonly socket: Socket;
   client: Client | undefined;
   subscribed: boolean;
+  receipts: Map<string, string>;
+  pendingNotification?: { id: string; receipt: string; deadline: number; finish: (delivered: boolean) => void };
   timer: ReturnType<typeof setTimeout> | undefined;
 };
 // A handler's result, what to do once its reply is written, and what to do once it is flushed.
@@ -74,6 +77,8 @@ export const serveIpc = (input: {
   readonly agentVersion: string;
   readonly onShutdown: () => void;
   readonly handshakeMs?: number;
+  readonly notifier?: Notifier;
+  readonly notificationTimeoutMs?: number;
 }) =>
   Effect.gen(function* () {
     const { handle, session } = input;
@@ -179,6 +184,33 @@ export const serveIpc = (input: {
     });
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
 
+    // Only OS posting acknowledged by the selected app counts as delivery.
+    const deliverNotification = (notification: Notification) => Effect.gen(function* () {
+      for (const conn of subscribers().filter((c) => c.client === 'app')) {
+        if (conn.socket.destroyed) continue;
+        const delivered = yield* Effect.callback<boolean>((resume) => {
+          const receipt = randomBytes(32).toString('base64url');
+          let finished = false;
+          const finish = (delivered: boolean) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            conn.pendingNotification = undefined;
+            resume(Effect.succeed(delivered));
+          };
+          const timer = setTimeout(() => finish(false), input.notificationTimeoutMs ?? 1000);
+          conn.pendingNotification = { id: notification.id, receipt, deadline: Date.now() + (input.notificationTimeoutMs ?? 1000), finish };
+          const message = { version: PROTOCOL_VERSION, event: 'notification', notification, receipt };
+          event(conn, message);
+          return Effect.sync(() => finish(false));
+        });
+        if (delivered) return true;
+      }
+      return false;
+    });
+    input.notifier?.setConnected(deliverNotification);
+    yield* Effect.addFinalizer(() => Effect.sync(() => input.notifier?.setConnected(undefined)));
+
     const hello = Effect.gen(function* () {
       const state = yield* (yield* AgentStateStore).read;
       const result: HelloResult = {
@@ -197,6 +229,33 @@ export const serveIpc = (input: {
 
     const dispatch = (conn: Connection, request: Request, client: Client): Effect.Effect<Handled, unknown, AgentServices> => {
       switch (request.command) {
+        case 'notification':
+          if (client !== 'app') return Effect.fail(new SessionError('UNAUTHORIZED', 'Notifications require an app connection'));
+          return Effect.gen(function* () {
+            const notification = input.notifier ? yield* input.notifier.get(request.notificationId) : undefined;
+            for (const connection of connections) {
+              for (const [id, bound] of connection.receipts) {
+                if (input.notifier?.receipt(id) !== bound) connection.receipts.delete(id);
+              }
+            }
+            let receipt = notification === undefined ? undefined : input.notifier?.receipt(request.notificationId);
+            if (receipt !== undefined && [...connections].some((c) => c !== conn && c.receipts.get(request.notificationId) === receipt)) receipt = undefined;
+            if (receipt !== undefined) conn.receipts.set(request.notificationId, receipt);
+            return { result: { notification: notification ?? null, receipt: receipt ?? null } };
+          });
+        case 'notificationAck':
+          if (client !== 'app') return Effect.fail(new SessionError('UNAUTHORIZED', 'Notifications require an app connection'));
+          return Effect.sync(() => {
+            const pending = conn.pendingNotification;
+            if (pending?.id === request.notificationId && pending.receipt === request.receipt && Date.now() < pending.deadline) {
+              pending.finish(request.delivered);
+              return { result: { accepted: true } };
+            }
+            const bound = conn.receipts.get(request.notificationId);
+            const accepted = bound === request.receipt && (input.notifier?.acknowledge(request.notificationId, request.delivered, request.receipt) ?? false);
+            if (bound === request.receipt) conn.receipts.delete(request.notificationId);
+            return { result: { accepted } };
+          });
         case 'hello':
           return Effect.map(hello, (result) => ({ result }));
         case 'status':
@@ -329,7 +388,7 @@ export const serveIpc = (input: {
     // JSON lines of at most MAX_RECORD_BYTES; an oversized record is discarded up to its newline.
     const accept = (socket: Socket) => {
       if (stopped) return void socket.destroy();
-      const conn: Connection = { socket, client: undefined, subscribed: false, timer: undefined };
+      const conn: Connection = { socket, client: undefined, subscribed: false, receipts: new Map(), timer: undefined };
       conn.timer = setTimeout(() => socket.destroy(), input.handshakeMs ?? HANDSHAKE_MS);
       connections.add(conn);
       let buffer = Buffer.alloc(0);
@@ -354,6 +413,8 @@ export const serveIpc = (input: {
       });
       socket.on('error', () => socket.destroy());
       socket.on('close', () => {
+        conn.pendingNotification?.finish(false);
+        conn.receipts.clear();
         clearTimeout(conn.timer);
         connections.delete(conn);
       });
@@ -368,6 +429,7 @@ export const serveIpc = (input: {
         shutdownTimer = undefined;
         for (const conn of connections) {
           clearTimeout(conn.timer);
+          conn.pendingNotification?.finish(false);
           conn.socket.destroy();
         }
         connections.clear();

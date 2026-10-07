@@ -172,3 +172,25 @@ test('inspect accepts its agent status and rejects unknown status and inspect fi
   assert.throws(() => decodeInspectResult({ ...inspected, status: { ...inspected.status, extra: 1 } }));
   assert.throws(() => decodeInspectResult({ ...inspected, status: { ...inspected.status, applying: 'yes' } }));
 });
+
+test('notification requests and events have strict bounded opaque fields', () => {
+  const notificationId = 'a'.repeat(64);
+  const notification = { id: notificationId, title: 'Review', body: 'Items need review' };
+  for (const request of [
+    { ...head, command: 'notification', notificationId },
+    { ...head, command: 'notificationAck', notificationId, receipt: 'fresh-receipt', delivered: false },
+  ]) {
+    assert.deepEqual(decodeRequest(request), request);
+    assert.throws(() => decodeRequest({ ...request, extra: true }));
+    assert.throws(() => decodeRequest({ ...request, notificationId: 'A'.repeat(64) }));
+  }
+  const event = { version: 3, event: 'notification', notification, receipt: 'fresh-receipt' };
+  assert.deepEqual(decodeMessage(event), event);
+  for (const bad of [
+    { ...event, receipt: '' }, { ...event, receipt: 'x'.repeat(201) },
+    { ...event, extra: true },
+    { ...event, notification: { ...notification, title: 'x'.repeat(101) } },
+    { ...event, notification: { ...notification, body: 'x'.repeat(501) } },
+    { ...event, notification: { ...notification, extra: true } },
+  ]) assert.throws(() => decodeMessage(bad));
+});

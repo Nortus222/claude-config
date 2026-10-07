@@ -79,3 +79,7 @@ test('the host accepts generation-scoped v3 status and rejects unknown fields an
   assert.throws(() => decodeHostEvent({ ...event, status: { ...status, extra: 1 } }));
   assert.throws(() => decodeHostEvent({ generation: 2, version: 3, id: 'r1', ok: true, result: null }));
 });
+
+test('native notification events never enter renderer progress handling', () => {
+  assert.throws(() => decodeHostEvent({ generation: 1, version: 3, event: 'notification', notification: { id: 'a'.repeat(64), title: 'Review', body: 'Held items' }, receipt: 'native-owned' }));
+});

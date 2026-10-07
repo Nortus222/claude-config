@@ -1,5 +1,5 @@
 import { homedir, userInfo } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Cause, Effect, Layer } from 'effect';
 import { agentLayer, runAgent } from '@nortuscc/agent';
@@ -35,9 +35,23 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
   process.once('SIGINT', stop);
   try {
     return await Effect.runPromise(Effect.gen(function* () {
-      const [arg] = input.args;
-      if (input.args.length > 1 || (arg !== undefined && arg !== '--ensure' && arg !== '--restart')) {
-        return yield* Effect.fail(new Error('Usage: agent.mjs [--ensure | --restart]'));
+      const [arg, appFlag, appPath] = input.args;
+      const serviceHelper = arg === '--ensure' || arg === '--restart';
+      if (!(input.args.length === 0 || (arg === '--paths' && input.args.length === 1)
+        || (serviceHelper && input.args.length === 3 && appFlag === '--app' && appPath !== undefined
+          && isAbsolute(appPath) && !/[\x00-\x1f\x7f]/.test(appPath)))) {
+        return yield* Effect.fail(new Error('Usage: agent.mjs [--ensure | --restart] --app <absolute executable> | --paths'));
+      }
+      if (arg === '--paths') {
+        // Only the state root is used; this mode needs no checkout or runtime metadata.
+        const login = yield* Effect.tryPromise({
+          try: () => (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath }), catch: (error) => error,
+        });
+        if (login.error) stderr(`nortuscc agent: ${login.error}\n`);
+        const paths = yield* pathsFromEnvironment({ env: login.env, home: login.env.HOME ?? input.env.HOME ?? homedir(),
+          platform: input.platform ?? process.platform, fallbackRepo: input.env.HOME ?? homedir() });
+        stdout(JSON.stringify({ stateRoot: paths.stateRoot }) + '\n');
+        return 0;
       }
       const metadata = yield* Fs.use((fs) => fs.readText(resolve(input.resources, 'runtime.json'))).pipe(Effect.provide(nodeFs));
       const agentVersion = yield* Effect.try({
@@ -61,6 +75,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
         if (platform !== 'darwin' && platform !== 'linux') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
         const result = yield* ensureAgent({
           paths, env, shellEnvironment: input.env, resources: input.resources, agentVersion,
+          appPath: appPath!,
           target: { platform, home, uid: input.uid ?? process.getuid?.() ?? 0, user: input.user ?? userInfo().username, stateRoot: paths.stateRoot },
         }, { restart: arg === '--restart' }).pipe(
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))),
@@ -71,7 +86,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       // Each job's integrations domain reads that job's snapshot and uses the login environment.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
       yield* runAgent({
-        paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32',
+        paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal,
       });
       return 0;

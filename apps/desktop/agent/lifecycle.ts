@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { Effect } from 'effect';
 import {
   AgentStateStore, installService, renderLaunchAgent, renderSystemdUnit, restartService, SetupsStore, stopService,
@@ -14,6 +14,7 @@ export type LifecycleInput = {
   readonly target: ServiceTarget;
   readonly resources: string;
   readonly agentVersion: string;
+  readonly appPath: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   // Pre-probe selection; absent startup variables must remain absent on the next service start.
   readonly shellEnvironment?: Readonly<Record<string, string | undefined>>;
@@ -57,6 +58,7 @@ const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catc
 // A matching unit alone does not prove a successful bootstrap. The marker is written only after
 // registration succeeds, so a failed install remains retryable even if it wrote the desired unit.
 export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {}) => Effect.scoped(Effect.gen(function* () {
+  if (!isAbsolute(input.appPath) || /[\x00-\x1f\x7f]/.test(input.appPath)) return yield* Effect.fail(new Error('app path must be an absolute executable path without control characters'));
   if (input.target.platform === 'win32') return yield* Effect.fail(new Error('desktop agent IPC is not supported on Windows'));
   const { paths, target } = input;
   const fs = yield* Fs;
@@ -67,7 +69,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   const rendered = target.platform === 'darwin'
     ? renderLaunchAgent(target.label ?? LAUNCH_AGENT_LABEL, program) : renderSystemdUnit(program);
   const markerPath = join(paths.stateRoot, 'agent', 'app-service.json');
-  const marker = JSON.stringify({ agentVersion: input.agentVersion, program });
+  const marker = JSON.stringify({ agentVersion: input.agentVersion, appPath: input.appPath, program });
   const previousMarker = yield* fs.readText(markerPath);
   const previousUnit = yield* fs.readText(unitPath(target));
   const registered = previousMarker?.trim() === marker;
@@ -84,7 +86,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   }
   if (conn) yield* Effect.addFinalizer(() => Effect.sync(() => conn?.close()));
   if (!options.restart && conn?.hello.agentVersion === input.agentVersion && recorded.installedBy === 'app'
-    && recorded.agentVersion === input.agentVersion && registered && unitMatches) return { stateRoot: paths.stateRoot };
+    && recorded.agentVersion === input.agentVersion && recorded.appPath === input.appPath && registered && unitMatches) return { stateRoot: paths.stateRoot };
   if ((yield* (yield* SetupsStore).read) === undefined) return yield* Effect.fail(new Error('agent/setups.json is invalid; repair it before installing'));
   // Existing service metadata or a stored trust decision makes this an update or takeover. Only
   // a first installation without either may establish trust; removal must stay a person's choice.
@@ -146,6 +148,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   } else {
     yield* installService(target, program, serviceOptions);
   }
+  yield* state.update((s) => ({ ...s, appPath: input.appPath }));
   yield* fs.writeTextAtomic(markerPath, marker + '\n');
   return { stateRoot: paths.stateRoot };
 }));

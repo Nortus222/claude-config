@@ -121,7 +121,7 @@ async function runForeground(): Promise<number> {
         try { redirected = fstatSync(process.stdout.fd).isFile(); } catch {}
       }
       return yield* runAgent({
-        paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, signal: controller.signal,
+        paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
         ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
         onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
       }).pipe(
