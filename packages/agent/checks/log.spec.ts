@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -214,15 +216,29 @@ test('captured output follows the active file through rotation', async (t) => {
   assert.equal(await fs.readFile(path + '.1', 'utf8'), 'a'.repeat(1_048_576));
 });
 
-test('failed capture acquisition leaves the original writers in place', async (t) => {
+test('capture rejects a directory without replacing writers or leaking its descriptor', async (t) => {
   const path = await fixture(t);
   await fs.mkdir(path);
   const stdout = output().stream;
   const stderr = output().stream;
   const originalOut = stdout.write;
   const originalErr = stderr.write;
-  const exit = await Effect.runPromiseExit(Effect.scoped(captureAgentOutput(path, { stdout, stderr })));
-  assert.ok(Exit.isFailure(exit));
-  assert.equal(stdout.write, originalOut);
-  assert.equal(stderr.write, originalErr);
+  const open = fsSync.openSync;
+  let descriptor: number | undefined;
+  // Windows can open the directory for append, so rejection must also close that handle.
+  t.mock.method(fsSync, 'openSync', (...args: Parameters<typeof open>) => {
+    descriptor = open(...args);
+    return descriptor;
+  });
+  syncBuiltinESMExports();
+  try {
+    const exit = await Effect.runPromiseExit(Effect.scoped(captureAgentOutput(path, { stdout, stderr })));
+    assert.ok(Exit.isFailure(exit));
+    assert.equal(stdout.write, originalOut);
+    assert.equal(stderr.write, originalErr);
+    if (descriptor !== undefined) assert.throws(() => fsSync.fstatSync(descriptor!), { code: 'EBADF' });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });

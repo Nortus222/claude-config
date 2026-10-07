@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { closeSync, constants, openSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, writeFileSync } from 'node:fs';
 import { Effect } from 'effect';
 
 const absent = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
@@ -74,6 +74,12 @@ export const captureAgentOutput = (logPath: string, output: AgentLogOutput) => E
   Effect.try({
     try: () => {
       const descriptor = openSync(logPath, 'a', 0o600);
+      try {
+        if (!fstatSync(descriptor).isFile()) throw new Error('Agent log must be a regular file');
+      } catch (error) {
+        closeSync(descriptor);
+        throw error;
+      }
       const stdoutWrite = output.stdout.write;
       const stderrWrite = output.stderr.write;
       const write: NodeJS.WritableStream['write'] = (
