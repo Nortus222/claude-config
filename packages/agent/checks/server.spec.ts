@@ -17,23 +17,23 @@ const THEME_KEY = 'config:claude:settings.json#theme';
 const EFFORT_KEY = 'config:claude:settings.json#effortLevel';
 const MODEL_KEY = 'config:claude:settings.json#model';
 
-type Record = { readonly [key: string]: any };
+type Wire = { readonly [key: string]: any };
 
 // One client connection: every record it received, in order.
 type Client = {
   readonly socket: Socket;
-  readonly records: Array<Record>;
+  readonly records: Array<Wire>;
   readonly send: (record: unknown) => void;
   readonly sendRaw: (text: string) => void;
   // The first record from index `from` on that matches.
-  readonly waitFor: (match: (record: Record) => boolean, from?: number) => Promise<Record>;
+  readonly waitFor: (match: (record: Wire) => boolean, from?: number) => Promise<Wire>;
   readonly closed: Promise<void>;
 };
 
 const connect = (path: string) =>
   new Promise<Client>((resolve, reject) => {
     const socket = createConnection(path);
-    const records: Array<Record> = [];
+    const records: Array<Wire> = [];
     let pending = '';
     let notify = () => {};
     let ended = false;
@@ -51,8 +51,8 @@ const connect = (path: string) =>
       }
       notify();
     });
-    const waitFor = (match: (record: Record) => boolean, from = 0) =>
-      new Promise<Record>((done, fail) => {
+    const waitFor = (match: (record: Wire) => boolean, from = 0) =>
+      new Promise<Wire>((done, fail) => {
         const timer = setTimeout(() => fail(new Error(`no matching record; got ${JSON.stringify(records.slice(from))}`)), 20_000);
         const check = () => {
           const found = records.slice(from).find(match);
@@ -150,6 +150,11 @@ test('hello with the right token answers the agent; a wrong token or no hello is
     assert.equal(refused.error.code, 'UNAUTHORIZED');
     await wrong.closed;
 
+    const short = await connect(s.socketPath);
+    const shorter = await ask(short, { command: 'hello', token: 'abc', client: 'app' });
+    assert.equal(shorter.error.code, 'UNAUTHORIZED');
+    await short.closed;
+
     const early = await connect(s.socketPath);
     const before = await ask(early, { command: 'status' });
     assert.equal(before.error.code, 'UNAUTHORIZED');
@@ -201,6 +206,23 @@ test('status, setPolicy, resume and decide answer the resulting status', async (
   });
 });
 
+test('a multi-item decide records every decision and runs one job', async () => {
+  await withServer({}, async (s) => {
+    const c = await s.open();
+    await ask(c, { command: 'status' });
+    await ask(c, { command: 'subscribe' });
+    const from = c.records.length;
+    const items = [EFFORT, MODEL, 'setting:claude:settings.json#theme'].map((id) => ({ setupId: 'local', id, revision: HEAD, decision: 'skip' }));
+    const decided = await ask(c, { command: 'decide', items });
+    assert.equal(decided.ok, true, JSON.stringify(decided));
+    // A job's status event is written before the reply of the request that ran it.
+    assert.equal(c.records.slice(from).filter((r) => r.event === 'status').length, 1);
+    const stored = await s.m.run(DecisionsStore.use((d) => d.read));
+    assert.deepEqual(items.map((i) => stored.find((d) => d.itemId === i.id)?.decision), ['skip', 'skip', 'skip']);
+    assert.equal((await s.m.events()).filter((e) => e.kind === 'decided').length, 3);
+  });
+});
+
 test('history answers newest first, at most limit, before a time', async () => {
   await withServer({}, async (s) => {
     const old = ['2020-01-01', '2020-01-02', '2020-01-03'].map((day) =>
@@ -212,11 +234,11 @@ test('history answers newest first, at most limit, before a time', async () => {
 
     const all = await ask(c, { command: 'history', limit: 500 });
     assert.deepEqual(all.result.events, [...await s.m.events()].reverse());
-    assert.ok(all.result.events.some((e: Record) => e.kind === 'policy-changed'));
+    assert.ok(all.result.events.some((e: Wire) => e.kind === 'policy-changed'));
     const newest = await ask(c, { command: 'history', limit: 1 });
     assert.deepEqual(newest.result.events, all.result.events.slice(0, 1));
     const before = await ask(c, { command: 'history', before: '2020-01-03T00:00:00.000Z', limit: 500 });
-    assert.deepEqual(before.result.events.map((e: Record) => e.reason), ['2020-01-02', '2020-01-01']);
+    assert.deepEqual(before.result.events.map((e: Wire) => e.reason), ['2020-01-02', '2020-01-01']);
   });
 });
 
@@ -242,7 +264,7 @@ test('apply answers started, then streams progress to the client and to subscrib
     await ask(watcher, { command: 'subscribe' });
     const c = await s.open();
     const inspected = await ask(c, { command: 'inspect' });
-    const exclude = inspected.result.items.filter((i: Record) => i.domain !== 'config').map((i: Record) => i.key);
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
     const preview = await ask(c, { command: 'preview', exclude });
     const from = c.records.length;
     const watched = watcher.records.length;
@@ -266,13 +288,13 @@ test('an apply whose plan changed since the preview answers stale with the new p
   await withServer({}, async (s) => {
     const c = await s.open();
     const inspected = await ask(c, { command: 'inspect' });
-    const exclude = inspected.result.items.filter((i: Record) => i.domain !== 'config').map((i: Record) => i.key);
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
     const preview = await ask(c, { command: 'preview', exclude });
-    assert.deepEqual(preview.result.plan.steps.map((st: Record) => st.key), [THEME_KEY, EFFORT_KEY, MODEL_KEY]);
+    assert.deepEqual(preview.result.plan.steps.map((st: Wire) => st.key), [THEME_KEY, EFFORT_KEY, MODEL_KEY]);
     await ask(c, { command: 'decide', items: [EFFORT, MODEL].map((id) => ({ setupId: 'local', id, revision: HEAD, decision: 'skip' })) });
     const stale = await ask(c, { command: 'apply', planId: preview.result.planId });
     assert.equal(stale.result.status, 'stale', JSON.stringify(stale));
-    assert.deepEqual(stale.result.plan.steps.map((st: Record) => st.key), [THEME_KEY]);
+    assert.deepEqual(stale.result.plan.steps.map((st: Wire) => st.key), [THEME_KEY]);
   });
 });
 

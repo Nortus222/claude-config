@@ -19,9 +19,12 @@ export type AgentHandle = {
   readonly inspection: Effect.Effect<JobInspection | undefined>;
   readonly request: (trigger: Trigger) => Effect.Effect<AgentStatus>;
   readonly decide: (decision: Decision, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid>;
+  // Records each decision in turn, then runs one job for them all.
+  readonly decideAll: (decisions: ReadonlyArray<Decision>, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid>;
   readonly resume: (actor: Actor) => Effect.Effect<AgentStatus, FsFailed>;
   readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<AgentStatus, FsFailed>;
-  // Calls `listener` with each job's status once it is the latest; answers the unsubscribe.
+  // Calls `listener` with each job's status once it is the latest; answers the unsubscribe. It runs
+  // before the job's requests are answered, so it is not ordered relative to their replies.
   readonly onStatus: (listener: (status: AgentStatus) => void) => () => void;
 };
 
@@ -77,6 +80,8 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       inspection: Ref.get(inspection),
       request: scheduler.request,
       decide: (decision, actor) => withServices(recordDecision(decision, actor)).pipe(Effect.andThen(scheduler.request('decide'))),
+      decideAll: (decisions, actor) =>
+        withServices(Effect.forEach(decisions, (d) => recordDecision(d, actor), { discard: true })).pipe(Effect.andThen(scheduler.request('decide'))),
       resume: (actor) => withServices(resume(actor)).pipe(Effect.andThen(scheduler.request('resume'))),
       setPolicy: (policy, actor) => withServices(changePolicy(policy, actor)).pipe(Effect.andThen(scheduler.request('policy'))),
       onStatus: (listener) => {

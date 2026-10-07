@@ -25,6 +25,8 @@ export class ServeFailed extends Data.TaggedError('ServeFailed')<{ readonly reas
 // How long a new connection may stay silent before it is closed.
 export const HANDSHAKE_MS = 10_000;
 const MAX_NOTE_LENGTH = 4096;
+// How long a refused connection may take to read its refusal.
+const REFUSED_MS = 1000;
 // sun_path holds 104 bytes on macOS and the BSDs and 108 on Linux, including the terminating NUL.
 const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103;
 
@@ -83,6 +85,8 @@ export const serveIpc = (input: {
       }));
     }
 
+    // node:fs directly: the machine's Fs has no mkdir, chmod or mode-aware write. Every path here
+    // comes from `input.paths`.
     yield* attempt(`create ${dir}`, async () => {
       await mkdir(dir, { recursive: true });
       await chmod(dir, 0o700);
@@ -114,6 +118,15 @@ export const serveIpc = (input: {
       if (!conn.socket.destroyed && conn.socket.writable) conn.socket.write(line);
       return true;
     };
+    // Events over the record limit are dropped, never written.
+    const event = (conn: Connection, message: { readonly event: string }) => {
+      const line = JSON.stringify(message);
+      if (Buffer.byteLength(line) + 1 > MAX_RECORD_BYTES) {
+        process.stderr.write(`nortuscc agent: dropped a ${message.event} event over ${MAX_RECORD_BYTES} bytes\n`);
+        return;
+      }
+      write(conn, JSON.parse(line));
+    };
     const reject = (conn: Connection, id: string, code: ErrorCode, message: string) =>
       void write(conn, { version: PROTOCOL_VERSION, id, ok: false, error: { code, message: truncate(message, 500) } });
     const reply = (conn: Connection, id: string, result: unknown) => {
@@ -123,7 +136,10 @@ export const serveIpc = (input: {
     };
     const refuse = (conn: Connection, id: string) => {
       reject(conn, id, 'UNAUTHORIZED', 'Send hello with the token from agent.token first');
-      conn.socket.end();
+      // Flushes the reply, then closes both directions; the timer covers a peer that never reads.
+      conn.socket.end(() => conn.socket.destroy());
+      clearTimeout(conn.timer);
+      conn.timer = setTimeout(() => conn.socket.destroy(), REFUSED_MS);
     };
     const subscribers = () => [...connections].filter((c) => c.subscribed);
 
@@ -134,13 +150,13 @@ export const serveIpc = (input: {
         progress.type === 'finished' ? { ...progress, note: truncate(progress.note, MAX_NOTE_LENGTH) }
         : progress.type === 'failed' ? { ...progress, message: truncate(progress.message, MAX_NOTE_LENGTH) }
         : progress;
-      const event = { version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped };
-      for (const conn of new Set([origin, ...subscribers()])) write(conn, event);
+      const message = { version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped };
+      for (const conn of new Set([origin, ...subscribers()])) event(conn, message);
     };
 
     const unsubscribe = handle.onStatus((status) => {
-      const event = { version: PROTOCOL_VERSION, event: 'status', status: toWireStatus(status) };
-      for (const conn of subscribers()) write(conn, event);
+      const message = { version: PROTOCOL_VERSION, event: 'status', status: toWireStatus(status) };
+      for (const conn of subscribers()) event(conn, message);
     });
     yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
 
@@ -192,15 +208,11 @@ export const serveIpc = (input: {
         case 'decide':
           return wire(Effect.gen(function* () {
             const decidedAt = (yield* (yield* AgentClock).now).toISOString();
-            let status: AgentStatus | undefined;
-            for (const item of request.items) {
-              const decision: Decision = {
-                setupId: item.setupId, itemId: item.id, revision: null, commit: item.revision, decision: item.decision,
-                decidedAt, machineId: null, source: 'local',
-              };
-              status = yield* handle.decide(decision, client);
-            }
-            return status ?? (yield* latest);
+            const decisions = request.items.map((item): Decision => ({
+              setupId: item.setupId, itemId: item.id, revision: null, commit: item.revision, decision: item.decision,
+              decidedAt, machineId: null, source: 'local',
+            }));
+            return yield* handle.decideAll(decisions, client);
           }));
         case 'setPolicy':
           return wire(handle.setPolicy(request.policy, client));
