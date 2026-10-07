@@ -87,3 +87,26 @@ test('items a raw git pull brought in wait for nortuscc sync, and fail status', 
   assert.equal(result.code, 1);
   assert.match(result.stdout, /1 item waits for you: run nortuscc sync/);
 });
+
+test('a held copied file applies its held bytes, agrees, and once released needs apply', async () => {
+  const m = machine();
+  await syncedMachine(m);
+  const first = git(m.repo, 'rev-parse', 'HEAD');
+  const original = readFileSync(join(m.repo, 'claude', 'CLAUDE.md'), 'utf8');
+  writeFileSync(join(m.repo, 'claude', 'CLAUDE.md'), '# newer rules\n');
+  git(m.repo, 'commit', '-qam', 'newer rules');
+  hold(m, { 'file:claude:CLAUDE.md': first });
+
+  const applied = await runCli(m, ['apply']);
+  assert.equal(applied.code, 0, applied.stderr);
+  assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), original);
+  const held = await runCli(m, ['status']);
+  assert.equal(held.code, 0, held.stdout + held.stderr);
+  assert.match(held.stdout, AGREEMENT);
+
+  hold(m, {});
+  const released = await runCli(m, ['status']);
+  assert.equal(released.code, 1);
+  assert.match(released.stdout, /CLAUDE\.md\s+repo-ahead/);
+  assert.match(released.stdout, /nortuscc apply/);
+});

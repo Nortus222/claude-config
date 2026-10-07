@@ -87,10 +87,22 @@ export function openDesired(options: { mode?: ConfigMode } = {}) {
       return yield* (yield* SyncStore).read;
     }).pipe(Effect.provide(syncStore.pipe(Layer.provide(opened.layer))));
     if (Object.keys(held).length === 0) return opened;
-    const into = yield* Effect.acquireRelease(
-      Effect.sync(() => mkdtempSync(join(tmpdir(), 'nortuscc-desired-'))),
-      (dir) => Effect.sync(() => rmSync(dir, { recursive: true, force: true })),
+    // desiredFor removes and recreates `into`, so it is a child of the private (0700) mkdtemp dir:
+    // recreated in a shared tmp under its own name, another user could plant documents in it.
+    // The exit hook removes the dir when the process exits before the scope closes.
+    const dir = yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const made = mkdtempSync(join(tmpdir(), 'nortuscc-desired-'));
+        const remove = () => rmSync(made, { recursive: true, force: true });
+        process.once('exit', remove);
+        return { made, remove };
+      }),
+      ({ remove }) => Effect.sync(() => {
+        process.off('exit', remove);
+        remove();
+      }),
     );
+    const into = join(dir.made, 'repo');
     const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
     const snapshot = yield* desiredFor({
       repo: opened.checkout, head: { kind: 'worktree' }, held, into, overrides: { ...opened.overrides, value },
