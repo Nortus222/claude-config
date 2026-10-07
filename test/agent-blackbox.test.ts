@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -162,8 +163,18 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   return check();
 }
 
-test('agent run holds the agent lock, refuses a second agent and stops cleanly on SIGTERM', { skip }, async () => {
+const checkoutHead = () => execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+// A service machine whose state root is short: `agent run` serves <state>/agent/agent.sock, and
+// socket paths are capped near 104 bytes, which a long OS temp dir could exceed.
+function runMachine(): Machine {
   const m = serviceMachine();
+  m.state = mkdtempSync('/tmp/nbb-');
+  return m;
+}
+
+test('agent run holds the agent lock, refuses a second agent and stops cleanly on SIGTERM', { skip }, async () => {
+  const m = runMachine();
   const lock = join(agentDir(m), 'agent.lock');
   const child = spawn(process.execPath, [BIN, 'agent', 'run'], { env: cliEnv(m), stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
@@ -183,6 +194,61 @@ test('agent run holds the agent lock, refuses a second agent and stops cleanly o
     assert.equal(existsSync(lock), false);
   } finally {
     if (child.exitCode === null) child.kill('SIGKILL');
+    rmSync(m.state, { recursive: true, force: true });
+  }
+});
+
+// Sends each record in turn over one connection, waiting for its reply; answers the replies.
+const converse = (path: string, records: ReadonlyArray<object>) =>
+  new Promise<Array<{ readonly [key: string]: any }>>((resolve, reject) => {
+    const socket = createConnection(path);
+    const replies: Array<{ readonly [key: string]: any }> = [];
+    let pending = '';
+    const next = () => {
+      const record = records[replies.length];
+      if (record === undefined) {
+        socket.end();
+        return resolve(replies);
+      }
+      socket.write(JSON.stringify(record) + '\n');
+    };
+    socket.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const record = JSON.parse(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (record.id === undefined) continue;
+        replies.push(record);
+        next();
+      }
+    });
+    socket.once('connect', next);
+    socket.once('error', reject);
+  });
+
+test('agent run serves its socket, and a shutdown request stops it cleanly', { skip }, async () => {
+  const m = runMachine();
+  const dir = agentDir(m);
+  const child = spawn(process.execPath, [BIN, 'agent', 'run'], { env: cliEnv(m), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+  try {
+    assert.ok(await until(() => existsSync(join(dir, 'agent.sock')), 15_000), `agent.sock never appeared: ${stderr}`);
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+      { version: 3, id: 'hello', command: 'hello', token, client: 'cli' },
+      { version: 3, id: 'shutdown', command: 'shutdown' },
+    ]);
+    assert.deepEqual(hello, { version: 3, id: 'hello', ok: true, result: { protocol: 3, agentVersion: checkoutHead(), policy: 'notify', paused: null } });
+    assert.deepEqual(shutdown, { version: 3, id: 'shutdown', ok: true, result: { shutdown: true } });
+    const code = await Promise.race([exited, wait(15_000).then(() => 'timeout' as const)]);
+    assert.equal(code, 0, stderr);
+    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    rmSync(m.state, { recursive: true, force: true });
   }
 });
 
@@ -191,8 +257,6 @@ const restarted = (m: Machine) =>
   linux
     ? serviceCalls(m).some((c) => c.cmd === 'systemctl' && c.args.join(' ') === '--user restart nortuscc-agent.service')
     : serviceCalls(m).some((c) => c.cmd === 'launchctl' && c.args.join(' ') === `kickstart -k gui/${process.getuid!()}/com.nortuscc.agent`);
-
-const checkoutHead = () => execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
 // Records the installed agent as running `version`. The harness's pull moves the temp repo, not the
 // checkout the agent runs from, so a stale version stands in for the code the pull replaced.

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore } from '@nortuscc/machine';
@@ -110,7 +111,7 @@ test('runAgent builds its services from paths and runs until interrupted', async
   const m = agentMachine();
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0' }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -167,7 +168,7 @@ test('closing the agent cancels an in-flight auto-apply, which records cancelled
 test('an aborted signal ends the agent, and no later job runs', async () => {
   const { m, fixture } = await autoApplyMachine();
   const controller = new AbortController();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, signal: controller.signal }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('apply-finished'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -209,7 +210,7 @@ test('a second agent fails LockHeld before it writes anything', async () => {
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   writeLock(lockPath(m), process.ppid);
-  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source }));
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0' }));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
   assert.deepEqual(await m.kinds(), []);
   assert.equal(existsSync(lockPath(m)), true);
@@ -221,7 +222,7 @@ test('an agent takes over a dead agent\'s lock and removes its own on close', as
   await m.trust();
   writeLock(lockPath(m), spawnSync(process.execPath, ['-e', '']).pid);
   const controller = new AbortController();
-  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, signal: controller.signal }));
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -230,4 +231,84 @@ test('an agent takes over a dead agent\'s lock and removes its own on close', as
   controller.abort();
   assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
   assert.equal(existsSync(lockPath(m)), false);
+});
+
+// Sends each record in turn over one connection, waiting for its reply; answers the replies.
+const converse = (path: string, records: ReadonlyArray<object>) =>
+  new Promise<Array<{ readonly [key: string]: any }>>((resolve, reject) => {
+    const socket = createConnection(path);
+    const replies: Array<{ readonly [key: string]: any }> = [];
+    let pending = '';
+    const next = () => {
+      const record = records[replies.length];
+      if (record === undefined) {
+        socket.end();
+        return resolve(replies);
+      }
+      socket.write(JSON.stringify(record) + '\n');
+    };
+    socket.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const record = JSON.parse(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (record.id === undefined) continue;
+        replies.push(record);
+        next();
+      }
+    });
+    socket.once('connect', next);
+    socket.once('error', reject);
+  });
+
+test('with ipc, runAgent serves the socket, and a shutdown request ends it like an abort', { skip: process.platform === 'win32' }, async () => {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  const dir = join(m.paths.stateRoot, 'agent');
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.2.3', ipc: true }));
+  try {
+    for (let i = 0; i < 500 && !existsSync(join(dir, 'agent.sock')); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+      { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
+      { version: 3, id: 's', command: 'shutdown' },
+    ]);
+    assert.deepEqual(hello?.result, { agentVersion: '1.2.3', protocol: 3, policy: 'notify', paused: null });
+    assert.deepEqual(shutdown?.result, { shutdown: true });
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'the agent kept running after shutdown');
+    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+  } finally {
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
+});
+
+test('without ipc, runAgent writes no socket or token', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  const controller = new AbortController();
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
+  for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const dir = join(m.paths.stateRoot, 'agent');
+  assert.equal(existsSync(join(dir, 'agent.sock')), false);
+  assert.equal(existsSync(join(dir, 'agent.token')), false);
+  controller.abort();
+  assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
+});
+
+test('a second agent with ipc fails LockHeld and leaves the running agent\'s socket and token', async () => {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  writeLock(lockPath(m), process.ppid);
+  const dir = join(m.paths.stateRoot, 'agent');
+  writeFileSync(join(dir, 'agent.sock'), 'live');
+  writeFileSync(join(dir, 'agent.token'), 'live');
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', ipc: true }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LockHeld'));
+  assert.equal(readFileSync(join(dir, 'agent.sock'), 'utf8'), 'live');
+  assert.equal(readFileSync(join(dir, 'agent.token'), 'utf8'), 'live');
 });

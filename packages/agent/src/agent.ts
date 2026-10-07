@@ -6,6 +6,8 @@ import {
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
 import { agentLayer, type AgentDomains } from './layer.ts';
+import { serveIpc } from './ipc/server.ts';
+import { makeSession } from './ipc/session.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
@@ -92,29 +94,37 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     return handle;
   });
 
-// Completes when `signal` aborts; never without one.
-const untilAborted = (signal?: AbortSignal): Effect.Effect<void> =>
-  signal === undefined
-    ? Effect.never
-    : Effect.callback<void>((resume) => {
-      if (signal.aborted) return resume(Effect.void);
-      const onAbort = () => resume(Effect.void);
-      signal.addEventListener('abort', onAbort, { once: true });
-      return Effect.sync(() => signal.removeEventListener('abort', onAbort));
-    });
+// Completes when `signal` aborts.
+const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {
+    if (signal.aborted) return resume(Effect.void);
+    const onAbort = () => resume(Effect.void);
+    signal.addEventListener('abort', onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener('abort', onAbort));
+  });
 
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
-// interrupted or `signal` aborts; either closes the agent, cancelling an in-flight auto-apply.
-// A pid lock makes it the only agent per state root: a second fails LockHeld before touching state.
-// The caller builds the per-job `domains` factory and `source` at the same boundary as `paths`.
+// interrupted, `signal` aborts or, with `ipc`, a client sends `shutdown`; each closes the agent,
+// cancelling an in-flight auto-apply. A pid lock makes it the only agent per state root: a second
+// fails LockHeld before touching state or the socket. The caller builds the per-job `domains`
+// factory and `source` at the same boundary as `paths`, and decides `ipc` (default off).
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
   readonly domains: AgentDomains;
   readonly source: Layer.Layer<SetupSource>;
+  readonly agentVersion: string;
+  readonly ipc?: boolean;
   readonly signal?: AbortSignal;
 }) =>
   Effect.scoped(Effect.gen(function* () {
+    // The lock comes first: serveIpc replaces a leftover socket, which is only safe while it is held.
     yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
-    yield* startAgent(input.domains, { signal: input.signal });
-    yield* untilAborted(input.signal);
+    const shutdown = new AbortController();
+    const signal = input.signal ? AbortSignal.any([input.signal, shutdown.signal]) : shutdown.signal;
+    const handle = yield* startAgent(input.domains, { signal });
+    if (input.ipc) {
+      const session = yield* makeSession(handle, { signal, domains: input.domains });
+      yield* serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, onShutdown: () => shutdown.abort() });
+    }
+    yield* untilAborted(signal);
   })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths), input.source)));

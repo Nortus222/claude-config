@@ -89,7 +89,8 @@ const uninstall = Effect.gen(function* () {
   }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
 });
 
-// Runs the agent in the foreground until SIGTERM or SIGINT, which exit 0.
+// Runs the agent in the foreground, serving its socket off Windows, until SIGTERM, SIGINT or a
+// client's `shutdown`, each of which exits 0.
 async function runForeground(): Promise<number> {
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -103,7 +104,9 @@ async function runForeground(): Promise<number> {
       // Each job builds its domains from its own paths, so the integrations domain reads the job's
       // snapshot, as ADR 0016 requires.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env: process.env }), skillsDomain];
-      return yield* runAgent({ paths, domains, source: setupSourceLayer(paths), signal: controller.signal }).pipe(
+      // Windows has no socket server yet; there the agent runs without IPC.
+      const ipc = process.platform !== 'win32';
+      return yield* runAgent({ paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, signal: controller.signal }).pipe(
         Effect.as(0),
         Effect.catchTag('LockHeld', (err) => Effect.sync(() => {
           console.error(err.path === lock ? `nortuscc: another agent (pid ${err.pid}) is running` : `nortuscc: ${err.message}`);
