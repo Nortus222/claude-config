@@ -1,12 +1,15 @@
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Effect, Layer, Stream } from 'effect';
-import { loadProfile, nodeFiles, type Target } from '@nortuscc/profile-engine';
+import { loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, execute, inspectUpdates, MachinePaths, nodeFs, nodeProcesses, pathsFromEnvironment, plan, readSkillLock,
-  selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
-  type Fs, type Observed, type Processes, type RepoNotFound, type SkillLock,
+  backupsForRun, emitManifest, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
+  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
+  type Observed, type Processes, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
+import { checkoutGroups, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
+import { composeHeld } from '../machine.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { select } from '../select.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
@@ -195,11 +198,11 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     return 2;
   }
 
-  const program = Effect.gen(function* () {
-    const paths = yield* MachinePaths;
+  // Inspects and acts on the configuration `loadDesired` answers, read from MachinePaths.repo. With
+  // `holds`, that repo is the composed copy, and `holds.checkout` is the git checkout.
+  const act = <E>(loadDesired: Effect.Effect<DesiredConfig, E>, holds: { checkout: string; held: Holds } | null) => Effect.gen(function* () {
     const inspection = Effect.gen(function* () {
-      // No requireValid: an integrations.json issue must not block `update`.
-      const desired = yield* loadProfile(paths.repo).pipe(Effect.provide(nodeFiles));
+      const desired = yield* loadDesired;
       return { desired, ...(yield* inspectUpdates(desired)) };
     });
     // Git children run in their own process group, so the terminal's Ctrl-C never reaches them:
@@ -277,6 +280,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     let anyFailed = false;
     let cancelled = false;
     let backups: string | undefined;
+    let manifestWritten = false;
 
     yield* Stream.runForEach(execute(p, report, [skillsDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
       switch (event.type) {
@@ -294,7 +298,10 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
             write(`\n${event.note}\n`);
           } else if (event.key === SKILL_STEP.manifest) {
             write(`\nskills-manifest.txt ${event.note}\n`);
-            if (event.note.startsWith('written')) write('Run: nortuscc push -m "..."   to share it\n');
+            if (event.note.startsWith('written')) {
+              manifestWritten = true;
+              write('Run: nortuscc push -m "..."   to share it\n');
+            }
           }
           return;
         case 'done':
@@ -306,6 +313,17 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
           write(`\ncancelled — not run: ${event.remaining.join(', ')}\n`);
       }
     })).pipe(Effect.provide(backupsForRun()));
+
+    // The skills domain writes the manifest into paths.repo, which is the composed copy when items are
+    // held: carry it to the checkout with each held skill as the checkout declares it, so the held
+    // value is never published as an upstream change.
+    if (manifestWritten && holds) {
+      const fs = yield* Fs;
+      const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
+      const target = join(holds.checkout, MANIFEST_FILE);
+      const declared = parseSkillsManifest(yield* fs.readText(target));
+      yield* fs.writeTextAtomic(target, emitManifest(checkoutGroups(composed, declared, holds.held)));
+    }
 
     if (backups) write(`\nbacked up -> ${backups}\n`);
 
@@ -358,6 +376,23 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     return exitCode({
       items, failed: anyFailed || addFailed || cancelled, prunedNames: removeOk ? removed : [], repinnedNames: repinned,
     });
+  });
+
+  const program = Effect.gen(function* () {
+    const paths = yield* MachinePaths;
+    // An invalid sync.json fails the run: SyncStateInvalid carries the message.
+    const held = yield* Effect.gen(function* () {
+      return yield* (yield* SyncStore).read;
+    }).pipe(Effect.provide(syncStore));
+    // No requireValid: an integrations.json issue must not block `update`.
+    if (Object.keys(held).length === 0) return yield* act(loadProfile(paths.repo).pipe(Effect.provide(nodeFiles)), null);
+    // Held items are composed over the working tree (no overrides: update never applied them).
+    return yield* Effect.scoped(Effect.gen(function* () {
+      const snapshot = yield* composeHeld({ checkout: paths.repo, held });
+      return yield* act(Effect.succeed(snapshot.desired), { checkout: paths.repo, held }).pipe(
+        Effect.provideService(MachinePaths, { ...paths, repo: snapshot.repo }),
+      );
+    }));
   });
 
   return Effect.runPromise(program.pipe(
