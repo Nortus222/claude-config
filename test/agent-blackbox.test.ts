@@ -158,6 +158,17 @@ test('agent uninstall with nothing installed exits 0', { skip }, async () => {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// `promise`'s value, or 'timeout' after `ms`; the timer is cleared either way, so it never holds the process open.
+async function within<A>(promise: Promise<A>, ms: number): Promise<A | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), ms); });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function until(check: () => boolean, ms: number): Promise<boolean> {
   for (const end = Date.now() + ms; Date.now() < end; await wait(100)) if (check()) return true;
   return check();
@@ -189,7 +200,7 @@ test('agent run holds the agent lock, refuses a second agent and stops cleanly o
     assert.match(second.stderr, new RegExp(`another agent \\(pid ${child.pid}\\) is running`));
 
     child.kill('SIGTERM');
-    const code = await Promise.race([exited, wait(15_000).then(() => 'timeout' as const)]);
+    const code = await within(exited, 15_000);
     assert.equal(code, 0, stderr);
     assert.equal(existsSync(lock), false);
   } finally {
@@ -243,11 +254,90 @@ test('agent run serves its socket, and a shutdown request stops it cleanly', { s
     ]);
     assert.deepEqual(hello, { version: 3, id: 'hello', ok: true, result: { protocol: 3, agentVersion: checkoutHead(), policy: 'notify', paused: null } });
     assert.deepEqual(shutdown, { version: 3, id: 'shutdown', ok: true, result: { shutdown: true } });
-    const code = await Promise.race([exited, wait(15_000).then(() => 'timeout' as const)]);
+    const code = await within(exited, 15_000);
     assert.equal(code, 0, stderr);
     for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
   } finally {
     if (child.exitCode === null) child.kill('SIGKILL');
+    rmSync(m.state, { recursive: true, force: true });
+  }
+});
+
+const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
+
+test('agent status, policy and resume talk to the running agent', { skip }, async () => {
+  const m = runMachine();
+  const dir = agentDir(m);
+  const child = spawn(process.execPath, [BIN, 'agent', 'run'], { env: cliEnv(m), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+  try {
+    assert.ok(await until(() => existsSync(join(dir, 'agent.sock')), 15_000), `agent.sock never appeared: ${stderr}`);
+
+    const status = await runCli(m, ['agent', 'status']);
+    assert.match(status.stdout, /^policy: notify$/m, status.stderr);
+    assert.match(status.stdout, /^paused: no$/m);
+    assert.match(status.stdout, /^trusted: (yes|no)$/m);
+    assert.match(status.stdout, /^pending: \d+, held: \d+, ready: \d+, drift: \d+$/m);
+    assert.match(status.stdout, /^conflicts: /m);
+    assert.match(status.stdout, /^last inspection: \d{4}-\d{2}-\d{2}T/m);
+    assert.equal(status.code, /^error: /m.test(status.stdout) ? 1 : 0, status.stdout + status.stderr);
+
+    const policy = await runCli(m, ['agent', 'policy', 'manual']);
+    assert.equal(policy.code, 0, policy.stderr);
+    assert.equal(policy.stdout.trim(), 'policy: manual');
+    assert.equal(agentJson(m).policy, 'manual');
+
+    const resume = await runCli(m, ['agent', 'resume']);
+    assert.equal(resume.code, 0, resume.stderr);
+    assert.equal(resume.stdout.trim(), 'not paused');
+
+    const bad = await runCli(m, ['agent', 'policy', 'sometimes']);
+    assert.equal(bad.code, 2);
+    assert.equal(agentJson(m).policy, 'manual');
+  } finally {
+    child.kill('SIGTERM');
+    if ((await within(exited, 15_000)) === 'timeout') child.kill('SIGKILL');
+    rmSync(m.state, { recursive: true, force: true });
+  }
+});
+
+test('agent resume resumes a paused agent', { skip }, async () => {
+  const m = runMachine();
+  const dir = agentDir(m);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent.json'), JSON.stringify({
+    version: 1, policy: 'auto-apply', policySource: 'person', paused: { reason: 'a step failed', at: '2026-10-06T12:00:00.000Z' },
+  }));
+  const child = spawn(process.execPath, [BIN, 'agent', 'run'], { env: cliEnv(m), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+  try {
+    assert.ok(await until(() => existsSync(join(dir, 'agent.sock')), 15_000), `agent.sock never appeared: ${stderr}`);
+    const status = await runCli(m, ['agent', 'status']);
+    assert.match(status.stdout, /^paused: yes, since 2026-10-06T12:00:00.000Z: a step failed$/m, status.stderr);
+    const resume = await runCli(m, ['agent', 'resume']);
+    assert.equal(resume.code, 0, resume.stderr);
+    assert.equal(resume.stdout.trim(), 'resumed');
+    assert.equal(agentJson(m).paused, null);
+  } finally {
+    child.kill('SIGTERM');
+    if ((await within(exited, 15_000)) === 'timeout') child.kill('SIGKILL');
+    rmSync(m.state, { recursive: true, force: true });
+  }
+});
+
+test('agent status, policy and resume with no agent running exit 1 and say so', { skip }, async () => {
+  const m = runMachine();
+  try {
+    for (const args of [['agent', 'status'], ['agent', 'policy', 'manual'], ['agent', 'resume']]) {
+      const result = await runCli(m, args);
+      assert.equal(result.code, 1, args.join(' '));
+      assert.equal(result.stderr.trim(), NOT_RUNNING, args.join(' '));
+    }
+  } finally {
     rmSync(m.state, { recursive: true, force: true });
   }
 });

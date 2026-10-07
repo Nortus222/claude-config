@@ -2,17 +2,23 @@ import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
 import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
-  agentLayer, AgentStateStore, installService, runAgent, trustOwnSetup, uninstallService, unitPath, type ServiceFailed, type ServiceTarget,
+  agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
+  type Policy, type ServiceFailed, type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
 import { setupSourceLayer } from '@nortuscc/sync';
+import { AgentUnavailable, connectAgent, type AgentConnection } from '../agent-client.ts';
 import { agentProgram, checkoutVersion, serviceTarget } from '../agent-service.ts';
 import { CHECKOUT, resolvePaths, runCommand } from '../machine.ts';
 
-const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run
+const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run | status | resume | policy <p>
   agent install [--linger]   run the local agent as a login service from this checkout
                              --linger (Linux) keeps it running with nobody logged in
   agent uninstall            stop the agent and remove its login service
-  agent run                  run the agent in the foreground (the service runs this)`;
+  agent run                  run the agent in the foreground (the service runs this)
+  agent status               show the running agent's policy, pause and pending items
+  agent resume               resume a paused agent
+  agent policy <auto-apply|notify|manual>
+                             set how the agent treats accepted items`;
 
 const APP_MANAGES = 'nortuscc: the desktop app manages the agent on this machine; manage it from the app.';
 
@@ -124,6 +130,48 @@ async function runForeground(): Promise<number> {
   }
 }
 
+const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
+
+// Runs `body` over a connection to the running agent; no agent prints NOT_RUNNING and exits 1.
+const withAgent = (body: (conn: AgentConnection) => Promise<number>) =>
+  runCommand(() => Effect.gen(function* () {
+    const paths = yield* resolvePaths((m) => console.error(m));
+    return yield* Effect.tryPromise({
+      try: async () => {
+        let conn: AgentConnection;
+        try {
+          conn = await connectAgent(paths);
+        } catch (error) {
+          if (!(error instanceof AgentUnavailable)) throw error;
+          console.error(NOT_RUNNING);
+          return 1;
+        }
+        try {
+          return await body(conn);
+        } finally {
+          conn.close();
+        }
+      },
+      catch: (error) => error,
+    });
+  }));
+
+const yesNo = (value: boolean) => (value ? 'yes' : 'no');
+
+// Prints the agent's last status; exits 1 when it carries an error.
+const printStatus = (status: WireStatus): number => {
+  const { counts } = status;
+  console.log(`policy: ${status.policy}`);
+  console.log(status.paused === null ? 'paused: no' : `paused: yes, since ${status.paused.at}: ${status.paused.reason}`);
+  console.log(`trusted: ${yesNo(status.trusted)}`);
+  console.log(`pending: ${counts.pending}, held: ${counts.held}, ready: ${counts.ready}, drift: ${counts.drift}`);
+  console.log(`conflicts: ${status.conflicts.length === 0 ? 'none' : status.conflicts.join(', ')}`);
+  console.log(`last inspection: ${status.at}`);
+  if (status.error === undefined) return 0;
+  console.log(`error: ${status.error}${status.detail === undefined ? '' : `: ${status.detail}`}`);
+  return 1;
+};
+
 export async function run(args: string[] = []): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
@@ -143,6 +191,32 @@ export async function run(args: string[] = []): Promise<number> {
     case 'run':
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
       return runForeground();
+    case 'status':
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      return withAgent(async (conn) => printStatus(await conn.request<WireStatus>({ command: 'status' })));
+    case 'resume':
+      if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
+      return withAgent(async (conn) => {
+        if (conn.hello.paused === null) {
+          console.log('not paused');
+          return 0;
+        }
+        await conn.request<WireStatus>({ command: 'resume' });
+        console.log('resumed');
+        return 0;
+      });
+    case 'policy': {
+      const [policy, ...extra] = rest;
+      if (policy === undefined || !POLICIES.includes(policy as Policy)) {
+        return usage(policy === undefined ? 'agent policy needs one of auto-apply, notify, manual' : `unknown policy '${policy}'`);
+      }
+      if (extra.length > 0) return usage(`unknown option ${extra[0]}`);
+      return withAgent(async (conn) => {
+        const status = await conn.request<WireStatus>({ command: 'setPolicy', policy });
+        console.log(`policy: ${status.policy}`);
+        return 0;
+      });
+    }
     default:
       return usage(sub === undefined ? undefined : `unknown agent command '${sub}'`);
   }
