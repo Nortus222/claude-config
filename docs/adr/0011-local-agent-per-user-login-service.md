@@ -1,5 +1,5 @@
 ---
-status: accepted (core built in #77; login service not built, #79)
+status: accepted (core built in #77; login service built in #79; IPC and app cutover #78)
 ---
 
 # A per-user login service keeps each machine on its policy; the CLI stays standalone

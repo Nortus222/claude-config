@@ -21,7 +21,8 @@
   "scripts": {
     "test": "node --test --test-timeout=30000",
     "test:packages": "npm run test --workspaces --if-present",
-    "typecheck": "tsc --noEmit && npm run typecheck --workspaces --if-present"
+    "typecheck": "tsc --noEmit && npm run typecheck --workspaces --if-present",
+    "smoke:agent": "node --test packages/agent/smoke/launchd.smoke.ts"
   },
   "dependencies": { "effect": "4.0.1" },
   "devDependencies": { "@types/node": "25.5.0", "typescript": "7.0.2" },
