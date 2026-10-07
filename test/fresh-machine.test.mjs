@@ -1,11 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, delimiter } from 'node:path';
+import { execFile, execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFakeBin } from './support/cli.ts';
+import { cliEnv, machine, writeFakeBin } from './support/cli.ts';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -16,16 +15,13 @@ const BIN = join(REPO, 'bin', 'nortuscc.mjs');
 // A genuinely empty home: no ~/.claude, no ~/.codex, no ~/.agents, no state.
 // Every path nortuscc can reach is inside it, so this acceptance test can
 // never observe — or disturb — the developer's real machine.
-function emptyHomeFixture() {
-  const home = mkdtempSync(join(tmpdir(), 'nortuscc-fresh-'));
-  return {
-    home,
-    claude: join(home, '.claude'),
-    codex: join(home, '.codex'),
-    agents: join(home, '.agents', 'skills'),
-    state: join(home, 'state'),
-    log: join(home, 'installer.log'),
-  };
+function emptyHomeFixture(t) {
+  const fixture = machine();
+  t.after(() => {
+    rmSync(fixture.home, { recursive: true, force: true });
+    rmSync(fixture.bin, { recursive: true, force: true });
+  });
+  return fixture;
 }
 
 // Fake `claude`, `codex` and `npx`, each modelling the surface of the tool it
@@ -39,7 +35,7 @@ function emptyHomeFixture() {
 // Only mutating commands are logged, so the log means "what was installed".
 // Everything written stays inside the test home: no network, no real installer.
 function fakeNativeInstallers(env, { codexUnavailable = false } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
+  const dir = env.bin;
 
   const script = (name) => `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -166,16 +162,7 @@ function readInstallerLog(env) {
 }
 
 async function runCli(args, { env, fixtureBinDir }) {
-  const childEnv = {
-    ...process.env,
-    PATH: `${fixtureBinDir}${delimiter}${process.env.PATH}`,
-    NORTUSCC_CLAUDE_DIR: env.claude,
-    NORTUSCC_CODEX_DIR: env.codex,
-    NORTUSCC_AGENTS_DIR: env.agents,
-    NORTUSCC_STATE_DIR: env.state,
-    NORTUSCC_REPO_DIR: REPO,
-    NORTUSCC_TEST_LOG: env.log,
-  };
+  const childEnv = cliEnv({ ...env, bin: fixtureBinDir });
   try {
     const { stdout, stderr } = await run(process.execPath, [BIN, ...args], { env: childEnv });
     return { code: 0, stdout, stderr };
@@ -199,8 +186,39 @@ function expectedDefaultInstallCalls() {
   ];
 }
 
-test('fresh machine setup installs selected defaults for both agents', async () => {
-  const env = emptyHomeFixture();
+test('fresh setup stays current when the CI checkout remote advances', async (t) => {
+  const env = emptyHomeFixture(t);
+  const fixtureBinDir = fakeNativeInstallers(env);
+  const realGit = execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', ['git'], {
+    encoding: 'utf8',
+  }).trim().split(/\r?\n/)[0];
+  // The CI checkout is pinned while its remote can move. Answer its probes
+  // without contacting that remote or changing the real checkout.
+  writeFakeBin(fixtureBinDir, 'git', `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args[0] === '-C' && args[1] === ${JSON.stringify(REPO)}) {
+  const command = args.slice(2).join(' ');
+  if (command === 'rev-parse --abbrev-ref HEAD') process.stdout.write('main\\n');
+  else if (command === 'rev-parse --short HEAD') process.stdout.write('1111111\\n');
+  else if (command === 'remote') process.stdout.write('origin\\n');
+  else if (command === 'ls-remote origin main') process.stdout.write('2222222222222222222222222222222222222222\\trefs/heads/main\\n');
+  else process.exit(1);
+} else {
+  const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' });
+  process.exit(result.status ?? 1);
+}
+`);
+
+  const result = await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir });
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  assert.doesNotMatch(result.stdout, /nortuscc\s+behind/);
+  const state = JSON.parse(readFileSync(join(env.state, 'state.json'), 'utf8'));
+  assert.equal(state.repo, env.repo, 'setup must record the temporary repo, not the moving CI checkout');
+});
+
+test('fresh machine setup installs selected defaults for both agents', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'all', '--yes'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -228,8 +246,8 @@ test('fresh machine setup installs selected defaults for both agents', async () 
   assert.deepEqual(settings, declared);
 });
 
-test('fresh setup still installs shared skills when the Codex CLI is unavailable', async () => {
-  const env = emptyHomeFixture();
+test('fresh setup still installs shared skills when the Codex CLI is unavailable', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'all', '--yes'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env, { codexUnavailable: true }),
@@ -241,8 +259,8 @@ test('fresh setup still installs shared skills when the Codex CLI is unavailable
   assert.ok(skillCalls.length > 0, 'Codex plugin inspection must not block shared skill installation');
 });
 
-test('every shared skill is installed for both agents, in one call per source', async () => {
-  const env = emptyHomeFixture();
+test('every shared skill is installed for both agents, in one call per source', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'all', '--yes'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -267,8 +285,8 @@ test('every shared skill is installed for both agents, in one call per source', 
 
 // Re-running setup is meant to be safe: it selects only incomplete work, which
 // is what lets a partial first run be resumed by running it again.
-test('a second setup run installs nothing and still exits 0', async () => {
-  const env = emptyHomeFixture();
+test('a second setup run installs nothing and still exits 0', async (t) => {
+  const env = emptyHomeFixture(t);
   const bin = fakeNativeInstallers(env);
 
   assert.equal((await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir: bin })).code, 0);
@@ -281,8 +299,8 @@ test('a second setup run installs nothing and still exits 0', async () => {
   assert.deepEqual(added, [], 'a satisfied machine must not re-run a single native installer');
 });
 
-test('a Codex-only setup never runs the Claude installer or writes ~/.claude', async () => {
-  const env = emptyHomeFixture();
+test('a Codex-only setup never runs the Claude installer or writes ~/.claude', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'codex', '--yes'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -307,8 +325,8 @@ test('a Codex-only setup never runs the Claude installer or writes ~/.claude', a
   }
 });
 
-test('a Claude-only setup never runs the Codex installer or writes ~/.codex', async () => {
-  const env = emptyHomeFixture();
+test('a Claude-only setup never runs the Codex installer or writes ~/.codex', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'claude', '--yes'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -326,8 +344,8 @@ test('a Claude-only setup never runs the Codex installer or writes ~/.codex', as
 // with a status report, and a machine that declined its declared integrations
 // and skills is genuinely not in agreement with the repo. The opt-out governs
 // what gets installed, not what status is willing to say about the result.
-test('--no-plugins and --no-skills reach the installers, not just the report', async () => {
-  const env = emptyHomeFixture();
+test('--no-plugins and --no-skills reach the installers, not just the report', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'all', '--yes', '--no-plugins', '--no-skills'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -345,8 +363,8 @@ test('--no-plugins and --no-skills reach the installers, not just the report', a
 
 // Without a terminal to choose on, an unattended run must refuse rather than
 // block forever or silently pick for the user.
-test('a non-TTY setup without --yes refuses and installs nothing', async () => {
-  const env = emptyHomeFixture();
+test('a non-TTY setup without --yes refuses and installs nothing', async (t) => {
+  const env = emptyHomeFixture(t);
   const result = await runCli(['setup', '--target', 'all'], {
     env,
     fixtureBinDir: fakeNativeInstallers(env),
@@ -359,8 +377,8 @@ test('a non-TTY setup without --yes refuses and installs nothing', async () => {
   assert.equal(existsSync(join(env.codex, 'AGENTS.md')), false);
 });
 
-test('state lands in the neutral location, never inside an agent directory', async () => {
-  const env = emptyHomeFixture();
+test('state lands in the neutral location, never inside an agent directory', async (t) => {
+  const env = emptyHomeFixture(t);
   await runCli(['setup', '--target', 'all', '--yes'], { env, fixtureBinDir: fakeNativeInstallers(env) });
 
   assert.ok(existsSync(join(env.state, 'state.json')));
