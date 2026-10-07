@@ -37,8 +37,9 @@ const planWithout = (exclude: string[]) => ({
 });
 
 // `stale` answers apply with a new preview; `drop` closes the connection after the run's first step
-// starts; `status` answers the status command, which goes unanswered without it.
-type Script = { stale?: boolean; drop?: boolean; status?: unknown };
+// starts; `status` answers the status command, which goes unanswered without it, and `statusError`
+// refuses it; `hang` leaves that command unanswered.
+type Script = { stale?: boolean; drop?: boolean; status?: unknown; statusError?: { code: string; message: string }; hang?: string };
 type Fake = { paths: MachinePathsValue; seen: Array<Record<string, unknown>>; close: () => Promise<void> };
 
 const send = (socket: Socket, record: unknown) => socket.write(JSON.stringify(record) + '\n');
@@ -65,12 +66,14 @@ async function fake(script: Script = {}): Promise<Fake> {
         const request = JSON.parse(pending.slice(0, newline));
         pending = pending.slice(newline + 1);
         seen.push(request);
+        if (request.command === script.hang) continue;
         switch (request.command) {
           case 'hello':
             ok(socket, request.id, { agentVersion: 'v', protocol: 3, policy: 'notify', paused: null });
             break;
           case 'status':
-            if (script.status !== undefined) ok(socket, request.id, script.status);
+            if (script.statusError !== undefined) send(socket, { version: 3, id: request.id, ok: false, error: script.statusError });
+            else if (script.status !== undefined) ok(socket, request.id, script.status);
             break;
           case 'inspect':
             ok(socket, request.id, INSPECTED);
@@ -243,6 +246,38 @@ test('agent status prints the status error and exits 1', { skip }, async () => {
     await f.close();
   }
 });
+
+test('agent status says the agent is still starting and exits 1 before its first job', { skip }, async () => {
+  const f = await fake({ statusError: { code: 'NO_REPORT', message: 'the agent is still starting' } });
+  try {
+    const { result, stdout, stderr } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths) }));
+    assert.equal(result, 1);
+    assert.equal(stdout, '');
+    assert.equal(stderr.trim(), 'nortuscc: the agent is still starting; try again in a moment');
+  } finally {
+    await f.close();
+  }
+});
+
+for (const hang of ['inspect', 'preview']) {
+  test(`agent review exits 130 on Ctrl-C while waiting for ${hang}, and applies nothing`, { skip }, async () => {
+    const f = await fake({ hang });
+    const controller = new AbortController();
+    // Ctrl-C once the agent has the request it will never answer.
+    const watch = setInterval(() => { if (f.seen.some((r) => r.command === hang)) controller.abort(); }, 5);
+    try {
+      const started = Date.now();
+      const { result, stdout } = await captured(() => run(['review'], { ...deps(f), signal: controller.signal }));
+      assert.equal(result, 130);
+      assert.ok(Date.now() - started < 2000, 'waited for the agent after Ctrl-C');
+      assert.match(stdout, /^cancelled; nothing was applied$/m);
+      assert.equal(commands(f).includes('apply'), false);
+    } finally {
+      clearInterval(watch);
+      await f.close();
+    }
+  });
+}
 
 test('agent review needs a terminal and exits 2 without one', async () => {
   let connected = false;

@@ -137,12 +137,16 @@ async function runForeground(): Promise<number> {
 const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
 const NO_ANSWER = 'nortuscc: the agent did not answer in time';
 const LOST = 'nortuscc: lost the agent during the run; check nortuscc agent status';
+const STARTING = 'nortuscc: the agent is still starting; try again in a moment';
 
 // Runs `body` over a connection to the running agent (this machine's, unless `connect` is given);
 // no agent prints NOT_RUNNING and exits 1, and so does an unanswered request, with NO_ANSWER.
-// `signal` aborts on the first Ctrl-C.
-const withAgent = (body: (conn: AgentConnection, signal: AbortSignal) => Promise<number>, connect?: () => Promise<AgentConnection>) =>
-  runCommand((signal) => Effect.gen(function* () {
+// `signal` aborts on the first Ctrl-C, or when `injected` (a test's) aborts.
+const withAgent = (
+  body: (conn: AgentConnection, signal: AbortSignal) => Promise<number>, connect?: () => Promise<AgentConnection>, injected?: AbortSignal,
+) =>
+  runCommand((ctrlC) => Effect.gen(function* () {
+    const signal = injected ? AbortSignal.any([ctrlC, injected]) : ctrlC;
     const open = connect ?? (yield* Effect.map(resolvePaths((m) => console.error(m)), (paths) => () => connectAgent(paths)));
     return yield* Effect.tryPromise({
       try: async () => {
@@ -184,12 +188,27 @@ const printStatus = (status: WireStatus): number => {
   return 1;
 };
 
-// Stand-ins for the terminal and the agent, so a test can drive the commands that talk to the agent.
+// Stand-ins for the terminal, Ctrl-C and the agent, so a test can drive the commands that talk to the agent.
 export type AgentDeps = {
   isTTY?: boolean;
   select?: typeof realSelect;
   confirm?: typeof realConfirm;
   connect?: () => Promise<AgentConnection>;
+  signal?: AbortSignal;
+};
+
+// Ctrl-C before the apply starts: nothing was applied.
+class Cancelled extends Error {}
+
+// `request`'s answer, or Cancelled as soon as `signal` aborts.
+const unlessAborted = <A>(request: Promise<A>, signal: AbortSignal): Promise<A> => {
+  if (signal.aborted) return Promise.reject(new Cancelled());
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Cancelled());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([request, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -226,79 +245,92 @@ const reviewChoices = (inspected: InspectResult & { readonly status: WireStatus 
 
 // Inspect through the agent, choose, preview, confirm, apply and stream the run. Exits 0 when the
 // run is done with no failures or the person applies nothing, 1 otherwise, including when the
-// connection closes before the run ends. Ctrl-C asks the agent to cancel the run.
+// connection closes before the run ends. Ctrl-C before the apply exits 130 with nothing applied;
+// during the run it asks the agent to cancel.
 const review = (deps: AgentDeps, isTTY: boolean) =>
   withAgent(async (conn, signal) => {
-    const inspected = await conn.request<InspectResult & { status: WireStatus }>({ command: 'inspect' });
-    const choices = reviewChoices(inspected);
-    if (choices.length === 0) {
-      console.log('nothing to review');
-      return 0;
-    }
-    const picked = await (deps.select ?? realSelect)(choices, { title: 'choose what to apply', isTTY });
-    if (picked === null) {
-      console.log('cancelled; nothing was applied');
-      return 0;
-    }
-    const chosen = new Set(picked);
-    const exclude = choices.filter((c) => !chosen.has(c.key)).map((c) => c.key);
-    const preview = await conn.request<PreviewResult>({ command: 'preview', exclude });
-    const { steps, skipped } = preview.plan;
-    for (const step of steps) console.log(`  ${step.summary}`);
-    for (const skip of skipped) console.log(`  skipped ${skip.key}: ${skip.reason}`);
-    if (steps.length === 0) {
-      console.log('nothing to apply');
-      return 0;
-    }
-    if (!(await (deps.confirm ?? realConfirm)(`Apply these ${steps.length} step(s)?`, { isTTY }))) {
-      console.log('declined; nothing was applied');
-      return 0;
-    }
-
-    // Events can arrive before the apply answer is seen, so they wait for the run id.
-    let runId: string | undefined;
-    const early: RunEvent[] = [];
-    let end!: (p: RunProgress) => void;
-    const ended = new Promise<RunProgress>((resolve) => { end = resolve; });
-    let offClose = () => {};
-    const lost = new Promise<'lost'>((resolve) => { offClose = conn.onClose(() => resolve('lost')); });
-    const onProgress = (e: RunEvent) => {
-      if (e.runId !== runId) return;
-      console.log(progressLine(e.progress));
-      if (e.progress.type === 'done' || e.progress.type === 'cancelled' || e.progress.type === 'failed') end(e.progress);
-    };
-    const off = conn.onEvent((event) => {
-      const e = event as RunEvent;
-      if (e.event !== 'progress') return;
-      if (runId === undefined) early.push(e);
-      else onProgress(e);
-    });
-    const cancel = () => {
-      console.log('cancelling…');
-      conn.request({ command: 'cancel' }).catch(() => {});
-    };
     try {
-      const applied = await conn.request<ApplyResult>({ command: 'apply', planId: preview.planId });
-      if (applied.status === 'stale') {
-        console.log('the machine changed; review again');
-        return 1;
-      }
-      runId = applied.runId;
-      for (const e of early.splice(0)) onProgress(e);
-      if (signal.aborted) cancel();
-      else signal.addEventListener('abort', cancel, { once: true });
-      const last = await Promise.race([ended, lost]);
-      if (last === 'lost') {
-        console.error(LOST);
-        return 1;
-      }
-      return last.type === 'done' && last.failed === 0 ? 0 : 1;
-    } finally {
-      off();
-      offClose();
-      signal.removeEventListener('abort', cancel);
+      return await reviewWith(conn, signal, deps, isTTY);
+    } catch (error) {
+      if (!(error instanceof Cancelled)) throw error;
+      console.log('cancelled; nothing was applied');
+      return 130;
     }
-  }, deps.connect);
+  }, deps.connect, deps.signal);
+
+// The review itself; throws Cancelled when Ctrl-C comes before the apply.
+const reviewWith = async (conn: AgentConnection, signal: AbortSignal, deps: AgentDeps, isTTY: boolean): Promise<number> => {
+  const inspected = await unlessAborted(conn.request<InspectResult & { status: WireStatus }>({ command: 'inspect' }), signal);
+  const choices = reviewChoices(inspected);
+  if (choices.length === 0) {
+    console.log('nothing to review');
+    return 0;
+  }
+  const picked = await (deps.select ?? realSelect)(choices, { title: 'choose what to apply', isTTY });
+  if (picked === null) {
+    console.log('cancelled; nothing was applied');
+    return 0;
+  }
+  const chosen = new Set(picked);
+  const exclude = choices.filter((c) => !chosen.has(c.key)).map((c) => c.key);
+  const preview = await unlessAborted(conn.request<PreviewResult>({ command: 'preview', exclude }), signal);
+  const { steps, skipped } = preview.plan;
+  for (const step of steps) console.log(`  ${step.summary}`);
+  for (const skip of skipped) console.log(`  skipped ${skip.key}: ${skip.reason}`);
+  if (steps.length === 0) {
+    console.log('nothing to apply');
+    return 0;
+  }
+  if (!(await (deps.confirm ?? realConfirm)(`Apply these ${steps.length} step(s)?`, { isTTY }))) {
+    console.log('declined; nothing was applied');
+    return 0;
+  }
+  if (signal.aborted) throw new Cancelled();
+
+  // Events can arrive before the apply answer is seen, so they wait for the run id.
+  let runId: string | undefined;
+  const early: RunEvent[] = [];
+  let end!: (p: RunProgress) => void;
+  const ended = new Promise<RunProgress>((resolve) => { end = resolve; });
+  let offClose = () => {};
+  const lost = new Promise<'lost'>((resolve) => { offClose = conn.onClose(() => resolve('lost')); });
+  const onProgress = (e: RunEvent) => {
+    if (e.runId !== runId) return;
+    console.log(progressLine(e.progress));
+    if (e.progress.type === 'done' || e.progress.type === 'cancelled' || e.progress.type === 'failed') end(e.progress);
+  };
+  const off = conn.onEvent((event) => {
+    const e = event as RunEvent;
+    if (e.event !== 'progress') return;
+    if (runId === undefined) early.push(e);
+    else onProgress(e);
+  });
+  const cancel = () => {
+    console.log('cancelling…');
+    conn.request({ command: 'cancel' }).catch(() => {});
+  };
+  try {
+    const applied = await conn.request<ApplyResult>({ command: 'apply', planId: preview.planId });
+    if (applied.status === 'stale') {
+      console.log('the machine changed; review again');
+      return 1;
+    }
+    runId = applied.runId;
+    for (const e of early.splice(0)) onProgress(e);
+    if (signal.aborted) cancel();
+    else signal.addEventListener('abort', cancel, { once: true });
+    const last = await Promise.race([ended, lost]);
+    if (last === 'lost') {
+      console.error(LOST);
+      return 1;
+    }
+    return last.type === 'done' && last.failed === 0 ? 0 : 1;
+  } finally {
+    off();
+    offClose();
+    signal.removeEventListener('abort', cancel);
+  }
+};
 
 export async function run(args: string[] = [], deps: AgentDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
@@ -321,7 +353,15 @@ export async function run(args: string[] = [], deps: AgentDeps = {}): Promise<nu
       return runForeground();
     case 'status':
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
-      return withAgent(async (conn) => printStatus(await conn.request<WireStatus>({ command: 'status' })), deps.connect);
+      return withAgent(async (conn) => {
+        try {
+          return printStatus(await conn.request<WireStatus>({ command: 'status' }));
+        } catch (error) {
+          if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error;
+          console.error(STARTING);
+          return 1;
+        }
+      }, deps.connect);
     case 'review': {
       if (rest.length > 0) return usage(`unknown option ${rest[0]}`);
       const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);

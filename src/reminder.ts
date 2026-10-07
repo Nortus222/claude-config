@@ -40,9 +40,11 @@ export async function reminder(paths: MachinePathsValue, options: Options = {}):
   }
 }
 
-const REMINDED = new Set(['status', 'apply', 'sync', 'pull', 'update', 'setup', 'capture', 'push']);
+// Only read-only verbs. A verb that writes runs in this process, so the agent cannot know it just
+// changed the machine; its last status could still list items that verb applied.
+const REMINDED = new Set(['status']);
 
-// After an interactive verb on a terminal, reminds about waiting items. Never throws, and never
+// After a reminded verb on a terminal, reminds about waiting items. Never throws, and never
 // resolves paths loudly.
 export async function remindAfter(verb: string | undefined, options: Options & { interactive?: boolean; paths?: () => Promise<MachinePathsValue> } = {}): Promise<void> {
   try {

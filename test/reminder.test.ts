@@ -121,7 +121,7 @@ test('reminder swallows a connect that throws and one that never settles', async
   assert.ok(Date.now() - started < 500);
 });
 
-test('remindAfter asks only for an interactive verb on a terminal, and survives failing paths', { skip }, async () => {
+test('remindAfter asks only after status on a terminal, and survives failing paths', { skip }, async () => {
   const f = await serve({ pending: 1, held: 1 });
   try {
     const attempt = async (verb: string | undefined, interactive: boolean, paths = async () => f.paths) => {
@@ -131,6 +131,8 @@ test('remindAfter asks only for an interactive verb on a terminal, and survives 
     };
     assert.deepEqual(await attempt('status', true), ['1 item waits for you: run nortuscc agent review']);
     assert.deepEqual(await attempt('status', false), []);
+    // A verb that writes may have just changed what the agent last saw, so it is not reminded.
+    for (const verb of ['apply', 'sync', 'pull', 'update', 'setup', 'capture', 'push']) assert.deepEqual(await attempt(verb, true), [], verb);
     assert.deepEqual(await attempt('agent', true), []);
     assert.deepEqual(await attempt(undefined, true), []);
     assert.deepEqual(await attempt('status', true, async () => { throw new Error('no paths'); }), []);

@@ -18,6 +18,9 @@ test('--help prints the usage text and exits 0', () => {
   for (const verb of ['setup', 'status', 'apply', 'capture', 'pull', 'push', 'uninstall']) {
     assert.match(out, new RegExp(`\\b${verb}\\b`), `usage should list ${verb}`);
   }
+  for (const command of ['agent install', 'agent status', 'agent review', 'agent resume', 'agent policy']) {
+    assert.match(out, new RegExp(`^  ${command}\\b`, 'm'), `usage should list ${command}`);
+  }
 });
 
 // I2: the usage text advertised `apply [--take-repo|--take-local]` and
