@@ -1,0 +1,12 @@
+{
+  "name": "@nortuscc/hosted-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted HTTP transport and private machine credentials",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "node --test \"checks/*.spec.ts\"", "typecheck": "tsc --noEmit" },
+  "dependencies": { "@nortuscc/machine": "0.1.0", "@nortuscc/hosted-protocol": "0.1.0", "effect": "4.0.1" },
+  "devDependencies": { "@types/node": "25.5.0", "typescript": "7.0.2" },
+  "engines": { "node": ">=24" }
+}

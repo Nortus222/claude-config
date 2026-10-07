@@ -10,6 +10,8 @@ export type Command = {
   readonly cwd?: string;
   // Merged over the layer's environment for this command only.
   readonly env?: Readonly<Record<string, string>>;
+  // Sent only through the child's stdin pipe, which is closed after the input.
+  readonly input?: string;
   readonly output: 'inherit' | 'capture';
   // With `output: 'capture'`, also captures stderr into Completed.stderr instead of inheriting it.
   readonly stderr?: 'capture';
@@ -23,7 +25,7 @@ export type ProcessesOptions = {
   // Replaces PATH in that environment.
   readonly path?: string;
   // Where an `inherit` command's output goes. 'stderr' keeps it off a stdout that carries a protocol
-  // and gives the child no stdin, so it cannot read that protocol either.
+  // and gives the child no inherited stdin. Explicit Command.input still uses its own pipe.
   readonly inherit?: 'stdio' | 'stderr';
 };
 
@@ -94,9 +96,9 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           windowsVerbatimArguments: batch !== undefined,
           // Its own process group, so cancelling reaches the installer's own children too.
           detached: process.platform !== 'win32',
-          stdio: command.output === 'capture' ? ['ignore', 'pipe', captureStderr ? 'pipe' : 'inherit']
-            : options.inherit === 'stderr' ? ['ignore', 2, 2]
-            : 'inherit',
+          stdio: command.output === 'capture' ? [command.input === undefined ? 'ignore' : 'pipe', 'pipe', captureStderr ? 'pipe' : 'inherit']
+            : options.inherit === 'stderr' ? [command.input === undefined ? 'ignore' : 'pipe', 2, 2]
+            : command.input === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
         });
         let stdout = '';
         let stderr = '';
@@ -106,6 +108,11 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
         child.stderr?.setEncoding('utf8');
         child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+        // A tool may close stdin before consuming all input. Its exit still determines success.
+        child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'EPIPE') resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'stdin write failed' })));
+        });
+        if (command.input !== undefined) child.stdin?.end(command.input, 'utf8');
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
         child.on('close', (code, signal) => {
           closed = true;

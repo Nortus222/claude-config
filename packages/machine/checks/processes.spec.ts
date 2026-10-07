@@ -178,3 +178,17 @@ test('stderr: capture returns stderr instead of inheriting it; without it nothin
   assert.deepEqual(JSON.parse(child.stdout), { code: 4, stdout: 'out' });
   assert.equal(child.stderr, 'é err');
 });
+
+test('command input is delivered through stdin and then closed', async () => {
+  const exit = await run(Processes.use((p) => p.run({
+    cmd: node, args: ['-e', 'let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", c => input += c); process.stdin.on("end", () => process.stdout.write(input));'],
+    input: 'secret é\n', output: 'capture', stderr: 'capture',
+  })));
+  assert.deepEqual(Exit.isSuccess(exit) && exit.value, { code: 0, stdout: 'secret é\n', stderr: '' });
+});
+
+test('a child closing stdin early does not turn EPIPE into an unhandled error', async () => {
+  const exit = await run(Processes.use((p) => p.run({ cmd: node, args: ['-e', 'process.exit(0)'], input: 'x'.repeat(1024 * 1024), output: 'capture', stderr: 'capture' })));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(Exit.isSuccess(exit) && exit.value.code, 0);
+});

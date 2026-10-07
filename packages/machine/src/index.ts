@@ -1,6 +1,7 @@
 export * from './errors.ts';
 export * from './paths.ts';
 export * from './fs.ts';
+export * from './private-file.ts';
 export * from './processes.ts';
 export * from './hash.ts';
 export * from './state.ts';
