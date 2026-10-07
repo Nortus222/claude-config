@@ -6,6 +6,31 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 
+type RecordedChild = { pid: number; home: string };
+
+async function cleanupRecordedFixture(app: string, record: string, child?: RecordedChild) {
+  child ??= existsSync(record) ? JSON.parse(readFileSync(record, 'utf8')) as RecordedChild : undefined;
+  if (child) {
+    const alive = () => {
+      try { process.kill(child.pid, 0); return true; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+        throw error;
+      }
+    };
+    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+      if (!alive()) break;
+      try { process.kill(child.pid, signal); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+      const deadline = Date.now() + 5000;
+      while (alive() && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+    }
+    assert.equal(alive(), false, `fixture child ${child.pid} did not stop; retaining its files`);
+    rmSync(child.home, { recursive: true, force: true });
+  }
+  rmSync(app, { recursive: true, force: true });
+}
+
 test('bundled smoke exercises authenticated socket operations and rejects unsafe records on an inert setup', {
   skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
   timeout: 60_000,
@@ -23,14 +48,8 @@ test('smoke waits for its foreground child to stop and removes HOME when a socke
   const app = mkdtempSync(join(tmpdir(), 'nsm-'));
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const record = join(app, 'child.json');
-  let child: { pid: number; home: string } | undefined;
-  t.after(() => {
-    if (child) {
-      try { process.kill(child.pid, 'SIGKILL'); } catch {}
-      rmSync(child.home, { recursive: true, force: true });
-    }
-    rmSync(app, { recursive: true, force: true });
-  });
+  let child: RecordedChild | undefined;
+  t.after(() => cleanupRecordedFixture(app, record, child));
   mkdirSync(resources, { recursive: true });
   symlinkSync(join(resolve(process.env.DESKTOP_AGENT_RESOURCES!), 'bun'), join(resources, 'bun'));
   writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'fake' }));
@@ -108,11 +127,8 @@ test('a missing native executable stops the foreground agent and removes HOME', 
   const resources = join(app, 'Contents/Resources/agent-runtime');
   const temporaryRoot = join(app, 'tmp');
   const record = join(app, 'child.json');
-  let child: { pid: number; home: string } | undefined;
-  t.after(() => {
-    if (child) { try { process.kill(child.pid, 'SIGKILL'); } catch {} }
-    rmSync(app, { recursive: true, force: true });
-  });
+  let child: RecordedChild | undefined;
+  t.after(() => cleanupRecordedFixture(app, record, child));
   mkdirSync(resources, { recursive: true });
   mkdirSync(temporaryRoot);
   for (const file of ['bun', 'runtime.json']) {
@@ -131,4 +147,39 @@ process.exitCode = await runDesktopEntry({ args: [], env: process.env, resources
   assert.throws(() => process.kill(child!.pid, 0), { code: 'ESRCH' });
   assert.equal(existsSync(child!.home), false);
   assert.deepEqual(readdirSync(temporaryRoot), []);
+});
+
+test('fixture teardown discovers and joins its child after smoke times out', {
+  skip: process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false,
+  timeout: 15_000,
+}, async (t) => {
+  const app = mkdtempSync('/tmp/nsm-');
+  const resources = join(app, 'Contents/Resources/agent-runtime');
+  const temporaryRoot = join(app, 'tmp');
+  const record = join(app, 'child.json');
+  let child: RecordedChild | undefined;
+  t.after(() => cleanupRecordedFixture(app, record, child));
+  mkdirSync(resources, { recursive: true });
+  mkdirSync(temporaryRoot);
+  symlinkSync(join(resolve(process.env.DESKTOP_AGENT_RESOURCES!), 'bun'), join(resources, 'bun'));
+  writeFileSync(join(resources, 'agent.mjs'), `
+import { createServer } from 'node:net';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const dir = join(process.env.HOME, '.config/nortuscc/agent');
+writeFileSync(${JSON.stringify(record)}, JSON.stringify({ pid: process.pid, home: process.env.HOME }));
+writeFileSync(join(dir, 'agent.token'), 'fixture');
+createServer(() => {}).listen(join(dir, 'agent.sock'));
+`);
+  // The fixture accepts the socket but never answers hello, so execFile kills only the smoke parent.
+  await assert.rejects(promisify(execFile)(process.execPath, ['scripts/smoke.mjs', app], {
+    cwd: new URL('..', import.meta.url), env: { ...process.env, TMPDIR: temporaryRoot }, timeout: 3000,
+  }), (error: unknown) => (error as { killed?: boolean }).killed === true);
+  child = JSON.parse(readFileSync(record, 'utf8'));
+  assert.doesNotThrow(() => process.kill(child!.pid, 0), 'timeout should leave the fixture child for teardown');
+  // No cached child is passed: teardown must discover ownership from its own record.
+  await cleanupRecordedFixture(app, record);
+  assert.throws(() => process.kill(child!.pid, 0), { code: 'ESRCH' });
+  assert.equal(existsSync(child!.home), false);
+  assert.equal(existsSync(app), false);
 });
