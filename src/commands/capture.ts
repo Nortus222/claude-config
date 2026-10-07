@@ -3,11 +3,12 @@ import { Effect } from 'effect';
 import { parseSkillsManifest, type Target } from '@nortuscc/profile-engine';
 import {
   emitManifest, Fs, inspect, installedGroups, installedSkillNames, MachinePaths, MANIFEST_FILE, plan, readSkillLock,
-  selectAll, type Domain, type Step,
+  selectAll, type Domain, type Plan, type Step,
 } from '@nortuscc/machine';
+import { checkoutGroups, itemIdOf, type Holds } from '@nortuscc/sync';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
-import { CONFLICT_NOTE, fileOutcomes, UNPARSEABLE_NOTE } from '../config-rows.ts';
-import { domainsFor, openMachine, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
+import { CONFLICT_NOTE, fileOutcomes, HELD_REASON, UNPARSEABLE_NOTE } from '../config-rows.ts';
+import { domainsFor, openCheckout, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 
@@ -24,13 +25,14 @@ const MANIFEST_STEP: Step = {
 };
 
 // Regenerates the repo's skills manifest from the skills installed here (in the lock and on disk),
-// keeping the current manifest's markers. Refuses to list fewer skills than the manifest does unless
-// `allowShrink`; writes nothing when no skill is installed. The note is `<state> — <detail>`, or ''.
-const writeManifest = (allowShrink: boolean) => Effect.gen(function* () {
+// keeping the current manifest's markers and listing each `held` skill as the manifest declares it.
+// Refuses to list fewer skills than the manifest does unless `allowShrink`; writes nothing when no
+// skill is listed. The note is `<state> — <detail>`, or ''.
+const writeManifest = (allowShrink: boolean, held: Holds) => Effect.gen(function* () {
   const fs = yield* Fs;
   const path = join((yield* MachinePaths).repo, MANIFEST_FILE);
   const before = parseSkillsManifest(yield* fs.readText(path));
-  const groups = installedGroups(yield* readSkillLock, yield* installedSkillNames, before);
+  const groups = checkoutGroups(installedGroups(yield* readSkillLock, yield* installedSkillNames, before), before, held);
   const beforeCount = before.reduce((n, g) => n + g.skills.length, 0);
   const afterCount = groups.reduce((n, g) => n + g.skills.length, 0);
   if (afterCount < beforeCount && !allowShrink) {
@@ -42,16 +44,28 @@ const writeManifest = (allowShrink: boolean) => Effect.gen(function* () {
 });
 
 // Runs only the manifest step, so it is written under the same apply lock as the configuration.
-const manifestDomain = (allowShrink: boolean): Domain<Fs | MachinePaths> => ({
+const manifestDomain = (allowShrink: boolean, held: Holds): Domain<Fs | MachinePaths> => ({
   name: 'skills',
   inspect: () => Effect.succeed({ items: [], probeErrors: [] }),
   steps: () => ({ steps: [], skipped: [] }),
-  run: () => writeManifest(allowShrink),
+  run: () => writeManifest(allowShrink, held),
+});
+
+// `planned` with every step for a held item moved to skipped, and every skipped held item re-labelled,
+// as HELD_REASON: capture never writes a held item's machine value into the checkout.
+const withoutHeld = (planned: Plan, isHeld: (key: string) => boolean): Plan => ({
+  ...planned,
+  steps: planned.steps.filter((step) => !isHeld(step.key)),
+  skipped: [
+    ...planned.skipped.map((s) => (isHeld(s.key) ? { key: s.key, reason: HELD_REASON } : s)),
+    ...planned.steps.filter((step) => isHeld(step.key)).map((step) => ({ key: step.key, reason: HELD_REASON })),
+  ],
 });
 
 // machine -> repo: captures the selected agents' local configuration edits into the repo, then
-// regenerates the skills manifest. `captured` is the repo-relative paths written (each captured
-// file's `src`, and `skills-manifest.txt`), for push to stage. `code` is 1 when a file was refused,
+// regenerates the skills manifest. Held items (opened.held) are left as the checkout declares them.
+// `captured` is the repo-relative paths written (each captured file's `src`, and `skills-manifest.txt`),
+// for push to stage. `code` is 1 when a file was refused,
 // could not be parsed or failed to write, or the run was cancelled, else 0.
 export function capture(
   opened: Opened,
@@ -59,7 +73,7 @@ export function capture(
 ): Effect.Effect<{ code: number; captured: string[] }, unknown, CliServices> {
   return Effect.gen(function* () {
     const { config } = domainsFor(opened.paths);
-    const manifest = manifestDomain(input.allowShrink);
+    const manifest = manifestDomain(input.allowShrink, opened.held);
     // On a skills-only machine no configuration file is read, written or captured.
     const report = yield* inspect(opened.desired, input.manageConfig ? [config] : []);
     if (report.probeErrors.length > 0) {
@@ -67,7 +81,11 @@ export function capture(
       console.error('nortuscc: configuration could not be read; nothing was captured.');
       return { code: 1, captured: [] };
     }
-    const planned = plan('capture', report, { ...selectAll, targets: input.targets, force: input.takeLocal }, [config]);
+    const isHeld = (key: string) => {
+      const id = itemIdOf(key, opened.desired);
+      return id !== undefined && id in opened.held;
+    };
+    const planned = withoutHeld(plan('capture', report, { ...selectAll, targets: input.targets, force: input.takeLocal }, [config]), isHeld);
     const ran = yield* runPlan({ ...planned, steps: [...planned.steps, MANIFEST_STEP] }, report, [config, manifest], { signal: input.signal });
 
     const lines: string[] = [];
@@ -79,7 +97,7 @@ export function capture(
     if (!input.manageConfig) lines.push(formatRow(SKIPPED_LABEL, SKIPPED_STATE, SKIPPED_NOTE));
     const files = input.manageConfig ? opened.desired.files.filter((f) => f.managed && input.targets.includes(f.target)) : [];
     for (const outcome of fileOutcomes(files, report, planned, ran)) {
-      const { file, copied, backupNote, conflicts } = outcome;
+      const { file, copied, backupNote, conflicts, held } = outcome;
       if (copied) captured.push(file.src);
       const credentials = outcome.failures.filter((f) => f.note.startsWith(CREDENTIAL_REFUSAL));
       const failure = outcome.failures.find((f) => !f.note.startsWith(CREDENTIAL_REFUSAL));
@@ -103,7 +121,10 @@ export function capture(
         refused += 1;
         lines.push(formatRow(file.dest, 'refused', copied ? partly('conflict', conflicts) : CONFLICT_NOTE));
       } else if (copied) {
-        lines.push(formatRow(file.dest, 'copied', backupNote));
+        const heldNote = held.length > 0 ? `held: ${held.join(', ')}` : '';
+        lines.push(formatRow(file.dest, 'copied', [backupNote, heldNote].filter(Boolean).join('; ')));
+      } else if (held.length > 0) {
+        lines.push(formatRow(file.dest, 'held', 'not captured while held'));
       } else {
         lines.push(formatRow(file.dest, 'skipped'));
       }
@@ -165,7 +186,8 @@ export async function run(args: string[] = []): Promise<number> {
   const targets = selectedTargets(target);
 
   return runCommand((signal) => Effect.gen(function* () {
-    const opened = yield* openMachine({ mode });
+    // Holds are read, not composed: capture writes into the checkout itself.
+    const opened = yield* openCheckout({ mode });
     if (refuseInvalidOverrides(opened.overrides)) return 1;
     const { manageConfig } = resolveConfigMode(mode, opened.overrides.value);
     const result = yield* capture(opened, { targets, takeLocal, allowShrink: rest.includes('--allow-shrink'), manageConfig, signal })

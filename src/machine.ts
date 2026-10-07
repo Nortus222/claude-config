@@ -2,18 +2,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Cause, Effect, Layer, Stream } from 'effect';
+import { Cause, Effect, Layer, Stream, type Scope } from 'effect';
 import {
   loadProfile, nodeFiles, type DesiredConfig, type Input, type MachineOverrides, type ReadFailed, type Target,
 } from '@nortuscc/profile-engine';
 import {
   backupsForRun, configDomain, execute, integrationsDomain, machinePaths, nodeFs, nodeProcesses, overridesStore,
   OverridesStore, pathsFromEnvironment, skillsDomain, stateStore,
-  type Backups, type Domain, type DomainServices, type Fs, type FsFailed, type IntegrationsServices, type LockHeld,
+  type Backups, type Domain, type DomainServices, type Fs, type FsFailed, type IntegrationsServices, type LaunchFailed, type LockHeld,
   type MachinePaths, type MachinePathsValue, type MachineReport, type Plan, type PluginState, type Processes, type RepoNotFound,
   type StateStore, type Step,
 } from '@nortuscc/machine';
-import { desiredFor, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
+import { desiredFor, SyncStore, syncStore, type Holds, type Snapshot, type SyncStateInvalid } from '@nortuscc/sync';
 import { resolveConfigMode, type ConfigMode } from './config-mode.ts';
 
 // The checkout this file belongs to: where a machine with no recorded checkout runs from.
@@ -76,20 +76,22 @@ export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsVa
   });
 }
 
-// openMachine with this machine's held items (sync.json) composed over the working tree, for the
-// commands that apply or report desired state. With holds, paths.repo is a temporary directory of the
-// composed documents, removed when the caller's scope closes, and `checkout` stays the git checkout.
-// An invalid sync.json fails with SyncStateInvalid, so the command changes nothing.
-export function openDesired(options: { mode?: ConfigMode } = {}) {
+// This machine's held items (sync.json). An invalid file fails with SyncStateInvalid and is never rewritten.
+export function readHolds(layer: Layer.Layer<MachinePaths | Fs>): Effect.Effect<Holds, FsFailed | SyncStateInvalid> {
   return Effect.gen(function* () {
-    const opened = yield* openMachine(options);
-    const held = yield* Effect.gen(function* () {
-      return yield* (yield* SyncStore).read;
-    }).pipe(Effect.provide(syncStore.pipe(Layer.provide(opened.layer))));
-    if (Object.keys(held).length === 0) return opened;
-    // desiredFor removes and recreates `into`, so it is a child of the private (0700) mkdtemp dir:
-    // recreated in a shared tmp under its own name, another user could plant documents in it.
-    // The exit hook removes the dir when the process exits before the scope closes.
+    return yield* (yield* SyncStore).read;
+  }).pipe(Effect.provide(syncStore.pipe(Layer.provide(layer))));
+}
+
+// The documents at the working tree of `checkout` with `held` patched in, resolved with `overrides`, composed
+// into a private temporary directory that the caller's scope removes. Call it only when `held` is non-empty.
+// desiredFor removes and recreates `into`, so it is a child of the private (0700) mkdtemp dir:
+// recreated in a shared tmp under its own name, another user could plant documents in it.
+// The exit hook removes the dir when the process exits before the scope closes.
+export function composeHeld(input: { checkout: string; held: Holds; overrides?: Input<MachineOverrides> }):
+  Effect.Effect<Snapshot, Error | FsFailed | LaunchFailed | ReadFailed, Fs | Processes | Scope.Scope> {
+  const { checkout, held } = input;
+  return Effect.gen(function* () {
     const dir = yield* Effect.acquireRelease(
       Effect.sync(() => {
         const made = mkdtempSync(join(tmpdir(), 'nortuscc-desired-'));
@@ -102,12 +104,10 @@ export function openDesired(options: { mode?: ConfigMode } = {}) {
         remove();
       }),
     );
-    const into = join(dir.made, 'repo');
-    const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
-    const snapshot = yield* desiredFor({
-      repo: opened.checkout, head: { kind: 'worktree' }, held, into, overrides: { ...opened.overrides, value },
+    return yield* desiredFor({
+      repo: checkout, head: { kind: 'worktree' }, held, into: join(dir.made, 'repo'),
+      ...(input.overrides ? { overrides: input.overrides } : {}),
     }).pipe(
-      Effect.provide(opened.layer),
       // A hold whose commit is gone cannot be composed; releasing it is the only way out.
       Effect.catchTag('RevisionUnavailable', (err) => {
         const items = Object.keys(held).filter((id) => held[id] === err.revision).sort();
@@ -118,9 +118,36 @@ export function openDesired(options: { mode?: ConfigMode } = {}) {
         ));
       }),
     );
+  });
+}
+
+// openMachine with this machine's held items (sync.json) composed over the working tree, for the
+// commands that apply or report desired state. With holds, paths.repo is a temporary directory of the
+// composed documents, removed when the caller's scope closes, and `checkout` stays the git checkout.
+// An invalid sync.json fails with SyncStateInvalid, so the command changes nothing.
+export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}) {
+  return Effect.gen(function* () {
+    const opened = yield* openMachine(options);
+    const held = yield* readHolds(opened.layer);
+    if (Object.keys(held).length === 0) return opened;
+    const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
+    const snapshot = yield* composeHeld({ checkout: opened.checkout, held, overrides: { ...opened.overrides, value } }).pipe(
+      Effect.provide(opened.layer),
+    );
     const paths = { ...opened.paths, repo: snapshot.repo };
     const composed: Opened = { ...opened, paths, layer: cliLayer(paths), desired: snapshot.desired, held };
     return composed;
+  });
+}
+
+// openMachine plus this machine's held items, with paths.repo still the checkout: for commands that
+// write into the checkout, which must keep held items out of what they publish.
+export function openCheckout(options: { mode?: ConfigMode } = {}) {
+  return Effect.gen(function* () {
+    const opened = yield* openMachine(options);
+    const held = yield* readHolds(opened.layer);
+    const withHolds: Opened = { ...opened, held };
+    return withHolds;
   });
 }
 
