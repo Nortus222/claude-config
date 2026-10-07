@@ -192,16 +192,24 @@ const restarted = (m: Machine) =>
     ? serviceCalls(m).some((c) => c.cmd === 'systemctl' && c.args.join(' ') === '--user restart nortuscc-agent.service')
     : serviceCalls(m).some((c) => c.cmd === 'launchctl' && c.args.join(' ') === `kickstart -k gui/${process.getuid!()}/com.nortuscc.agent`);
 
-test('sync restarts a CLI-installed agent after the checkout moves', { skip }, async () => {
+const checkoutHead = () => execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+// Records the installed agent as running `version`. The harness's pull moves the temp repo, not the
+// checkout the agent runs from, so a stale version stands in for the code the pull replaced.
+const recordAgentVersion = (m: Machine, version: string) =>
+  writeFileSync(join(agentDir(m), 'agent.json'), JSON.stringify({ ...agentJson(m), agentVersion: version }));
+
+test('sync restarts a CLI-installed agent after a pull moves the checkout past it', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
   assert.equal(restarted(m), false);
+  recordAgentVersion(m, 'before-the-pull');
   pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);
   assert.ok(restarted(m), JSON.stringify(serviceCalls(m)));
   assert.match(result.stdout, /^agent restarted on [0-9a-f]{7}$/m);
-  assert.equal(agentJson(m).agentVersion, execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim());
+  assert.equal(agentJson(m).agentVersion, checkoutHead());
 });
 
 test('sync with no agent installed runs no service command', { skip }, async () => {
@@ -213,19 +221,34 @@ test('sync with no agent installed runs no service command', { skip }, async () 
   assert.doesNotMatch(result.stdout, /agent restarted/);
 });
 
-test('sync that leaves the checkout where it was does not restart the agent', { skip }, async () => {
+test('sync leaves an agent already on the checkout\'s version alone, even after a pull', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  assert.equal(agentJson(m).agentVersion, checkoutHead());
   const before = serviceCalls(m).length;
+  pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(serviceCalls(m).length, before);
+  assert.doesNotMatch(result.stdout, /agent restarted/);
+});
+
+// An apply that failed after the fast-forward left the agent behind; the next sync catches it up.
+test('sync restarts an agent left on a stale version even when nothing was pulled', { skip }, async () => {
+  const m = serviceMachine();
+  assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
+  recordAgentVersion(m, 'stale');
+  const result = await runCli(m, ['sync', '--yes']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(restarted(m), JSON.stringify(serviceCalls(m)));
+  assert.equal(agentJson(m).agentVersion, checkoutHead());
 });
 
 test('a failed restart warns and never fails the sync', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
   for (const tool of TOOLS) writeFakeBin(m.bin, tool, "#!/usr/bin/env node\nprocess.stderr.write('refused\\n'); process.exit(5);\n");
+  recordAgentVersion(m, 'stale');
   pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);

@@ -314,8 +314,9 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     if (code !== 0) return code;
     yield* (yield* StateStore).update((state) => withApplied(state, head));
     // The agent runs from this checkout and never downloads code; whoever installed it upgrades it
-    // (ADR 0011), so a pull that moved the checkout restarts a CLI-installed agent on the new code.
-    if (head !== before) yield* restartAfterPull(paths);
+    // (ADR 0011), so a CLI-installed agent behind the checkout is restarted on its code. Checked on
+    // every successful sync, so an agent missed when an apply failed after the pull catches up.
+    yield* restartAfterPull(paths);
     return yield* reportIntegrations(target, flags.rest);
   });
 

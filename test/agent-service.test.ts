@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { Effect, Layer } from 'effect';
 import { nodeFs, Processes, type MachinePathsValue } from '@nortuscc/machine';
 import { unitPath, type ServiceTarget } from '@nortuscc/agent';
-import { restartAfterPull } from '../src/agent-service.ts';
+import { checkoutVersion, restartAfterPull } from '../src/agent-service.ts';
 
 // restartAfterPull against a temporary home and a recording Processes: no service manager runs.
-function setup(lockPid?: number) {
+function setup(lockPid?: number, agentVersion = 'old') {
   const home = mkdtempSync(join(tmpdir(), 'agent-service-'));
   const stateRoot = join(home, 'state');
   const paths: MachinePathsValue = {
@@ -18,7 +18,7 @@ function setup(lockPid?: number) {
   };
   const target: ServiceTarget = { platform: 'linux', home, uid: 501, user: 'me', stateRoot };
   mkdirSync(join(stateRoot, 'agent'), { recursive: true });
-  writeFileSync(join(stateRoot, 'agent', 'agent.json'), JSON.stringify({ version: 1, policy: 'notify', policySource: 'default', paused: null, installedBy: 'cli', agentVersion: 'old' }));
+  writeFileSync(join(stateRoot, 'agent', 'agent.json'), JSON.stringify({ version: 1, policy: 'notify', policySource: 'default', paused: null, installedBy: 'cli', agentVersion }));
   mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true });
   writeFileSync(unitPath(target), 'stale');
   if (lockPid !== undefined) writeFileSync(join(stateRoot, 'apply.lock'), JSON.stringify({ pid: lockPid }));
@@ -64,4 +64,13 @@ test('a lock left by a dead process does not hold the restart back', async () =>
   assert.ok(s.calls.includes('systemctl --user restart nortuscc-agent.service'), JSON.stringify(s.calls));
   assert.match(out, /^agent restarted on [0-9a-f]{7}$/m);
   assert.notEqual(s.version(), 'old');
+});
+
+test('an agent already on the checkout\'s version is not restarted', async () => {
+  const s = setup(undefined, checkoutVersion());
+  const out = await captured(() => Effect.runPromise(
+    restartAfterPull(s.paths, { target: s.target }).pipe(Effect.provide(Layer.merge(nodeFs, s.processes))),
+  ));
+  assert.equal(out, '');
+  assert.deepEqual(s.calls, []);
 });

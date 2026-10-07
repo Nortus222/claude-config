@@ -35,7 +35,8 @@ export function agentProgram(paths: MachinePathsValue): ServiceProgram {
   };
 }
 
-// The checkout's HEAD commit, or 'unknown' when git cannot say.
+// The checkout's HEAD commit, or 'unknown' when git cannot say. The agent runs CHECKOUT's code,
+// so this is its version.
 export function checkoutVersion(): string {
   const result = spawnSync('git', ['-C', CHECKOUT, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   const head = result.status === 0 ? result.stdout.trim() : '';
@@ -48,9 +49,11 @@ export type RestartOptions = {
   readonly pollMs?: number; // default 500 ms
 };
 
-// After a pull moved this checkout, restarts a CLI-installed agent on the pulled code once no live
-// apply holds apply.lock, and records its new version. It never fails: a problem is a warning and
-// the pull stands. An app-installed agent is the app's to upgrade.
+// Restarts a CLI-installed agent whose recorded version is not this checkout's, once no live apply
+// holds apply.lock, and records its new version; an agent already on this checkout is left alone.
+// Keyed on the version rather than on a pull, so an agent missed by one sync is restarted by the
+// next. It never fails: a problem is a warning and the sync stands. An app-installed agent is the
+// app's to upgrade.
 export const restartAfterPull = (paths: MachinePathsValue, options: RestartOptions = {}) => {
   const target = options.target ?? serviceTarget(paths);
   if (target === undefined) return Effect.void;
@@ -60,14 +63,15 @@ export const restartAfterPull = (paths: MachinePathsValue, options: RestartOptio
   });
   return Effect.gen(function* () {
     const state = yield* AgentStateStore;
-    if ((yield* state.read).installedBy !== 'cli' || !(yield* serviceInstalled(target))) return;
+    const recorded = yield* state.read;
+    const version = checkoutVersion();
+    if (recorded.installedBy !== 'cli' || recorded.agentVersion === version || !(yield* serviceInstalled(target))) return;
     const lock = join(paths.stateRoot, 'apply.lock');
     for (const deadline = Date.now() + timeoutMs; liveLockHolder(lock) !== undefined;) {
       if (Date.now() >= deadline) return yield* notRestarted('an apply is running');
       yield* Effect.sleep(pollMs);
     }
     yield* restartService(target, agentProgram(paths));
-    const version = checkoutVersion();
     yield* state.update((s) => ({ ...s, agentVersion: version }));
     console.log(`agent restarted on ${short(version)}`);
   }).pipe(
