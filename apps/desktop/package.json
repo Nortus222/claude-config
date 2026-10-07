@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "prototype": "vite --host 127.0.0.1 --open /prototype.html",
     "test": "tsx --test checks/*.spec.ts",
     "test:bun": "bun test ./checks/protocol.spec.ts ./checks/controller.spec.ts && DESKTOP_RUNTIME=\"$PWD/src-tauri/resources/darwin-arm64/bun\" tsx --test checks/backend.spec.ts",
     "typecheck": "tsc --noEmit",
