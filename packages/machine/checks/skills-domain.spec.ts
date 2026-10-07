@@ -106,8 +106,9 @@ test('items are ordered: declared, undeclared, then links in declared order with
   ]);
 });
 
-test('an unreadable store is a probe error and every declared skill reads as unknown and blocked', async () => {
-  if (process.getuid?.() === 0) return;
+test('an unreadable store is a probe error and every declared skill reads as unknown and blocked', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory access');
+  if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const m = skillsMachine();
   mkdirSync(m.paths.agentsSkills, { recursive: true });
   chmodSync(m.paths.agentsSkills, 0o000);
@@ -115,7 +116,7 @@ test('an unreadable store is a probe error and every declared skill reads as unk
     const desired = desiredWith([skill('want', 'o/r'), skill('maybe', 'o/r', { optional: true, install: false })]);
     const report = await m.run(inspectSkills(desired));
     assert.equal(report.probeErrors.length, 1);
-    assert.match(report.probeErrors[0]!, new RegExp(`^could not read ${m.paths.agentsSkills}: `));
+    assert.ok(report.probeErrors[0]!.startsWith(`could not read ${m.paths.agentsSkills}: `));
     assert.deepEqual(report.items.map((i) => [i.key, i.state, i.disposition, i.note]), [
       ['skill:want', 'unknown', 'blocked', 'store unreadable'],
       ['skill:maybe', 'unknown', 'blocked', 'store unreadable'],
@@ -131,8 +132,9 @@ test('an unreadable store is a probe error and every declared skill reads as unk
   }
 });
 
-test('an unreadable agent directory is a probe error, not a link item', async () => {
-  if (process.getuid?.() === 0) return;
+test('an unreadable agent directory is a probe error, not a link item', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory access');
+  if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const m = skillsMachine();
   mkdirSync(join(m.paths.agentsSkills, 'tdd'), { recursive: true });
   mkdirSync(join(m.paths.claude, 'skills'), { recursive: true });
@@ -385,8 +387,9 @@ test('the expose step re-adds a declared skill an agent cannot load', async () =
   assert.equal(result.note, 're-exposed 1 skill(s) to claude-code');
 });
 
-test('an unreadable agent directory is not a reason to reinstall', async () => {
-  if (process.getuid?.() === 0) return;
+test('an unreadable agent directory is not a reason to reinstall', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory access');
+  if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const m = runMachine();
   m.install('tdd', 'o/r', false);
   mkdirSync(join(m.paths.claude, 'skills'), { recursive: true });

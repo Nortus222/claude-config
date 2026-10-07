@@ -111,6 +111,7 @@ test('with no store at all, every entry came from somewhere else', async () => {
 // Fs.realPath reads ENOTDIR as absent, so the unusable store here is one behind an unreadable directory.
 test('a store that cannot be resolved is an error, not "everything is undeclared"', async (t) => {
   const { home, paths, run } = machine();
+  if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory access');
   if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const locked = join(home, 'locked');
   mkdirSync(join(locked, 'skills'), { recursive: true });
@@ -122,7 +123,7 @@ test('a store that cannot be resolved is an error, not "everything is undeclared
     ));
     assert.deepEqual(result.items, []);
     assert.equal(result.errors.length, 1);
-    assert.match(result.errors[0]!, new RegExp(`^could not resolve ${join(locked, 'skills')}: `));
+    assert.ok(result.errors[0]!.startsWith(`could not resolve ${join(locked, 'skills')}: `));
   } finally {
     chmodSync(locked, 0o755);
   }
@@ -134,7 +135,7 @@ test('an unreadable agents directory is an error, never an empty observation', a
   const { items, errors } = await run(observedAgents);
   assert.deepEqual(items, []);
   assert.equal(errors.length, 1);
-  assert.match(errors[0]!, new RegExp(`^could not read ${join(paths.claude, 'agents')}: `));
+  assert.ok(errors[0]!.startsWith(`could not read ${join(paths.claude, 'agents')}: `));
 });
 
 test('no settings file, and settings without hooks, observe nothing', async () => {

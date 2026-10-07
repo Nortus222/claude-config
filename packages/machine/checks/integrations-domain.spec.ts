@@ -106,7 +106,7 @@ test('only the MCP probe runs when no Codex plugin or marketplace is declared', 
 // Issue #90: Codex is asked what it has configured.
 test('a Codex MCP server Codex already has configured is installed and in sync', async () => {
   const m = machine();
-  m.fake.codex({ installed: [] }, { marketplaces: [] }, 'exit 0', [
+  m.fake.codex({ installed: [] }, { marketplaces: [] }, 'process.exit(0)', [
     { name: 'srv', enabled: true, transport: { type: 'stdio', command: 'srv', env: { SRV_TOKEN: 'sk-fixture-secret' }, env_vars: [] } },
   ]);
   const report = await m.inspect(desiredOf([MCP, { ...MCP, id: 'other', label: 'other' }]));
@@ -237,7 +237,7 @@ test('installers run in type order through the real executor', async () => {
 test('a Codex plugin and marketplace install through codex, never claude', async () => {
   const m = machine();
   m.fake.codex({ installed: [] }, { marketplaces: [] });
-  m.fake.tool('claude', 'exit 9');
+  m.fake.tool('claude', 'process.exit(9)');
   await runAll(m, desiredOf([CODEX_PLUGIN, CODEX_MARKETPLACE]));
   assert.deepEqual(m.fake.calls().slice(2), ['codex plugin marketplace add mksglu/context-mode', 'codex plugin add context-mode@context-mode']);
 });
@@ -245,7 +245,7 @@ test('a Codex plugin and marketplace install through codex, never claude', async
 // One failing installer never takes the rest of the run with it.
 test('a failed or unlaunchable installer is a failed step and later steps still run', async () => {
   const m = machine();
-  m.fake.tool('claude', 'case "$*" in "plugin marketplace"*) exit 4 ;; esac');
+  m.fake.tool('claude', 'if (args.slice(0, 2).join(" ") === "plugin marketplace") process.exit(4)');
   const events = await runAll(m, desiredOf([CLAUDE_MARKETPLACE, CLAUDE_PLUGIN, MCP]));
   const finished = events.flatMap((e) => (e.type === 'finished' ? [e] : []));
   assert.deepEqual(finished.map((e) => e.outcome), ['failed', 'ok', 'failed']);
@@ -293,7 +293,7 @@ test('the hook step backs settings.json up into the run folder', async () => {
 test('cancelling during an installer kills it and stops before the next step', async () => {
   const m = machine();
   const marker = join(m.home, 'started');
-  m.fake.tool('claude', `touch '${marker}'; sleep 30`);
+  m.fake.tool('claude', `fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setTimeout(() => {}, 30000)`);
   m.fake.tool('codex');
   const controller = new AbortController();
   const watcher = setInterval(() => { if (existsSync(marker)) controller.abort(); }, 20);
@@ -303,8 +303,10 @@ test('cancelling during an installer kills it and stops before the next step', a
     events = await runAll(m, desiredOf([CLAUDE_PLUGIN, MCP]), { signal: controller.signal });
   } finally {
     clearInterval(watcher);
+    controller.abort();
   }
   assert.ok(Date.now() - started < 10_000, 'the sleeping installer must be killed, not awaited');
+  assert.throws(() => process.kill(Number(readFileSync(marker, 'utf8')), 0), { code: 'ESRCH' });
   assert.deepEqual(outcomes(events), [`${integrationKey('cm')}:cancelled`]);
   assert.deepEqual(events.at(-1), { type: 'cancelled', remaining: [integrationKey('srv')], backups: undefined });
   assert.equal(m.fake.calls().some((c) => c.startsWith('codex') && c !== 'codex mcp list --json'), false);
