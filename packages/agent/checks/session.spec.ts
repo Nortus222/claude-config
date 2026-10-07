@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { Deferred, Effect, Fiber, Layer } from 'effect';
 import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
 import {
-  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, SessionError, SetupSource, startAgent,
-  type AgentDomain, type AgentDomains, type AgentHandle, type AgentServices, type AgentSession, type RunProgress,
+  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, makeNotifier, SessionError, SetupSource, startAgent,
+  type AgentStatus, type Notification, type AgentDomain, type AgentDomains, type AgentHandle, type AgentServices, type AgentSession, type RunProgress,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
@@ -17,6 +17,7 @@ const EFFORT_KEY = 'config:claude:settings.json#effortLevel';
 const MODEL_KEY = 'config:claude:settings.json#model';
 
 type Options = {
+  readonly onStatus?: (status: AgentStatus) => Effect.Effect<void>;
   readonly paused?: boolean;
   readonly fixture?: FixtureOptions;
   // Replaces the config domain, so a test can gate or fail a step.
@@ -44,7 +45,7 @@ const sessionMachine = async (options: Options = {}) => {
   const source = options.source ? Layer.succeed(SetupSource, options.source(fixture.service)) : fixture.source;
   const within = <A, E>(body: (session: AgentSession, agent: AgentHandle) => Effect.Effect<A, E, AgentServices>) =>
     m.run(Effect.scoped(Effect.gen(function* () {
-      const agent = yield* startAgent(domains);
+      const agent = yield* startAgent(domains, { onStatus: options.onStatus });
       const session = yield* makeSession(agent, { signal: shutdown.signal, domains });
       return yield* body(session, agent);
     })), source);
@@ -320,4 +321,32 @@ test('a scheduled job and an apply\'s re-inspection never run a job at the same 
   }));
   assert.equal(result.result.status, 'started');
   assert.equal(most, 1);
+});
+
+test('a manual apply defect records a durable failure without pausing and refreshes status', async () => {
+  const failing: AgentDomain = { ...configDomain, run: () => Effect.die('fixture apply defect') };
+  const delivered: Notification[] = [];
+  let notify: (status: AgentStatus) => Effect.Effect<void> = () => Effect.void;
+  const { m, within, lock } = await sessionMachine({ config: failing, onStatus: (status) => notify(status) });
+  await m.run(AgentStateStore.use((s) => s.update((state) => ({ ...state, policy: 'manual' }))));
+  const notifier = await m.run(makeNotifier({ platform: 'test' }));
+  notifier.setConnected((notification) => ({ timeoutMs: 15, deliver: Effect.sync(() => { delivered.push(notification); return true; }) }));
+  notify = notifier.notify;
+  const run = await within((session, agent) => Effect.gen(function* () {
+    const { planId } = yield* session.preview(yield* configOnly(session));
+    delivered.length = 0;
+    const run = yield* startRun(session, planId, lock);
+    yield* Deferred.await(run.ended);
+    yield* agent.request('inspect');
+    return run;
+  }));
+  assert.equal(run.events.at(-1)?.type, 'done');
+  assert.equal(delivered.length, 1);
+  assert.equal(run.lockAtEnd(), false);
+  const finished = (await m.events()).filter((e) => e.kind === 'apply-finished');
+  assert.equal(finished.length, 1);
+  assert.ok(finished[0]?.kind === 'apply-finished');
+  assert.equal(finished[0].runId, [...run.runIds][0]);
+  assert.equal(finished[0].steps.some((s) => s.outcome === 'failed'), true);
+  assert.ok(!(await m.kinds()).includes('paused'));
 });

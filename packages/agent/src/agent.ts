@@ -9,6 +9,7 @@ import { agentLayer, type AgentDomains } from './layer.ts';
 import { serveIpc } from './ipc/server.ts';
 import { makeSession } from './ipc/session.ts';
 import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from './log.ts';
+import { makeNotifier } from './notifier.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
@@ -39,10 +40,11 @@ const describe = (cause: Cause.Cause<unknown>): string => {
   return error instanceof Error && error.message ? error.message : String(error);
 };
 
-// Starts the scheduler and the timer in the current scope and queues the start job. It never
+// Starts the scheduler and timer in the current scope, queuing startup unless deferred. It never
 // changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
-export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal } = {}) =>
+// `onStatus` is awaited after listeners and cannot fail a job; defer startup until IPC is attached.
+export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly deferStart?: boolean; readonly onStatus?: (status: AgentStatus) => Effect.Effect<void> } = {}) =>
   Effect.gen(function* () {
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
@@ -71,6 +73,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
             } catch {}
           }
         })),
+        Effect.tap((result) => options.onStatus === undefined ? Effect.void : Effect.suspend(() => options.onStatus!(result.status)).pipe(Effect.catchCause(() => Effect.void))),
         Effect.map((result) => result.status),
       );
     const scheduler = yield* makeScheduler(job);
@@ -79,7 +82,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     // Finalizers run in reverse: the abort runs before the loop is interrupted, so a running apply
     // stops at its next step and records `cancelled` instead of being cut off mid-run.
     yield* Effect.addFinalizer(() => Effect.sync(() => shutdown.abort()));
-    yield* scheduler.trigger('start');
+    if (!options.deferStart) yield* scheduler.trigger('start');
 
     const context = yield* Effect.context<AgentStateStore | HistoryStore | DecisionsStore>();
     const withServices = <A, E>(effect: Effect.Effect<A, E, AgentStateStore | HistoryStore | DecisionsStore>) =>
@@ -124,6 +127,7 @@ export const runAgent = (input: {
   readonly agentVersion: string;
   readonly processes?: Layer.Layer<Processes>;
   readonly ipc?: boolean;
+  readonly notifications?: { readonly platform: string; readonly timeoutMs?: number };
   readonly logOutput?: AgentLogOutput;
   readonly onStarted?: () => void;
   readonly signal?: AbortSignal;
@@ -146,10 +150,12 @@ export const runAgent = (input: {
     if (input.onStarted) yield* Effect.sync(input.onStarted);
     const shutdown = new AbortController();
     const signal = input.signal ? AbortSignal.any([input.signal, shutdown.signal]) : shutdown.signal;
-    const handle = yield* startAgent(input.domains, { signal });
+    const notifier = input.notifications ? yield* makeNotifier(input.notifications) : undefined;
+    const handle = yield* startAgent(input.domains, { signal, deferStart: true, onStatus: notifier?.notify });
     if (input.ipc) {
       const session = yield* makeSession(handle, { signal, domains: input.domains });
-      yield* serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, onShutdown: () => shutdown.abort() });
+      yield* serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, notifier, onShutdown: () => shutdown.abort() });
     }
+    yield* Effect.forkScoped(handle.request('start'));
     yield* untilAborted(signal);
   })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes }), input.source)));

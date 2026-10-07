@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
-import { configDomain, DecisionsStore } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, HistoryStore, Processes } from '@nortuscc/machine';
 import { AgentStateStore, runAgent, SetupSource, startAgent, type AgentDomain } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, APPLIED, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
@@ -401,4 +401,52 @@ test('runAgent records a fatal startup failure before restoring captured output'
   assert.equal(stdout.write, originalOut);
   assert.equal(stderr.write, originalErr);
   assert.equal(existsSync(lockPath(m)), false);
+});
+
+test('status callback is awaited after listeners and cannot fail the next job', async () => {
+  const m = agentMachine();
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const order: string[] = [];
+  await m.run(Effect.scoped(Effect.gen(function* () {
+    const agent = yield* startAgent(() => m.domains, { deferStart: true, onStatus: () => Effect.sync(() => { order.push('notify'); }).pipe(Effect.andThen(Effect.die('unavailable'))) });
+    agent.onStatus(() => order.push('listener'));
+    yield* agent.request('inspect');
+    yield* agent.request('inspect');
+  })), fixture.source);
+  assert.deepEqual(order, ['listener', 'notify', 'listener', 'notify']);
+});
+
+test('runAgent enables notification delivery explicitly, refreshes History failures, and deduplicates on restart', { skip: process.platform === 'win32' }, async (t) => {
+  const m = agentMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  await m.trust();
+  await m.run(DecisionsStore.use((d) => d.record(accept(EFFORT))));
+  const commands: string[] = [];
+  const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.sock')), true, 'IPC attaches before startup delivery'); commands.push(command.cmd); return { code: 0, stdout: '' }; }) });
+  const dir = join(m.paths.stateRoot, 'agent');
+  const launch = async (enabled: boolean) => {
+    const controller = new AbortController();
+    const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true, processes, signal: controller.signal, ...(enabled ? { notifications: { platform: 'linux', timeoutMs: 30 } } : {}) }));
+    for (let i = 0; i < 200 && !existsSync(join(dir, 'agent.sock')); i++) await new Promise((r) => setTimeout(r, 10));
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    const inspect = () => converse(join(dir, 'agent.sock'), [{ version: 3, id: 'h', command: 'hello', token, client: 'cli' }, { version: 3, id: 'i', command: 'inspect' }]);
+    await inspect();
+    return { inspect, stop: async () => { controller.abort(); assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber)))); } };
+  };
+  let running = await launch(false);
+  await running.stop();
+  assert.equal(commands.length, 0);
+  running = await launch(true);
+  try {
+    assert.deepEqual(commands, ['notify-send']);
+    await m.run(HistoryStore.use((h) => h.append({ actor: 'app', kind: 'apply-finished', runId: 'manual-failed', steps: [{ key: 'x', outcome: 'failed', note: 'fixture' }], backup: null, result: 'done' })));
+    await running.inspect();
+    assert.equal(commands.length, 2);
+    await running.inspect();
+    assert.equal(commands.length, 2);
+  } finally { await running.stop(); }
+  running = await launch(true);
+  await running.stop();
+  assert.equal(commands.length, 2);
 });

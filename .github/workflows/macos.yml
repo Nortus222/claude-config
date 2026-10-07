@@ -1,0 +1,47 @@
+name: macos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DESKTOP_AGENT_RESOURCES: ${{ github.workspace }}/apps/desktop/src-tauri/resources/darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: npm ci
+      - name: Fetch the matching Bun license
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { appendFile, writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+
+          const version = execFileSync('bun', ['--version'], { encoding: 'utf8' }).trim();
+          const response = await fetch(`https://raw.githubusercontent.com/oven-sh/bun/bun-v${version}/LICENSE.md`);
+          if (!response.ok) throw new Error(`Bun ${version} license download failed: ${response.status}`);
+          const path = join(process.env.RUNNER_TEMP, 'bun-LICENSE.md');
+          await writeFile(path, await response.text());
+          await appendFile(process.env.GITHUB_ENV, `DESKTOP_BUN_LICENSE=${path}\n`);
+          NODE
+      - run: npm run resources -w apps/desktop
+      - run: npm test -w apps/desktop
+      - run: npm run test:bun -w apps/desktop
+      # Use the runner's Rust toolchain. Tests use fake posting and socket adapters.
+      - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: npm run desktop:build -w apps/desktop
+      # --smoke uses a canonical temporary HOME and a foreground agent owned by JavaScript.
+      - run: npm run smoke -w apps/desktop -- src-tauri/target/release/bundle/macos/Nortuscc.app

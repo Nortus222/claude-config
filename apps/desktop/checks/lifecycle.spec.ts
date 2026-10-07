@@ -41,7 +41,7 @@ const fixture = (t: { after: (f: () => void) => void }) => {
     }),
   });
   const base = agentLayer(paths, { processes });
-  const input = { paths, target, resources: join(home, 'resources'), agentVersion: 'v1', env: { HOME: home, PATH: '/fake/bin', NORTUSCC_STATE_DIR: stateRoot, NORTUSCC_TEST_SECRET: 'omit' } };
+  const input = { paths, target, resources: join(home, 'resources'), agentVersion: 'v1', appPath: join(home, 'Nortuscc.app/Contents/MacOS/Nortuscc'), env: { HOME: home, PATH: '/fake/bin', NORTUSCC_STATE_DIR: stateRoot, NORTUSCC_TEST_SECRET: 'omit' } };
   const read = (name: string) => JSON.parse(readFileSync(join(stateRoot, 'agent', name), 'utf8')) as Record<string, unknown>;
   const write = (name: string, value: unknown) => writeFileSync(join(stateRoot, 'agent', name), JSON.stringify(value));
   const run = (changes: Partial<typeof input> = {}, options: Parameters<typeof ensureAgent>[1] = {}) =>
@@ -66,7 +66,7 @@ const connection = (events: string[], version = 'v1', statuses: Array<WireStatus
 test('first install trusts the setup and records app ownership before starting its resource program', async (t) => {
   const f = fixture(t);
   assert.deepEqual(await f.run(), { stateRoot: f.paths.stateRoot });
-  assert.deepEqual(f.read('agent.json'), { ...DEFAULT_STATE, installedBy: 'app', agentVersion: 'v1' });
+  assert.deepEqual(f.read('agent.json'), { ...DEFAULT_STATE, installedBy: 'app', agentVersion: 'v1', appPath: f.input.appPath });
   assert.ok(f.registrations.every((s) => s.installedBy === 'app' && s.agentVersion === 'v1'));
   const unit = readFileSync(unitPath(f.target), 'utf8');
   assert.ok(unit.includes(join(f.input.resources, 'bun')));
@@ -320,4 +320,26 @@ test('failed app-owned registration and retry preserve mismatched own trust', as
   f.recover();
   await f.run({ agentVersion: 'v2' });
   assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/setups.json'), 'utf8'), trust);
+});
+
+test('recorded executable follows successful relocation but failed registration preserves the prior path', async (t) => {
+  const f = fixture(t);
+  await f.run();
+  const moved = join(f.home, 'Moved.app/Contents/MacOS/Nortuscc');
+  f.fail();
+  await assert.rejects(f.run({ appPath: moved }, { connect: async () => connection(f.events) }), /registration failed/);
+  assert.equal(f.read('agent.json').appPath, f.input.appPath);
+  f.recover();
+  await f.run({ appPath: moved });
+  assert.equal(f.read('agent.json').appPath, moved);
+  f.events.length = 0;
+  await f.run({ appPath: moved }, { connect: async () => connection(f.events) });
+  assert.deepEqual(f.events, ['close']);
+  assert.equal(f.read('agent.json').appPath, moved);
+});
+
+test('invalid executable refuses lifecycle before invoking service adapters', async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run({ appPath: 'relative/app' }), /absolute|app path/);
+  assert.deepEqual(f.events, []);
 });

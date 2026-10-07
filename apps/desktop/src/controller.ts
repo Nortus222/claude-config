@@ -23,6 +23,7 @@ export type ViewState = {
   readonly run: RunView | null;
   readonly pending: boolean;
   readonly detail: string;
+  readonly reviewRequested: number;
 };
 
 // The agent can own a manual run that began before this window connected.
@@ -56,7 +57,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
 export class MachineController {
   state: ViewState = {
     connection: 'connecting', inspection: null, status: null, hello: null, excluded: [], preview: null, run: null, pending: false,
-    detail: 'Connecting to the local agent',
+    detail: 'Connecting to the local agent', reviewRequested: 0,
   };
   private bridge: Bridge | null;
   private generation: number | null = null;
@@ -66,6 +67,8 @@ export class MachineController {
   private revision = 0;
   private starting = false;
   private early: RunEvent[] = [];
+  private reviewRefresh = false;
+  private earlyReviews = new Set<number>();
   private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
 
@@ -84,6 +87,7 @@ export class MachineController {
     if (this.disposed) return;
     this.state = { ...this.state, ...update };
     for (const listener of this.listeners) listener();
+    if (update.pending === false) this.refreshReview();
   }
   private owns(revision: number) {
     return !this.disposed && this.revision === revision;
@@ -93,6 +97,28 @@ export class MachineController {
   }
   private ready() {
     return this.bridge !== null && this.state.connection === 'connected' && !this.state.pending && this.state.run?.outcome !== 'running' && this.state.status?.applying !== true;
+  }
+
+  private requestReview() {
+    this.reviewRefresh = true;
+    this.update({ reviewRequested: this.state.reviewRequested + 1 });
+    this.refreshReview();
+  }
+
+  private refreshReview() {
+    if (!this.reviewRefresh || !this.ready()) return;
+    this.reviewRefresh = false;
+    void this.inspect();
+  }
+
+  private async takeReviewRequest(revision: number) {
+    try {
+      const reply = await this.bridge!.invoke('take_review_request');
+      if (this.current(revision, reply) && typeof reply.data === 'object' && reply.data !== null
+        && 'requested' in reply.data && reply.data.requested === true) this.requestReview();
+    } catch {
+      // Routing is optional; it cannot change the agent connection's health.
+    }
   }
 
   // Adopts an agent connection generation; a disconnect for it that arrived first wins.
@@ -114,6 +140,9 @@ export class MachineController {
       catch { throw new Error('Incompatible agent protocol. Restart or reinstall the agent explicitly.'); }
     }
     this.update({ connection: 'connected', detail, hello, status });
+    const review = this.earlyReviews.has(reply.generation);
+    this.earlyReviews.clear();
+    if (review) this.requestReview();
     return true;
   }
 
@@ -121,6 +150,8 @@ export class MachineController {
     if (!this.bridge) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.reviewRefresh = false;
+    this.earlyReviews.clear();
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
     this.update({ pending: true });
@@ -132,6 +163,7 @@ export class MachineController {
       }
       this.unlisten = unlisten;
       if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
+      await this.takeReviewRequest(revision);
       if (await this.loadStatus(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
@@ -175,6 +207,7 @@ export class MachineController {
 
   // Inspects within an action that already holds `pending`; a refusal leaves the app connected.
   private async load(revision: number) {
+    this.reviewRefresh = false;
     this.update({ detail: 'Inspecting this machine' });
     try {
       const reply = await this.bridge!.invoke('inspect_machine');
@@ -292,6 +325,8 @@ export class MachineController {
     if (!this.bridge || this.state.pending || (this.state.connection === 'connected' && (this.state.run?.outcome === 'running' || this.state.status?.applying === true))) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.reviewRefresh = false;
+    this.earlyReviews.clear();
     this.starting = false;
     this.early = [];
     this.earlyDisconnects.clear();
@@ -299,6 +334,7 @@ export class MachineController {
     this.update({ pending: true, connection: 'connecting', run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
+      await this.takeReviewRequest(revision);
       if (await this.loadStatus(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
@@ -309,6 +345,8 @@ export class MachineController {
 
   dispose() {
     this.disposed = true;
+    this.earlyReviews.clear();
+    this.reviewRefresh = false;
     this.revision++;
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
@@ -319,6 +357,7 @@ export class MachineController {
   private receive(event: HostEvent) {
     if (this.disposed) return;
     if (this.generation === null) {
+      if (event.event === 'review-requested' && this.earlyReviews.size < 16) this.earlyReviews.add(event.generation);
       if (event.event === 'disconnected' && this.earlyDisconnects.size < 16) this.earlyDisconnects.set(event.generation, event);
       if (event.event === 'status' && this.earlyStatuses.size < 16) this.earlyStatuses.set(event.generation, event.status);
       return;
@@ -335,9 +374,16 @@ export class MachineController {
       return;
     }
     if (this.state.connection !== 'connected') return;
+    if (event.event === 'review-requested') {
+      // The event routes immediately; consuming its native flag prevents replay on reconnect.
+      void this.bridge!.invoke('take_review_request').catch(() => {});
+      this.requestReview();
+      return;
+    }
     if (event.event === 'status') {
       const externalApplyEnded = this.state.status?.applying === true && this.state.run?.outcome !== 'running' && event.status.applying === false;
       this.showStatus(event.status);
+      this.refreshReview();
       if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
       return;
     }

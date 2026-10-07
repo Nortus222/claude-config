@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
-import { Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
+import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentError, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
 import { runDesktopEntry } from '../agent/main.ts';
 
@@ -30,7 +30,7 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   }) });
   let probes = 0;
   const input = {
-    args: ['--ensure'], resources,
+    args: ['--ensure', '--app', join(home, 'Nortuscc.app/Contents/MacOS/Nortuscc')], resources,
     env: { HOME: home, SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
     platform: 'darwin' as const, uid: 501, user: 'fixture', processes,
     probe: async () => { probes++; return { env: { HOME: home, PATH: '/login/bin', NORTUSCC_STATE_DIR: stateRoot } }; },
@@ -157,7 +157,9 @@ test('startup selectors introduced by the helper probe remain absent before the 
   const controller = new AbortController();
   let probed = false;
   const foreground = runDesktopEntry({
-    ...f.input, args: [], processes: undefined, signal: controller.signal,
+    ...f.input, args: [], processes: Layer.succeed(Processes, { run: (command) => command.cmd === 'git'
+      ? Processes.use((processes) => processes.run(command)).pipe(Effect.provide(nodeProcesses({ env: exported, inherit: 'stderr' })))
+      : Effect.succeed({ code: 1, stdout: '', stderr: 'notification unavailable in fixture' }) }), signal: controller.signal,
     env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
     probe: async (input) => {
       assert.equal(input.env.ZDOTDIR, undefined);
@@ -176,4 +178,29 @@ test('startup selectors introduced by the helper probe remain absent before the 
     controller.abort();
     assert.equal(await foreground, 0, f.stderr.join(''));
   }
+});
+
+test('paths helper resolves login environment without resources, registration or inspection', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.input.resources, 'runtime.json'));
+  rmSync(join(f.stateRoot, 'state.json'));
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--paths'] }), 0);
+  assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
+  assert.equal(f.probes(), 1);
+  assert.deepEqual(f.commands, []);
+  assert.equal(existsSync(join(f.stateRoot, 'agent')), false);
+  const currentRoot = join(f.home, 'current-login-state');
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--paths'],
+    probe: async () => ({ env: { HOME: f.home, NORTUSCC_STATE_DIR: currentRoot } }) }), 0);
+  assert.equal(f.stdout.at(-1), JSON.stringify({ stateRoot: currentRoot }) + '\n');
+  assert.equal(existsSync(currentRoot), false);
+});
+
+test('helper argv rejects missing, relative, extra and control-character app paths before probe', async (t) => {
+  const f = fixture(t);
+  for (const args of [ ['--ensure'], ['--restart', '--app', 'relative'], ['--ensure', '--app', '/app', '--paths'], ['--paths', '--app', '/app'], ['--ensure', '--app', '/bad\napp'] ]) {
+    assert.equal(await runDesktopEntry({ ...f.input, args }), 1);
+  }
+  assert.equal(f.probes(), 0);
+  assert.deepEqual(f.commands, []);
 });

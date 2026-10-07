@@ -108,6 +108,8 @@ export function machine(options: { repo?: 'checkout' | 'copy'; codexUnavailable?
 function fakeNativeInstallers({ codexUnavailable }: { codexUnavailable: boolean }): string {
   const dir = mkdtempSync(join(tmpdir(), 'nortuscc-fake-bin-'));
   temporaryRoots.push(dir);
+  // Foreground agents may notify on Linux; keep fixture delivery unavailable and inert.
+  writeFakeBin(dir, 'notify-send', '#!/usr/bin/env node\nprocess.exit(1);\n');
 
   const script = (name: string) => `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';

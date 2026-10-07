@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { Context, Effect, Layer, Semaphore } from 'effect';
 import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
 import { POLICIES, type Policy } from './policy-values.ts';
@@ -12,6 +12,7 @@ export type AgentState = {
   // Who installed the login service, and the agent version it runs; absent until an install.
   readonly installedBy?: 'app' | 'cli';
   readonly agentVersion?: string;
+  readonly appPath?: string;
 };
 
 // Before sign-in a machine notifies, and records that nobody chose that yet.
@@ -36,6 +37,7 @@ const decode = (raw: Readonly<Record<string, unknown>>): AgentState => ({
   paused: pausedOf(raw.paused),
   ...(raw.installedBy === 'app' || raw.installedBy === 'cli' ? { installedBy: raw.installedBy } : {}),
   ...(typeof raw.agentVersion === 'string' ? { agentVersion: raw.agentVersion } : {}),
+  ...(typeof raw.appPath === 'string' && isAbsolute(raw.appPath) ? { appPath: raw.appPath } : {}),
 });
 
 export class AgentStateStore extends Context.Service<
@@ -47,7 +49,7 @@ export class AgentStateStore extends Context.Service<
 >()('agent/AgentStateStore') {}
 
 // <stateRoot>/agent/agent.json. A corrupt file reads as the default, as state.json does. Writes keep
-// unknown fields; an update that leaves out installedBy or agentVersion removes it. Updates run one
+// unknown fields; an update that leaves out installedBy, agentVersion or appPath removes it. Updates run one
 // at a time, so the job's pause and a caller's policy change never overwrite each other.
 export const agentStateStore = Layer.effect(
   AgentStateStore,
@@ -72,7 +74,7 @@ export const agentStateStore = Layer.effect(
           const before = yield* raw;
           const next = f(decode(before));
           // Owned optional fields come only from `next`, so leaving one out deletes it.
-          const { installedBy: _installedBy, agentVersion: _agentVersion, ...kept } = before;
+          const { installedBy: _installedBy, agentVersion: _agentVersion, appPath: _appPath, ...kept } = before;
           yield* fs.writeTextAtomic(path, JSON.stringify({ ...kept, ...next }, null, 2) + '\n');
           return next;
         }).pipe(lock.withPermit),

@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
 import { MachineController, canCancel, type StepStatus } from './controller.ts';
@@ -11,11 +11,17 @@ const provenance = (item: WireObserved) => (item.from ? `${item.from.layer} · $
 
 function App() {
   const [controller] = useState(() => new MachineController(nativeAvailable() ? nativeBridge : null));
+  const reviewTarget = useRef<HTMLHeadingElement>(null);
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
   useEffect(() => {
     void controller.connect();
     return () => controller.dispose();
   }, [controller]);
+  useEffect(() => {
+    if (state.reviewRequested === 0) return;
+    reviewTarget.current?.focus();
+    reviewTarget.current?.scrollIntoView({ block: 'start' });
+  }, [state.reviewRequested]);
   const running = state.run?.outcome === 'running';
   const applying = running || state.status?.applying === true;
   const ready = state.connection === 'connected' && !state.pending && !applying;
@@ -30,7 +36,7 @@ function App() {
       <header>
         <div>
           <p className="eyebrow">NORTUSCC / THIS MACHINE</p>
-          <h1>Machine</h1>
+          <h1 ref={reviewTarget} tabIndex={-1}>Review &amp; apply</h1>
           <p className="intro">Inspect this machine, preview the changes, then apply them with backups.</p>
         </div>
         <span className={`connection ${state.connection}`}>
