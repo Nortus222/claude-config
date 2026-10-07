@@ -3,18 +3,20 @@ import { join } from 'node:path';
 import { Effect } from 'effect';
 import type { DesiredConfig, ResolvedFile, Target } from '@nortuscc/profile-engine';
 import {
-  configFileId, hookCommand, inspect, knownMarketplaces, probeUndeclared, readCodexState, readExposure, SKILL_AGENTS,
-  skillExposure, userScopeInstalls, type InstalledIntegrations, type Observed,
+  configFileId, Fs, hookCommand, inspect, knownMarketplaces, parseState, probeUndeclared, readCodexState, readExposure, SKILL_AGENTS,
+  skillExposure, userScopeInstalls, type InstalledIntegrations, type Observed, type Processes,
 } from '@nortuscc/machine';
+import { incoming, revParse } from '@nortuscc/sync';
 import { cliVersion, type CliVersion } from '../cli-version.ts';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
-import { CHECKOUT, domainsFor, forTargets, openMachine, runCommand, type CliServices, type CodexStateRead, type Opened } from '../machine.ts';
+import { CHECKOUT, domainsFor, forTargets, openDesired, runCommand, type CliServices, type CodexStateRead, type Opened } from '../machine.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { parseTarget, selectedTargets, type TargetChoice } from '../targets.ts';
 
-// `nortuscc status`: read-only by construction. It writes no state, overrides or backups; the one
-// thing it can change is nortuscc itself, and only after an explicit yes.
+// `nortuscc status`: read-only by construction. It writes no state, overrides or backups (held items
+// compose in a temporary directory outside the state root); the one thing it can change is nortuscc
+// itself, and only after an explicit yes.
 
 export type StatusDeps = {
   cliState?: (root: string) => CliVersion;
@@ -96,6 +98,37 @@ export function inspectIntegrations(opened: Opened, targets: ReadonlyArray<Targe
   });
 }
 
+// How many incoming items a raw `git pull` brought in that no sync has decided: zero unless
+// state.json records an applied commit and HEAD has moved past it. Reads state.json without
+// StateStore, whose read can migrate a legacy lock: status writes nothing.
+const waitingItems = (opened: Opened) =>
+  Effect.gen(function* () {
+    const text = yield* (yield* Fs).readText(join(opened.paths.stateRoot, 'state.json'));
+    const applied = text === undefined ? undefined : parseState(text)?.applied?.commit;
+    if (applied === undefined) return 0;
+    const head = yield* revParse(opened.checkout, 'HEAD');
+    if (head === undefined || head === applied) return 0;
+    const { changes } = yield* incoming({ repo: opened.checkout, applied, head, holds: opened.held, overrides: opened.overrides.value });
+    return changes.length;
+  });
+
+// The sync section: held items, and items waiting for `nortuscc sync`. Holds alone are not drift.
+function syncSection(opened: Opened): Effect.Effect<{ lines: string[]; waiting: number }, never, Fs | Processes> {
+  return Effect.gen(function* () {
+    const lines: string[] = [];
+    const held = Object.keys(opened.held).sort();
+    if (held.length > 0) lines.push(formatRow('held', String(held.length), held.join(', ')));
+    const found = yield* Effect.result(waitingItems(opened));
+    if (found._tag === 'Failure') {
+      lines.push(formatRow('waiting', 'unknown', found.failure.message));
+      return { lines, waiting: 0 };
+    }
+    const waiting = found.success;
+    if (waiting > 0) lines.push(`  ${waiting} item${waiting === 1 ? ' waits' : 's wait'} for you: run nortuscc sync`);
+    return { lines, waiting };
+  });
+}
+
 // The cli, config, integrations, skills and undeclared sections, then advice. Returns 1 when the
 // machine is out of agreement (or, with --strict, has undeclared findings), else 0.
 function report(opened: Opened, input: {
@@ -108,7 +141,7 @@ function report(opened: Opened, input: {
     const domains = domainsFor(paths);
 
     // First: everything below is computed by this checkout's code, so a stale checkout reports stale.
-    const cli = (deps.cliState ?? ((root) => cliVersion({ root })))(paths.repo);
+    const cli = (deps.cliState ?? ((root) => cliVersion({ root })))(opened.checkout);
     if (cli.state === 'behind' || cli.state === 'unknown') {
       const row = cli.state === 'behind'
         ? formatRow('nortuscc', 'behind', `${cli.remote}/${cli.branch} is at ${cli.sha}`)
@@ -120,13 +153,17 @@ function report(opened: Opened, input: {
       const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY);
       const update = isTTY ? yield* Effect.promise(() => (deps.confirm ?? realConfirm)('Update nortuscc now?', { isTTY })) : false;
       if (update) {
-        const code = yield* Effect.promise(() => (deps.pull ?? spawnPull)(paths.repo, target));
+        const code = yield* Effect.promise(() => (deps.pull ?? spawnPull)(opened.checkout, target));
         if (code !== 0) return code;
         // No report from the modules this process already loaded: they are the old ones.
         process.stdout.write('\nnortuscc updated. Re-run `nortuscc status` to report on the new version.\n');
         return 0;
       }
     }
+
+    // sync: held items and items waiting for a sync; printed only when there is something to say.
+    const sync = yield* syncSection(opened);
+    if (sync.lines.length > 0) process.stdout.write('\n' + section('sync', sync.lines));
 
     // config. A skills-only machine reports the section as skipped: silence would read as clean.
     const { manageConfig, configTargets } = resolveConfigMode(input.mode, opened.overrides.value);
@@ -277,6 +314,7 @@ function report(opened: Opened, input: {
     const cliBehind = cli.state === 'behind';
     // An undeclared item alone is informational; --strict is what makes it actionable.
     const otherDirty = cliBehind
+      || sync.waiting > 0
       || actionable.length > 0
       || configErrors.length > 0
       || manifestErrors.length > 0
@@ -316,8 +354,8 @@ export async function run(args: string[] = [], deps: StatusDeps = {}): Promise<n
     console.error(`nortuscc: ${error}`);
     return 2;
   }
-  return runCommand(() => Effect.gen(function* () {
-    const opened = yield* openMachine({ mode });
+  return runCommand(() => Effect.scoped(Effect.gen(function* () {
+    const opened = yield* openDesired({ mode });
     return yield* report(opened, { target, rest, mode, deps }).pipe(Effect.provide(opened.layer));
-  }));
+  })));
 }

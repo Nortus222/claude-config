@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Black-box harness: every run gets its own home, state, repo and fake
@@ -266,4 +266,28 @@ export function runCli(
     });
     child.stdin?.end(options.input ?? '');
   });
+}
+
+// Commits `files` on origin from a second clone, as another machine pushing would. Answers the commit.
+export function pushUpstream(m: Machine, files: Record<string, string>, message = 'upstream change'): string {
+  const origin = join(m.home, 'origin.git');
+  const other = join(m.home, 'other');
+  if (!existsSync(other)) git(m.home, 'clone', '-q', origin, other);
+  else git(other, 'pull', '-q');
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(other, path)), { recursive: true });
+    writeFileSync(join(other, path), text);
+  }
+  git(other, 'add', '.');
+  git(other, 'commit', '-qm', message);
+  git(other, 'push', '-q');
+  return git(other, 'rev-parse', 'HEAD');
+}
+
+// Configuration applied and every default integration and required skill installed.
+export async function syncedMachine(m: Machine): Promise<void> {
+  for (const args of [['apply'], ['apply', '--install', '--yes']]) {
+    const result = await runCli(m, args);
+    if (result.code !== 0) throw new Error(`nortuscc ${args.join(' ')} exited ${result.code}: ${result.stderr}`);
+  }
 }

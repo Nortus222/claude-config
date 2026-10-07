@@ -5,7 +5,7 @@ import { inspect, OverridesStore, plan, selectAll, StateStore } from '@nortuscc/
 import { CONFLICT_NOTE, fileOutcomes, UNPARSEABLE_NOTE } from '../config-rows.ts';
 import { parseConfigMode, persisted, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
-import { domainsFor, openMachine, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
+import { domainsFor, openDesired, refuseInvalidOverrides, runCommand, runPlan, type CliServices, type Opened } from '../machine.ts';
 import { formatRow, section } from '../report.ts';
 import { parseTarget, selectedTargets } from '../targets.ts';
 
@@ -119,8 +119,8 @@ export async function run(args: string[] = []): Promise<number> {
   if (skillsAlias && !install) process.stdout.write(DEPRECATED_SKILLS);
   const targets = selectedTargets(target);
 
-  return runCommand((signal) => Effect.gen(function* () {
-    const opened = yield* openMachine({ mode });
+  return runCommand((signal) => Effect.scoped(Effect.gen(function* () {
+    const opened = yield* openDesired({ mode });
     if (refuseInvalidOverrides(opened.overrides)) return 1;
     return yield* Effect.gen(function* () {
       yield* recordChoice(opened, mode);
@@ -138,7 +138,7 @@ export async function run(args: string[] = []): Promise<number> {
         signal,
       });
     }).pipe(Effect.provide(opened.layer));
-  }));
+  })));
 }
 
 // Records --skills-only / --no-skills-only in overrides.json before anything is planned, and moves
