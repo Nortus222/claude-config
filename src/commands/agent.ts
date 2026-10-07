@@ -58,7 +58,8 @@ const install = (linger: boolean) =>
       yield* installService(target, program, { linger });
       yield* state.update((s) => ({ ...s, installedBy: 'cli', agentVersion: checkoutVersion() }));
       console.log(`agent installed: ${unitPath(target)}`);
-      console.log(`log: ${program.logPath}`);
+      // Task Scheduler cannot redirect the agent's output, so nothing writes the log on Windows.
+      if (target.platform !== 'win32') console.log(`log: ${program.logPath}`);
       return 0;
     }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
   });

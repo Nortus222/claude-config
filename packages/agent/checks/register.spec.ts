@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Effect, Exit, Layer } from 'effect';
-import { nodeFs, Processes } from '@nortuscc/machine';
+import { nodeFs, Processes, type Command } from '@nortuscc/machine';
 import {
   installService, renderLaunchAgent, renderScheduledTask, renderSystemdUnit, restartService, ServiceFailed, serviceInstalled,
   uninstallService, unitPath, type ServiceProgram, type ServiceTarget,
@@ -23,18 +23,25 @@ const targetFor = (platform: ServiceTarget['platform']): ServiceTarget => {
   return { platform, home, uid: 501, user: 'me', stateRoot: join(home, '.config', 'nortuscc') };
 };
 
-// Records every argv and answers its exit code from `codes` (keyed by the joined argv), else 0.
-const fakeProcesses = (codes: Readonly<Record<string, number>> = {}) => {
+// Records every argv and answers its exit code from `codes` (keyed by the joined argv), else 0. An
+// array answers successive calls in turn, its last code repeating. A failure writes `refused` to stderr.
+const fakeProcesses = (codes: Readonly<Record<string, number | readonly number[]>> = {}) => {
   const calls: string[] = [];
+  const commands: Command[] = [];
   const layer = Layer.succeed(Processes, {
     run: (command) => Effect.sync(() => {
       const line = [command.cmd, ...command.args].join(' ');
+      const answer = codes[line] ?? 0;
+      const code = typeof answer === 'number' ? answer : answer[Math.min(calls.filter((c) => c === line).length, answer.length - 1)]!;
       calls.push(line);
-      return { code: codes[line] ?? 0, stdout: '' };
+      commands.push(command);
+      return { code, stdout: '', stderr: code === 0 ? '' : '  refused\n' };
     }),
   });
-  return { calls, layer };
+  return { calls, commands, layer };
 };
+
+const fast = { retryDelayMs: 0 };
 
 const run = <A, E>(effect: Effect.Effect<A, E, any>, processes: Layer.Layer<Processes>) =>
   Effect.runPromiseExit(effect.pipe(Effect.provide(Layer.merge(nodeFs, processes))) as Effect.Effect<A, E>);
@@ -72,14 +79,40 @@ test('darwin install writes the plist and bootstraps it', async () => {
   assert.equal(await ok(serviceInstalled(t), p.layer), true);
 });
 
-test('darwin install succeeds when bootout finds nothing loaded, and fails naming bootstrap when it fails', async () => {
+test('darwin install succeeds when bootout finds nothing loaded, and fails naming bootstrap and its stderr after 5 attempts', async () => {
   const t = targetFor('darwin');
   const P = unitPath(t);
   await ok(installService(t, program), fakeProcesses({ [`launchctl bootout ${D}/${L}`]: 3 }).layer);
-  const error = await ok(Effect.flip(installService(t, program)), fakeProcesses({ [`launchctl bootstrap ${D} ${P}`]: 5 }).layer);
+  const p = fakeProcesses({ [`launchctl bootstrap ${D} ${P}`]: 5 });
+  const error = await ok(Effect.flip(installService(t, program, fast)), p.layer);
   assert.ok(error instanceof ServiceFailed);
   assert.match(error.command, /^launchctl bootstrap/);
   assert.equal(error.code, 5);
+  assert.equal(error.reason, 'refused');
+  assert.equal(p.calls.filter((c) => c.startsWith('launchctl bootstrap')).length, 5);
+});
+
+// bootout returns before the old job is gone, so bootstrap can fail (exit 5 or 37) for a moment.
+test('darwin install retries a bootstrap that fails while the old job tears down', async () => {
+  const t = targetFor('darwin');
+  const P = unitPath(t);
+  const p = fakeProcesses({ [`launchctl bootstrap ${D} ${P}`]: [37, 5, 0] });
+  await ok(installService(t, program, fast), p.layer);
+  assert.deepEqual(p.calls, [`launchctl bootout ${D}/${L}`, ...Array(3).fill(`launchctl bootstrap ${D} ${P}`)]);
+});
+
+test('service commands capture stderr, so an ignored failure prints nothing', async () => {
+  const t = targetFor('darwin');
+  const p = fakeProcesses({ [`launchctl bootout ${D}/${L}`]: 3 });
+  await ok(installService(t, program), p.layer);
+  assert.ok(p.commands.every((c) => c.output === 'capture' && c.stderr === 'capture'), JSON.stringify(p.commands));
+});
+
+test('a failure with empty stderr reads as a non-zero exit', async () => {
+  const t = targetFor('linux');
+  const silent = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 1, stdout: '', stderr: ' \n' }) });
+  const error = await ok(Effect.flip(installService(t, program)), silent);
+  assert.equal(error.reason, 'non-zero exit');
 });
 
 test('linux install writes the unit, reloads, enables and restarts it', async () => {
@@ -102,13 +135,16 @@ test('linux install with linger enables lingering first', async () => {
   assert.equal(p.calls.length, 4);
 });
 
-test('win32 install writes the task XML as UTF-16LE, creates and runs the task', async () => {
+// IgnoreNew makes /Run a no-op while an old instance runs, so the old one is ended first.
+test('win32 install writes the task XML as UTF-16LE, ends any running task, then creates and runs it', async () => {
   const t = targetFor('win32');
-  const p = fakeProcesses();
+  const p = fakeProcesses({ 'schtasks /End /TN nortuscc-agent': 1 });
   await ok(installService(t, program), p.layer);
   const P = unitPath(t);
   assert.equal(utf16(P), renderScheduledTask(program, 'me'));
-  assert.deepEqual(p.calls, [`schtasks /Create /TN nortuscc-agent /XML ${P} /F`, 'schtasks /Run /TN nortuscc-agent']);
+  assert.deepEqual(p.calls, [
+    'schtasks /End /TN nortuscc-agent', `schtasks /Create /TN nortuscc-agent /XML ${P} /F`, 'schtasks /Run /TN nortuscc-agent',
+  ]);
 });
 
 test('darwin uninstall boots the agent out and removes the plist', async () => {
@@ -121,10 +157,10 @@ test('darwin uninstall boots the agent out and removes the plist', async () => {
   assert.equal(await ok(serviceInstalled(t), p.layer), false);
 });
 
-test('linux uninstall disables the unit, removes it and reloads', async () => {
+test('linux uninstall disables the unit, removes it and reloads, even with no user bus', async () => {
   const t = targetFor('linux');
   await ok(installService(t, program), fakeProcesses().layer);
-  const p = fakeProcesses({ 'systemctl --user disable --now nortuscc-agent.service': 1 });
+  const p = fakeProcesses({ 'systemctl --user disable --now nortuscc-agent.service': 1, 'systemctl --user daemon-reload': 1 });
   await ok(uninstallService(t), p.layer);
   assert.deepEqual(p.calls, ['systemctl --user disable --now nortuscc-agent.service', 'systemctl --user daemon-reload']);
   assert.equal(existsSync(unitPath(t)), false);
@@ -146,9 +182,9 @@ test('darwin restart kickstarts an unchanged agent, and re-bootstraps a changed 
   const same = fakeProcesses();
   await ok(restartService(t, program), same.layer);
   assert.deepEqual(same.calls, [`launchctl kickstart -k ${D}/${L}`]);
-  const different = fakeProcesses();
-  await ok(restartService(t, changed), different.layer);
-  assert.deepEqual(different.calls, [`launchctl bootout ${D}/${L}`, `launchctl bootstrap ${D} ${P}`]);
+  const different = fakeProcesses({ [`launchctl bootstrap ${D} ${P}`]: [5, 0] });
+  await ok(restartService(t, changed, fast), different.layer);
+  assert.deepEqual(different.calls, [`launchctl bootout ${D}/${L}`, `launchctl bootstrap ${D} ${P}`, `launchctl bootstrap ${D} ${P}`]);
   assert.equal(readFileSync(P, 'utf8'), renderLaunchAgent(L, changed));
 });
 
@@ -164,7 +200,7 @@ test('linux restart only restarts an unchanged unit, and reloads a changed one f
   assert.equal(readFileSync(unitPath(t), 'utf8'), renderSystemdUnit(changed));
 });
 
-test('win32 restart ends and runs an unchanged task, and re-creates a changed one first', async () => {
+test('win32 restart ends and runs an unchanged task, and re-creates a changed one after ending it', async () => {
   const t = targetFor('win32');
   const P = unitPath(t);
   await ok(installService(t, program), fakeProcesses().layer);
@@ -174,7 +210,7 @@ test('win32 restart ends and runs an unchanged task, and re-creates a changed on
   const different = fakeProcesses();
   await ok(restartService(t, changed), different.layer);
   assert.deepEqual(different.calls, [
-    `schtasks /Create /TN nortuscc-agent /XML ${P} /F`, 'schtasks /End /TN nortuscc-agent', 'schtasks /Run /TN nortuscc-agent',
+    'schtasks /End /TN nortuscc-agent', `schtasks /Create /TN nortuscc-agent /XML ${P} /F`, 'schtasks /Run /TN nortuscc-agent',
   ]);
   assert.equal(utf16(P), renderScheduledTask(changed, 'me'));
 });

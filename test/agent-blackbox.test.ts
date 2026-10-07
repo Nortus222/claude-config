@@ -13,14 +13,14 @@ const TOOLS = linux ? ['systemctl', 'loginctl'] : ['launchctl'];
 const serviceLog = (m: Machine) => join(m.home, 'service.log');
 
 // A machine whose service tools are fakes that log their argv, proven to shadow the real ones.
-// `failing` makes every call exit 5 with a reason.
+// `failing` makes every call exit 5 with a reason on stderr.
 function serviceMachine(failing = false): Machine {
   const m = machine();
   for (const tool of TOOLS) {
     writeFakeBin(m.bin, tool, `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 appendFileSync(${JSON.stringify(serviceLog(m))}, JSON.stringify({ cmd: ${JSON.stringify(tool)}, args: process.argv.slice(2) }) + '\\n');
-${failing ? "process.stdout.write('refused'); process.exit(5);" : ''}
+${failing ? "process.stderr.write('refused\\n'); process.exit(5);" : ''}
 `);
     const found = execFileSync('which', [tool], { env: cliEnv(m), encoding: 'utf8' }).trim();
     assert.equal(found, join(m.bin, tool), `${tool} must resolve to the fake`);
@@ -225,7 +225,7 @@ test('sync that leaves the checkout where it was does not restart the agent', { 
 test('a failed restart warns and never fails the sync', { skip }, async () => {
   const m = serviceMachine();
   assert.equal((await runCli(m, ['agent', 'install'])).code, 0);
-  for (const tool of TOOLS) writeFakeBin(m.bin, tool, "#!/usr/bin/env node\nprocess.stdout.write('refused'); process.exit(5);\n");
+  for (const tool of TOOLS) writeFakeBin(m.bin, tool, "#!/usr/bin/env node\nprocess.stderr.write('refused\\n'); process.exit(5);\n");
   pushUpstream(m, { 'claude/CLAUDE.md': '# moved\n' });
   const result = await runCli(m, ['sync', '--yes']);
   assert.equal(result.code, 0, result.stderr);

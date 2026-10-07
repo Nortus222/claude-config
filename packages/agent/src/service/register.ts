@@ -49,7 +49,7 @@ const render = (target: ServiceTarget, program: ServiceProgram) =>
 const fsAttempt = <A>(op: string, path: string, run: () => Promise<A>) =>
   Effect.tryPromise({ try: run, catch: (err) => new FsFailed({ op, path, reason: err instanceof Error ? err.message : String(err) }) });
 
-const BOM = '﻿';
+const BOM = '\uFEFF';
 
 // Fs.writeTextAtomic writes UTF-8, but the task XML declares UTF-16 and schtasks /XML reads it as
 // such, so on Windows the file is written here as UTF-16LE with a byte-order mark.
@@ -66,7 +66,7 @@ const readUnit = (target: ServiceTarget) =>
   target.platform === 'win32'
     ? fsAttempt('read', unitPath(target), () =>
       readFile(unitPath(target)).then(
-        (bytes) => bytes.toString('utf16le').replace(/^﻿/, ''),
+        (bytes) => bytes.toString('utf16le').replace(/^\uFEFF/, ''),
         (err: NodeJS.ErrnoException) => {
           if (err.code === 'ENOENT') return undefined;
           throw err;
@@ -74,16 +74,17 @@ const readUnit = (target: ServiceTarget) =>
       ))
     : Fs.use((fs) => fs.readText(unitPath(target)));
 
-// Runs argv; a non-zero exit fails unless `ignored`. A command that cannot start fails too.
+// Runs argv with its output captured, so an ignored failure prints nothing; a non-zero exit fails,
+// carrying stderr, unless `ignored`. A command that cannot start fails too.
 const exec = (argv: ReadonlyArray<string>, ignored = false) =>
   Effect.gen(function* () {
     const [cmd = '', ...args] = argv;
     const command = argv.join(' ');
-    const done = yield* Processes.use((p) => p.run({ cmd, args, output: 'capture' })).pipe(
+    const done = yield* Processes.use((p) => p.run({ cmd, args, output: 'capture', stderr: 'capture' })).pipe(
       Effect.mapError((err) => new ServiceFailed({ command, code: -1, reason: err.message })),
     );
     if (done.code !== 0 && !ignored) {
-      return yield* new ServiceFailed({ command, code: done.code, reason: done.stdout.trim() || 'non-zero exit' });
+      return yield* new ServiceFailed({ command, code: done.code, reason: done.stderr?.trim() || 'non-zero exit' });
     }
   });
 
@@ -92,13 +93,40 @@ const service = (target: ServiceTarget) => `${domain(target)}/${labelOf(target)}
 const systemctl = (...args: string[]) => ['systemctl', '--user', ...args];
 const schtasks = (...args: string[]) => ['schtasks', ...args];
 
+export type ServiceOptions = {
+  readonly retryDelayMs?: number; // between launchctl bootstrap attempts; default 400 ms
+};
+
+const BOOTSTRAP_ATTEMPTS = 5;
+
+// Replaces the loaded job with the unit on disk. bootout returns before the old job has gone, and a
+// bootstrap meanwhile fails (exit 5 or 37), so bootstrap is retried a few times before it fails.
+const rebootstrap = (target: ServiceTarget, options: ServiceOptions) =>
+  Effect.gen(function* () {
+    yield* exec(['launchctl', 'bootout', service(target)], true);
+    const bootstrap = exec(['launchctl', 'bootstrap', domain(target), unitPath(target)]);
+    for (let attempt = 1; attempt < BOOTSTRAP_ATTEMPTS; attempt++) {
+      if ((yield* Effect.result(bootstrap))._tag === 'Success') return;
+      yield* Effect.sleep(options.retryDelayMs ?? 400);
+    }
+    yield* bootstrap;
+  });
+
+// Replaces the task with the XML on disk and starts it. The old instance is ended first: with
+// MultipleInstancesPolicy IgnoreNew, /Run does nothing while it still runs.
+const recreateTask = (target: ServiceTarget) =>
+  Effect.gen(function* () {
+    yield* exec(schtasks('/End', '/TN', SCHEDULED_TASK), true);
+    yield* exec(schtasks('/Create', '/TN', SCHEDULED_TASK, '/XML', unitPath(target), '/F'));
+    yield* exec(schtasks('/Run', '/TN', SCHEDULED_TASK));
+  });
+
 // Loads the written unit into the service manager and starts it.
-const register = (target: ServiceTarget) =>
+const register = (target: ServiceTarget, options: ServiceOptions) =>
   Effect.gen(function* () {
     switch (target.platform) {
       case 'darwin':
-        yield* exec(['launchctl', 'bootout', service(target)], true);
-        yield* exec(['launchctl', 'bootstrap', domain(target), unitPath(target)]);
+        yield* rebootstrap(target, options);
         return;
       case 'linux':
         yield* exec(systemctl('daemon-reload'));
@@ -106,19 +134,18 @@ const register = (target: ServiceTarget) =>
         yield* exec(systemctl('restart', SYSTEMD_UNIT));
         return;
       case 'win32':
-        yield* exec(schtasks('/Create', '/TN', SCHEDULED_TASK, '/XML', unitPath(target), '/F'));
-        yield* exec(schtasks('/Run', '/TN', SCHEDULED_TASK));
+        yield* recreateTask(target);
         return;
     }
   });
 
 /** Writes the unit and registers it to start at login, starting it now. `linger` (Linux) keeps it running without a session. */
-export const installService = (target: ServiceTarget, program: ServiceProgram, options: { readonly linger?: boolean } = {}) =>
+export const installService = (target: ServiceTarget, program: ServiceProgram, options: ServiceOptions & { readonly linger?: boolean } = {}) =>
   Effect.gen(function* () {
     const text = yield* render(target, program);
     if (target.platform === 'linux' && options.linger) yield* exec(['loginctl', 'enable-linger', target.user]);
     yield* writeUnit(target, text);
-    yield* register(target);
+    yield* register(target, options);
   });
 
 /** Stops and unregisters the service and removes its unit; an absent service is not an error. */
@@ -133,7 +160,8 @@ export const uninstallService = (target: ServiceTarget) =>
       case 'linux':
         yield* exec(systemctl('disable', '--now', SYSTEMD_UNIT), true);
         yield* fs.remove(unitPath(target));
-        yield* exec(systemctl('daemon-reload'));
+        // Ignored, so an uninstall with no user bus still succeeds once the unit is gone.
+        yield* exec(systemctl('daemon-reload'), true);
         return;
       case 'win32':
         yield* exec(schtasks('/End', '/TN', SCHEDULED_TASK), true);
@@ -144,7 +172,7 @@ export const uninstallService = (target: ServiceTarget) =>
   });
 
 /** Rewrites the unit when its text changed, then restarts the running service. */
-export const restartService = (target: ServiceTarget, program: ServiceProgram) =>
+export const restartService = (target: ServiceTarget, program: ServiceProgram, options: ServiceOptions = {}) =>
   Effect.gen(function* () {
     const text = yield* render(target, program);
     const changed = (yield* readUnit(target)) !== text;
@@ -152,8 +180,7 @@ export const restartService = (target: ServiceTarget, program: ServiceProgram) =
     switch (target.platform) {
       case 'darwin':
         if (changed) {
-          yield* exec(['launchctl', 'bootout', service(target)], true);
-          yield* exec(['launchctl', 'bootstrap', domain(target), unitPath(target)]);
+          yield* rebootstrap(target, options);
         } else {
           yield* exec(['launchctl', 'kickstart', '-k', service(target)]);
         }
@@ -163,9 +190,12 @@ export const restartService = (target: ServiceTarget, program: ServiceProgram) =
         yield* exec(systemctl('restart', SYSTEMD_UNIT));
         return;
       case 'win32':
-        if (changed) yield* exec(schtasks('/Create', '/TN', SCHEDULED_TASK, '/XML', unitPath(target), '/F'));
-        yield* exec(schtasks('/End', '/TN', SCHEDULED_TASK), true);
-        yield* exec(schtasks('/Run', '/TN', SCHEDULED_TASK));
+        if (changed) {
+          yield* recreateTask(target);
+        } else {
+          yield* exec(schtasks('/End', '/TN', SCHEDULED_TASK), true);
+          yield* exec(schtasks('/Run', '/TN', SCHEDULED_TASK));
+        }
         return;
     }
   });
