@@ -16,3 +16,4 @@ export * from './policy.ts';
 export * from './agent.ts';
 export * from './service/units.ts';
 export * from './service/register.ts';
+export * from './ipc/protocol.ts';
