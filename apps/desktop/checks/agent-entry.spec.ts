@@ -205,3 +205,23 @@ test('helper argv rejects missing, relative, extra and control-character app pat
   assert.equal(f.probes(), 0);
   assert.deepEqual(f.commands, []);
 });
+
+test('foreground hosted opt-in comes from login environment and invalid URL keeps IPC available', {
+  skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
+}, async (t) => {
+  const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
+    probe: async () => ({ env: { HOME: f.home, PATH: '/fake', NORTUSCC_STATE_DIR: f.stateRoot, NORTUSCC_HOSTED_URL: 'http://invalid/v1' } }) });
+  let conn: AgentConnection | undefined;
+  for (let n = 0; n < 100 && !conn; n++) {
+    try { conn = await connectAgent(f.paths, { timeoutMs: 50 }); } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.ok(conn, f.stderr.join(''));
+  try {
+    const hosted = await conn.request<{ enabled: boolean; error: string }>({ command: 'hostedState' });
+    assert.equal(hosted.enabled, true); assert.equal(hosted.error, 'invalid_url');
+    assert.ok(f.commands.every((c) => c.cmd === 'git'), 'no keychain or service manager');
+    await conn.request({ command: 'shutdown' });
+  } finally { conn.close(); controller.abort(); }
+  assert.equal(await running, 0);
+});

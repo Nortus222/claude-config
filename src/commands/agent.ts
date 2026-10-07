@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
 import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
-  agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
+  decodeWireStatus, decodeHostedState, decodeSignInResult, decodeRequest, agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
   type ApplyResult, type InspectResult, type Policy, type PreviewResult, type RunEvent, type RunProgress, type ServiceFailed,
   type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
@@ -22,6 +22,13 @@ const USAGE = `Usage: nortuscc agent install [--linger] | uninstall | run | stat
   agent status               show the running agent's policy, pause and pending items
   agent review               choose pending, held and drifted items and apply them (needs a terminal)
   agent resume               resume a paused agent
+  agent hosted | sign-in [name] | sign-out | sync
+                             account state, device sign-in, sign-out or immediate sync
+  agent trust <setupId>       trust an offered setup on this machine
+  agent decide <setupId> <itemId> <revision> <accept|skip>
+                             record an account choice, including while offline
+  agent machine <name|report-status> <value>
+                             change the display name or reporting (on/off)
   agent policy <auto-apply|notify|manual>
                              set how the agent treats accepted items`;
 
@@ -121,6 +128,7 @@ async function runForeground(): Promise<number> {
         try { redirected = fstatSync(process.stdout.fd).isFile(); } catch {}
       }
       return yield* runAgent({
+        ...(process.env.NORTUSCC_HOSTED_URL === undefined ? {} : { hosted: { url: process.env.NORTUSCC_HOSTED_URL, platform: process.platform } }),
         paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
         ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
         onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
@@ -343,6 +351,48 @@ const reviewWith = async (conn: AgentConnection, signal: AbortSignal, deps: Agen
 export async function run(args: string[] = [], deps: AgentDeps = {}): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
+    case 'hosted':
+    case 'sign-in':
+    case 'sign-out':
+    case 'sync':
+    case 'trust':
+    case 'decide':
+    case 'machine': {
+      let command: Record<string, unknown>;
+      if (sub === 'hosted' || sub === 'sign-out' || sub === 'sync') {
+        if (rest.length) return usage('this command takes no arguments');
+        command = { command: sub === 'hosted' ? 'hostedState' : sub === 'sign-out' ? 'signOut' : 'syncNow' };
+      } else if (sub === 'sign-in') {
+        if (rest.length > 1) return usage('quote a machine name containing spaces');
+        command = { command: 'signIn', ...(rest[0] === undefined ? {} : { name: rest[0] }) };
+      } else if (sub === 'trust') {
+        if (rest.length !== 1) return usage('trust needs an offered setup ID');
+        command = { command: 'trustSetup', setupId: rest[0] };
+      } else if (sub === 'decide') {
+        if (rest.length !== 4 || !/^[1-9][0-9]*$/.test(rest[2]!)) return usage('decide needs setup ID, item ID, numeric revision and accept/skip');
+        command = { command: 'decide', items: [{ setupId: rest[0], id: rest[1], revision: Number(rest[2]), decision: rest[3] }] };
+      } else {
+        if (rest.length !== 2 || !['name', 'report-status'].includes(rest[0]!) || rest[0] === 'report-status' && !['on', 'off'].includes(rest[1]!)) return usage('machine needs name <name> or report-status <on|off>');
+        command = { command: 'machineSettings', patch: rest[0] === 'name' ? { name: rest[1] } : { reportStatus: rest[1] === 'on' } };
+      }
+      try { decodeRequest({ ...command, version: 3, id: 'cli' }); } catch { return usage('invalid hosted arguments'); }
+      return withAgent(async (conn) => {
+        const result = await conn.request(command);
+        if (sub === 'sign-in') {
+          const started = decodeSignInResult(result);
+          console.log(`Open ${started.verificationUri} and enter ${started.userCode}. The agent completes sign-in in the background.`);
+        } else if (sub === 'decide') return printStatus(decodeWireStatus(result));
+        else {
+          const state = decodeHostedState(result);
+          console.log(`hosted: ${state.enabled ? state.auth : 'disabled'}${state.signingIn ? ' (sign-in pending)' : ''}`);
+          if (state.accountId) console.log(`account: ${state.accountId}`);
+          for (const setup of state.setups) console.log(`offered: ${setup.setupId} (${setup.name}), revision ${setup.latestRevision}`);
+          if (state.machine) console.log(`policy: ${state.machine.policy}; report status: ${yesNo(state.machine.reportStatus)}`);
+          if (state.error) console.log(`hosted error: ${state.error}`);
+        }
+        return 0;
+      }, deps.connect);
+    }
     case 'install': {
       const unknown = rest.find((arg) => arg !== '--linger');
       if (unknown !== undefined) return usage(`unknown option ${unknown}`);

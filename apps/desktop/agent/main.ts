@@ -86,6 +86,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       // Each job's integrations domain reads that job's snapshot and uses the login environment.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
       yield* runAgent({
+        ...(env.NORTUSCC_HOSTED_URL === undefined ? {} : { hosted: { url: env.NORTUSCC_HOSTED_URL, platform } }),
         paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal,
       });

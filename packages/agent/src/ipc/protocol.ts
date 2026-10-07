@@ -1,3 +1,5 @@
+import { DeviceStartResponseSchema, DisplayNameSchema, IdSchema as HostedId, ItemIdSchema as HostedItemId, RevisionNumberSchema, SyncSetupSchema, SyncMachineSchema, MachinePatchSchema, IsoTimeSchema as HostedTime } from '@nortuscc/hosted-protocol';
+import { HOSTED_FAILURE_CODES } from '@nortuscc/hosted-client/transport';
 import { Schema } from 'effect';
 import type { HistoryEvent } from '@nortuscc/machine';
 import type { AgentStatus, StatusError } from '../job.ts';
@@ -40,14 +42,20 @@ const Client = Schema.Literals(['app', 'cli']);
 const Policy = Schema.Literals(POLICIES);
 const STATUS_ERRORS = ['PROFILE_INVALID', 'DECISIONS_INVALID', 'REVISION_UNAVAILABLE', 'JOB_FAILED'] as const satisfies ReadonlyArray<StatusError>;
 
-const DecisionSchema = Schema.Struct({
+const LocalDecisionSchema = Schema.Struct({
   setupId: Schema.Literal('local'),
   id: ItemId,
   revision: Sha,
   decision: Schema.Literals(['accept', 'skip']),
 });
 
+const DecisionSchema = Schema.Union([LocalDecisionSchema, Schema.Struct({ setupId: HostedId, id: HostedItemId, revision: RevisionNumberSchema, decision: Schema.Literals(['accept', 'skip']) })]);
+
 export const RequestSchema = Schema.Union([
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['hostedState', 'signOut', 'syncNow']) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('trustSetup'), setupId: HostedId }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('machineSettings'), patch: MachinePatchSchema }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notification'), notificationId: NotificationId }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notificationAck'), notificationId: NotificationId, receipt: Receipt, delivered: Schema.Boolean }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Client }),
@@ -151,6 +159,18 @@ export const ResponseSchema = Schema.Union([
 ]);
 
 const strict = { onExcessProperty: 'error' } as const;
+const { pendingId: _pendingId, ...signInFields } = DeviceStartResponseSchema.fields;
+export const SignInResultSchema = Schema.Struct(signInFields);
+export const HostedStateSchema = Schema.Struct({
+  enabled: Schema.Boolean, recovered: Schema.Boolean, signingIn: Schema.Boolean,
+  accountId: Schema.NullOr(HostedId), login: Schema.NullOr(DisplayNameSchema), machineId: Schema.NullOr(HostedId),
+  auth: Schema.Literals(['signed-in', 'signed-out', 'unauthenticated']), setups: Schema.Array(SyncSetupSchema),
+  machine: Schema.NullOr(SyncMachineSchema), lastSyncAt: Schema.NullOr(HostedTime), retryAt: Schema.NullOr(HostedTime),
+  pollAfter: RevisionNumberSchema, error: Schema.NullOr(Schema.Literals(HOSTED_FAILURE_CODES)),
+});
+export const decodeSignInResult = Schema.decodeUnknownSync(SignInResultSchema, strict);
+export const decodeHostedState = Schema.decodeUnknownSync(HostedStateSchema, strict);
+export type WireHostedState = typeof HostedStateSchema.Type;
 export const decodeRequest = Schema.decodeUnknownSync(RequestSchema, strict);
 export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
 export const decodeHelloResult = Schema.decodeUnknownSync(HelloResultSchema, strict);

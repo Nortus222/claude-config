@@ -1,3 +1,5 @@
+import { HostedFailure } from '@nortuscc/hosted-client';
+import { disabledHostedState } from '../hosted.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
@@ -11,7 +13,7 @@ import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { AgentStateStore } from '../state.ts';
 import {
-  decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
+  decodeHostedState, decodeSignInResult, decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
   type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
 } from './protocol.ts';
 import { SessionError, type AgentSession } from './session.ts';
@@ -237,7 +239,17 @@ export const serveIpc = (input: {
       Effect.flatMap(effect, (status) => Effect.map(liveStatus(status), (result) => ({ result })));
 
     const dispatch = (conn: Connection, request: Request, client: Client): Effect.Effect<Handled, unknown, AgentServices> => {
+      const hosted = handle.hosted;
+      const hostedResult = (effect: Effect.Effect<unknown, unknown>) => Effect.andThen(effect,
+        Effect.map(hosted?.state ?? Effect.succeed(disabledHostedState), (s) => ({ result: decodeHostedState(s) })));
+      const unavailable = Effect.fail(new SessionError('NOT_SIGNED_IN', 'Hosted mode is not configured'));
       switch (request.command) {
+        case 'hostedState': return hostedResult(Effect.void);
+        case 'signIn': return hosted ? Effect.map(hosted.signIn(request.name), (s) => ({ result: decodeSignInResult(s) })) : unavailable;
+        case 'signOut': return hosted ? hostedResult(hosted.signOut()) : unavailable;
+        case 'syncNow': return hosted ? hostedResult(hosted.sync()) : unavailable;
+        case 'trustSetup': return hosted ? hostedResult(hosted.trust(request.setupId, client)) : unavailable;
+        case 'machineSettings': return hosted ? hostedResult(hosted.machine(request.patch, client)) : unavailable;
         case 'notification':
           if (client !== 'app') return Effect.fail(new SessionError('UNAUTHORIZED', 'Notifications require an app connection'));
           return Effect.gen(function* () {
@@ -298,7 +310,7 @@ export const serveIpc = (input: {
           return wire(Effect.gen(function* () {
             const decidedAt = (yield* (yield* AgentClock).now).toISOString();
             const decisions = request.items.map((item): Decision => ({
-              setupId: item.setupId, itemId: item.id, revision: null, commit: item.revision, decision: item.decision,
+              setupId: item.setupId, itemId: item.id, revision: typeof item.revision === 'number' ? item.revision : null, commit: typeof item.revision === 'string' ? item.revision : null, decision: item.decision,
               decidedAt, machineId: null, source: 'local',
             }));
             return yield* handle.decideAll(decisions, client);
@@ -357,7 +369,8 @@ export const serveIpc = (input: {
           onFailure: (cause) => {
             if (Cause.hasInterruptsOnly(cause)) return reject(conn, request.id, 'SHUTDOWN', 'The agent is shutting down');
             const error = Cause.squash(cause);
-            if (error instanceof SessionError) reject(conn, request.id, error.code, error.message);
+            if (error instanceof HostedFailure) reject(conn, request.id, error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', error.message);
+            else if (error instanceof SessionError) reject(conn, request.id, error.code, error.message);
             else reject(conn, request.id, 'INTERNAL', describe(error));
           },
         }),

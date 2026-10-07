@@ -302,3 +302,13 @@ test('hello protocol mismatch is a typed error instead of an unreachable agent',
     await f.close();
   }
 });
+
+test('hosted IPC rejects pending IDs, tokens and unknown nested result fields', { skip }, async () => {
+  const start = { userCode: 'ABCD', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 };
+  const f = await fake((request, socket) => ok(socket, request.id, { ...start, pendingId: 'secret' }));
+  try {
+    const conn = await connectAgent(f.paths);
+    try { await assert.rejects(conn.request({ command: 'signIn' }), (e: any) => e.code === 'MALFORMED' && !e.message.includes('secret')); }
+    finally { conn.close(); }
+  } finally { await f.close(); }
+});

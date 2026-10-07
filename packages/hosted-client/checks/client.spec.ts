@@ -488,3 +488,39 @@ test('review explicit recovery repairs local policy without uploading and preser
   assert.equal((await run(f.services.decisions.read))[0]!.setupId, 'local');
   assert.equal((await run(f.services.store.read)).accounts[0]!.outbox.length, 1);
 });
+
+test('status reporting validates complete metadata, guards auth/settings/backoff and requires 204', async (t) => {
+  const f = await fixture(t);
+  assert.equal(typeof f.client.reportStatus, 'function');
+  const summary = { reportedAt: '2026-10-07T00:00:00Z', policy: 'notify', agents: ['claude'], setups: [], drift: { setting: 0, skill: 0, integration: 0, file: 0 } } as const;
+  await run(f.client.reportStatus(summary));
+  assert.equal(f.requests.length, 0);
+  await f.signIn();
+  await run(f.client.reportStatus(summary));
+  assert.equal(f.requests.at(-1)?.path, '/machines/self/status');
+  assert.deepEqual(f.requests.at(-1)?.body, summary);
+  const before = f.requests.length;
+  await assert.rejects(run(f.client.reportStatus({ ...summary, token: 'secret' } as any)), /invalid_request/);
+  assert.equal(f.requests.length, before);
+  await run(f.client.enqueueMachine({ reportStatus: false }));
+  await run(f.client.reportStatus(summary));
+  assert.equal(f.requests.length, before);
+  await run(f.client.enqueueMachine({ reportStatus: true }));
+  f.actions.push(() => Effect.succeed({ status: 200 }));
+  await assert.rejects(run(f.client.reportStatus(summary)), /invalid_response/);
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'unavailable', retryAfter: 2147484 })));
+  await assert.rejects(run(f.client.reportStatus(summary)), /unavailable/);
+  const backedOff = f.requests.length;
+  await run(f.client.reportStatus(summary));
+  assert.equal(f.requests.length, backedOff);
+});
+
+test('oversized complete status is declined before HTTP, never truncated', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  const ids = Array.from({ length: 2000 }, (_, i) => `file:claude:${i}-${'x'.repeat(150)}.md`);
+  const summary = { reportedAt: '2026-10-07T00:00:00Z', policy: 'notify', agents: ['claude'], setups: [{ setupId: 'setup1', revisionApplied: 0, adopted: [], skipped: [], pending: [], waitingForPerson: ids }], drift: { setting: 0, skill: 0, integration: 0, file: 0 } } as const;
+  assert.ok(jsonByteLength(summary) > MAX_REQUEST_BODY_BYTES);
+  const before = f.requests.length;
+  await assert.rejects(run(f.client.reportStatus(summary)), /invalid_request/);
+  assert.equal(f.requests.length, before);
+});

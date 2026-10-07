@@ -2,7 +2,7 @@ import { Effect, Schema, Semaphore } from 'effect';
 import { DecisionsStore, HistoryStore, type Actor, type Decision as LocalDecision } from '@nortuscc/machine';
 import { DeviceStartRequestSchema, DeviceStartResponseSchema, DevicePollPendingSchema, DevicePollSuccessSchema,
   DecisionsRequestSchema, MachinePatchSchema, MachineRecordSchema, MachineTokenSchema, SyncResponseSchema, decodeDecisionsResponse,
-  IsoTimeSchema,
+  IsoTimeSchema, StatusSummarySchema, type StatusSummary,
   decodeHosted, decodeRequestBody, formatSyncQuery, jsonByteLength, MAX_DECISIONS, MAX_REQUEST_BODY_BYTES,
   type DeviceStartRequest, type MachinePatch, type Policy, type SyncRevision, type SyncedDecision, type SyncMachine, type SyncSetup } from '@nortuscc/hosted-protocol';
 import { HostedFailure, HostedTransport, type HostedFailureCode, type HostedRequest } from './transport.ts';
@@ -32,6 +32,7 @@ export type HostedClient = {
   readonly signOut: () => Effect.Effect<void, HostedFailure>;
   // Repairs durable local decisions and policy before jobs, without making hosted requests.
   readonly recover: () => Effect.Effect<HostedState, HostedFailure>;
+  readonly reportStatus: (summary: StatusSummary) => Effect.Effect<void, HostedFailure>;
   readonly sync: () => Effect.Effect<HostedState, HostedFailure>;
   readonly enqueueDecision: (decision: LocalDecision, actor?: Actor) => Effect.Effect<void, HostedFailure>;
   readonly enqueueMachine: (patch: MachinePatch, actor?: Actor) => Effect.Effect<void, HostedFailure>;
@@ -308,6 +309,16 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       if (metadata.error) return yield* Effect.fail(metadata.error);
       if (a) yield* updateAccount(a.accountId, (current) => ({ ...current, auth: 'signed-out', retryAt: null, error: remoteError?.code ?? null }));
       if (remoteError) return yield* Effect.fail(remoteError);
+    }).pipe(lock.withPermit),
+    reportStatus: (summary) => Effect.gen(function* () {
+      const body = yield* decode(StatusSummarySchema, summary, true);
+      const a = active(yield* store.read);
+      if (!a || a.auth !== 'signed-in' || !effectiveMachine(a).reportStatus
+        || (a.retryAt !== null && Date.parse(a.retryAt) > now().getTime())) return;
+      yield* request(a, { method: 'PUT', path: '/machines/self/status', body }).pipe(
+        Effect.flatMap((reply) => reply.status === 204 ? Effect.void : Effect.fail(invalidResponse())),
+        Effect.catch((error) => persistFailure(a, error).pipe(Effect.andThen(Effect.fail(error)))),
+      );
     }).pipe(lock.withPermit),
     sync,
     recover: () => recoverAccount.pipe(Effect.map(project), lock.withPermit),

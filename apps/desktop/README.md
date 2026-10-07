@@ -80,3 +80,10 @@ Hidden delivery branches before Tauri creates a window. Its fixed `--paths` help
 Native work has a three-second budget from event enqueue or hidden-mode entry, including authorization settings and submission, followed by a bounded acknowledgment. The agent allows five seconds for each connected app's receipt and tries a fixed snapshot of subscribers sequentially. The total delivery deadline allows those per-app budgets plus five seconds for scheduling and cleanup. Late native completions cannot acknowledge an expired generation. OS acceptance followed by a lost acknowledgment can still cause a later repeat; acceptance does not prove a banner appeared.
 
 Rust checks exercise fake posting success/refusal, strict payloads, direct hidden connections, the read-only helper, startup events before session publication, off-reader acknowledgments, stale generations and queued clicks. They never initialize the notification center or show a window. On a disposable macOS machine, manually verify permission grant/denial, Notification Center with banners disabled, foreground presentation, warm and cold clicks, hidden posting with the app closed, no permission dialog in hidden mode, and exit after posting. Also verify the hidden path leaves service registration and machine state unchanged. These OS behaviors are not established by automated tests or a successful native build.
+
+The bundled foreground agent supports optional hosted sync through
+`NORTUSCC_HOSTED_URL` in its login environment, using the same runtime as the CLI.
+The value must be an explicit HTTPS root ending in `/v1`; no endpoint is guessed.
+Account/device-flow, setup trust and machine-reporting commands are available through
+`nortuscc agent`; this change adds no renderer account screens or Rust request commands.
+See the [agent README](../../packages/agent/README.md#optional-hosted-client).
