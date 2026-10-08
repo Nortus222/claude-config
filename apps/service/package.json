@@ -10,6 +10,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": { "effect": "4.0.1", "@nortuscc/hosted-protocol": "*" },
-  "devDependencies": { "@types/node": "25.5.0", "typescript": "7.0.2" },
+  "devDependencies": {
+    "@nortuscc/agent": "*",
+    "@nortuscc/hosted-client": "*",
+    "@nortuscc/machine": "*",
+    "@nortuscc/sync": "*",
+    "@types/node": "25.5.0",
+    "typescript": "7.0.2"
+  },
   "engines": { "node": ">=24" }
 }

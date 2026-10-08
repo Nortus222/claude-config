@@ -116,3 +116,20 @@ Checks use an actual loopback HTTP listener, fake upstream GitHub, an injected
 clock, isolated memory Stores and Store fault/barrier wrappers. They do not sign
 in to production, install a native service or touch a person's home. Production
 Cosmos, emulator, OAuth, deployment, TTL retention and live acceptance are deferred.
+
+`checks/client-integration.spec.ts` additionally connects the merged hosted client
+and agent to that listener through the actual `httpTransport`. Its fetch adapter
+rewrites only a fixed synthetic HTTPS origin to loopback HTTP and preserves the
+request and response bytes, methods, headers and cancellation signals. Independent
+temporary homes, fake keychains, a local bare Git origin and a fake connected
+notification receiver keep owner state and native services untouched. Processes
+permits only inert Git operations and refuses installers, OS registration,
+keychain commands, native notifications and app launches.
+
+These local checks cover explicit trust, person apply, inert auto apply, notify
+waiting and History, actual private status, complete revision caches above50,
+conditional polls, server receipt ordering, partial decision suffix retries,
+revocation and account isolation. Hook registration still does not establish
+byte adoption in the merged client, so hooks remain waitingForPerson even after
+a person copies their inert fixture text. The tests establish local service/client
+interoperability; they do not establish production or native desktop acceptance.
