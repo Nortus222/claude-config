@@ -34,7 +34,8 @@ export function validateDeploymentParameters(input: unknown): DeploymentParamete
   const budgetContactEmails = value.budgetContactEmails;
   if (!Array.isArray(budgetContactEmails) || budgetContactEmails.length < 1 || budgetContactEmails.length > 5 || Object.keys(budgetContactEmails).length !== budgetContactEmails.length || budgetContactEmails.some(v => typeof v !== 'string' || v.length > 254 || /[\x00-\x20\x7f]/.test(v) || !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(v)) || new Set(budgetContactEmails.map(v => v.toLowerCase())).size !== budgetContactEmails.length) return invalid();
   const budgetStartDate = text('budgetStartDate', /^20[2-9][0-9]-(?:0[1-9]|1[0-2])-01$/);
-  parseServiceEnvironment({ NORTUSCC_SERVICE_GITHUB_CLIENT_ID: githubClientId, NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'https://deployment.documents.azure.com/', NORTUSCC_SERVICE_COSMOS_DATABASE: 'metadata', NORTUSCC_SERVICE_ALLOWLIST: allowlistedLogins.join(','), NORTUSCC_SERVICE_OPEN_SIGNUP: value.openSignup ? 'true' : 'false' });
+  const runtime = parseServiceEnvironment({ NORTUSCC_SERVICE_GITHUB_CLIENT_ID: githubClientId, NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'https://deployment.documents.azure.com/', NORTUSCC_SERVICE_COSMOS_DATABASE: 'metadata', NORTUSCC_SERVICE_ALLOWLIST: allowlistedLogins.join(','), NORTUSCC_SERVICE_OPEN_SIGNUP: value.openSignup ? 'true' : 'false' });
+  if (runtime.allowlistedLogins.length !== allowlistedLogins.length || runtime.allowlistedLogins.some((login, index) => login !== allowlistedLogins[index])) return invalid();
   return { location, namePrefix, githubClientId, allowlistedLogins: [...allowlistedLogins], openSignup: value.openSignup, budgetAmount, budgetContactEmails: [...budgetContactEmails], budgetStartDate, image };
 }
 /** Parse bounded JSON and reject duplicate object keys before canonicalizing it. */

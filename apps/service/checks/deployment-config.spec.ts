@@ -48,3 +48,12 @@ test('CLI runs when import.meta.main is absent and imports without side effects'
     assert.equal(imported.status, 0); assert.equal(imported.stdout, ''); assert.equal(imported.stderr, '');
   } finally { rmSync(dir, { recursive: true }); }
 });
+for (const [label, allowlistedLogins] of [
+  ['comma-containing login', ['alice,bob']],
+  ['one entry encoding 101 logins', [Array.from({ length: 101 }, (_, index) => `owner${index}`).join(',')]],
+  ['empty login entry', ['']],
+] as const) {
+  test(`allowlist rejects ${label} before canonical deployment output`, () => {
+    assert.throws(() => validateDeploymentParameters({ ...valid(), allowlistedLogins }));
+  });
+}
