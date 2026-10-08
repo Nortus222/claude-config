@@ -18,6 +18,7 @@ show-me
 
 [mattpocock/skills]
 ask-matt
+chief-of-staff
 code-review
 codebase-design
 diagnosing-bugs
@@ -28,9 +29,11 @@ grilling
 handoff
 implement
 improve-codebase-architecture
+pr
 prototype
 research
 resolving-merge-conflicts
+retro
 setup-matt-pocock-skills
 tdd
 teach
