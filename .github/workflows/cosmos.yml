@@ -1,0 +1,63 @@
+name: cosmos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NORTUSCC_COSMOS_EMULATOR_ENDPOINT: http://127.0.0.1:8081
+      # The local emulator does not enforce authentication; this is a dummy SDK key.
+      NORTUSCC_COSMOS_EMULATOR_KEY: bG9jYWwtZW11bGF0b3Itb25seQ==
+      NORTUSCC_COSMOS_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Start the local Cosmos emulator
+        run: |
+          docker run --detach --name nortuscc-cosmos-ci \
+            --publish 127.0.0.1:8081:8081 \
+            --publish 127.0.0.1:8080:8080 \
+            --env ENABLE_TELEMETRY=false \
+            --env ENABLE_EXPLORER=false \
+            mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
+      - name: Wait for emulator readiness
+        run: |
+          node --input-type=module <<'NODE'
+          import { setTimeout } from 'node:timers/promises';
+
+          const deadline = Date.now() + 120_000;
+          while (Date.now() < deadline) {
+            try {
+              const response = await fetch('http://127.0.0.1:8080/ready', {
+                signal: AbortSignal.timeout(2_000),
+              });
+              if (response.ok) process.exit(0);
+            } catch {
+              // Startup may refuse connections before the health server is available.
+            }
+            await setTimeout(1_000);
+          }
+          throw new Error('Cosmos emulator did not become ready within 120 seconds');
+          NODE
+      - name: Run required Cosmos contracts
+        run: npm run test:cosmos -w apps/service
+      - name: Show emulator logs on failure
+        if: failure()
+        run: docker logs nortuscc-cosmos-ci
+      - name: Remove the task-owned emulator
+        if: always()
+        run: |
+          if docker container inspect nortuscc-cosmos-ci >/dev/null 2>&1; then
+            docker rm --force nortuscc-cosmos-ci
+          fi
