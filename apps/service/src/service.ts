@@ -41,10 +41,11 @@ export function makeService(options: ServiceOptions): Effect.Effect<ServiceHandl
           return yield* deviceStart(store, github, body, options.now);
         }
         if (method === 'POST' && path === '/v1/auth/device/poll') return yield* devicePoll(store, github, body, options.config, options.now);
-        const principal = yield* authenticate(store, request.headers.authorization);
+        const deleting = method === 'DELETE' && path === '/v1/account';
+        const principal = yield* authenticate(store, request.headers.authorization, deleting);
         accountHash = createHash('sha256').update(principal.accountId).digest('hex');
         yield* Effect.try({ try: () => machineRequests(`${principal.accountId}:${principal.machineId}`), catch: (e) => e as ServiceFailure });
-        yield* touchMachine(store, principal, options.now());
+        if (!deleting) yield* touchMachine(store, principal, options.now());
         const response = yield* machineRoute(request, principal, store);
         if (response) return response;
         return yield* metadata(request,principal,store);

@@ -20,7 +20,7 @@ const upsert = (document: ServiceDocument) => ({ type: 'upsert' as const, docume
 
 test('absent partitions accept one null CAS and then require their marker version', async () => {
   const store = makeMemoryStore();
-  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, documents: [] });
+  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, closed: false, documents: [] });
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', 'stale', [upsert(account())])), false);
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', null, [upsert(account())])), true);
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', null, [upsert(account())])), false);
@@ -76,7 +76,7 @@ test('partition mismatches fail generically without applying any mutation', asyn
       assert.equal(result.failure.message, 'Request failed.');
       assert.ok(!JSON.stringify(result.failure).includes(key));
     }
-    assert.deepEqual(await Effect.runPromise(store.readPartition(container, key)), { version: null, documents: [] });
+    assert.deepEqual(await Effect.runPromise(store.readPartition(container, key)), { version: null, closed: false, documents: [] });
   }
 });
 
@@ -85,7 +85,7 @@ test('99 document operations fit beside the marker while 100 fail atomically', a
   const oversized = Array.from({ length: 100 }, (_, i) => upsert(decision(i)));
   const failure = await Effect.runPromise(Effect.result(store.commitPartition('accounts', 'account-a', null, oversized)));
   assert.equal(failure._tag, 'Failure');
-  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, documents: [] });
+  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, closed: false, documents: [] });
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', null, oversized.slice(0, 99))), true);
   assert.equal((await Effect.runPromise(store.readPartition('accounts', 'account-a'))).documents.length, 99);
 });
@@ -95,7 +95,7 @@ test('duplicate document targets including delete plus upsert fail atomically', 
   for (const mutations of [[upsert(account()), upsert(account())], [upsert(account()), { type: 'delete' as const, id: 'account' }]]) {
     const failure = await Effect.runPromise(Effect.result(store.commitPartition('accounts', 'account-a', null, mutations)));
     assert.equal(failure._tag, 'Failure');
-    assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, documents: [] });
+    assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, closed: false, documents: [] });
   }
 });
 
@@ -114,7 +114,7 @@ test('deletion sweeps remove every document and stale CAS cannot target a recrea
     assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', snapshot.version,
       snapshot.documents.slice(0, 99).map(({ id }) => ({ type: 'delete', id })))), true);
   }
-  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, documents: [] });
+  assert.deepEqual(await Effect.runPromise(store.readPartition('accounts', 'account-a')), { version: null, closed: false, documents: [] });
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', null, [upsert(account())])), true);
   assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', full.version, [upsert(account())])), false);
 });
@@ -158,4 +158,28 @@ test('credentials use 32 random bytes and SHA256 with safe malformed-hash reject
   assert.equal(verifyTokenSecret(newTokenSecret(), hash), false);
   for (const malformed of ['', 'x'.repeat(64), 'a'.repeat(63), hash.toUpperCase()]) assert.equal(verifyTokenSecret(secret, malformed), false);
   assert.equal(machineToken('account-a', 'machine-a', secret), `nmt_account-a_machine-a_${secret}`);
+});
+
+test('terminal closure fences absent creators and permits only bounded deletion sweeps', async () => {
+  const store = makeMemoryStore();
+  assert.equal(await Effect.runPromise(store.closePartition('accounts', 'account-a', null)), true);
+  const closed = await Effect.runPromise(store.readPartition('accounts', 'account-a'));
+  assert.equal(closed.closed, true); assert.equal(typeof closed.version, 'string');
+  assert.deepEqual(closed.documents, []);
+  for (const version of [null, closed.version]) assert.equal(await Effect.runPromise(store.commitPartition('accounts', 'account-a', version, [upsert(account())])), false);
+  (closed as { closed: boolean }).closed = false;
+  assert.equal((await Effect.runPromise(store.readPartition('accounts', 'account-a'))).closed, true);
+  assert.equal(await Effect.runPromise(store.closePartition('accounts', 'account-a', null)), false);
+  const occupied = makeMemoryStore();
+  await Effect.runPromise(occupied.commitPartition('accounts', 'account-a', null, [upsert(account()), upsert(decision(0))]));
+  const before = await Effect.runPromise(occupied.readPartition('accounts', 'account-a'));
+  assert.equal(await Effect.runPromise(occupied.closePartition('accounts', 'account-a', before.version)), true);
+  const frozen = await Effect.runPromise(occupied.readPartition('accounts', 'account-a'));
+  assert.deepEqual(frozen.documents, before.documents);
+  assert.equal(await Effect.runPromise(occupied.commitPartition('accounts', 'account-a', frozen.version, [{ type:'delete',id:'account' },upsert(decision(1))])), false);
+  assert.equal(await Effect.runPromise(occupied.commitPartition('accounts', 'account-a', frozen.version, frozen.documents.map(({ id }) => ({ type:'delete',id })))), true);
+  const empty = await Effect.runPromise(occupied.readPartition('accounts', 'account-a'));
+  assert.equal(empty.closed, true); assert.notEqual(empty.version, null); assert.deepEqual(empty.documents, []);
+  const invalid = await Effect.runPromise(Effect.result(store.closePartition('identities' as 'accounts', 'github:123', null)));
+  assert.equal(invalid._tag, 'Failure');
 });

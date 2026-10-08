@@ -9,7 +9,7 @@ import { statusRoute } from './status.ts';
 import { accountRoute } from './account.ts';
 export function metadataHandler(now: () => number, pollAfter: number): NonNullable<ServiceOptions['metadata']> {
   return (request,principal,store) => Effect.gen(function* () {
-    for (const route of [setupRoute(request,principal,store,now),revisionRoute(request,principal,store,now),syncRoute(request,principal,store,pollAfter),decisionRoute(request,principal,store,now),statusRoute(request,principal,store),accountRoute(request,principal,store)]) {
+    for (const route of [setupRoute(request,principal,store,now),revisionRoute(request,principal,store,now),syncRoute(request,principal,store,pollAfter),decisionRoute(request,principal,store,now),statusRoute(request,principal,store),accountRoute(request,principal,store,now)]) {
       const response = yield* route;
       if (response) return response;
     }

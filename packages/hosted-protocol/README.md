@@ -144,7 +144,7 @@ account identity and public metadata records. Its account object is exactly
 safe numeric GitHub ID and `defaultPolicy: notify`. Machines include enabled
 status summaries. Revision and decision export arrays contain all records without
 a revision-page cap. Export excludes hashes, device sessions, claims, issuance
-fences, account reservations and concurrency markers; storage documents must
+fences, device/account reservations and concurrency markers; storage documents must
 never be decoded or spread directly into this projection.
 
 ## Sync query and complete response

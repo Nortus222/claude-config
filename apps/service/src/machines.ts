@@ -8,7 +8,7 @@ import type { ServiceRequest, ServiceResponse } from './service.ts';
 
 export function activeAccount(snapshot: PartitionSnapshot): AccountDocument {
   const account = snapshot.documents.find((d) => d.type === 'account');
-  if (!account || account.type !== 'account' || account.state !== 'active') throw new ServiceFailure({ code: 'unauthenticated' });
+  if (snapshot.closed || !account || account.type !== 'account' || account.state !== 'active') throw new ServiceFailure({ code: 'unauthenticated' });
   return account;
 }
 

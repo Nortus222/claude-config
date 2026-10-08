@@ -16,27 +16,30 @@ that dispatch for embedding tests; callers do not need to supply it.
 
 The current batch implements device authentication, machine lifecycle, setup
 registration/listing, revision publication/listing, decisions, sync, private status,
-health and account export. Account deletion and the final partition-closure
-contract belong to Task 3B and remain unimplemented. In particular, this core does
-not claim crash-safe account deletion concurrent with a reserved initializer.
-The current Store physically removes empty partitions; a paused null-CAS creator
-can still recreate one. No production deployment or deletion guarantee follows
-from these memory checks.
+health, account export and account deletion. The memory Store tests cover local
+recovery and paused writers. Production adapters, deployment and live acceptance
+remain separate work.
 
 ## Partition boundaries and recovery
 
 Every atomic commit targets one approved partition: `accounts/accountId`,
 `setups/setupId` or `identities/id`. Store snapshots have opaque concurrency tokens
-and must contain all pages under a stable token. The memory adapter reproduces
-CAS conflicts, ownership checks and the maximum 99 distinct document mutations.
+and a `closed` flag, and must contain all pages under a stable token. The memory
+adapter reproduces CAS conflicts, ownership checks and the maximum 99 distinct document mutations.
 A future Cosmos adapter must reserve its hundredth operation for the marker.
+`closePartition` conditionally closes an account or setup, including an absent
+partition, in that partition alone. Closed partitions reject every upsert and
+permit deletion-only batches. Empty closed markers retain only the opaque partition
+ID, closed flag and concurrency version. IDs are never reused. Numeric GitHub
+identity partitions cannot be closed and disappear when their documents are deleted.
 There is no cross-partition transaction.
 
 Setup registration first reserves an ID and immutable registration metadata in the
 account partition. Reserved entries count toward the ten-setup limit. List, sync
 and export repair interrupted materialization and mark reservations ready, so a
 failed request does not lose the cleanup index or consume another slot during
-recovery. This recovery alone does not solve the deferred deletion race.
+recovery. Deletion closes every reserved setup ID before sweeping, fencing paused
+null-CAS initializers.
 
 Publication commits the immutable revision, new setup head and UTC daily quota in
 one setup CAS. Its account checkpoint follows separately. A **503 after publication
@@ -61,6 +64,61 @@ by a later patch. Only changed public settings advance seq. Counter exhaustion
 fails closed with generic 503. A transient chunk failure returns a 200 response with the processed prefix and an unprocessed
 suffix. Consumers must correlate every result with its original position using
 `decodeDecisionsResponse` before removing queued entries.
+
+## Account deletion and recovery
+
+`DELETE /v1/account` first sets the account to deleting and captures its complete
+setup reservation index in an account CAS. That CAS also freezes account-local
+device reservation documents. Ordinary authentication is revoked immediately.
+Deletion closes every setup, even an absent reservation target, before deleting
+its metadata in batches of at most 99. Account deletion metadata and machine token
+hashes remain until all indexed targets have been swept.
+
+Device issuance reserves an existing random session ID in the account partition
+before attaching any account claim. Deletion removes those indexed sessions,
+including their temporary upstream credentials and claim hashes, before returning
+204. Every later session claim write requires its old non-null concurrency version;
+no poll or recovery path initializes an absent session. Each small reservation is
+its own account document, so concurrent flows cannot grow an inline account array
+past the database document size limit. Successful issuance or cleanup removes its
+reservation only after physically deleting the session. Deleting accounts retain
+all reservations for recovery; an interrupted pre-claim flow can leave a harmless
+reservation until account deletion.
+
+The numeric GitHub mapping becomes deleting before final account cleanup, blocking
+fresh signup while old account metadata remains. The account is then closed and
+swept, keeping its account document and at most 25 machine records for one final
+atomic deletion. A conditional identity delete removes only a mapping still owned
+by that old account. A stale cleanup worker cannot remove a fresh account mapping.
+Paused setup/account initializers, publishers and machine issuers cannot resurrect
+closed targets.
+
+A failed deletion can be retried through exactly `DELETE /v1/account` using a token
+whose hash remains in the deleting account. Hash verification and the ordinary
+60-per-minute rate limit still apply. Payloads and query fields are rejected before
+recovery, and deletion retries skip lastSeen updates. A fresh service instance can
+resume from the stored cleanup index, including a closed but partially swept account.
+
+A 503 after the final account batch may mean all metadata and token hashes are
+already gone. The old token then returns 401, including on DELETE. A verified
+GitHub device sign-in repairs an old deleting identity only after a point read
+proves the old account is closed and empty, conditionally removes that mapping,
+and creates a new account ID. This covers the final crash window without retaining
+credentials or claiming a transaction across partitions.
+
+Deletion deliberately retains one permanent opaque fencing marker per deleted
+account and setup. Markers contain no identity, owner link, name, repository URL,
+credential or content metadata, and never appear in export or diagnostics. This
+owner-approved privacy tradeoff prevents arbitrarily paused creators from restoring
+deleted data. It does not mean literal physical removal of every storage document.
+
+Unbound device sessions have a validity deadline of at most 900 seconds, also
+capped by the upstream deadline. They are not discoverable through an account
+index and expire separately. The memory adapter physically removes them when an
+expired session is polled; without another poll they remain in memory until the
+Store is discarded. Successful sessions and indexed account claims are physically
+removed as described above. A persistent expiry/TTL adapter and its physical
+retention guarantee are deferred; the validity deadline alone is not such a guarantee.
 
 ## Complete sync and privacy
 
@@ -97,8 +155,8 @@ uses the strict `AccountExportSchema` projection:
 - `setups`, `revisions` and `decisions` contain every public record for the account.
 
 Export has no revision-page cap. It excludes token hashes, OAuth tokens, device
-codes, claims, issuance fences, reservations, receipt counters/order and concurrency
-markers. Explicit projection keeps storage discriminants and private fields out of every wire
+codes, claims, device reservations, issuance fences, setup reservations, receipt
+counters/order and concurrency markers. Explicit projection keeps storage discriminants and private fields out of every wire
 response. Diagnostics contain only request ID, sanitized route template, status,
 duration and an optional account hash. Failures and diagnostic callback errors
 never expose request values or causes.
@@ -129,7 +187,7 @@ keychain commands, native notifications and app launches.
 These local checks cover explicit trust, person apply, inert auto apply, notify
 waiting and History, actual private status, complete revision caches above50,
 conditional polls, server receipt ordering, partial decision suffix retries,
-revocation and account isolation. Hook registration still does not establish
-byte adoption in the merged client, so hooks remain waitingForPerson even after
+revocation after account deletion on all three machines, local-state preservation
+and account isolation. Hook registration still does not establish byte adoption in the merged client, so hooks remain waitingForPerson even after
 a person copies their inert fixture text. The tests establish local service/client
 interoperability; they do not establish production or native desktop acceptance.

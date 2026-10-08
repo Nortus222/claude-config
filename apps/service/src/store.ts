@@ -9,6 +9,7 @@ export const PARTITION_MARKER_ID = '__partition';
 export interface PartitionSnapshot {
   // Opaque concurrency token, Cosmos ETag in a persistent adapter; null means absent.
   readonly version: string | null;
+  readonly closed: boolean;
   readonly documents: ReadonlyArray<ServiceDocument>;
 }
 
@@ -19,7 +20,12 @@ export class Store extends Context.Service<Store, {
   // Collect every page under a stable marker before returning detached documents.
   readonly readPartition: (container: Container, key: string) => Effect.Effect<PartitionSnapshot, ServiceFailure>;
   // One partition only. At most 99 distinct document targets plus its concurrency marker.
-  // Conflict returns false, with no writes. Deleting the last document removes the marker.
+  // Conflict or an upsert into a closed partition returns false, with no writes.
+  // Empty closed markers persist; other empty partitions remove their marker.
   readonly commitPartition: (container: Container, key: string, expectedVersion: string | null,
     mutations: ReadonlyArray<Mutation>) => Effect.Effect<boolean, ServiceFailure>;
+  // Terminal CAS fence, including absent targets. Retains documents for bounded delete-only sweeps.
+  // Persistent markers contain only the opaque partition ID, closed flag and concurrency version.
+  readonly closePartition: (container: 'accounts' | 'setups', key: string,
+    expectedVersion: string | null) => Effect.Effect<boolean, ServiceFailure>;
 }>()('hosted/Store') {}

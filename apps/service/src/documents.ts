@@ -20,7 +20,6 @@ export interface SetupReservation {
 export interface AccountDeletion {
   readonly startedAt: string;
   readonly remainingSetupIds: ReadonlyArray<string>;
-  readonly identityRemoved: boolean;
 }
 
 export interface AccountDocument extends Document {
@@ -51,6 +50,13 @@ export interface IssuanceFenceDocument extends Document {
   readonly type: 'issuanceFence';
   readonly accountId: string;
   readonly machineId: string;
+}
+
+// Account-local index of an existing device session, retained until physical session deletion.
+export interface DeviceReservationDocument extends Document {
+  readonly type: 'deviceReservation';
+  readonly accountId: string;
+  readonly sessionId: string;
 }
 
 export interface ReceiptOrder { readonly ticket: number; readonly position: number }
@@ -115,5 +121,5 @@ export interface DeviceSessionDocument extends Document {
   readonly claim: DeviceClaim | null;
 }
 
-export type ServiceDocument = AccountDocument | MachineDocument | IssuanceFenceDocument | DecisionDocument | StatusDocument
+export type ServiceDocument = AccountDocument | MachineDocument | IssuanceFenceDocument | DeviceReservationDocument | DecisionDocument | StatusDocument
   | SetupDocument | RevisionDocument | IdentityDocument | DeviceSessionDocument;

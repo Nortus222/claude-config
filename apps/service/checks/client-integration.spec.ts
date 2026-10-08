@@ -115,6 +115,27 @@ test('actual HTTP service: explicit person apply, inert auto apply and notify wa
   const exported = decodeHosted(AccountExportSchema, await response.json());
   assert.equal(exported.decisions.length, 2);
   f.assertPrivateMetadata(exported, machines);
+  const oldTokens = machines.map((machine) => machine.token()!);
+  const beforeDeletion = machines.map((machine) => structuredClone(machine.document().accounts[0]!));
+  assert.equal((await f.call('DELETE', '/v1/account', undefined, publisher.token)).status, 204);
+  for (const [index, machine] of machines.entries()) await machine.run((runtime) => Effect.gen(function* () {
+    const trust = yield* (yield* SetupsStore).read;
+    const rejectedSync = yield* Effect.result(runtime.sync);
+    assert.equal(rejectedSync._tag, 'Failure');
+    assert.equal(machine.requests.at(-1)!.status, 401);
+    assert.equal((yield* runtime.state).auth, 'unauthenticated');
+    assert.deepEqual(yield* (yield* SetupsStore).read, trust, 'revocation preserves local repository consent');
+    assert.deepEqual(machine.document().accounts[0]!.cursors, beforeDeletion[index]!.cursors);
+    assert.deepEqual(machine.document().accounts[0]!.authoritative, beforeDeletion[index]!.authoritative);
+    if (index < 2) assert.equal(JSON.parse(readFileSync(join(machine.paths.claude, 'settings.json'), 'utf8')).effortLevel, SETTING_VALUE);
+    const rejected = yield* Effect.promise(() => f.call('GET', '/v1/account/export', undefined, oldTokens[index]));
+    assert.equal(rejected.status, 401);
+  }));
+  const fresh = await f.login('Fresh account');
+  assert.equal(fresh.response.status, 200); assert.notEqual(fresh.body.accountId, publisher.accountId);
+  const freshExport = decodeHosted(AccountExportSchema, await (await f.call('GET', '/v1/account/export', undefined, fresh.body.token)).json());
+  assert.deepEqual(freshExport.setups, []); assert.deepEqual(freshExport.decisions, []);
+  f.assertPrivateMetadata(freshExport, machines);
 });
 
 test('actual client caches more than 50 revisions and uses independent setup cursors and conditional HTTP polls', async (t) => {
