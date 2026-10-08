@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,6 +9,38 @@ import { SetupsStore } from '@nortuscc/sync';
 import { AccountExportSchema, MachinesResponseSchema, SyncResponseSchema, decodeDecisionsResponse, decodeHosted, type DecisionsRequest } from '@nortuscc/hosted-protocol';
 import { makeMemoryStore, ServiceFailure } from '../src/index.ts';
 import { clientFixture, EFFORT, HOOK, HOOK_TEXT, SETTING_VALUE } from './support/client-machines.ts';
+
+test('fixture preserves the later failure and joins an earlier client scope before HTTP and root teardown', async (t) => {
+  const controller = new AbortController();
+  const cleanups: Array<NonNullable<Parameters<TestContext['after']>[0]>> = [];
+  const context: Pick<TestContext, 'after' | 'signal'> = { signal: controller.signal, after: (hook) => { if (hook) cleanups.push(hook); } };
+  const f = await clientFixture(context); const earlier = f.machine(); const later = f.machine();
+  let ready!: () => void; const started = new Promise<void>((resolve) => { ready = resolve; });
+  let finished = false; let rootExistedAtFinalizer = false; let healthAtFinalizer = 0;
+  const first = earlier.run(() => Effect.gen(function* () {
+    yield* Effect.addFinalizer(() => Effect.promise(async () => {
+      rootExistedAtFinalizer = existsSync(f.root);
+      healthAtFinalizer = (await f.call('GET', '/v1/health')).status;
+      finished = true;
+    }));
+    ready(); yield* Effect.never;
+  }));
+  const joined = first.catch((error: unknown) => error);
+  await started;
+  const originalFailure = new Error('deliberate later-client assertion failure');
+  let failure: unknown;
+  try {
+    try { await later.run(() => Effect.fail(originalFailure)); }
+    catch (error) { failure = error; }
+    finally { for (const cleanup of cleanups) await cleanup(t, () => {}); }
+    assert.equal(failure, originalFailure, 'cleanup preserves the original failure object');
+    assert.equal(finished, true, 'earlier scope must finish before fixture teardown returns');
+    assert.equal(rootExistedAtFinalizer, true, 'temporary roots remain available during scoped finalization');
+    assert.equal(healthAtFinalizer, 200, 'the actual HTTP server remains available during scoped finalization');
+    assert.equal(existsSync(f.root), false, 'root removal follows scoped finalization');
+    await assert.rejects(f.call('GET', '/v1/health'), 'the HTTP server closes after scoped finalization');
+  } finally { controller.abort(); await joined; }
+});
 
 test('actual HTTP service: explicit person apply, inert auto apply and notify waiting on three isolated machines', async (t) => {
   const f = await clientFixture(t);

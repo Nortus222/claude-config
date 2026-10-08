@@ -26,12 +26,20 @@ const docs = {
 };
 export type HttpObservation = { readonly method: string; readonly path: string; readonly status: number; readonly body?: unknown; readonly reply?: unknown; readonly etag: string | null; readonly conditional: string | null };
 
-export async function clientFixture(t: TestContext, options: { store?: Store['Service'] } = {}) {
+export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, options: { store?: Store['Service'] } = {}) {
   const f = await fixture(options);
-  t.after(() => f.close());
+  const lifetime = new AbortController();
+  const activeRuns = new Set<Promise<unknown>>();
+  let fixtureRoot: string | undefined;
+  t.after(async () => {
+    lifetime.abort();
+    await Promise.allSettled([...activeRuns]);
+    try { await f.close(); }
+    finally { if (fixtureRoot) rmSync(fixtureRoot, { recursive: true, force: true }); }
+  });
   const loopbackOrigin = new URL((await f.call('GET', '/v1/health')).url).origin;
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'hosted-clients-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  fixtureRoot = root;
   const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file' };
   const git = (args: string[], cwd?: string) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.email=fixture@example.invalid', '-c', 'user.name=Fixture', ...args], { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const repo = join(root, 'author'); mkdirSync(repo);
@@ -91,11 +99,16 @@ export async function clientFixture(t: TestContext, options: { store?: Store['Se
     })).pipe(Layer.provide(nodeProcesses({ env: { ...env, HOME: home } })));
     const clock = Layer.succeed(AgentClock, { now: Effect.sync(() => new Date(f.clock.now)), random: Effect.succeed(0.5), sleep: () => Effect.never });
     const domains = (value: MachinePathsValue) => [configDomain, integrationsDomain({ paths: value, env: {} })];
-    const run = <A, E>(work: (runtime: HostedRuntime) => Effect.Effect<A, E, AgentServices | SetupSource | Scope.Scope>) => Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const runtime = yield* configuredHostedRuntime(paths, { url: FIXTURE_ORIGIN + '/v1', platform: 'darwin', now: () => new Date(f.clock.now), transport: httpTransport(FIXTURE_ORIGIN + '/v1', { fetch: forward }),
-        keychain: { read: () => Effect.succeed(token), write: (value) => Effect.sync(() => { token = value; }), remove: () => Effect.sync(() => { token = undefined; }) } }, { domains, os: 'macos' });
-      return yield* work(runtime);
-    })).pipe(Effect.provide(Layer.merge(agentLayer(paths, { processes, clock }), setupSourceLayer(paths, { processes })))), { signal: t.signal });
+    const run = <A, E>(work: (runtime: HostedRuntime) => Effect.Effect<A, E, AgentServices | SetupSource | Scope.Scope>) => {
+      const promise = Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+        const runtime = yield* configuredHostedRuntime(paths, { url: FIXTURE_ORIGIN + '/v1', platform: 'darwin', now: () => new Date(f.clock.now), transport: httpTransport(FIXTURE_ORIGIN + '/v1', { fetch: forward }),
+          keychain: { read: () => Effect.succeed(token), write: (value) => Effect.sync(() => { token = value; }), remove: () => Effect.sync(() => { token = undefined; }) } }, { domains, os: 'macos' });
+        return yield* work(runtime);
+      })).pipe(Effect.provide(Layer.merge(agentLayer(paths, { processes, clock }), setupSourceLayer(paths, { processes })))), { signal: AbortSignal.any([t.signal, lifetime.signal]) });
+      activeRuns.add(promise);
+      void promise.then(() => activeRuns.delete(promise), () => activeRuns.delete(promise));
+      return promise;
+    };
     const document = () => JSON.parse(readFileSync(join(stateRoot, 'agent', 'sync.json'), 'utf8')) as HostedDocument;
     return { root: machineRoot, paths, run, domains, requests, document, token: () => token };
   };
