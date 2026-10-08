@@ -13,7 +13,7 @@ test('configuration defaults closed and ignores unrelated environment', () => {
 test('configuration fails closed on missing, unsafe, unknown and noncanonical values', () => {
   for (const [key, values] of Object.entries({
     GITHUB_CLIENT_ID: ['', ' id', 'a-b', 'x'.repeat(101)],
-    COSMOS_ENDPOINT: ['http://remote', 'https://127.0.0.1', 'https://localhost', 'https://user@remote', 'https://remote/db', 'https://remote?x', 'https://remote#x'],
+    COSMOS_ENDPOINT: ['http://remote', 'https://127.0.0.1', 'https://localhost', 'https://api.localhost./', 'https://[::ffff:127.0.0.1]/', 'https://[::ffff:7f00:1]/', 'https://[::ffff:127.255.255.255]/', 'https://user@remote', 'https://remote/db', 'https://remote?x', 'https://remote#x'],
     COSMOS_DATABASE: ['', '.', '../db', 'a/b', 'x'.repeat(101)],
     MANAGED_IDENTITY_CLIENT_ID: ['', 'not-uuid'], HOST: ['localhost', 'evil'], PORT: ['0', '65536', '+1', '01', '1.0', ' 1'],
     OPEN_SIGNUP: ['TRUE', '', '1'], ALLOWLIST: [' a', 'a,', '-a', 'a--b', 'a_a', 'a,a'],

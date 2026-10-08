@@ -1,5 +1,6 @@
 import { CosmosClient } from '@azure/cosmos';
 import { ManagedIdentityCredential } from '@azure/identity';
+import { createDefaultHttpClient } from '@azure/core-rest-pipeline';
 import { parseServiceEnvironment, type RuntimeConfig } from './config.ts';
 import { makeProductionResources } from './production.ts';
 import { startServiceRuntime, type RuntimeOptions, type RuntimeEvent, type ServiceRuntime } from './runtime.ts';
@@ -55,7 +56,8 @@ if (import.meta.main) {
     await launchService({ environment: process.env, signals: process, now: Date.now, diagnostic: () => {},
       event: (event) => { process.stderr.write(`${event}\n`); }, shutdownFailure: () => { process.exitCode = 1; },
       resources: (config) => makeProductionResources(config, {
-        credential: (options) => options ? new ManagedIdentityCredential(options) : new ManagedIdentityCredential(),
+        credential: (options) => new ManagedIdentityCredential(options),
+        identityTransport: createDefaultHttpClient(),
         client: (options) => new CosmosClient(options), fetch: globalThis.fetch, now: Date.now,
       }),
     });

@@ -12,6 +12,7 @@
     "start": "node src/main.ts"
   },
   "dependencies": {
+    "@azure/core-rest-pipeline": "1.25.0",
     "@azure/cosmos": "4.10.1",
     "@azure/identity": "4.13.3",
     "@nortuscc/hosted-protocol": "*",

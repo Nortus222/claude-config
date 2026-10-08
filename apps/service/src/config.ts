@@ -31,7 +31,10 @@ export function parseServiceEnvironment(env: Readonly<Record<string, string | un
   try { url = new URL(endpoint); } catch { return invalid(); }
   if (url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^https?:\/\/[^/?#]+\/?$/.test(endpoint)) return invalid();
   const literalLoopback = /^https?:\/\/(127\.0\.0\.1|\[::1\])(?::[1-9][0-9]*)?\/?$/.test(endpoint);
-  if (localEmulator ? !literalLoopback : url.protocol !== 'https:' || (url.hostname.replace(/\.$/, '') === 'localhost' || url.hostname.endsWith('.localhost') || url.hostname === '[::1]') || /^127\./.test(url.hostname)) return invalid();
+  const hostname = url.hostname.replace(/\.$/, '');
+  const loopback = hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '[::1]'
+    || /^127\./.test(hostname) || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(hostname);
+  if (localEmulator ? !literalLoopback : url.protocol !== 'https:' || loopback) return invalid();
   const emulatorKey = get('EMULATOR_KEY');
   const managedIdentityClientId = get('MANAGED_IDENTITY_CLIENT_ID');
   if (localEmulator ? !emulatorKey || emulatorKey.length > 1024 || /[\x00-\x20\x7f]/.test(emulatorKey) || managedIdentityClientId !== undefined : emulatorKey !== undefined) return invalid();
