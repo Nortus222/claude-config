@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Effect } from 'effect';
 import { createCosmosFixture } from './support/cosmos.ts';
+import { removeOwnedImageContainer, withOwnedImageContainer } from './support/image.ts';
 import type { DeviceSessionDocument } from '../src/documents.ts';
 
 const image = process.env.NORTUSCC_SERVICE_IMAGE;
@@ -20,7 +21,7 @@ test('actual image contains only hosted production sources and dependencies and 
   assert.equal(inspected.Architecture, 'amd64'); assert.equal(inspected.Os, 'linux');
   assert.equal(inspected.Config.User, 'node');
   assert.deepEqual(inspected.Config.Entrypoint, ['node', 'apps/service/src/main.ts']);
-  const result = await docker('run', '--rm', '--name', `nortuscc-image-${randomUUID()}`, ...isolated, '--network=none', '--entrypoint=node', image!, '-e', `
+  const result = await withOwnedImageContainer(docker, name => docker('run', '--rm', '--name', name, ...isolated, '--network=none', '--entrypoint=node', image!, '-e', `
     const fs = require('node:fs');
     console.log(JSON.stringify({ uid: process.getuid(), version: process.version,
       apps: fs.readdirSync('/app/apps'), packages: fs.readdirSync('/app/packages'),
@@ -28,7 +29,7 @@ test('actual image contains only hosted production sources and dependencies and 
       workspaces: fs.readdirSync('/app/node_modules/@nortuscc'),
       dev: ['typescript', '@types/node'].filter(p => fs.existsSync('/app/node_modules/' + p)),
       dependency: require.resolve('@azure/cosmos'),
-      extra: ['.git', '.claude', 'claude', 'codex', 'docs', 'test', 'package-lock.json'].filter(p => fs.existsSync('/app/' + p)) }));`);
+      extra: ['.git', '.claude', 'claude', 'codex', 'docs', 'test', 'package-lock.json'].filter(p => fs.existsSync('/app/' + p)) }));`));
   const value = JSON.parse(result);
   assert.notEqual(value.uid, 0); assert.match(value.version, /^v24\./);
   assert.deepEqual(value.apps, ['service']); assert.deepEqual(value.packages, ['hosted-protocol']);
@@ -38,7 +39,7 @@ test('actual image contains only hosted production sources and dependencies and 
 
 test('actual production image rejects federation, emulator keys and unknown settings with constant redacted logs', { skip: !image }, async () => {
   for (const invalid of [{ AZURE_FEDERATED_TOKEN_FILE: '/private/IMAGE_PRIVATE_TOKEN' }, { NORTUSCC_SERVICE_EMULATOR_KEY: 'IMAGE_PRIVATE_KEY' }, { NORTUSCC_SERVICE_UNKNOWN: 'IMAGE_PRIVATE_VALUE' }] as Record<string, string>[]) {
-    try { await docker('run', '--rm', '--name', `nortuscc-image-${randomUUID()}`, ...isolated, '--network=none', ...envArgs({ ...production, ...invalid }), image!); assert.fail('invalid configuration started'); }
+    try { await withOwnedImageContainer(docker, name => docker('run', '--rm', '--name', name, ...isolated, '--network=none', ...envArgs({ ...production, ...invalid }), image!)); assert.fail('invalid configuration started'); }
     catch (error) {
       const failure = error as Error & { code: number; stdout: string; stderr: string };
       assert.equal(failure.code, 1); assert.equal(failure.stdout, '');
@@ -52,10 +53,9 @@ test('actual PID1 startup recovers bound claims before readiness, recovers after
   assert.ok(emulator && /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(emulator), 'explicit owned emulator container is required');
   const origin = process.env.NORTUSCC_SERVICE_IMAGE_ORIGIN;
   assert.ok(origin && /^http:\/\/127\.0\.0\.1:[1-9][0-9]*$/.test(origin), 'explicit loopback service origin is required');
-  const backend = await createCosmosFixture(); t.after(backend.dispose);
+  const backend = await createCosmosFixture();
   const name = `nortuscc-image-${randomUUID()}`;
-  let created = false;
-  t.after(async () => { if (created) await docker('rm', '-f', name); });
+  t.after(() => removeOwnedImageContainer(docker, name).then(backend.dispose));
   const seed = async (suffix: string, expiresIn = -60000) => {
     const now = Date.now(); const key = `device:image-${suffix}`; const accountId = `image-${suffix}`; const machineId = `orphan-${suffix}`;
     const session: DeviceSessionDocument = { type: 'deviceSession', version: 1, id: key, pendingId: `image-${suffix}`, deviceCode: 'IMAGE_PRIVATE_DEVICE',
@@ -80,7 +80,7 @@ test('actual PID1 startup recovers bound claims before readiness, recovers after
     ...production, NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://127.0.0.1:8081/', NORTUSCC_SERVICE_COSMOS_DATABASE: backend.database.id,
     NORTUSCC_SERVICE_LOCAL_EMULATOR: 'true', NORTUSCC_SERVICE_EMULATOR_KEY: process.env.NORTUSCC_COSMOS_EMULATOR_KEY!,
     NORTUSCC_SERVICE_HOST: '0.0.0.0', NORTUSCC_SERVICE_PORT: '8090',
-  }), image!); created = true;
+  }), image!);
   const ready = async () => {
     const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
