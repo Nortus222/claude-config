@@ -6,14 +6,14 @@ import { fakeGitHub } from './fake-github.ts';
 import type { Store } from '../../src/store.ts';
 import type { ServiceOptions } from '../../src/service.ts';
 
-export async function fixture(options: { store?: Store['Service']; openSignup?: boolean; allowlistedLogins?: readonly string[]; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] } = {}) {
+export async function fixture(options: { store?: Store['Service']; openSignup?: boolean; allowlistedLogins?: readonly string[]; pollAfter?: number; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] } = {}) {
   if (!('makeService' in api)) throw new Error('makeService must be exported');
   const clock = { now: Date.UTC(2026, 9, 7) };
   const diagnostics: unknown[] = [];
   const github = fakeGitHub();
   const store = options.store ?? api.makeMemoryStore();
   const handler = await Effect.runPromise(api.makeService({ now: () => clock.now,
-    config: { openSignup: options.openSignup ?? true, allowlistedLogins: options.allowlistedLogins ?? [], pollAfter: 900 },
+    config: { openSignup: options.openSignup ?? true, allowlistedLogins: options.allowlistedLogins ?? [], pollAfter: options.pollAfter ?? 900 },
     diagnostic: (entry) => { diagnostics.push(entry); options.diagnostic?.(entry); }, ...(options.metadata ? { metadata: options.metadata } : {}),
   }).pipe(Effect.provideService(api.Store, store), Effect.provideService(api.GitHub, github.service)));
   const server = api.createServiceServer(handler);

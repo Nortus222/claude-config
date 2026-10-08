@@ -88,6 +88,7 @@ this phase.
 | `MachinesResponseSchema` | `{ machines: MachineRecord[] }` | `200` from `GET /machines` |
 | `SyncResponseSchema` | `{ seq, decisions, revisions, machine, setups, pollAfter }` | `200` from `GET /sync` |
 | `StatusSummarySchema` | `{ reportedAt, policy, agents, setups, drift }` | Request to `PUT /machines/self/status` |
+| `AccountExportSchema` | `{ account, machines, setups, revisions, decisions }` | `200` from `GET /account/export` |
 | `ErrorResponseSchema` | `{ error, message }` | Non-success error body |
 
 The source designs leave several success statuses unspecified. This foundation
@@ -137,7 +138,14 @@ keeps working without an account.
 
 Status writes, sign-out, machine deletion and account deletion return `204` without
 a JSON body. Conditional sync returns `304` without a body. There is no schema for
-either empty body. Health uses the minimal `HealthResponseSchema`; account export remains a service-batch decision.
+either empty body. Health uses the minimal `HealthResponseSchema`. `AccountExportSchema` contains
+account identity and public metadata records. Its account object is exactly
+`{ accountId, githubId, login, seq, defaultPolicy, createdAt }`, with a positive
+safe numeric GitHub ID and `defaultPolicy: notify`. Machines include enabled
+status summaries. Revision and decision export arrays contain all records without
+a revision-page cap. Export excludes hashes, device sessions, claims, issuance
+fences, account reservations and concurrency markers; storage documents must
+never be decoded or spread directly into this projection.
 
 ## Sync query and complete response
 

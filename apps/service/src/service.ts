@@ -9,6 +9,7 @@ import { machineRoute } from './machines.ts';
 import { tokenBucket } from './limits.ts';
 import { routeTemplate, type DiagnosticSink } from './diagnostics.ts';
 import { newId } from './ids.ts';
+import { metadataHandler } from './metadata.ts';
 
 export interface ServiceRequest { readonly method: string; readonly path: string; readonly headers: Readonly<Record<string, string | undefined>>; readonly body?: unknown; readonly ip: string }
 export interface ServiceResponse { readonly status: number; readonly body?: unknown; readonly headers?: Readonly<Record<string, string>> }
@@ -23,6 +24,7 @@ export interface ServiceOptions {
 export function makeService(options: ServiceOptions): Effect.Effect<ServiceHandler, never, Store | GitHub> {
   return Effect.gen(function* () {
     const store = yield* Store; const github = yield* GitHub;
+    const metadata = options.metadata ?? metadataHandler(options.now,options.config.pollAfter);
     const starts = tokenBucket(10, 3600000, options.now); const machineRequests = tokenBucket(60, 60000, options.now);
     return (request: ServiceRequest) => {
       const start = options.now(); let accountHash: string | undefined;
@@ -45,8 +47,7 @@ export function makeService(options: ServiceOptions): Effect.Effect<ServiceHandl
         yield* touchMachine(store, principal, options.now());
         const response = yield* machineRoute(request, principal, store);
         if (response) return response;
-        if (options.metadata) return yield* options.metadata(request, principal, store);
-        return yield* Effect.fail(new ServiceFailure({ code: 'not_found' }));
+        return yield* metadata(request,principal,store);
       });
       const log = (status: number) => { try { options.diagnostic({ requestId: newId(options.now()), route: routeTemplate(request.method, request.path), status, duration: Math.max(0, options.now() - start), ...(accountHash ? { accountHash } : {}) }); } catch { /* Diagnostics cannot change a response. */ } };
       return handle.pipe(Effect.tap((response) => Effect.sync(() => log(response.status))), Effect.tapError((error) => Effect.sync(() => log(ERROR_STATUS[error.code]))));
