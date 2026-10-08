@@ -1,0 +1,102 @@
+name: service-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_commit:
+        description: 'Reviewed main commit (must equal this run source SHA)'
+        required: true
+        type: string
+      image_commit:
+        description: 'Reviewed source commit of the image (ancestor of this main checkout; permits rollback)'
+        required: true
+        type: string
+      image_ref:
+        description: 'Public ghcr.io/nortus222/claude-config-service@sha256 digest from reviewed source'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: hosted-deploy
+  cancel-in-progress: false
+
+env:
+  REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
+  IMAGE_COMMIT: ${{ inputs.image_commit }}
+  IMAGE_REF: ${{ inputs.image_ref }}
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'Nortus222/claude-config'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Verify reviewed source, existing protection and public image/config
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node apps/service/infra/release.ts deploy
+      - name: Compile reviewed infrastructure before approval
+        run: |
+          az bicep install --version v0.47.16
+          az bicep build --file apps/service/infra/main.bicep --stdout > /tmp/nortuscc-reviewed-template.json
+
+  deploy:
+    needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'Nortus222/claude-config'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: hosted-production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Reverify release after environment approval
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node apps/service/infra/release.ts deploy
+      - name: Validate public deployment identity before OIDC
+        run: |
+          node apps/service/infra/deploy.ts inputs
+      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Install pinned compiler on the ephemeral runner
+        run: |
+          az bicep install --version v0.47.16
+      - name: Read-only Azure preflight then incremental deployment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node apps/service/infra/deploy.ts execute

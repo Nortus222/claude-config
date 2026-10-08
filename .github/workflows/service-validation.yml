@@ -1,0 +1,29 @@
+name: service-validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Compile infrastructure and verify delivery boundaries without login
+        run: |
+          az bicep install --version v0.47.16
+          export BICEP_CLI=/home/runner/.azure/bin/bicep
+          node --test apps/service/checks/infra.spec.ts apps/service/checks/deployment-config.spec.ts apps/service/checks/release.spec.ts apps/service/checks/deploy.spec.ts apps/service/checks/workflows.spec.ts apps/service/checks/owner-setup.spec.ts
+          npm run typecheck -w apps/service

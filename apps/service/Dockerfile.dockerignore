@@ -1,0 +1,13 @@
+**
+!package.json
+!package-lock.json
+!apps/
+!apps/service/
+!apps/service/package.json
+!apps/service/src/
+!apps/service/src/**
+!packages/
+!packages/hosted-protocol/
+!packages/hosted-protocol/package.json
+!packages/hosted-protocol/src/
+!packages/hosted-protocol/src/**
