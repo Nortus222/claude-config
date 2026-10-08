@@ -31,3 +31,11 @@ test('launcher routes SIGINT and SIGTERM to the same idempotent stop and removes
   });
   signals.emit('SIGINT'); signals.emit('SIGTERM'); await launched.stop(); assert.equal(disposed, 1); assert.equal(launched.runtime.server.listening, false); assert.equal(signals.listenerCount('SIGTERM'), 0); assert.equal(signals.listenerCount('SIGINT'), 0);
 });
+
+test('unsupported production federation is rejected before resources and signal handlers are constructed', async () => {
+  for (const file of ['', '/inert/federated-token']) {
+    const signals = new EventEmitter(); const events: string[] = []; let constructors = 0;
+    await assert.rejects(launchService({ environment: { ...environment, AZURE_FEDERATED_TOKEN_FILE: file }, signals, now: Date.now, diagnostic: () => {}, event: (event) => events.push(event), resources: () => { constructors++; throw new Error('resources must not be constructed'); } }), /Service startup failed/);
+    assert.equal(constructors, 0); assert.equal(signals.listenerCount('SIGINT'), 0); assert.equal(signals.listenerCount('SIGTERM'), 0); assert.deepEqual(events, ['startup_failed']);
+  }
+});

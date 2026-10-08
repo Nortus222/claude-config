@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
+import { gzipSync, deflateSync } from 'node:zlib';
 import type { CosmosClient, CosmosClientOptions } from '@azure/cosmos';
-import { createDefaultHttpClient, createPipelineRequest, type HttpClient } from '@azure/core-rest-pipeline';
+import { createDefaultHttpClient, createHttpHeaders, createPipelineRequest, type HttpClient } from '@azure/core-rest-pipeline';
 import { makeProductionResources } from '../src/production.ts';
 import { parseServiceEnvironment } from '../src/config.ts';
 type TokenCredential = NonNullable<CosmosClientOptions['aadCredentials']>;
@@ -26,7 +27,7 @@ test('production selects exactly one managed identity and owns deterministic Cos
 test('emulator never constructs credential and construction failure destroys acquired agent', async () => {
   let destroyed = 0;
   const factories = { credential: (): TokenCredential => { throw new Error('credential discovery forbidden'); }, agent: () => ({ maxFreeSockets: 1, maxSockets: 2, sockets: {}, requests: {}, destroy: () => { destroyed++; } }), identityTransport: forbiddenTransport, fetch: forbiddenFetch, now: () => 0 };
-  const local = { ...config, localEmulator: true, cosmosEndpoint: 'http://127.0.0.1:18081/', emulatorKey: 'dummy' };
+  const local = parseServiceEnvironment({ NORTUSCC_SERVICE_GITHUB_CLIENT_ID: 'client', NORTUSCC_SERVICE_COSMOS_DATABASE: 'metadata', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://127.0.0.1:18081/', NORTUSCC_SERVICE_LOCAL_EMULATOR: 'true', NORTUSCC_SERVICE_EMULATOR_KEY: 'dummy', AZURE_FEDERATED_TOKEN_FILE: '/inert/federated-token' });
   const resources = makeProductionResources(local, { ...factories, client: (options) => { assert.equal(options.aadCredentials, undefined); assert.equal(options.key, 'dummy'); return { database: () => ({}), dispose: () => {} } as unknown as CosmosClient; } });
   await resources.dispose(); assert.equal(destroyed, 1);
   assert.throws(() => makeProductionResources(config, { ...factories, credential: () => ({ getToken: async () => null }), client: () => { throw new Error('SDK construction'); } })); assert.equal(destroyed, 2);
@@ -99,4 +100,54 @@ test('owned default identity transport aborts a stalled loopback socket and join
     for (let i = 0; i < 200 && sockets.size; i++) await new Promise((resolve) => setTimeout(resolve, 1));
     assert.equal(sockets.size, 0);
   } finally { await resources.dispose(); for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test('owned identity transport removes advertised compression without mutating SDK request headers', async () => {
+  const request = createPipelineRequest({ url: 'http://127.0.0.1:9/inert', method: 'GET', headers: createHttpHeaders({ 'Accept-Encoding': 'gzip,deflate', 'x-test': 'preserved' }) });
+  let captured: CosmosClientOptions | undefined;
+  const resources = makeProductionResources(config, {
+    credential: (options) => ({ getToken: async () => { await options.httpClient!.sendRequest(request); return null; } }),
+    identityTransport: { sendRequest: async (physical) => { assert.equal(physical.headers.get('accept-encoding'), undefined); assert.equal(physical.headers.get('x-test'), 'preserved'); assert.equal(request.headers.get('accept-encoding'), 'gzip,deflate'); return { request: physical, status: 200, headers: createHttpHeaders() }; } },
+    client: (options) => { captured = options; return { database: () => ({}), dispose: () => {} } as unknown as CosmosClient; }, fetch: forbiddenFetch, now: Date.now,
+  });
+  try { assert.equal(await captured!.aadCredentials!.getToken('scope'), null); } finally { await resources.dispose(); }
+});
+for (const encoding of ['gzip', 'deflate'] as const) for (const cancellation of ['caller', 'timeout', 'dispose'] as const) test(`default identity transport joins partial ${encoding} body on ${cancellation}`, async (t) => {
+  const realTimeout = setTimeout;
+  const wait = (ms: number) => new Promise<void>((resolve) => realTimeout(resolve, ms));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const server = createServer(); const sockets = new Set<Socket>(); let sent = false; let captured: CosmosClientOptions | undefined;
+  server.on('connection', (socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  server.on('request', (_request, response) => { response.writeHead(200, { 'content-encoding': encoding }); response.write(Buffer.from(encoding === 'gzip' ? [0x1f, 0x8b, 0x08, 0] : [0x78, 0x9c])); sent = true; });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const resources = makeProductionResources(config, {
+    credential: (options) => ({ getToken: async () => { await options.httpClient!.sendRequest(createPipelineRequest({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/fake-identity`, method: 'GET', allowInsecureConnection: true, headers: createHttpHeaders({ 'Accept-Encoding': 'gzip,deflate' }) })); return null; } }),
+    identityTransport: createDefaultHttpClient(), client: (options) => { captured = options; return { database: () => ({}), dispose: () => {} } as unknown as CosmosClient; }, fetch: forbiddenFetch, now: Date.now,
+  });
+  let disposal: Promise<void> | undefined; let joined = false;
+  try {
+    const caller = new AbortController(); const rejected = assert.rejects(captured!.aadCredentials!.getToken('scope', { abortSignal: caller.signal }), /Credential acquisition failed/);
+    for (let i = 0; i < 200 && !sent; i++) await wait(1);
+    assert.equal(sent, true); await wait(30); // Let the default transport consume headers and enter the partial body read.
+    if (cancellation === 'timeout') t.mock.timers.tick(10000); else if (cancellation === 'caller') caller.abort(); else disposal = resources.dispose();
+    await rejected; disposal ??= resources.dispose();
+    joined = await Promise.race([disposal.then(() => true), wait(300).then(() => false)]);
+    assert.equal(joined, true, 'physical body read and disposal must settle after cancellation');
+  } finally {
+    // The RED SDK decoder bug leaves a pending promise after all sockets close; never hide it behind teardown.
+    disposal ??= resources.dispose(); if (joined) await disposal;
+    for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+for (const [encoding, compress] of [['gzip', gzipSync], ['deflate', deflateSync]] as const) test(`unexpected complete ${encoding} identity body fails token parsing safely`, async () => {
+  const server = createServer((_request, response) => { response.writeHead(200, { 'content-encoding': encoding }); response.end(compress(Buffer.from('{"access_token":"inert"}'))); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  let captured: CosmosClientOptions | undefined;
+  const resources = makeProductionResources(config, {
+    credential: (options) => ({ getToken: async () => { const response = await options.httpClient!.sendRequest(createPipelineRequest({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/fake-identity`, method: 'GET', allowInsecureConnection: true, headers: createHttpHeaders({ 'Accept-Encoding': 'gzip,deflate' }) })); JSON.parse(response.bodyAsText!); return null; } }),
+    identityTransport: createDefaultHttpClient(), client: (options) => { captured = options; return { database: () => ({}), dispose: () => {} } as unknown as CosmosClient; }, fetch: forbiddenFetch, now: Date.now,
+  });
+  try { await assert.rejects(captured!.aadCredentials!.getToken('scope'), /^Error: Credential acquisition failed\.$/); }
+  finally { await resources.dispose(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

@@ -34,3 +34,10 @@ test('emulator mode only permits literal loopback roots, requires key and reject
   assert.throws(() => parseServiceEnvironment({ ...base, [`${prefix}LOCAL_EMULATOR`]: 'true', [`${prefix}COSMOS_ENDPOINT`]: 'http://127.0.0.1/' }));
   assert.throws(() => parseServiceEnvironment({ ...base, [`${prefix}LOCAL_EMULATOR`]: 'true', [`${prefix}COSMOS_ENDPOINT`]: 'http://127.0.0.1/', [`${prefix}EMULATOR_KEY`]: 'dummy', [`${prefix}MANAGED_IDENTITY_CLIENT_ID`]: '00000000-0000-4000-8000-000000000001' }));
 });
+
+test('production rejects unsupported workload federation before resource discovery, while explicit emulator ignores it', () => {
+  for (const file of ['', '/inert/federated-token']) assert.throws(() => parseServiceEnvironment({ ...base, AZURE_FEDERATED_TOKEN_FILE: file }), /Invalid service configuration/);
+  const local = parseServiceEnvironment({ ...base, [`${prefix}LOCAL_EMULATOR`]: 'true', [`${prefix}COSMOS_ENDPOINT`]: 'http://127.0.0.1:18081/', [`${prefix}EMULATOR_KEY`]: 'dummy', AZURE_FEDERATED_TOKEN_FILE: '/inert/federated-token' });
+  assert.equal(local.localEmulator, true); assert.equal(local.emulatorKey, 'dummy'); assert.equal(local.managedIdentityClientId, undefined);
+  assert.equal(parseServiceEnvironment({ ...base, AZURE_TENANT_ID: 'ignored' }).openSignup, false);
+});

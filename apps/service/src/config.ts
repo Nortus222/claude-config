@@ -17,7 +17,7 @@ export interface RuntimeConfig {
 const prefix = 'NORTUSCC_SERVICE_';
 const keys = new Set(['GITHUB_CLIENT_ID', 'COSMOS_ENDPOINT', 'COSMOS_DATABASE', 'MANAGED_IDENTITY_CLIENT_ID', 'HOST', 'PORT', 'OPEN_SIGNUP', 'ALLOWLIST', 'POLL_AFTER_SECONDS', 'SWEEP_INTERVAL_SECONDS', 'SWEEP_TIMEOUT_SECONDS', 'SHUTDOWN_GRACE_SECONDS', 'LOCAL_EMULATOR', 'EMULATOR_KEY']);
 const invalid = (): never => { throw new Error('Invalid service configuration.'); };
-/** Parse only the service namespace. Never resolve credentials or inspect a machine. */
+/** Parse service settings and reject identity paths whose work the runtime cannot own. */
 export function parseServiceEnvironment(env: Readonly<Record<string, string | undefined>>): RuntimeConfig {
   for (const key of Object.keys(env)) if (key.startsWith(prefix) && !keys.has(key.slice(prefix.length))) invalid();
   const get = (key: string) => env[`${prefix}${key}`];
@@ -25,6 +25,8 @@ export function parseServiceEnvironment(env: Readonly<Record<string, string | un
   const boolean = (key: string, fallback: boolean) => { const value = get(key); if (value === undefined) return fallback; if (value !== 'true' && value !== 'false') return invalid(); return value === 'true'; };
   const integer = (key: string, fallback: number, maximum: number) => { const value = get(key); if (value === undefined) return fallback; if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > maximum) return invalid(); return Number(value); };
   const localEmulator = boolean('LOCAL_EMULATOR', false);
+  // Identity 4.13.3's token-exchange path discards the owned transport and cancellation.
+  if (!localEmulator && env.AZURE_FEDERATED_TOKEN_FILE !== undefined) return invalid();
   const endpoint = get('COSMOS_ENDPOINT');
   if (!endpoint || /[\x00-\x20\x7f\\]/.test(endpoint)) return invalid();
   let url: URL;

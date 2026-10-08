@@ -4,7 +4,7 @@ import { Agent as HttpsAgent } from 'node:https';
 import type { Socket } from 'node:net';
 import type { CosmosClient, CosmosClientOptions } from '@azure/cosmos';
 import type { ManagedIdentityCredentialClientIdOptions } from '@azure/identity';
-import type { HttpClient } from '@azure/core-rest-pipeline';
+import { createHttpHeaders, type HttpClient } from '@azure/core-rest-pipeline';
 import type { RuntimeConfig } from './config.ts';
 import { makeCosmosStore, validateCosmosConfiguration } from './cosmos-store.ts';
 import { makeGitHub } from './github-http.ts';
@@ -66,7 +66,10 @@ export function makeProductionResources(config: RuntimeConfig, factories: Produc
       controller.signal.throwIfAborted();
       return await track(Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
-        return factories.identityTransport.sendRequest({ ...request, abortSignal: controller.signal,
+        // The pinned default transport cannot finish a partial decoder after cancellation.
+        const headers = createHttpHeaders(request.headers.toJSON());
+        headers.delete('accept-encoding');
+        return factories.identityTransport.sendRequest({ ...request, headers, abortSignal: controller.signal,
           timeout: Math.min(request.timeout > 0 ? request.timeout : 10000, 10000), agent: new URL(request.url).protocol === 'http:' ? identityHttpAgent : identityHttpsAgent });
       }), transports);
     } catch { throw credentialFailure(); }
