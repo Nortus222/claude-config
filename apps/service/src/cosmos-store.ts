@@ -39,7 +39,7 @@ const errorDetails = (error: unknown): { status?: number; retryAfter?: number } 
   return {};
 };
 const failure = (error: unknown): ServiceFailure => error instanceof ServiceFailure ? error : unavailable(errorDetails(error).retryAfter);
-const attempt = <A>(run: () => Promise<A>): Effect.Effect<A, ServiceFailure> => Effect.tryPromise({ try: run, catch: failure });
+const attempt = <A>(run: (signal: AbortSignal) => Promise<A>): Effect.Effect<A, ServiceFailure> => Effect.tryPromise({ try: (signal) => { signal.throwIfAborted(); return run(signal); }, catch: failure });
 const conflict = (error: unknown): boolean => [404, 409, 412].includes(errorDetails(error).status ?? 0);
 const validKey = (key: string): boolean => typeof key === 'string' && key.length > 0 && Buffer.from(key).toString() === key && Buffer.byteLength(key) <= 2048;
 const validId = (id: string, container: Container): boolean => Buffer.from(id).toString() === id && (container === 'identities'
@@ -52,14 +52,16 @@ const etag = (raw: StoredDocument | undefined): string | null => {
 };
 
 /** Read-only prerequisite check. The embedder owns provisioning and must call this before serving. */
-export const validateCosmosConfiguration = (database: Database, options: { readonly localEmulator?: boolean } = {}): Effect.Effect<void, ServiceFailure> => attempt(async () => {
-  const account = await database.client.getDatabaseAccount();
+export const validateCosmosConfiguration = (database: Database, options: { readonly localEmulator?: boolean } = {}): Effect.Effect<void, ServiceFailure> => attempt(async (signal) => {
+  const account = await database.client.getDatabaseAccount({ abortSignal: signal });
+  signal.throwIfAborted();
   if (options.localEmulator) {
     const endpoint = new URL(await database.client.getWriteEndpoint());
     if (!['127.0.0.1', '[::1]', 'localhost'].includes(endpoint.hostname) || endpoint.username || endpoint.password) throw unavailable();
   } else if (account.resource?.consistencyPolicy !== ConsistencyLevel.Strong) throw unavailable();
   for (const name of ['accounts', 'setups', 'identities'] as const) {
-    const { resource } = await database.container(name).read();
+    signal.throwIfAborted();
+    const { resource } = await database.container(name).read({ abortSignal: signal });
     if (resource?.partitionKey?.paths.length !== 1 || resource.partitionKey.paths[0] !== `/${partitionFields[name]}`
       || (name === 'identities' ? resource.defaultTtl !== -1 : resource.defaultTtl !== undefined && resource.defaultTtl !== -1)) throw unavailable();
   }
@@ -79,9 +81,10 @@ export type CosmosStore = Store['Service'] & {
 /** Atomic partition writes and Strong marker-bookended reads over an injected SDK database. */
 export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxSnapshotAttempts = 5 }: CosmosStoreOptions): CosmosStore => {
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxSnapshotAttempts) || maxSnapshotAttempts < 1) throw invalid();
-  const point = async (container: Container, key: string, id: string): Promise<StoredDocument | undefined> => {
+  const point = async (container: Container, key: string, id: string, signal: AbortSignal): Promise<StoredDocument | undefined> => {
+    signal.throwIfAborted();
     try {
-      const response = await database.container(container).item(id, key).read<StoredDocument>(strong);
+      const response = await database.container(container).item(id, key).read<StoredDocument>({ ...strong, abortSignal: signal });
       if (response.statusCode === 404) return undefined;
       return response.resource;
     } catch (error) {
@@ -96,24 +99,27 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
       || raw[partitionFields[container]] !== key) throw unavailable();
     return structuredClone(document);
   };
-  const snapshot = async (container: Container, key: string): Promise<PartitionSnapshot> => {
+  const snapshot = async (container: Container, key: string, signal: AbortSignal): Promise<PartitionSnapshot> => {
     if (!validKey(key) || (container === 'identities' && !validId(key, container))) throw invalid();
     if (container === 'identities') {
-      const raw = await point(container, key, key);
+      const raw = await point(container, key, key, signal);
       return { version: etag(raw), closed: false, documents: raw ? [payload(raw, container, key)] : [] };
     }
     for (let count = 0; count < maxSnapshotAttempts; count++) {
-      const before = await point(container, key, PARTITION_MARKER_ID);
+      const before = await point(container, key, PARTITION_MARKER_ID, signal);
+      signal.throwIfAborted();
       const iterator = database.container(container).items.query<StoredDocument>({
         query: `SELECT * FROM c WHERE c.${partitionFields[container]} = @key AND c.id != @marker`,
         parameters: [{ name: '@key', value: key }, { name: '@marker', value: PARTITION_MARKER_ID }],
-      }, { ...strong, partitionKey: key, maxItemCount: pageSize });
+      }, { ...strong, abortSignal: signal, partitionKey: key, maxItemCount: pageSize });
       const documents: ServiceDocument[] = [];
       while (iterator.hasMoreResults()) {
+        signal.throwIfAborted();
         const page = await iterator.fetchNext();
+        signal.throwIfAborted();
         for (const raw of page.resources) documents.push(payload(raw, container, key));
       }
-      const after = await point(container, key, PARTITION_MARKER_ID);
+      const after = await point(container, key, PARTITION_MARKER_ID, signal);
       if (etag(before) !== etag(after)) continue;
       if ((!after && documents.length) || (after && (typeof after.closed !== 'boolean' || after[partitionFields[container]] !== key))) throw unavailable();
       return { version: etag(after), closed: after?.closed ?? false, documents };
@@ -126,10 +132,11 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
     payload: structuredClone(document),
     ...(document.type === 'deviceSession' ? { ttl: document.claim ? -1 : Math.max(1, Math.ceil((document.expiresAt - now()) / 1000)) } : {}),
   });
-  const batch = async (container: Container, key: string, operations: OperationInput[]): Promise<boolean> => {
+  const batch = async (container: Container, key: string, operations: OperationInput[], signal: AbortSignal): Promise<boolean> => {
     if (Buffer.byteLength(JSON.stringify(operations)) > MAX_COSMOS_BATCH_BYTES) throw new ServiceFailure({ code: 'payload_too_large' });
     try {
-      const response = await database.container(container).items.batch(operations, key, strong);
+      signal.throwIfAborted();
+      const response = await database.container(container).items.batch(operations, key, { ...strong, abortSignal: signal });
       const failures = response.result?.filter((result) => result.statusCode >= 400) ?? [];
       // 424 only describes rolled-back siblings; classify the actual failing operation.
       const root = failures.find((result) => result.statusCode !== 424);
@@ -145,20 +152,21 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
     }
   };
   const marker = (container: 'accounts' | 'setups', key: string, closed: boolean) => ({ id: PARTITION_MARKER_ID, [partitionFields[container]]: key, closed });
-  const commit = async (container: Container, key: string, expectedVersion: string | null, mutations: ReadonlyArray<Mutation>): Promise<boolean> => {
+  const commit = async (container: Container, key: string, expectedVersion: string | null, mutations: ReadonlyArray<Mutation>, signal: AbortSignal): Promise<boolean> => {
     if (!validKey(key) || !validMutations(container, key, mutations)
       || mutations.some((mutation) => !validId(mutation.type === 'upsert' ? mutation.document.id : mutation.id, container))) throw invalid();
     if (Buffer.byteLength(JSON.stringify(mutations)) > MAX_COSMOS_BATCH_BYTES) throw new ServiceFailure({ code: 'payload_too_large' });
-    const current = await snapshot(container, key);
+    const current = await snapshot(container, key, signal);
     if (current.version !== expectedVersion || (current.closed && mutations.some((mutation) => mutation.type === 'upsert'))) return false;
     if (container === 'identities') {
       const mutation = mutations[0];
       if (!mutation || (mutation.type === 'delete' && current.version === null)) return true;
       const target = database.container(container);
       try {
-        const options = { ...strong, accessCondition: { type: 'IfMatch', condition: current.version! } };
+        signal.throwIfAborted();
+        const options = { ...strong, abortSignal: signal, accessCondition: { type: 'IfMatch', condition: current.version! } };
         if (mutation.type === 'delete') await target.item(key, key).delete(options);
-        else if (current.version === null) await target.items.create(stored(container, key, mutation.document), strong);
+        else if (current.version === null) await target.items.create(stored(container, key, mutation.document), { ...strong, abortSignal: signal });
         else await target.item(key, key).replace(stored(container, key, mutation.document), options);
         return true;
       } catch (error) {
@@ -186,32 +194,37 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
       operations.unshift(current.version === null ? { operationType: 'Create', resourceBody }
         : { operationType: 'Replace', id: PARTITION_MARKER_ID, resourceBody, ifMatch: current.version });
     }
-    return batch(container, key, operations);
+    return batch(container, key, operations, signal);
   };
   const store: CosmosStore = {
-    readPartition: (container, key) => attempt(() => snapshot(container, key)),
-    commitPartition: (container, key, version, mutations) => attempt(() => commit(container, key, version, mutations)),
-    closePartition: (container, key, version) => attempt(async () => {
+    readPartition: (container, key) => attempt((signal) => snapshot(container, key, signal)),
+    commitPartition: (container, key, version, mutations) => attempt((signal) => commit(container, key, version, mutations, signal)),
+    closePartition: (container, key, version) => attempt(async (signal) => {
       if (!validKey(key) || (container !== 'accounts' && container !== 'setups')) throw invalid();
-      const current = await snapshot(container, key);
+      const current = await snapshot(container, key, signal);
       if (current.version !== version) return false;
       if (current.closed) return true;
       const resourceBody = marker(container, key, true);
       return batch(container, key, [version === null ? { operationType: 'Create', resourceBody }
-        : { operationType: 'Replace', id: PARTITION_MARKER_ID, ifMatch: version, resourceBody }]);
+        : { operationType: 'Replace', id: PARTITION_MARKER_ID, ifMatch: version, resourceBody }], signal);
     }),
     // The caller owns scheduling and retries after interruption; scan rows are only candidates.
     sweepExpiredDevices: () => Effect.gen(function* () {
       const cutoff = now();
-      const iterator = yield* attempt(async () => database.container('identities').items.query<{ id: string }>({
-        query: "SELECT c.id FROM c WHERE c.payload.type = 'deviceSession' AND c.payload.expiresAt <= @now",
-        parameters: [{ name: '@now', value: cutoff }],
-      }, { ...strong, maxItemCount: pageSize }));
-      const keys: string[] = [];
-      while (iterator.hasMoreResults()) {
-        const page = yield* attempt(() => iterator.fetchNext());
-        for (const candidate of page.resources) keys.push(candidate.id);
-      }
+      const keys = yield* attempt(async (signal) => {
+        const iterator = database.container('identities').items.query<{ id: string }>({
+          query: "SELECT c.id FROM c WHERE c.payload.type = 'deviceSession' AND c.payload.expiresAt <= @now",
+          parameters: [{ name: '@now', value: cutoff }],
+        }, { ...strong, abortSignal: signal, maxItemCount: pageSize });
+        const keys: string[] = [];
+        while (iterator.hasMoreResults()) {
+          signal.throwIfAborted();
+          const page = await iterator.fetchNext();
+          signal.throwIfAborted();
+          for (const candidate of page.resources) keys.push(candidate.id);
+        }
+        return keys;
+      });
       // Deleting during pagination can shift continuation offsets and skip candidates.
       for (const key of keys) yield* recoverExpiredDeviceSession(store, key, cutoff);
     }),

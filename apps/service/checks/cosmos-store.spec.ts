@@ -19,7 +19,7 @@ test('physical IDs reversibly encode unsafe logical IDs without marker collision
 });
 
 // These SDK boundary doubles exercise error mapping, not emulator transaction behavior.
-const fakeDatabase = (options: { batch?: () => Promise<unknown>; point?: (options: RequestOptions) => Promise<unknown>; query?: (spec: unknown, options: FeedOptions) => unknown } = {}): Database => ({
+const fakeDatabase = (options: { batch?: (...args: unknown[]) => Promise<unknown>; point?: (options: RequestOptions) => Promise<unknown>; query?: (spec: unknown, options: FeedOptions) => unknown } = {}): Database => ({
   container: () => ({
     item: () => ({ read: options.point ?? (async () => ({ statusCode: 404 })) }),
     items: { query: options.query ?? (() => ({ hasMoreResults: () => false })), batch: options.batch },
@@ -111,4 +111,56 @@ test('emulator harness rejects remote and malformed endpoints before creating a 
     if (endpoint === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT; else process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT = endpoint;
     if (key === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_KEY; else process.env.NORTUSCC_COSMOS_EMULATOR_KEY = key;
   }
+});
+
+test('validation and mutation requests forward Effect AbortSignal to the SDK', async () => {
+  const signals: AbortSignal[] = [];
+  const capture = (options: RequestOptions) => { assert.ok(options.abortSignal instanceof AbortSignal); signals.push(options.abortSignal); };
+  const validation = { client: { getDatabaseAccount: async (options: RequestOptions) => { capture(options); return { resource: { consistencyPolicy: 'Strong' } }; } },
+    container: (name: string) => ({ read: async (options: RequestOptions) => { capture(options); return { resource: { partitionKey: { paths: [({ accounts: '/accountId', setups: '/setupId', identities: '/id' })[name]] }, ...(name === 'identities' ? { defaultTtl: -1 } : {}) } }; } }),
+  } as unknown as Database;
+  await Effect.runPromise(validateCosmosConfiguration(validation)); assert.equal(signals.length, 4);
+  const database = fakeDatabase({ point: async (options) => { capture(options); return { statusCode: 404 }; }, query: (_query, options) => { capture(options); return { hasMoreResults: () => false }; },
+    batch: async (...args: unknown[]) => { capture(args[2] as RequestOptions); return { code: 200, result: [{ statusCode: 201 }, { statusCode: 201 }] }; },
+  });
+  const before = signals.length; assert.equal(await Effect.runPromise(makeCosmosStore({ database }).commitPartition('accounts', 'account-a', null, [upsert(account())])), true);
+  assert.equal(signals.length - before, 4);
+});
+test('aborted snapshot query cannot start later marker reads or writes after its promise resolves', async () => {
+  let release: (() => void) | undefined; let querySignal: AbortSignal | undefined; let writes = 0; let reads = 0;
+  const controller = new AbortController();
+  const database = fakeDatabase({ point: async () => { reads++; return { statusCode: 404 }; },
+    query: (_query, options) => { querySignal = options.abortSignal as AbortSignal; let more = true; return { hasMoreResults: () => more, fetchNext: () => new Promise((resolve) => { release = () => { more = false; resolve({ resources: [] }); }; }) }; },
+    batch: async () => { writes++; return {}; },
+  });
+  const running = Effect.runPromise(makeCosmosStore({ database }).commitPartition('accounts', 'account-a', null, [upsert(account())]), { signal: controller.signal });
+  while (!release) await new Promise((resolve) => setImmediate(resolve)); controller.abort(); await assert.rejects(running); assert.equal(querySignal!.aborted, true);
+  release(); await new Promise((resolve) => setImmediate(resolve)); assert.equal(writes, 0); assert.equal(reads, 1);
+});
+
+test('singleton create, replace and delete carry the same cancellable signal as their CAS read', async () => {
+  const identity = { type: 'identity' as const, version: 1 as const, id: 'github:42', githubId: 42, accountId: 'account-a', state: 'active' as const };
+  for (const operation of ['create', 'replace', 'delete'] as const) {
+    let pointSignal: AbortSignal | undefined; let writes = 0;
+    const write = async (options: RequestOptions) => { writes++; assert.equal(options.abortSignal, pointSignal); assert.equal(options.abortSignal!.aborted, false); return {}; };
+    const database = { container: () => ({
+      item: () => ({ read: async (options: RequestOptions) => { pointSignal = options.abortSignal as AbortSignal; assert.ok(pointSignal instanceof AbortSignal); return operation === 'create' ? { statusCode: 404 } : { resource: { id: identity.id, _etag: 'e1', payload: identity } }; },
+        replace: (_body: unknown, options: RequestOptions) => write(options), delete: write }),
+      items: { create: (_body: unknown, options: RequestOptions) => write(options) },
+    }) } as unknown as Database;
+    const store = makeCosmosStore({ database });
+    assert.equal(await Effect.runPromise(store.commitPartition('identities', identity.id, operation === 'create' ? null : 'e1', [operation === 'delete' ? { type: 'delete', id: identity.id } : upsert(identity)])), true);
+    assert.equal(writes, 1);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(Effect.runPromise(store.commitPartition('identities', identity.id, null, [upsert(identity)]), { signal: controller.signal })); assert.equal(writes, 1);
+  }
+});
+test('cancelled emulator endpoint lookup cannot start later container validation', async () => {
+  let release: (() => void) | undefined; let reads = 0;
+  const database = { client: { getDatabaseAccount: async () => ({ resource: {} }), getWriteEndpoint: () => new Promise<string>((resolve) => { release = () => resolve('http://127.0.0.1:18081/'); }) },
+    container: () => { reads++; throw new Error('validation must not continue'); },
+  } as unknown as Database;
+  const controller = new AbortController(); const running = Effect.runPromise(validateCosmosConfiguration(database, { localEmulator: true }), { signal: controller.signal });
+  while (!release) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort(); await assert.rejects(running); release(); await new Promise((resolve) => setImmediate(resolve)); assert.equal(reads, 0);
 });

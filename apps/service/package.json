@@ -8,10 +8,12 @@
   "scripts": {
     "test": "node --test \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit",
-    "test:cosmos": "NORTUSCC_COSMOS_REQUIRED=1 node --test \"checks/cosmos-*.spec.ts\""
+    "test:cosmos": "NORTUSCC_COSMOS_REQUIRED=1 node --test \"checks/cosmos-*.spec.ts\"",
+    "start": "node src/main.ts"
   },
   "dependencies": {
     "@azure/cosmos": "4.10.1",
+    "@azure/identity": "4.13.3",
     "@nortuscc/hosted-protocol": "*",
     "effect": "4.0.1"
   },
