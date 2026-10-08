@@ -133,7 +133,10 @@ commit. Durable claims, CAS and retries after restart resolve uncertain writes.
 OAuth exchange or identity-lookup failures consume the pending flow; start a fresh
 sign-in rather than retaining a token to retry verification. Runtime events and
 request diagnostics contain no credential/error payloads; the executable emits
-only constant lifecycle events.
+only constant lifecycle events. Before loading Azure SDK modules, the executable
+disables SDK logging by clearing `AZURE_LOG_LEVEL`, `TYPESPEC_RUNTIME_LOG_LEVEL`
+and `DEBUG` for its process lifetime. Importing the launcher or embedding the
+service leaves the caller's logging configuration unchanged.
 
 Service quotas are in-memory per process: 10 device starts per socket peer IP per
 hour and 60 requests per machine token per minute. Forwarded IP headers are not

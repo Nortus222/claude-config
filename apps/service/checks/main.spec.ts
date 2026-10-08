@@ -11,12 +11,86 @@ import { launchService } from '../src/main.ts';
 import { makeMemoryStore } from '../src/memory-store.ts';
 import { fakeGitHub } from './support/fake-github.ts';
 const environment = { NORTUSCC_SERVICE_GITHUB_CLIENT_ID: 'client', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'https://example.documents.azure.com/', NORTUSCC_SERVICE_COSMOS_DATABASE: 'metadata' };
+test('executable starts on the Node 24 baseline without import.meta.main, from root or workspace', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'service-main-compat-'));
+  try {
+    for (const [cwd, entry] of [[new URL('../../../', import.meta.url), 'apps/service/src/main.ts'], [new URL('../', import.meta.url), 'src/main.ts']] as const) {
+      await assert.rejects(promisify(execFile)(process.execPath, ['--import', new URL('./support/main-compat-loader.mjs', import.meta.url).href, entry], {
+        cwd, env: { HOME: home, PATH: '/usr/bin:/bin' }, timeout: 3000,
+      }), (error: unknown) => {
+        const result = error as { code: number; stdout: string; stderr: string };
+        assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.equal(result.stderr, 'startup_failed\n'); return true;
+      });
+    }
+    const imported = await promisify(execFile)(process.execPath, ['--import', new URL('./support/main-compat-loader.mjs', import.meta.url).href,
+      '--input-type=module', '--eval', `await import(${JSON.stringify(new URL('../src/main.ts', import.meta.url).href)}); console.log('imported');`], {
+      cwd: new URL('../../../', import.meta.url), env: { HOME: home, PATH: '/usr/bin:/bin' }, timeout: 3000,
+    });
+    assert.equal(imported.stdout, 'imported\n'); assert.equal(imported.stderr, '');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
 test('invalid executable configuration exits nonzero with constant redacted failure before resource construction', async () => {
   const home = await mkdtemp(join(tmpdir(), 'service-main-'));
   try {
     await assert.rejects(promisify(execFile)(process.execPath, ['apps/service/src/main.ts'], { cwd: new URL('../../../', import.meta.url), env: { HOME: home, PATH: '/usr/bin:/bin', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://PRIVATE_ENDPOINT' }, timeout: 3000 }), (error: unknown) => {
       const result = error as { code: number; stdout: string; stderr: string }; assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.equal(result.stderr, 'startup_failed\n'); return true;
     });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+test('executable isolates malformed SDK logging environment before any SDK initialization', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'service-main-log-config-'));
+  try {
+    await assert.rejects(promisify(execFile)(process.execPath, ['apps/service/src/main.ts'], {
+      cwd: new URL('../../../', import.meta.url), timeout: 3000,
+      env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', DEBUG: '*', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://PRIVATE_ENDPOINT' },
+    }), (error: unknown) => {
+      const result = error as { code: number; stdout: string; stderr: string };
+      assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.equal(result.stderr, 'startup_failed\n'); return true;
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+test('executable suppresses enabled SDK endpoint and upstream-body logs through an inert real Cosmos request', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'service-main-log-sdk-'));
+  try {
+    for (const logging of [{ AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning' }, { DEBUG: '*' }, { DEBUG: 'azure:*,typeSpecRuntime:*' }]) {
+      await assert.rejects(promisify(execFile)(process.execPath, ['--import', new URL('./support/main-inert-sdk-loader.mjs', import.meta.url).href, 'apps/service/src/main.ts'], {
+        cwd: new URL('../../../', import.meta.url), timeout: 3000,
+        env: { HOME: home, PATH: '/usr/bin:/bin', ...environment, NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://127.0.0.1:9/', NORTUSCC_SERVICE_LOCAL_EMULATOR: 'true', NORTUSCC_SERVICE_EMULATOR_KEY: 'inert-key', ...logging },
+      }), (error: unknown) => {
+        const result = error as { code: number; stdout: string; stderr: string };
+        assert.equal(result.code, 1); assert.equal(result.stdout, 'inert_cosmos_request\n'); assert.equal(result.stderr, 'startup_failed\nshutdown_succeeded\n'); return true;
+      });
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+test('importing main leaves caller logging, environment and signal ownership unchanged', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'service-main-import-'));
+  try {
+    const main = JSON.stringify(new URL('../src/main.ts', import.meta.url).href);
+    const imported = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
+      import assert from 'node:assert/strict';
+      const before = { ...process.env };
+      const signals = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+      await import(${main});
+      assert.deepEqual({ ...process.env }, before);
+      assert.deepEqual([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')], signals);
+      console.log('imported');
+    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', DEBUG: '*' } });
+    assert.equal(imported.stdout, 'imported\n'); assert.equal(imported.stderr, '');
+    const caller = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
+      import assert from 'node:assert/strict';
+      import { createClientLogger, getLogLevel } from '@azure/logger';
+      import { createClientLogger as typeSpecLogger, getLogLevel as typeSpecLevel } from '@typespec/ts-http-runtime';
+      const before = { ...process.env };
+      await import(${main});
+      assert.deepEqual({ ...process.env }, before);
+      assert.equal(getLogLevel(), 'warning'); assert.equal(typeSpecLevel(), 'warning');
+      createClientLogger('embedding').warning('caller-owned Azure log');
+      typeSpecLogger('embedding').warning('caller-owned TypeSpec log');
+    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning' } });
+    assert.equal(caller.stdout, '');
+    assert.match(caller.stderr, /azure:embedding:warning caller-owned Azure log/);
+    assert.match(caller.stderr, /typeSpecRuntime:embedding:warning caller-owned TypeSpec log/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 test('launcher owns signal handlers, cancels startup and removes handlers after startup failure', async () => {
