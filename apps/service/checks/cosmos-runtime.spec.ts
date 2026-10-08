@@ -31,6 +31,24 @@ if (!emulatorConfigured()) {
       'https://github.com/login/device/code', 'https://github.com/login/oauth/access_token', 'https://api.github.com/user',
     ]);
   });
+  test('backend disposal stops the active listener and joins recovery before SDK/database cleanup, idempotently', async (t) => {
+    const clock = { now: Date.now() };
+    const backend = await createRuntimeCosmosFixture({ now: () => clock.now }); t.after(backend.dispose);
+    let sweeps = 0;
+    const observed: CosmosStore = { ...backend.store, sweepExpiredDevices: () => Effect.gen(function* () {
+      sweeps++; yield* backend.store.sweepExpiredDevices();
+    }) };
+    const f = await fixture({ store: observed, clock, hosting: backend.hosting }); t.after(f.close);
+    assert.equal((await f.call('GET', '/readyz')).status, 200); assert.equal(sweeps, 1);
+    await backend.dispose(); await backend.dispose();
+    assert.equal(backend.clientsDisposed(), 1);
+    await assert.rejects(f.call('GET', '/v1/health'), 'backend cleanup must close its runtime listener');
+    const stoppedSweeps = sweeps;
+    await delay(1200);
+    assert.equal(sweeps, stoppedSweeps, 'no recovery can start after backend cleanup');
+    await f.close(); assert.equal(backend.clientsDisposed(), 1);
+  });
+
   test('startup recovery removes a retained bound claim after a committed issuance failure and fresh SDK restart', async (t) => {
     const clock = { now: Date.now() };
     const backend = await createRuntimeCosmosFixture({ now: () => clock.now }); t.after(backend.dispose);

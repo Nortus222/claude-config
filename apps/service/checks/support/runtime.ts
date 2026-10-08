@@ -3,7 +3,7 @@ import { CosmosClient } from '@azure/cosmos';
 import { Effect } from 'effect';
 import { makeProductionResources } from '../../src/production.ts';
 import { parseServiceEnvironment } from '../../src/config.ts';
-import { startServiceRuntime, type RuntimeEvent } from '../../src/runtime.ts';
+import { startServiceRuntime, type RuntimeEvent, type ServiceRuntime } from '../../src/runtime.ts';
 import { createCosmosFixture, requireEmulatorConfiguration } from './cosmos.ts';
 import type { FixtureHosting } from './service.ts';
 import type { fakeGitHub } from './fake-github.ts';
@@ -51,6 +51,7 @@ export async function createRuntimeCosmosFixture({ now }: { now: () => number })
   const githubRequests: GitHubRequest[] = []; const events: RuntimeEvent[] = [];
   const entries: Array<{ resources: ReturnType<typeof makeProductionResources>; dispose: () => Promise<void> }> = [];
   let disposed = 0;
+  const runtimes = new Set<ServiceRuntime>();
   const open = () => {
     let attachedGitHub: ReturnType<typeof fakeGitHub> | undefined;
     const resources = makeProductionResources(config, { now,
@@ -77,6 +78,7 @@ export async function createRuntimeCosmosFixture({ now }: { now: () => number })
       now: () => clock.now, validate: entry.resources.validate, dispose: entry.dispose,
       diagnostic: (record) => { diagnostics.push(record); options.diagnostic?.(record); }, event: (event) => events.push(event),
     });
+    runtimes.add(runtime);
     // Prevent an idle fetch connection from surviving a same-port runtime replacement.
     runtime.server.prependListener('request', (_request, response) => response.setHeader('connection', 'close'));
     return { server: runtime.server, close: runtime.stop };
@@ -86,8 +88,11 @@ export async function createRuntimeCosmosFixture({ now }: { now: () => number })
     restart: () => { current = open(); return current.resources.store; },
     clientsCreated: () => entries.length, clientsDisposed: () => disposed,
     dispose: () => disposal ??= (async () => {
-      try { await Promise.all(entries.map((entry) => entry.dispose())); }
-      finally { await provision.dispose(); }
+      const stopped = await Promise.allSettled([...runtimes].map((runtime) => runtime.stop()));
+      const disposedEntries = await Promise.allSettled(entries.map((entry) => entry.dispose()));
+      try {
+        if ([...stopped, ...disposedEntries].some((result) => result.status === 'rejected')) throw new Error('Runtime fixture cleanup failed.');
+      } finally { await provision.dispose(); }
     })(),
   };
 }
