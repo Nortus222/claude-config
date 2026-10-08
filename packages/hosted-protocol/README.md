@@ -69,6 +69,7 @@ this phase.
 
 | Schema | Shape | Endpoint response |
 | --- | --- | --- |
+| `HealthResponseSchema` | `{ status: 'ok' }` | `200` from `GET /health`, no data reads |
 | `DeviceStartRequestSchema` | `{ name, os, agents }` | Request to `POST /auth/device/start` |
 | `DeviceStartResponseSchema` | `{ pendingId, userCode, verificationUri, interval, expiresIn }` | `200`, successful device start |
 | `DevicePollRequestSchema` | `{ pendingId }` | Request to `POST /auth/device/poll` |
@@ -136,7 +137,7 @@ keeps working without an account.
 
 Status writes, sign-out, machine deletion and account deletion return `204` without
 a JSON body. Conditional sync returns `304` without a body. There is no schema for
-either empty body. Health and account export shapes remain service-batch decisions.
+either empty body. Health uses the minimal `HealthResponseSchema`; account export remains a service-batch decision.
 
 ## Sync query and complete response
 
