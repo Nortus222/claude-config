@@ -5,8 +5,9 @@ import type { ServiceDocument } from './documents.ts';
 import { ServiceFailure } from './errors.ts';
 import { PARTITION_MARKER_ID, type Container, type Mutation, type PartitionSnapshot, type Store } from './store.ts';
 import { belongsTo, validMutations } from './store-validation.ts';
+import { recoverExpiredDeviceSession } from './auth.ts';
 
-// Leave room below Cosmos's 2 MiB request limit for its batch serialization overhead.
+// Leave room below Cosmos's 2 MB request limit for its batch serialization overhead.
 export const MAX_COSMOS_BATCH_BYTES = 1_800_000;
 const strong: RequestOptions = { consistencyLevel: ConsistencyLevel.Strong, bypassIntegratedCache: true };
 const partitionFields = { accounts: 'accountId', setups: 'setupId', identities: 'id' } as const;
@@ -71,8 +72,12 @@ export interface CosmosStoreOptions {
   readonly maxSnapshotAttempts?: number;
 }
 
+export type CosmosStore = Store['Service'] & {
+  readonly sweepExpiredDevices: () => Effect.Effect<void, ServiceFailure>;
+};
+
 /** Atomic partition writes and Strong marker-bookended reads over an injected SDK database. */
-export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxSnapshotAttempts = 5 }: CosmosStoreOptions): Store['Service'] => {
+export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxSnapshotAttempts = 5 }: CosmosStoreOptions): CosmosStore => {
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxSnapshotAttempts) || maxSnapshotAttempts < 1) throw invalid();
   const point = async (container: Container, key: string, id: string): Promise<StoredDocument | undefined> => {
     try {
@@ -183,7 +188,7 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
     }
     return batch(container, key, operations);
   };
-  return {
+  const store: CosmosStore = {
     readPartition: (container, key) => attempt(() => snapshot(container, key)),
     commitPartition: (container, key, version, mutations) => attempt(() => commit(container, key, version, mutations)),
     closePartition: (container, key, version) => attempt(async () => {
@@ -195,5 +200,21 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
       return batch(container, key, [version === null ? { operationType: 'Create', resourceBody }
         : { operationType: 'Replace', id: PARTITION_MARKER_ID, ifMatch: version, resourceBody }]);
     }),
+    // The caller owns scheduling and retries after interruption; scan rows are only candidates.
+    sweepExpiredDevices: () => Effect.gen(function* () {
+      const cutoff = now();
+      const iterator = yield* attempt(async () => database.container('identities').items.query<{ id: string }>({
+        query: "SELECT c.id FROM c WHERE c.payload.type = 'deviceSession' AND c.payload.expiresAt <= @now",
+        parameters: [{ name: '@now', value: cutoff }],
+      }, { ...strong, maxItemCount: pageSize }));
+      const keys: string[] = [];
+      while (iterator.hasMoreResults()) {
+        const page = yield* attempt(() => iterator.fetchNext());
+        for (const candidate of page.resources) keys.push(candidate.id);
+      }
+      // Deleting during pagination can shift continuation offsets and skip candidates.
+      for (const key of keys) yield* recoverExpiredDeviceSession(store, key, cutoff);
+    }),
   };
+  return store;
 };
