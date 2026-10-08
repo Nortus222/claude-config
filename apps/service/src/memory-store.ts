@@ -1,32 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Effect, Layer } from 'effect';
-import type { ServiceDocument } from './documents.ts';
+import { validMutations } from './store-validation.ts';
 import { ServiceFailure } from './errors.ts';
-import { MAX_PARTITION_MUTATIONS, PARTITION_MARKER_ID, Store, type Container, type Mutation, type PartitionSnapshot } from './store.ts';
-
-const belongsTo = (document: ServiceDocument, container: Container, key: string): boolean => {
-  switch (document.type) {
-    case 'account': case 'machine': case 'issuanceFence': case 'deviceReservation': case 'decision': case 'status':
-      return container === 'accounts' && document.accountId === key;
-    case 'setup': case 'revision':
-      return container === 'setups' && document.setupId === key;
-    case 'identity': case 'deviceSession':
-      return container === 'identities' && document.id === key;
-  }
-};
-
-const validMutations = (container: Container, key: string, mutations: ReadonlyArray<Mutation>): boolean => {
-  if (!key || mutations.length > MAX_PARTITION_MUTATIONS) return false;
-  const targets = new Set<string>();
-  for (const mutation of mutations) {
-    const id = mutation.type === 'upsert' ? mutation.document.id : mutation.id;
-    if (!id || id === PARTITION_MARKER_ID || targets.has(id)) return false;
-    if (container === 'identities' && id !== key) return false;
-    if (mutation.type === 'upsert' && !belongsTo(mutation.document, container, key)) return false;
-    targets.add(id);
-  }
-  return true;
-};
+import { Store, type Container, type PartitionSnapshot } from './store.ts';
 
 export const makeMemoryStore = (): Store['Service'] => {
   const containers = new Map<Container, Map<string, PartitionSnapshot>>();

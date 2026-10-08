@@ -10,3 +10,4 @@ export * from './machines.ts';
 export * from './github.ts';
 export * from './limits.ts';
 export * from './diagnostics.ts';
+export * from './cosmos-store.ts';
