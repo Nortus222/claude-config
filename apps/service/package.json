@@ -9,6 +9,7 @@
     "test": "node --test \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit",
     "test:cosmos": "NORTUSCC_COSMOS_REQUIRED=1 node --test \"checks/cosmos-*.spec.ts\"",
+    "test:image": "node --test \"checks/image*.spec.ts\"",
     "start": "node src/main.ts"
   },
   "dependencies": {
