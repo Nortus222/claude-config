@@ -29,3 +29,19 @@ test('SDK unit: expiry scan visits every page and rechecks current point deadlin
   await Effect.runPromise(store.sweepExpiredDevices());
   assert.equal(pages, 2); assert.deepEqual(points, ['device:1', 'device:2']); assert.equal(writes, 0);
 });
+
+test('expiry page cancellation aborts the iterator signal and cannot begin point recovery after late page completion', async () => {
+  let release: (() => void) | undefined; let querySignal: AbortSignal | undefined; let points = 0;
+  const database = { container: () => ({
+    item: () => { points++; throw new Error('recovery must not start'); },
+    items: { query: (_spec: unknown, options: { abortSignal: AbortSignal }) => {
+      querySignal = options.abortSignal; let more = true;
+      return { hasMoreResults: () => more, fetchNext: () => new Promise((resolve) => { release = () => { more = false; resolve({ resources: [{ id: 'candidate' }] }); }; }) };
+    } },
+  }) } as unknown as Database;
+  const controller = new AbortController();
+  const running = Effect.runPromise(makeCosmosStore({ database }).sweepExpiredDevices(), { signal: controller.signal });
+  while (!release) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort(); await assert.rejects(running); assert.equal(querySignal!.aborted, true);
+  release(); await new Promise((resolve) => setImmediate(resolve)); assert.equal(points, 0);
+});

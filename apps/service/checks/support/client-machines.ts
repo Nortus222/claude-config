@@ -25,7 +25,7 @@ const docs = {
 };
 export type HttpObservation = { readonly method: string; readonly path: string; readonly status: number; readonly body?: unknown; readonly reply?: unknown; readonly etag: string | null; readonly conditional: string | null };
 
-export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, options: Pick<FixtureOptions, 'store' | 'clock'> = {}) {
+export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, options: Pick<FixtureOptions, 'store' | 'clock' | 'hosting'> = {}) {
   const f = await fixture(options);
   const lifetime = new AbortController();
   const activeRuns = new Set<Promise<unknown>>();
