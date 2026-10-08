@@ -23,7 +23,7 @@ export function assertProtectedEnvironment(environment: unknown, policies: unkno
   const env = record(environment); const policy = record(env.deployment_branch_policy); const branches = record(policies);
   if (policy.protected_branches !== false || policy.custom_branch_policies !== true || !Array.isArray(env.protection_rules)) fail();
   const reviewers = env.protection_rules.map(record).find(rule => rule.type === 'required_reviewers');
-  if (!reviewers || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
+  if (!reviewers || reviewers.prevent_self_review !== true || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
     const reviewer = record(item); return (reviewer.type === 'User' || reviewer.type === 'Team') && Number.isSafeInteger(record(reviewer.reviewer).id) && Number(record(reviewer.reviewer).id) > 0;
   })) fail();
   if (branches.total_count !== 1 || !Array.isArray(branches.branch_policies) || branches.branch_policies.length !== 1) fail();

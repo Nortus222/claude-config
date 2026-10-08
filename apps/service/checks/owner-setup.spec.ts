@@ -13,5 +13,8 @@ test('owner wizard keeps the shared library intact and only captures public conf
   assert.match(stages, /mktemp "\$SCRIPT_DIR\/owner-public\.XXXXXX"/);
   for (const key of ['AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_RESOURCE_GROUP', 'LOCATION', 'GITHUB_CLIENT_ID']) assert.match(stages, new RegExp(`capture_public ${key} `));
   assert.match(stages, /write_env "\$key" "\$value"/);
+  assert.match(stages, /eligible reviewer distinct from the run initiator/);
+  assert.match(stages, /Enable Prevent self review/);
+  assert.doesNotMatch(stages, /single-owner|when another eligible/);
   assert.match(stages, /hosted-image/); assert.match(stages, /hosted-production/);
 });

@@ -226,10 +226,10 @@ pause "Confirm subscription eligibility, region and dedicated resource group bef
 
 stage "Two protected GitHub environments"
 open_url "https://github.com/Nortus222/claude-config/settings/environments"
-step "Create hosted-image and hosted-production separately. Add at least one required reviewer to each."
+step "Create hosted-image and hosted-production separately. Require an eligible reviewer distinct from the run initiator for each."
 step "Select deployment branches/tags: selected branches; add exactly branch main and no tags or wildcard patterns."
-step "Disable administrator bypass. Prevent self review when another eligible approver is available; otherwise document the single-owner limitation."
-note "No environments existed at the 2026-10-08 read-only check; prepare fails until reviewers and exact main policy exist."
+step "Disable administrator bypass. Enable Prevent self review in BOTH environments; self approval must remain blocked."
+note "No environments existed at the 2026-10-08 read-only check; prepare fails until reviewers, self-review prevention and exact main policy exist."
 pause "Confirm both approval boundaries are configured."
 
 stage "CI identity and exact Azure federation"

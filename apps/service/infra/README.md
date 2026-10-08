@@ -37,15 +37,14 @@ mutation, app registration, publication, deployment or acceptance request.
    `Microsoft.ManagedIdentity`, `Microsoft.OperationalInsights`,
    `Microsoft.Insights` and `Microsoft.Consumption` yourself.
 2. Create separate `hosted-image` and `hosted-production` GitHub environments.
-   Require at least one reviewer; selected deployment branches must contain
-   **only branch `main`**, no tags or wildcards. Disable administrator bypass.
-   Prevent self review when another eligible approver exists; a single-owner
-   setup must document that limitation. Read-only inspection on 2026-10-08 found
-   zero environments. Naming one in YAML is insufficient and can create an
+   Require an eligible reviewer distinct from the run initiator and enable
+   **Prevent self review** for both environments. Selected deployment branches
+   must contain **only branch `main`**, no tags or wildcards. Disable administrator bypass.
+   Read-only inspection on 2026-10-08 found zero environments. Naming one in YAML is insufficient and can create an
    unprotected environment, so prepare rejects missing environments, empty
-   reviewers, all/protected-branches policies and any policy other than exact
-   branch main. The REST response verifies reviewer/branch rules; bypass and
-   practical self-review settings remain owner checks.
+   reviewers, false/missing self-review prevention, all/protected-branches policies
+   and any policy other than exact branch main. The REST response verifies reviewers, `prevent_self_review: true`
+   and branch rules; disabling administrator bypass remains an owner check.
 3. Create a CI-only Entra app/service principal with **no client secret**. Its
    federated issuer is `https://token.actions.githubusercontent.com`, audience
    `api://AzureADTokenExchange`. Verify the repository's actual OIDC subject

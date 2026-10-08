@@ -5,7 +5,7 @@ import { assertReleaseContext, assertProtectedEnvironment, verifyPublicImage, re
 
 const sha = 'a'.repeat(40);
 const context = { event: 'workflow_dispatch', ref: 'refs/heads/main', repository: 'Nortus222/claude-config', captured: sha, reviewed: sha, head: sha };
-const protectedEnvironment = { protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { id: 1 } }] }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
+const protectedEnvironment = { protection_rules: [{ type: 'required_reviewers', prevent_self_review: true, reviewers: [{ type: 'User', reviewer: { id: 1 } }] }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
 const policies = { total_count: 1, branch_policies: [{ name: 'main', type: 'branch' }] };
 test('only the captured reviewed main commit can release', () => {
   assert.doesNotThrow(() => assertReleaseContext(context));
@@ -75,4 +75,26 @@ test('rollback verifies separately reviewed image ancestor using only literal Gi
   await assert.rejects(checkImageCommit(prior, sha, async () => { throw new Error('not ancestor'); }));
   for (const value of ['$(id)', '--help', `${prior}\n`, 'latest']) await assert.rejects(checkImageCommit(value, sha, async args => { calls.push([...args]); }));
   assert.equal(calls.length, 0);
+});
+
+test('both release environments require self-review prevention in direct rules and read-only API metadata', async () => {
+  const { verifyEnvironment } = await import('../infra/release.ts');
+  const rule = protectedEnvironment.protection_rules[0]!;
+  for (const prevent_self_review of [false, undefined]) {
+    const environment = { ...protectedEnvironment, protection_rules: [{ ...rule, prevent_self_review }] };
+    assert.throws(() => assertProtectedEnvironment(environment, policies));
+    for (const name of ['hosted-image', 'hosted-production']) {
+      let requests = 0;
+      await assert.rejects(verifyEnvironment(name, 'runner-token', async (_url, options) => {
+        assert.equal(options?.method ?? 'GET', 'GET'); requests++;
+        return new Response(JSON.stringify(requests === 1 ? environment : policies));
+      }));
+      assert.equal(requests, 2);
+    }
+  }
+  for (const name of ['hosted-image', 'hosted-production']) {
+    let requests = 0;
+    await verifyEnvironment(name, 'runner-token', async () => new Response(JSON.stringify(++requests === 1 ? protectedEnvironment : policies)));
+    assert.equal(requests, 2);
+  }
 });
