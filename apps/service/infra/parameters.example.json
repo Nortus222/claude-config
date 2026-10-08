@@ -1,0 +1,10 @@
+{
+  "location": "OWNER_CHOOSE_REGION",
+  "namePrefix": "OWNER_CHOOSE_PREFIX",
+  "githubClientId": "",
+  "allowlistedLogins": [],
+  "openSignup": false,
+  "budgetAmount": 0,
+  "budgetContactEmails": [],
+  "budgetStartDate": "OWNER_CHOOSE_FIRST_DAY_OF_MONTH"
+}
