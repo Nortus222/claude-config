@@ -46,7 +46,6 @@ test('requests outside v3 are rejected', () => {
     { version: 2, id: '1', command: 'inspect' },
     { version: 2, id: '1', command: 'hello', token: 't', client: 'app' },
     { ...head, command: 'restore', backupId: 'b' },
-    { ...head, command: 'syncNow' },
     { ...head, command: 'hello', token: '', client: 'app' },
     { ...head, command: 'hello', token: 'x'.repeat(201), client: 'app' },
     { ...head, command: 'hello', token: 't', client: 'browser' },

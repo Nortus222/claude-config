@@ -21,3 +21,7 @@ export * from './ipc/protocol.ts';
 export * from './ipc/session.ts';
 export * from './ipc/server.ts';
 export * from './notifier.ts';
+
+export * from './hosted-status.ts';
+
+export * from './hosted.ts';

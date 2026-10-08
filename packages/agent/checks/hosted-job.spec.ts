@@ -1,0 +1,30 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Effect, Layer } from 'effect';
+import { DecisionsStore } from '@nortuscc/machine';
+import { ownSetup, revisionCommit, SetupSource, SetupsStore } from '@nortuscc/sync';
+import { runJob } from '../src/job.ts';
+import { agentMachine } from './support/agent-machine.ts';
+import { EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
+
+const record = { setupId: 'hosted-1', number: 2, commitSha: HEAD, tag: 'v2', changelog: '', requiredEnv: [], items: [{ id: EFFORT, kind: 'setting' as const, change: 'added' as const }] };
+test('linked jobs pass numeric decisions and record numeric History while rechecking source proof each job', async () => {
+  const m = agentMachine();
+  const f = setupFixture(m.root);
+  const linked = { setupId: record.setupId, accountId: 'account-1', repoUrl: 'github.com/example/setup', checkout: m.paths.repo, trustedAt: '2026-10-07T00:00:00Z' };
+  await m.run(SetupsStore.use((s) => s.write([linked])));
+  assert.deepEqual(ownSetup([linked], m.paths.repo), linked);
+  const decision = { setupId: record.setupId, itemId: EFFORT, revision: 2, commit: null, decision: 'accept' as const, decidedAt: '2026-10-07T00:00:00Z', machineId: null, source: 'local' as const };
+  await m.run(DecisionsStore.use((s) => s.record(decision)));
+  const seen: unknown[] = [];
+  const source = Layer.succeed(SetupSource, { ...f.service, setupId: record.setupId, trusted: Effect.succeed(true), fetch: Effect.succeed({ head: record }), load: (r) => f.service.load(revisionCommit(r)), effective: (d) => { seen.push(...d); return f.service.effective(d.map((value) => ({ ...value, setupId: 'local', commit: HEAD, revision: null }))); } });
+  const first = await m.run(runJob(() => m.domains, { inspectOnly: true }), source);
+  const second = await m.run(runJob(() => m.domains, { inspectOnly: true }), source);
+  assert.equal(first.status.trusted, true); assert.equal(second.inspection?.revision, record);
+  assert.deepEqual(seen, [decision, decision]);
+  assert.equal(f.calls.filter((call) => call === 'load').length, 2);
+  const verified = (await m.events()).filter((e) => e.kind === 'revision-verified');
+  assert.equal(verified.length, 1);
+  assert.ok(verified[0]?.kind === 'revision-verified');
+  assert.equal(verified[0].setupId, 'hosted-1'); assert.equal(verified[0].revision, 2);
+});

@@ -39,3 +39,54 @@ per-user login service. Decisions: `docs/adr/0011-local-agent-per-user-login-ser
 [`@nortuscc/hosted-protocol`](../hosted-protocol/README.md). Shared literals do not
 change local state, decision ordering, trust or classification. Local IPC v3 and
 hosted HTTP v1 keep separate contracts.
+
+## Optional hosted client
+
+Local-only operation is the default. Set `NORTUSCC_HOSTED_URL` to an explicit HTTPS
+API root ending in `/v1` before starting the foreground agent or its login service.
+There is no built-in production endpoint. The CLI inherits this variable; the bundled
+agent reads it from the probed login environment. Invalid configuration appears as
+`invalid_url` in hosted state and does not stop local inspection.
+
+`agent sign-in [name]` prints the GitHub device URI and code. The agent polls, honors
+expiry/backoff and stores its machine credential in the OS keychain, with the private
+`agent/machine-token` fallback. The default name is the OS family plus `machine`.
+`agent hosted` lists account state and offered setup IDs; `agent trust <setupId>`
+grants explicit account-bound repository consent. Matching own origins link the
+checkout; other offered repositories use private clones. Sign-in and sync never
+change trust. `agent sign-out` removes credentials while keeping account caches and
+queued choices.
+
+Use `agent decide <setupId> <itemId> <revision> <accept|skip>`, `agent sync`,
+`agent machine name <name>`, and `agent machine report-status <on|off>`.
+Choices enter a durable ordered outbox before local projection, including offline.
+`agent policy` queues the same machine setting when an account is present. Synced
+policy preserves pause and service ownership. Device polling and sync use the
+shared job/apply boundary; account or choice changes invalidate hosted previews.
+Local IPC v3 adds strict `signIn`, `signOut`, `syncNow`, `hostedState`, `trustSetup`
+and `machineSettings` commands and numeric hosted decisions. Existing status stays
+compatible. Hosted commands are currently exposed by the CLI; the desktop renderer
+and Rust request allowlist have no account controls.
+
+Hosted records are capped at the committed offered head before Git verification.
+Each trusted setup runs under the common job semaphore. Additional setups do not
+replace the primary inspection. Metadata reporting re-inspects every selected
+setup under the shared apply lock and declines an upload if a complete verified
+summary is unavailable or exceeds 128 KiB. Successful steps can be adopted even
+when another step failed; missing probes and absent rows prove nothing. Reporting
+includes only item IDs, numeric revision, policy, agent kinds, timestamps and drift
+counts. Turning it off leaves decisions enabled.
+
+Config clean observations prove recorded ownership and can advance origins. Existing
+skill/plugin/MCP probes report installed presence without proving nortuscc ownership;
+they conservatively remain waiting unless a selected successful person-run step
+is followed by matching fresh observations. This run evidence is scoped to that
+account, repository and confirmed origin and is not inferred from imported baseline
+seeds. After an agent restart, non-config items conservatively wait for fresh
+selected-run ownership proof. Hook registration
+also cannot prove hook-file bytes, so hooks remain waiting. Existing normalization also couples
+skill pins within one source; a held sibling can prevent independent pin adoption.
+Unsupported removals remain waiting until an explicit ownership-release operation
+can prove them. These conservative limits preserve current local apply semantics.
+Automated three-machine checks use fake HTTP/keychain adapters and inert temporary
+Git repositories; they do not establish live hosted-service acceptance.

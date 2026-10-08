@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, Layer, Semaphore } from 'effect';
 import { DecisionsInvalid, type FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
@@ -56,6 +56,8 @@ export class DecisionsStore extends Context.Service<
     readonly read: Effect.Effect<ReadonlyArray<Decision>, FsFailed | DecisionsInvalid>;
     // Stores `decision` unless the file holds a newer one for the same setup and item; answers whether it did.
     readonly record: (decision: Decision) => Effect.Effect<boolean, FsFailed | DecisionsInvalid>;
+    // Replaces the given hosted setups in arrival order, independently of local wall clocks.
+    readonly replaceHosted: (setupIds: ReadonlyArray<string>, decisions: ReadonlyArray<Decision>) => Effect.Effect<void, FsFailed | DecisionsInvalid>;
   }
 >()('machine/DecisionsStore') {}
 
@@ -66,6 +68,7 @@ export const decisionsStore = Layer.effect(
     const paths = yield* MachinePaths;
     const fs = yield* Fs;
     const path = join(paths.stateRoot, 'decisions.json');
+    const lock = yield* Semaphore.make(1);
     const read = Effect.flatMap(fs.readText(path), (text) => decode(text, path));
     return {
       read,
@@ -79,7 +82,22 @@ export const decisionsStore = Layer.effect(
           const next = existing ? current.map((d) => (same(d) ? decision : d)) : [...current, decision];
           yield* fs.writeTextAtomic(path, JSON.stringify({ version: 1, decisions: next }, null, 2) + '\n');
           return true;
-        }),
+        }).pipe(lock.withPermit),
+      replaceHosted: (setupIds: ReadonlyArray<string>, decisions: ReadonlyArray<Decision>) =>
+        Effect.gen(function* () {
+          const ids = new Set(setupIds);
+          if (ids.has('local') || decisions.some((d) => !isDecision(d) || !ids.has(d.setupId) || d.revision === null)) {
+            return yield* Effect.fail(new DecisionsInvalid({ path, reason: 'hosted decisions are malformed' }));
+          }
+          const current = yield* read;
+          const next = current.filter((d) => !ids.has(d.setupId));
+          for (const decision of decisions) {
+            const index = next.findIndex((d) => d.setupId === decision.setupId && d.itemId === decision.itemId);
+            if (index === -1) next.push(decision);
+            else next[index] = decision;
+          }
+          yield* fs.writeTextAtomic(path, JSON.stringify({ version: 1, decisions: next }, null, 2) + '\n');
+        }).pipe(lock.withPermit),
     };
   }),
 );

@@ -105,3 +105,24 @@ test('an equal decidedAt replaces the stored decision', async () => {
   assert.equal(await ok((d) => d.record(decision({ decision: 'skip' }))), true);
   assert.deepEqual((await ok((d) => d.read)).map((d) => d.decision), ['skip']);
 });
+
+test('authoritative replacement ignores clocks and removes obsolete hosted decisions only', async () => {
+  const { ok } = setup();
+  await ok((d) => d.record(decision()));
+  await ok((d) => d.record(decision({ setupId: 'setup1', revision: 2, commit: null })));
+  const synced = decision({ setupId: 'setup1', revision: 3, commit: null, decision: 'skip',
+    decidedAt: '2020-01-01T00:00:00Z', source: 'synced' });
+  await ok((d) => d.replaceHosted(['setup1'], [synced]));
+  assert.deepEqual(await ok((d) => d.read), [decision(), synced]);
+  await ok((d) => d.replaceHosted(['setup1'], []));
+  assert.deepEqual(await ok((d) => d.read), [decision()]);
+});
+
+test('concurrent record and authoritative writers preserve unrelated decisions', async () => {
+  const { ok } = setup();
+  await ok((d) => Effect.all(Array.from({ length: 20 }, (_, index) => index % 2 === 0
+    ? d.record(decision({ itemId: `integration:${index}` }))
+    : d.replaceHosted([`setup${index}`], [decision({ setupId: `setup${index}`, revision: 1, commit: null })])),
+  { concurrency: 'unbounded' }));
+  assert.equal((await ok((d) => d.read)).length, 20);
+});

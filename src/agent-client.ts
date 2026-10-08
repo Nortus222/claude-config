@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import type { MachinePathsValue } from '@nortuscc/machine';
-import { decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
+import { decodeWireStatus, decodeHostedState, decodeSignInResult, decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
 
 // The agent answered a request with an error, sent a record outside the protocol, or did not answer
 // in time (code TIMEOUT).
@@ -42,7 +42,7 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export const INSPECT_TIMEOUT_MS = 120_000;
 const LONG_COMMANDS = new Set(['inspect', 'apply']);
 
-type Pending = { readonly resolve: (result: unknown) => void; readonly reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
+type Pending = { readonly command?: string; readonly resolve: (result: unknown) => void; readonly reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
 
 // Connects to <stateRoot>/agent/agent.sock with a token read fresh from agent.token and says hello.
 // Connecting and the hello together must finish within `timeoutMs` (2 s by default). Later requests
@@ -100,7 +100,13 @@ export const connectAgent = async (
     if (p === undefined) return;
     pending.delete(message.id);
     clearTimeout(p.timer);
-    if (message.ok) p.resolve(message.result);
+    if (message.ok) {
+      try {
+        const result = p.command === 'decide' ? decodeWireStatus(message.result) : p.command === 'signIn' ? decodeSignInResult(message.result)
+          : ['hostedState', 'signOut', 'syncNow', 'trustSetup', 'machineSettings'].includes(p.command ?? '') ? decodeHostedState(message.result) : message.result;
+        p.resolve(result);
+      } catch { p.reject(new AgentError('MALFORMED', 'the hosted result is outside protocol v3')); }
+    }
     else p.reject(new AgentError(message.error.code, message.error.message));
   };
 
@@ -138,7 +144,7 @@ export const connectAgent = async (
       const id = String(++next);
       const line = JSON.stringify({ ...command, version: PROTOCOL_VERSION, id }) + '\n';
       if (Buffer.byteLength(line) > MAX_RECORD_BYTES) return reject(new AgentError('OVERSIZED', 'the request exceeds the record limit'));
-      const entry: Pending = { resolve: resolve as (result: unknown) => void, reject };
+      const entry: Pending = { command: (command as { command?: string }).command, resolve: resolve as (result: unknown) => void, reject };
       const name = (command as { command?: unknown }).command;
       const timeout = opts.timeoutMs
         ?? (typeof name === 'string' && LONG_COMMANDS.has(name) ? options.inspectTimeoutMs ?? INSPECT_TIMEOUT_MS : options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);

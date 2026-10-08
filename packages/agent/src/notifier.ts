@@ -95,7 +95,7 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
     for (const event of events) {
       if (event.kind === 'apply-finished' && event.steps.some((step) => step.outcome === 'failed')) freshFailures.push(identity('apply-failed', event.runId));
       if (event.kind === 'paused') freshFailures.push(identity('paused', event.runId ?? event.at, event.reason));
-      if (event.kind === 'revision-rejected') freshFailures.push(identity('revision-rejected', event.setupId, event.revision));
+      if (event.kind === 'revision-rejected') freshFailures.push(identity('revision-rejected', event.setupId, String(event.revision)));
     }
     if (status.paused) freshFailures.push(identity('paused', status.paused.runId ?? status.paused.at, status.paused.reason));
     if (status.error) freshFailures.push(identity('inspection-error', status.error, status.detail ?? ''));

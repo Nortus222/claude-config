@@ -4,7 +4,7 @@ import {
   type HistoryEvent, type ItemReason, type MachinePathsValue, type MachineReport,
 } from '@nortuscc/machine';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
-import { LOCAL_SETUP, ownSetup, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
+import { LOCAL_SETUP, ownSetup, revisionIdentity, revisionSetupId, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain, AgentDomains } from './layer.ts';
@@ -55,7 +55,7 @@ export const failedStatus = (at: string, previous: AgentStatus | undefined, deta
 });
 
 const isVerdictOn = (e: HistoryEvent, revision: Revision) =>
-  (e.kind === 'revision-verified' || e.kind === 'revision-rejected') && e.setupId === LOCAL_SETUP && e.revision === revision;
+  (e.kind === 'revision-verified' || e.kind === 'revision-rejected') && e.setupId === revisionSetupId(revision) && e.revision === revisionIdentity(revision);
 
 const reasonOf = (p: Pending): ItemReason => ({ itemId: p.itemId, reason: p.verdict.kind === 'held' ? p.verdict.reason : 'inert' });
 const batchKey = (items: ReadonlyArray<ItemReason>) => items.map((i) => `${i.itemId}\n${i.reason}`).sort().join('\n\n');
@@ -95,7 +95,10 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
     if (interrupted !== undefined) yield* pause(`auto-apply run ${interrupted} was interrupted`, interrupted);
 
     const state = yield* agentState.read;
-    const trusted = ownSetup(yield* (yield* SetupsStore).read, paths.repo) !== undefined;
+    const setupId = source.setupId ?? LOCAL_SETUP;
+    const trusted = source.trusted === undefined
+      ? ownSetup(yield* (yield* SetupsStore).read, paths.repo) !== undefined
+      : yield* source.trusted.pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(false)));
     const finish = (fields: Partial<AgentStatus> = {}, inspection?: JobInspection) =>
       Effect.map(agentState.read, (current): JobResult => {
         const status: AgentStatus = {
@@ -125,28 +128,29 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
       return yield* finish({ drift: report.items.filter(differs).map((i) => i.key), probeErrors: report.probeErrors }, inspection);
     }
 
-    // 1. Refresh: verify the tracked branch's head once. A mismatch blocks only that revision; an
-    // unreachable one is retried by the next job.
+    // 1. Refresh and verify. Hosted heads are verified every job; local branch verdicts are
+    // cached in History. The hosted source also verifies every contributing record in effective.
     const head = yield* source.fetch.pipe(
       Effect.map((fetched): Revision | undefined => fetched.head),
       Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)),
     );
-    if (head !== undefined && !(yield* history.read).some((e) => isVerdictOn(e, head))) {
+    if (head !== undefined && (typeof head !== 'string' || !(yield* history.read).some((e) => isVerdictOn(e, head)))) {
+      const prior = yield* history.read;
       yield* source.load(head).pipe(
-        Effect.andThen(history.append({ kind: 'revision-verified', actor: 'agent', setupId: LOCAL_SETUP, revision: head })),
+        Effect.andThen(prior.some((e) => isVerdictOn(e, head) && e.kind === 'revision-verified') ? Effect.void : history.append({ kind: 'revision-verified', actor: 'agent', setupId: revisionSetupId(head), revision: revisionIdentity(head) })),
         Effect.catchTag('RevisionMismatch', (error) =>
-          history.append({ kind: 'revision-rejected', actor: 'agent', setupId: LOCAL_SETUP, revision: head, error: error._tag })),
+          prior.some((e) => isVerdictOn(e, head) && e.kind === 'revision-rejected') ? Effect.void : history.append({ kind: 'revision-rejected', actor: 'agent', setupId: revisionSetupId(head), revision: revisionIdentity(head), error: error._tag })),
         Effect.catchTag('RevisionUnavailable', () => Effect.void),
       );
     }
     const events = yield* history.read;
     const verified = new Set(events.flatMap((e) => (e.kind === 'revision-verified' && e.setupId === LOCAL_SETUP ? [e.revision] : [])));
 
-    // 2. Resolve from decisions on verified revisions of this setup. Every job reads decisions.json
-    // (and, inside effective, overrides.json) fresh.
+    // 2. Local decisions require a cached branch verdict. Hosted decisions pass to the source
+    // for tag/diff verification and carry-forward checks. Decisions and overrides are read fresh.
     const decisions = yield* (yield* DecisionsStore).read.pipe(Effect.catchTag('DecisionsInvalid', () => Effect.succeed(undefined)));
-    const usable = (decisions ?? []).filter((d) => d.setupId === LOCAL_SETUP && d.commit !== null && verified.has(d.commit));
-    const resolved = yield* source.effective(usable).pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)));
+    const usable = (decisions ?? []).filter((d) => d.setupId === setupId && (setupId === LOCAL_SETUP ? d.commit !== null && verified.has(d.commit) : d.revision !== null));
+    const resolved = yield* source.effective(usable).pipe(Effect.catchTag('RevisionUnavailable', () => Effect.succeed(undefined)), Effect.catchTag('RevisionMismatch', () => Effect.succeed(undefined)));
     if (resolved === undefined) return yield* finish({ error: 'REVISION_UNAVAILABLE' });
     const decisionsError: Partial<AgentStatus> = decisions === undefined ? { error: 'DECISIONS_INVALID' } : {};
 

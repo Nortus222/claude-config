@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import type { Decision } from '@nortuscc/machine';
+import { revisionCommit, type Revision } from '@nortuscc/sync';
 import { RevisionMismatch, RevisionUnavailable, SetupSource, type Snapshot } from '../../src/index.ts';
 
 export const APPLIED = 'a'.repeat(40);
@@ -56,7 +57,7 @@ export const setupFixture = (root: string, options: FixtureOptions = {}) => {
   const unavailable = new Set<SourceCall>(options.unavailable);
   const calls: Array<SourceCall> = [];
   const called = (call: SourceCall) => Effect.sync(() => void calls.push(call));
-  const down = (call: SourceCall, revision: string) =>
+  const down = (call: SourceCall, revision: Revision) =>
     Effect.fail(new RevisionUnavailable({ revision, reason: `${call} is unavailable` }));
   const snapshot = (revision: string) =>
     loadProfile(dirs[revision]!).pipe(
@@ -71,8 +72,8 @@ export const setupFixture = (root: string, options: FixtureOptions = {}) => {
         yield* called('load');
         if (unavailable.has('load')) return yield* down('load', revision);
         if (options.rejectHead && revision === HEAD) return yield* Effect.fail(new RevisionMismatch({ revision, reason: 'not on the tracked branch' }));
-        if (dirs[revision] === undefined) return yield* Effect.fail(new RevisionUnavailable({ revision, reason: 'unknown commit' }));
-        return yield* snapshot(revision);
+        if (dirs[revisionCommit(revision)] === undefined) return yield* Effect.fail(new RevisionUnavailable({ revision, reason: 'unknown commit' }));
+        return yield* snapshot(revisionCommit(revision));
       }),
     effective: (decisions) =>
       Effect.gen(function* () {

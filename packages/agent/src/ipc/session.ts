@@ -5,7 +5,7 @@ import {
   acquireApplyLock, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
-import type { SetupSource } from '@nortuscc/sync';
+import { itemIdOf, revisionCommit, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
 import { AgentClock } from '../clock.ts';
@@ -42,7 +42,7 @@ export type AgentSession = {
   readonly running: Effect.Effect<boolean>;
 };
 
-type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan };
+type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number };
 type Active = { readonly abort: AbortController; readonly done: Deferred.Deferred<void> };
 
 const describe = (error: unknown): string => {
@@ -116,7 +116,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const result: InspectResult & { status: WireStatus } = {
           profile: {
             repo,
-            revision: inspection.revision,
+            revision: inspection.revision === null ? null : revisionCommit(inspection.revision),
             overrides: join(stateRoot, 'overrides.json'),
             issues: inspection.desired.issues.map((i) => ({ layer: i.layer, source: i.source, path: i.path, message: i.message })),
           },
@@ -139,7 +139,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return yield* Effect.fail(new SessionError('UNKNOWN_KEY', `'${unknown}' is not an item of the last inspection; inspect again`));
         }
         const unique = [...new Set(exclude)];
-        const next: Previewed = { planId: randomUUID(), exclude: unique, plan: planFor(inspection, unique) };
+        const next: Previewed = { planId: randomUUID(), exclude: unique, plan: planFor(inspection, unique), generation: yield* (handle.generation ?? Effect.succeed(0)) };
         previewed = next;
         return { planId: next.planId, plan: wirePlan(next.plan) };
       });
@@ -184,7 +184,11 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             Effect.provideContext(context),
             Effect.catchTag('LockHeld', (held) => Effect.fail(new SessionError('LOCKED', `${held.message}; apply again when it finishes`))),
           );
-          const job = yield* handle.exclusive(runJob(options.domains, { inspectOnly: true })).pipe(
+          if (wanted.generation !== (yield* (handle.generation ?? Effect.succeed(0)))) {
+            previewed = undefined;
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+          }
+          const job = yield* handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(
             Effect.provideContext(context),
             Effect.mapError((error) => new SessionError('INSPECT_FAILED', describe(error))),
           );
@@ -193,7 +197,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           yield* validate(inspection);
           const fresh = planFor(inspection, wanted.exclude);
           if (!samePlan(wanted.plan, fresh)) {
-            const next: Previewed = { planId: randomUUID(), exclude: wanted.exclude, plan: fresh };
+            const next: Previewed = { planId: randomUUID(), exclude: wanted.exclude, plan: fresh, generation: yield* (handle.generation ?? Effect.succeed(0)) };
             previewed = next;
             const stale: ApplyResult = { status: 'stale', planId: next.planId, plan: wirePlan(fresh) };
             return stale;
@@ -237,6 +241,17 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           ),
         );
         if (Exit.isFailure(exit)) terminal = { type: 'failed', message: describe(Cause.squash(exit.cause)) };
+        if (handle.afterPerson && Exit.isSuccess(exit)) {
+          const ok = new Set(exit.value.steps.filter((s) => s.outcome === 'ok').map((s) => s.key));
+          const successful = planned.steps.filter((s) => ok.has(s.key)).flatMap((step) => {
+            const id = itemIdOf(step.key, inspection.desired);
+            return id ? [id] : step.touches.filter((path) => path.startsWith('skills/')).flatMap((path) => {
+              const skill = inspection.desired.skills.find((s) => s.name === path.slice('skills/'.length));
+              return skill ? [`skill:${skill.source}/${skill.name}`] : [];
+            });
+          });
+          yield* handle.exclusive(handle.afterPerson(inspection, successful)).pipe(Effect.catchCause(() => Effect.void));
+        }
         yield* release;
         // The run is already in History; a pruning failure must not hide it.
         if (Exit.isSuccess(exit)) yield* pruneBackups(now, actor).pipe(Effect.ignore);

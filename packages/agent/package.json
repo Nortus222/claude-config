@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@nortuscc/hosted-client": "0.1.0",
     "@nortuscc/hosted-protocol": "0.1.0",
     "@nortuscc/machine": "0.1.0",
     "@nortuscc/profile-engine": "0.1.0",

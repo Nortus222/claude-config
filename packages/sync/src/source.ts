@@ -1,9 +1,24 @@
 import { Context, Data, type Effect } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import type { Decision } from '@nortuscc/machine';
+import type { SyncRevision } from '@nortuscc/hosted-protocol';
 
-// P2: a commit SHA on the setup's tracked branch. P3 adds hosted revision records.
-export type Revision = string;
+export type Revision = string | SyncRevision;
+
+export const revisionCommit = (revision: Revision): string => typeof revision === 'string' ? revision : revision.commitSha;
+export const revisionIdentity = (revision: Revision): string | number => typeof revision === 'string' ? revision : revision.number;
+export const revisionSetupId = (revision: Revision): string => typeof revision === 'string' ? LOCAL_SETUP : revision.setupId;
+
+export type HostedBaseline = { readonly revisionApplied: number; readonly origins: Readonly<Record<string, string>> };
+
+// IDs positively confirmed by a fresh inspection with ownership, or successful apply and
+// reinspection. Missing observations are never evidence; removals require ownership release.
+export type AppliedEvidence = {
+  readonly revision: SyncRevision;
+  readonly decisions: ReadonlyArray<Decision>;
+  readonly observed: ReadonlyArray<string>;
+  readonly released: ReadonlyArray<string>;
+};
 
 // P2: decisions about the user's own setup, not linked to the hosted service.
 export const LOCAL_SETUP = 'local';
@@ -13,8 +28,8 @@ export const LOCAL_SETUP = 'local';
 export type Snapshot = { readonly desired: DesiredConfig; readonly repo: string };
 
 export type Effective = {
-  // The revision this machine last applied, which pending items are measured against.
-  readonly applied: Snapshot & { readonly revision: Revision };
+  // The local applied commit; null for a hosted baseline composed from per-item origins.
+  readonly applied: Snapshot & { readonly revision: Revision | null };
   // The applied revision plus the accepted items of newer revisions.
   readonly effective: Snapshot;
   // Accepted items that conflict with machine overrides, as #43 words them. Never resolved here.
@@ -23,13 +38,13 @@ export type Effective = {
 
 export class RevisionMismatch extends Data.TaggedError('RevisionMismatch')<{ readonly revision: Revision; readonly reason: string }> {
   override get message() {
-    return `revision ${this.revision} failed verification: ${this.reason}`;
+    return `revision ${revisionIdentity(this.revision)} failed verification: ${this.reason}`;
   }
 }
 
 export class RevisionUnavailable extends Data.TaggedError('RevisionUnavailable')<{ readonly revision: Revision; readonly reason: string }> {
   override get message() {
-    return `revision ${this.revision} could not be fetched: ${this.reason}`;
+    return `revision ${revisionIdentity(this.revision)} could not be fetched: ${this.reason}`;
   }
 }
 
@@ -37,15 +52,20 @@ export class RevisionUnavailable extends Data.TaggedError('RevisionUnavailable')
 export class SetupSource extends Context.Service<
   SetupSource,
   {
-    // Updates the setup's remote refs from its trusted repoUrl with the user's own Git credentials.
-    // Never touches the working tree. Answers the tracked branch's head.
+    readonly setupId?: string;
+    // Hosted sources check the active account and locally granted repository trust here.
+    readonly trusted?: Effect.Effect<boolean, RevisionUnavailable>;
+    readonly baseline?: Effect.Effect<HostedBaseline, RevisionUnavailable>;
+    readonly recordApplied?: (evidence: AppliedEvidence) => Effect.Effect<void, RevisionMismatch | RevisionUnavailable>;
+    // Answers the latest offered revision. Local sources refresh their tracked branch here;
+    // hosted sources fetch and verify exact tags in load/effective. Never moves the checkout.
     readonly fetch: Effect.Effect<{ readonly head: Revision }, RevisionUnavailable>;
-    // The configuration at `revision`, verified to be reachable from the tracked branch fetched from repoUrl.
+    // Verified configuration: local branch reachability, or hosted exact tag and item diff.
     readonly load: (revision: Revision) => Effect.Effect<Snapshot, RevisionMismatch | RevisionUnavailable>;
     // This machine's desired configuration; skipped and undecided items stay at their applied value.
-    readonly effective: (decisions: ReadonlyArray<Decision>) => Effect.Effect<Effective, RevisionUnavailable>;
-    // The checkout's HEAD with this machine's holds and overrides. No fetch and no trust check: it
-    // is only for inspecting an untrusted checkout for drift, never for applying.
+    readonly effective: (decisions: ReadonlyArray<Decision>) => Effect.Effect<Effective, RevisionMismatch | RevisionUnavailable>;
+    // Local sources inspect checkout HEAD with holds without trust. Hosted sources read their
+    // consent-checked durable baseline without fetching. Neither operation authorizes apply.
     readonly current: Effect.Effect<Snapshot, RevisionUnavailable>;
   }
 >()('sync/SetupSource') {}
