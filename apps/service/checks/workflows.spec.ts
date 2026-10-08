@@ -29,7 +29,8 @@ test('deployer validates anonymously before login and exposes no runtime federat
   assert.match(yaml, /node apps\/service\/infra\/deploy.ts execute/);
   assert.match(yaml, /IMAGE_REF: \$\{\{ inputs.image_ref \}\}/);
   for (const key of ['CLIENT_ID', 'TENANT_ID', 'SUBSCRIPTION_ID', 'RESOURCE_GROUP']) assert.ok(yaml.includes(`AZURE_${key}: $`));
-  assert.doesNotMatch(yaml, /client-secret|creds:|AZURE_FEDERATED_TOKEN_FILE|parameter_file:/);
+  assert.doesNotMatch(yaml, /client-secret|creds:|AZURE_FEDERATED_TOKEN_FILE|parameter_file:|bootstrapOnly/);
+  assert.match(yaml.slice(yaml.indexOf('  deploy:')), /timeout-minutes: 120/);
 });
 test('ordinary validation never receives publishing/deployment credentials and actually tests image', () => {
   const yaml = read('service-validation');

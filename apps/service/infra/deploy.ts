@@ -24,7 +24,7 @@ const sameId = (a: unknown, b: string) => typeof a === 'string' && a.toLowerCase
 const resourceGroupId = (ids: AzureInputs) => `/subscriptions/${ids.subscription}/resourceGroups/${ids.group}`;
 export type Snapshot = { subscription: unknown; group: unknown; providers: unknown; accounts: unknown; deployments: unknown; identities: unknown; resources: unknown; budgets: unknown };
 /** No account is adopted: existing ownership comes from the prior fixed deployment. */
-export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: DeploymentParameters): string | undefined {
+export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: DeploymentParameters, bootstrapVerification = false): string | undefined {
   const subscription = record(snapshot.subscription); const rg = resourceGroupId(ids);
   if (!sameId(subscription.id, ids.subscription) || !sameId(subscription.tenantId, ids.tenant) || subscription.state !== 'Enabled' || !sameId(record(snapshot.group).id, rg)) fail();
   const providers = list(snapshot.providers);
@@ -61,7 +61,7 @@ export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: 
       continue;
     }
     if (type.startsWith('microsoft.documentdb/databaseaccounts/')) {
-      if (!expected || typeof resource.id !== 'string' || !resource.id.toLowerCase().startsWith(`${expected}/`.toLowerCase()) || !outputs.some(o => sameId(o.id, String(resource.id))) || !['microsoft.documentdb/databaseaccounts/sqldatabases', 'microsoft.documentdb/databaseaccounts/sqldatabases/containers', 'microsoft.documentdb/databaseaccounts/sqlroledefinitions', 'microsoft.documentdb/databaseaccounts/sqlroleassignments'].includes(type)) fail();
+      if (!expected || typeof resource.id !== 'string' || !resource.id.toLowerCase().startsWith(`${expected}/`.toLowerCase()) || !outputs.some(o => sameId(o.id, String(resource.id))) && ![`${expected}/sqlDatabases/metadata`, ...['accounts', 'setups', 'identities'].map(name => `${expected}/sqlDatabases/metadata/containers/${name}`)].some(id => sameId(resource.id, id)) || !['microsoft.documentdb/databaseaccounts/sqldatabases', 'microsoft.documentdb/databaseaccounts/sqldatabases/containers', 'microsoft.documentdb/databaseaccounts/sqlroledefinitions', 'microsoft.documentdb/databaseaccounts/sqlroleassignments'].includes(type)) fail();
       continue;
     }
     if (type === 'microsoft.documentdb/databaseaccounts' ? !expected || !sameId(resource.id, String(expected)) : (!names[type] || resource.name !== names[type])) fail();
@@ -69,11 +69,13 @@ export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: 
   }
   if (account) {
     const p = record(account.properties); const locations = list(p.locations); const backup = record(p.backupPolicy); const periodic = record(backup.periodicModeProperties);
-    if (region(account.location) !== params.location || record(p.consistencyPolicy).defaultConsistencyLevel !== 'Strong' || p.enableFreeTier !== true || p.disableLocalAuth !== true || p.enableMultipleWriteLocations !== false || p.enableAutomaticFailover !== false || p.enableBurstCapacity === true || record(p.capacity).totalThroughputLimit !== 1000 || locations.length !== 1 || region(locations[0]!.locationName) !== params.location || locations[0]!.failoverPriority !== 0 || backup.type !== 'Periodic' || periodic.backupIntervalInMinutes !== 240 || periodic.backupRetentionIntervalInHours !== 8 || (Array.isArray(p.capabilities) && p.capabilities.length !== 0)) fail();
+    if (region(account.location) !== params.location || record(p.consistencyPolicy).defaultConsistencyLevel !== 'Strong' || p.enableFreeTier !== true || p.disableLocalAuth !== true || p.enableMultipleWriteLocations !== false || p.enableAutomaticFailover !== false || p.enableBurstCapacity === true || record(p.capacity).totalThroughputLimit !== (bootstrapVerification ? -1 : 1000) || locations.length !== 1 || region(locations[0]!.locationName) !== params.location || locations[0]!.failoverPriority !== 0 || backup.type !== 'Periodic' || periodic.backupIntervalInMinutes !== 240 || periodic.backupRetentionIntervalInHours !== 8 || (Array.isArray(p.capabilities) && p.capabilities.length !== 0)) fail();
   }
   for (const budget of list(snapshot.budgets)) {
     const p = record(budget.properties);
-    if (budget.name !== `${params.namePrefix}-monthly` || !previous || p.category !== 'Cost' || p.timeGrain !== 'Monthly' || p.amount !== params.budgetAmount || String(record(p.timePeriod).startDate).slice(0, 10) !== params.budgetStartDate) fail();
+    const startDate = record(p.timePeriod).startDate;
+    if (typeof startDate !== 'string' || startDate.length > 64 || !/^20[2-9][0-9]-(?:0[1-9]|1[0-2])-01(?:T00:00:00(?:\.000)?Z)?$/.test(startDate)) fail();
+    if (budget.name !== `${params.namePrefix}-monthly` || !previous || p.category !== 'Cost' || p.timeGrain !== 'Monthly' || !Number.isFinite(p.amount) || Number(p.amount) <= 0) fail();
   }
   return typeof expected === 'string' ? expected : undefined;
 }
@@ -140,13 +142,24 @@ export function validateOutputs(deployment: unknown, ids: AzureInputs, params: D
   if (!/^https:\/\/[a-z0-9.-]+\.azurecontainerapps\.io$/.test(result.endpoint!) || result.appName !== `${params.namePrefix}-service` || !sameId(result.runtimeIdentityResourceId, `${resourceGroupId(ids)}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${params.namePrefix}-runtime`) || result.runtimeIdentityClientId!.length !== 36 || result.runtimeIdentityPrincipalId!.length !== 36 || !uuid.test(result.runtimeIdentityClientId!) || !uuid.test(result.runtimeIdentityPrincipalId!) || sameId(result.runtimeIdentityClientId, ids.client)) fail();
   return result;
 }
-/** All Azure reads finish successfully before the single incremental mutation. */
+/** Initial preflight precedes mutation; new storage is verified before capped runtime deployment. */
 export async function deploy(ids: AzureInputs, params: DeploymentParameters, armParameters: string, runner: Runner = azureRunner) {
   const snapshot = await snapshotFor(ids, runner);
   const account = evaluatePreflight(snapshot, ids, params);
-  await checkExistingResources(snapshot, ids, params, runner);
-  if (account) await checkDatabase(ids, account, runner);
-  const result = await runner(['deployment', 'group', 'create', '--name', 'hosted-service', '--resource-group', ids.group, '--subscription', ids.subscription, '--mode', 'Incremental', '--template-file', 'apps/service/infra/main.bicep', '--parameters', `@${armParameters}`]);
+  const create = ['deployment', 'group', 'create', '--name', 'hosted-service', '--resource-group', ids.group, '--subscription', ids.subscription, '--mode', 'Incremental', '--template-file', 'apps/service/infra/main.bicep', '--parameters', `@${armParameters}`];
+  if (!account) {
+    await runner([...create, 'bootstrapOnly=true']);
+    const storage = await snapshotFor(ids, runner);
+    const created = evaluatePreflight(storage, ids, params, true);
+    if (!created || list(storage.identities).length !== 0 || list(storage.budgets).length !== 0 || list(storage.resources).some(resource => !String(resource.type).toLowerCase().startsWith('microsoft.documentdb/') && String(resource.type).toLowerCase() !== 'microsoft.resources/deployments')) fail();
+    await checkDatabase(ids, created, runner);
+  } else {
+    await checkExistingResources(snapshot, ids, params, runner);
+    await checkDatabase(ids, account, runner);
+  }
+  // The final account PUT restores the ceiling before any dependent runtime resource.
+  // It does not PUT containers; their shared layout has already been verified above.
+  const result = await runner(create);
   return validateOutputs(result, ids, params);
 }
 async function main() {

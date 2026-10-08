@@ -57,3 +57,7 @@ for (const [label, allowlistedLogins] of [
     assert.throws(() => validateDeploymentParameters({ ...valid(), allowlistedLogins }));
   });
 }
+test('public configuration cannot request storage bootstrap', () => {
+  assert.throws(() => validateDeploymentParameters({ ...valid(), bootstrapOnly: true }));
+  assert.throws(() => validateDeploymentParameters({ ...valid(), bootstrapOnly: false }));
+});

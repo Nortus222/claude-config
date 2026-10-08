@@ -23,6 +23,9 @@ param budgetStartDate string
 @maxLength(111)
 param image string
 
+// Internal new-account phase; the delivery helper never exposes this as public input.
+param bootstrapOnly bool = false
+
 var databaseName = 'metadata'
 var suffix = uniqueString(resourceGroup().id, namePrefix)
 var cosmosName = '${namePrefix}-${suffix}'
@@ -32,7 +35,7 @@ var containers = [
   { name: 'identities', partitionKey: '/id' }
 ]
 
-resource runtimeIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
+resource runtimeIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = if (!bootstrapOnly) {
   name: '${namePrefix}-runtime'
   location: location
 }
@@ -50,19 +53,19 @@ resource cosmos 'Microsoft.DocumentDB/databaseAccounts@2025-04-15' = {
     disableLocalAuth: true
     publicNetworkAccess: 'Enabled'
     minimalTlsVersion: 'Tls12'
-    capacity: { totalThroughputLimit: 1000 }
+    capacity: { totalThroughputLimit: bootstrapOnly ? -1 : 1000 }
     backupPolicy: {
       type: 'Periodic'
       periodicModeProperties: { backupIntervalInMinutes: 240, backupRetentionIntervalInHours: 8 }
     }
   }
 }
-resource database 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2025-04-15' = {
+resource database 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2025-04-15' = if (bootstrapOnly) {
   parent: cosmos
   name: databaseName
   properties: { resource: { id: databaseName }, options: { throughput: 1000 } }
 }
-resource container 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2025-04-15' = [for item in containers: {
+resource container 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2025-04-15' = [for item in containers: if (bootstrapOnly) {
   parent: database
   name: item.name
   properties: {
@@ -71,7 +74,7 @@ resource container 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/container
   }
 }]
 var databaseScope = '${cosmos.id}/dbs/${databaseName}'
-resource dataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@2025-04-15' = {
+resource dataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@2025-04-15' = if (!bootstrapOnly) {
   parent: cosmos
   name: guid(cosmos.id, 'metadata-items')
   properties: {
@@ -90,7 +93,7 @@ resource dataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@2025
     ] }]
   }
 }
-resource metadataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@2025-04-15' = {
+resource metadataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@2025-04-15' = if (!bootstrapOnly) {
   parent: cosmos
   name: guid(cosmos.id, 'account-metadata')
   properties: {
@@ -100,23 +103,23 @@ resource metadataRole 'Microsoft.DocumentDB/databaseAccounts/sqlRoleDefinitions@
     permissions: [{ dataActions: ['Microsoft.DocumentDB/databaseAccounts/readMetadata'] }]
   }
 }
-resource dataAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2025-04-15' = {
+resource dataAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2025-04-15' = if (!bootstrapOnly) {
   parent: cosmos
-  name: guid(cosmos.id, runtimeIdentity.id, 'metadata-items')
-  properties: { principalId: runtimeIdentity.properties.principalId, roleDefinitionId: dataRole.id, scope: databaseScope }
+  name: guid(cosmos.id, runtimeIdentity!.id, 'metadata-items')
+  properties: { principalId: runtimeIdentity!.properties.principalId, roleDefinitionId: dataRole!.id, scope: databaseScope }
   dependsOn: [container]
 }
-resource metadataAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2025-04-15' = {
+resource metadataAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2025-04-15' = if (!bootstrapOnly) {
   parent: cosmos
-  name: guid(cosmos.id, runtimeIdentity.id, 'account-metadata')
-  properties: { principalId: runtimeIdentity.properties.principalId, roleDefinitionId: metadataRole.id, scope: cosmos.id }
+  name: guid(cosmos.id, runtimeIdentity!.id, 'account-metadata')
+  properties: { principalId: runtimeIdentity!.properties.principalId, roleDefinitionId: metadataRole!.id, scope: cosmos.id }
 }
-resource logs 'Microsoft.OperationalInsights/workspaces@2025-07-01' = {
+resource logs 'Microsoft.OperationalInsights/workspaces@2025-07-01' = if (!bootstrapOnly) {
   name: '${namePrefix}-logs'
   location: location
   properties: { sku: { name: 'PerGB2018' }, retentionInDays: 30, features: { disableLocalAuth: true }, workspaceCapping: { dailyQuotaGb: 1 } }
 }
-resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = {
+resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = if (!bootstrapOnly) {
   name: '${namePrefix}-environment'
   location: location
   properties: {
@@ -124,23 +127,23 @@ resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = {
     workloadProfiles: [{ name: 'Consumption', workloadProfileType: 'Consumption' }]
   }
 }
-resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!bootstrapOnly) {
   scope: environment
   name: '${namePrefix}-logs'
   properties: {
-    workspaceId: logs.id
+    workspaceId: logs!.id
     logs: [
       { category: 'ContainerAppConsoleLogs', enabled: true }
       { category: 'ContainerAppSystemLogs', enabled: true }
     ]
   }
 }
-resource app 'Microsoft.App/containerApps@2025-07-01' = {
+resource app 'Microsoft.App/containerApps@2025-07-01' = if (!bootstrapOnly) {
   name: '${namePrefix}-service'
   location: location
-  identity: { type: 'UserAssigned', userAssignedIdentities: { '${runtimeIdentity.id}': {} } }
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${runtimeIdentity!.id}': {} } }
   properties: {
-    managedEnvironmentId: environment.id
+    managedEnvironmentId: environment!.id
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
@@ -157,7 +160,7 @@ resource app 'Microsoft.App/containerApps@2025-07-01' = {
           { name: 'NORTUSCC_SERVICE_GITHUB_CLIENT_ID', value: githubClientId }
           { name: 'NORTUSCC_SERVICE_COSMOS_ENDPOINT', value: cosmos.properties.documentEndpoint }
           { name: 'NORTUSCC_SERVICE_COSMOS_DATABASE', value: databaseName }
-          { name: 'NORTUSCC_SERVICE_MANAGED_IDENTITY_CLIENT_ID', value: runtimeIdentity.properties.clientId }
+          { name: 'NORTUSCC_SERVICE_MANAGED_IDENTITY_CLIENT_ID', value: runtimeIdentity!.properties.clientId }
           { name: 'NORTUSCC_SERVICE_HOST', value: '0.0.0.0' }
           { name: 'NORTUSCC_SERVICE_PORT', value: '8080' }
           { name: 'NORTUSCC_SERVICE_OPEN_SIGNUP', value: openSignup ? 'true' : 'false' }
@@ -174,7 +177,7 @@ resource app 'Microsoft.App/containerApps@2025-07-01' = {
   }
   dependsOn: [dataAssignment, metadataAssignment, diagnostics]
 }
-resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
+resource budget 'Microsoft.Consumption/budgets@2024-08-01' = if (!bootstrapOnly) {
   name: '${namePrefix}-monthly'
   properties: {
     category: 'Cost'
@@ -189,8 +192,8 @@ resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
     }
   }
 }
-output endpoint string = 'https://${app.properties.configuration.ingress.fqdn}'
-output appName string = app.name
-output runtimeIdentityResourceId string = runtimeIdentity.id
-output runtimeIdentityClientId string = runtimeIdentity.properties.clientId
-output runtimeIdentityPrincipalId string = runtimeIdentity.properties.principalId
+output endpoint string = bootstrapOnly ? '' : 'https://${app!.properties.configuration.ingress.fqdn}'
+output appName string = bootstrapOnly ? '' : app!.name
+output runtimeIdentityResourceId string = bootstrapOnly ? '' : runtimeIdentity!.id
+output runtimeIdentityClientId string = bootstrapOnly ? '' : runtimeIdentity!.properties.clientId
+output runtimeIdentityPrincipalId string = bootstrapOnly ? '' : runtimeIdentity!.properties.principalId

@@ -19,7 +19,7 @@ test('compiled Azure resources preserve runtime, storage, identity and cost cont
   assert.equal(cosmos.disableLocalAuth, true);
   assert.equal(cosmos.locations.length, 1);
   assert.equal(cosmos.enableMultipleWriteLocations, false);
-  assert.equal(cosmos.capacity.totalThroughputLimit, 1000);
+  assert.equal(cosmos.capacity.totalThroughputLimit, "[if(parameters('bootstrapOnly'), -1, 1000)]");
   assert.deepEqual(cosmos.backupPolicy.periodicModeProperties, { backupIntervalInMinutes: 240, backupRetentionIntervalInHours: 8 });
   assert.equal(one('Microsoft.DocumentDB/databaseAccounts/sqlDatabases').properties.options.throughput, 1000);
   const containers = resources.filter(r => r.type.endsWith('/containers'));
@@ -73,4 +73,26 @@ test('compiled Azure resources preserve runtime, storage, identity and cost cont
   assert.ok(!JSON.stringify(arm).includes('autoscale'));
   assert.ok(!JSON.stringify(arm).includes('listKeys'));
   assert.deepEqual(Object.keys(arm.outputs), ['endpoint', 'appName', 'runtimeIdentityResourceId', 'runtimeIdentityClientId', 'runtimeIdentityPrincipalId']);
+});
+test('internal storage bootstrap disables ceiling only before shared containers; final resources wait for capped account', { skip: !process.env.BICEP_CLI }, () => {
+  const result = spawnSync(process.env.BICEP_CLI!, ['build', fileURLToPath(new URL('../infra/main.bicep', import.meta.url)), '--stdout'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, '');
+  const arm = JSON.parse(result.stdout);
+  assert.deepEqual(arm.parameters.bootstrapOnly, { type: 'bool', defaultValue: false });
+  const resources = arm.resources as any[];
+  const account = resources.find(r => r.type === 'Microsoft.DocumentDB/databaseAccounts');
+  assert.equal(account.condition, undefined);
+  assert.equal(account.properties.capacity.totalThroughputLimit, "[if(parameters('bootstrapOnly'), -1, 1000)]");
+  for (const resource of resources) {
+    if (resource === account) continue;
+    const storage = resource.type === 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases' || resource.type.endsWith('/containers');
+    assert.equal(resource.condition, storage ? "[parameters('bootstrapOnly')]" : "[not(parameters('bootstrapOnly'))]", resource.type);
+  }
+  const app = resources.find(r => r.type === 'Microsoft.App/containerApps');
+  const role = resources.find(r => r.type.endsWith('/sqlRoleAssignments'));
+  const cappedAccount = "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]";
+  assert.ok(role.dependsOn.includes(cappedAccount));
+  assert.ok(app.dependsOn.includes(cappedAccount));
+  assert.doesNotMatch(JSON.stringify(app.properties.template.containers[0].env), /bootstrap|AZURE_FEDERATED|AZURE_CLIENT_ID/);
+  assert.ok(app.dependsOn.some((dep: string) => dep.includes('sqlRoleAssignments')));
 });

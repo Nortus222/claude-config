@@ -202,20 +202,36 @@ this code batch dispatches either workflow.
    **before Azure login**. Only it has `id-token:write`; it cannot publish packages.
    After OIDC, preflight reads the selected subscription/group, provider
    registrations/regional declarations and complete subscription Cosmos inventory
-   before the single incremental `hosted-service` deployment. It refuses a paid
+   before choosing the internal new-account bootstrap or existing-account path. It
+   refuses a paid
    fallback, a different free-tier account, unowned group resources, unexpected
    Strong/key/throughput/budget policy, CI/runtime identity collisions or truncated
    ARM inventory pages. Existing metadata database/container settings must retain
-   manual shared 1000 RU/s, three partition keys and TTL -1. Existing workspace/app policy
+   manual shared 1000 RU/s, three partition keys and TTL -1. Owned budgets must remain
+   Cost/Monthly with valid existing values; newly reviewed amount/date updates
+   are allowed and their creation-window validation remains ARM's responsibility. Existing workspace/app policy
    also rejects altered compute/scale/logging or runtime secrets/federation.
 5. The previous fixed deployment's `outputResources` identifies the sole owned
    Cosmos account without guessing ARM `uniqueString`. Missing/ambiguous ownership
    or an orphan account after a failed first deployment stops release. Recovery
    requires separately reviewed owner inspection/reconciliation; do not delete
    the account, adopt unrelated data or bypass free-tier validation automatically.
-   Read calls have a 120-second bound. Initial resource creation has a 45-minute bound
-   inside a 60-minute job; timeout/cancellation may leave provisioning running.
-   Inspect the existing deployment before retrying. ARM success is **not runtime
+   Read calls have a 120-second bound. Each deployment phase has a 45-minute bound
+   inside a 120-minute job; timeout/cancellation may leave provisioning running.
+   Inspect the existing deployment before retrying. The NEW-account path first
+   deploys only the Strong/free-tier/key-disabled account, shared manual 1000 RU/s
+   database and three containers with the ceiling temporarily disabled. No app,
+   runtime identity, roles, logs or budget is created in that phase. The helper
+   re-reads ownership/account policy and verifies the exact shared storage layout,
+   then deploys the final ceiling 1000 before dependent runtime resources. Existing
+   accounts run only the capped final path and never have their ceiling relaxed.
+   The final template intentionally does not PUT databases/containers; its
+   default path requires the helper's existing storage proof. The internal
+   `bootstrapOnly` flag is not a dispatch/configuration input. Do not invoke the
+   template directly as a substitute for the helper. A partial/uncapped bootstrap
+   retry fails closed, even when owned; manual reconciliation needs separate review.
+   [ADR0028](../../../docs/adr/0028-hosted-cosmos-bootstrap-order.md) records this
+   ordering and its bounded initial provisioning exception. ARM success is **not runtime
    readiness**. Public outputs are endpoint, appName, runtimeIdentityResourceId,
    runtimeIdentityClientId and runtimeIdentityPrincipalId; identity outputs are
    checked for correct group/name and a client ID distinct from CI.
@@ -269,7 +285,18 @@ subscription; 1000 RU/s and 25 GB discounts do not make all Azure resources free
 Shared-throughput minimum grows with storage/history/container count, and automatic
 storage-driven minimum throughput can exceed the configured account ceiling.
 Strong reads cost twice the read RUs of weaker consistency. No paid fallback,
-autoscale or multi-region failover is introduced.
+autoscale or multi-region failover is introduced. Azure currently rejects creation
+of offerless containers while the ceiling is enabled, which is why the NEW-only
+storage bootstrap precedes final capping. The template never supplies dedicated
+container throughput. Container-list `properties.options` is only a coarse
+unexpected-shape guard, **not proof that a dedicated offer is absent**. The
+[container ThroughputSetting API](https://learn.microsoft.com/en-us/rest/api/cosmos-db-resource-provider/sql-resources/get-sql-container-throughput?view=rest-cosmos-db-resource-provider-2025-04-15)
+documents a successful offer read but no authoritative absence response; the helper
+never treats arbitrary 400/404/auth/network failures as no offer. Successful final
+capping cannot set a limit below actual provisioned allocation, providing the
+bootstrap allocation gate before the app starts. Independent control-plane offer
+absence/response-shape proof remains part of the later owner-approved cloud
+acceptance; no data-plane credential or CI data-plane role is added for it.
 [Throughput ceiling exception](https://learn.microsoft.com/en-us/azure/cosmos-db/limit-total-account-throughput),
 [throughput/limits](https://learn.microsoft.com/en-us/azure/cosmos-db/concepts-limits),
 [consistency](https://learn.microsoft.com/en-us/azure/cosmos-db/consistency-levels).
