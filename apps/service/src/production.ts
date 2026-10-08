@@ -4,7 +4,7 @@ import { Agent as HttpsAgent } from 'node:https';
 import type { Socket } from 'node:net';
 import type { CosmosClient, CosmosClientOptions } from '@azure/cosmos';
 import type { ManagedIdentityCredentialClientIdOptions } from '@azure/identity';
-import { createHttpHeaders, type HttpClient } from '@azure/core-rest-pipeline';
+import { createDefaultHttpClient, createHttpHeaders, type HttpClient } from '@azure/core-rest-pipeline';
 import type { RuntimeConfig } from './config.ts';
 import { makeCosmosStore, validateCosmosConfiguration } from './cosmos-store.ts';
 import { makeGitHub } from './github-http.ts';
@@ -19,6 +19,7 @@ export interface ProductionFactories {
   readonly agent?: () => NonNullable<CosmosClientOptions['agent']>;
   /** The transport must honor request cancellation and settle when its HTTP work ends. */
   readonly identityTransport: HttpClient;
+  readonly cosmosTransport?: HttpClient;
   readonly fetch: typeof fetch;
   readonly now: () => number;
 }
@@ -92,7 +93,14 @@ export function makeProductionResources(config: RuntimeConfig, factories: Produc
         track(work, acquisitions).then((token) => { finish(); resolve(token); }, () => { failed(); finish(); });
       }),
     };
-    client = factories.client({ endpoint: config.cosmosEndpoint, ...(config.localEmulator ? { key: config.emulatorKey! } : { aadCredentials: boundedCredential! }),
+    const cosmosTransport = config.localEmulator ? factories.cosmosTransport ?? createDefaultHttpClient() : undefined;
+    const emulatorHttpClient: HttpClient | undefined = cosmosTransport && { sendRequest: (request) => {
+      const url = new URL(request.url);
+      if (url.origin !== new URL(config.cosmosEndpoint).origin || url.username || url.password) return Promise.reject(new Error('Service transport failed.'));
+      // Cosmos 4.10.1 omits this flag when a custom agent is supplied.
+      return cosmosTransport.sendRequest({ ...request, allowInsecureConnection: url.protocol === 'http:' });
+    } };
+    client = factories.client({ ...(emulatorHttpClient ? { httpClient: emulatorHttpClient } : {}), endpoint: config.cosmosEndpoint, ...(config.localEmulator ? { key: config.emulatorKey! } : { aadCredentials: boundedCredential! }),
       agent, consistencyLevel: 'Strong', connectionPolicy: { requestTimeout: 10000, enableEndpointDiscovery: false,
         enableBackgroundEndpointRefreshing: false, useMultipleWriteLocations: false, retryOptions: { maxRetryAttemptCount: 0, maxWaitTimeInSeconds: 0 } } });
     const database = client.database(config.cosmosDatabase);

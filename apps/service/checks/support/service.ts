@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import * as api from '../../src/index.ts';
@@ -6,7 +7,9 @@ import { fakeGitHub } from './fake-github.ts';
 import type { Store } from '../../src/store.ts';
 import type { ServiceOptions } from '../../src/service.ts';
 
-export type FixtureOptions = { store?: Store['Service']; clock?: { now: number }; openSignup?: boolean; allowlistedLogins?: readonly string[]; pollAfter?: number; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] };
+export type FixtureHosting = (options: { store: Store['Service']; clock: { now: number }; github: ReturnType<typeof fakeGitHub>; diagnostics: unknown[]; options: FixtureOptions; port: number }) => Promise<{ server: Server; close: () => Promise<void> }>;
+
+export type FixtureOptions = { hosting?: FixtureHosting; store?: Store['Service']; clock?: { now: number }; openSignup?: boolean; allowlistedLogins?: readonly string[]; pollAfter?: number; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] };
 
 export async function fixture(options: FixtureOptions = {}) {
   if (!('makeService' in api)) throw new Error('makeService must be exported');
@@ -24,8 +27,9 @@ export async function fixture(options: FixtureOptions = {}) {
     server.prependListener('request', (_request, response) => response.setHeader('connection', 'close'));
     return server;
   };
-  let server = await makeServer();
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  let hosted = options.hosting ? await options.hosting({ store, clock, github, diagnostics, options, port: 0 }) : undefined;
+  let server = hosted?.server ?? await makeServer();
+  if (!hosted) await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   const call = (method: string, path: string, body?: unknown, token?: string) => fetch(`http://127.0.0.1:${port}${path}`, {
     method, headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(token ? { authorization: `Bearer ${token}` } : {}) },
@@ -38,14 +42,17 @@ export async function fixture(options: FixtureOptions = {}) {
   });
   const start = async (name = 'Machine') => { const response = await call('POST', '/v1/auth/device/start', { name, os: 'linux', agents: ['codex'] }); return { response, body: await response.json() }; };
   const login = async (name = 'Machine') => { const pending = await start(name); clock.now += 5000; const response = await call('POST', '/v1/auth/device/poll', { pendingId: pending.body.pendingId }); return { response, body: await response.json() }; };
-  const close = () => new Promise<void>((resolve, reject) => {
+  const closeEmbedded = () => new Promise<void>((resolve, reject) => {
     if (!server.listening) { resolve(); return; }
     server.close((error) => error ? reject(error) : resolve());
   });
+  const close = () => hosted ? hosted.close() : closeEmbedded();
   const restart = async (nextStore: Store['Service']) => {
     await close();
     store = nextStore;
-    server = await makeServer();
+    hosted = options.hosting ? await options.hosting({ store, clock, github, diagnostics, options, port }) : undefined;
+    server = hosted?.server ?? await makeServer();
+    if (hosted) return;
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });

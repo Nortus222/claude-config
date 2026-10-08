@@ -151,3 +151,22 @@ for (const [encoding, compress] of [['gzip', gzipSync], ['deflate', deflateSync]
   try { await assert.rejects(captured!.aadCredentials!.getToken('scope'), /^Error: Credential acquisition failed\.$/); }
   finally { await resources.dispose(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test('explicit HTTP emulator transport permits only the configured origin with its owned agent', async () => {
+  const local = parseServiceEnvironment({ NORTUSCC_SERVICE_GITHUB_CLIENT_ID: 'client', NORTUSCC_SERVICE_COSMOS_DATABASE: 'metadata', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://127.0.0.1:18081/', NORTUSCC_SERVICE_LOCAL_EMULATOR: 'true', NORTUSCC_SERVICE_EMULATOR_KEY: 'dummy' });
+  let captured: CosmosClientOptions | undefined; let calls = 0;
+  const resources = makeProductionResources(local, {
+    credential: () => { throw new Error('No credential'); }, identityTransport: forbiddenTransport,
+    cosmosTransport: { sendRequest: async (request) => { calls++; assert.equal(request.allowInsecureConnection, true); assert.equal(request.agent, captured!.agent); return { request, status: 200, headers: createHttpHeaders() }; } },
+    client: (options) => { captured = options; return { database: () => ({}), dispose: () => {} } as unknown as CosmosClient; }, fetch: forbiddenFetch, now: Date.now,
+  });
+  try {
+    const request = createPipelineRequest({ url: 'http://127.0.0.1:18081/dbs/metadata', method: 'GET' });
+    request.agent = captured!.agent;
+    await captured!.httpClient!.sendRequest(request);
+    for (const url of ['http://127.0.0.1:18082/', 'http://example.invalid/', 'https://127.0.0.1:18081/']) {
+      await assert.rejects(captured!.httpClient!.sendRequest(createPipelineRequest({ url, method: 'GET' })), /Service transport failed/);
+    }
+    assert.equal(calls, 1);
+  } finally { await resources.dispose(); }
+});

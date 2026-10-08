@@ -17,7 +17,7 @@ export function registerClientIntegrationContract(name: string, factory: Service
       const clock = { now: Date.UTC(2026, 9, 7) };
       const backend = await factory({ now: () => clock.now });
       try {
-        await scenario(t, backend, (context, options = {}) => createClientFixture(context, { ...options, store: options.store ?? backend.store, clock }));
+        await scenario(t, backend, (context, options = {}) => createClientFixture(context, { hosting: backend.hosting, ...options, store: options.store ?? backend.store, clock }));
       } finally { t.after(backend.dispose); }
     });
 

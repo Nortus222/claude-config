@@ -1,9 +1,10 @@
 import test from 'node:test';
 import { makeMemoryStore } from '../../src/memory-store.ts';
 import type { Store } from '../../src/store.ts';
-import { fixture, type FixtureOptions } from './service.ts';
+import { fixture, type FixtureOptions, type FixtureHosting } from './service.ts';
 
 export interface ServiceStoreFixture {
+  readonly hosting?: FixtureHosting;
   readonly store: Store['Service'];
   readonly restart: () => Store['Service'] | Promise<Store['Service']>;
   readonly dispose: () => Promise<void>;
@@ -30,6 +31,6 @@ export const serviceContract = (name: string, factory: ServiceStoreFactory) =>
     await run({
       store: backend.store,
       restartStore: backend.restart,
-      fixture: (options = {}) => fixture({ ...options, store: options.store ?? backend.store, clock }),
+      fixture: (options = {}) => fixture({ hosting: backend.hosting, ...options, store: options.store ?? backend.store, clock }),
     });
   });

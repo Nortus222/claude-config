@@ -1,10 +1,10 @@
-# Hosted service core
+# Hosted metadata service
 
-`@nortuscc/service` is an embeddable HTTP v1 metadata service on Node 24+,
-pinned Effect 4 and `@nortuscc/hosted-protocol`. It has no executable launcher,
-production GitHub adapter or environment access. Its memory Store is for local
-embedding and tests; its Cosmos Store uses an injected official SDK `Database`.
-It does not read repositories or apply machine configuration.
+`@nortuscc/service` runs HTTP v1 on Node 24+, pinned Effect 4 and
+`@nortuscc/hosted-protocol`. It includes a production GitHub device-flow adapter,
+managed-identity Cosmos resources and an owned Node HTTP runtime. The memory Store
+and unlistened HTTP core remain available for embedding. The service stores
+metadata only; it never reads repositories or applies machine configuration.
 
 Construct `makeService({ now, config, diagnostic })` with injected `Store` and
 `GitHub` Effect services, then pass the captured handler to
@@ -17,8 +17,130 @@ that dispatch for embedding tests; callers do not need to supply it.
 The current batch implements device authentication, machine lifecycle, setup
 registration/listing, revision publication/listing, decisions, sync, private status,
 health, account export and account deletion. The memory Store tests cover local
-recovery and paused writers. Production runtime, GitHub authentication, cloud
-provisioning, deployment and live acceptance remain separate work.
+recovery and paused writers. The executable and adapters are implemented. Real
+OAuth, managed identity/RBAC, cloud provisioning, deployment and LIVE multi-machine acceptance remain unverified.
+
+## Run the service
+
+Install the workspace dependencies once with `npm ci`, then run from the repository
+root using an existing GitHub OAuth app and existing Azure resources:
+
+```bash
+export NORTUSCC_SERVICE_GITHUB_CLIENT_ID=YOUR_PUBLIC_OAUTH_CLIENT_ID
+export NORTUSCC_SERVICE_COSMOS_ENDPOINT=https://YOUR_ACCOUNT.documents.azure.com/
+export NORTUSCC_SERVICE_COSMOS_DATABASE=metadata
+export NORTUSCC_SERVICE_ALLOWLIST=YOUR_GITHUB_LOGIN
+npm start -w apps/service
+```
+
+Replace the uppercase placeholders. Defaults bind loopback port 8080 and keep
+signup closed. An empty allowlist denies new sign-ins while signup is closed.
+The command performs no provisioning or native service installation. Put TLS and
+any public routing in your hosting layer; explicitly set HOST to `0.0.0.0` only
+when that layer needs it.
+
+Enable device flow in a dedicated identity-only OAuth app before use. The adapter
+requests no scope or client secret, requires an empty returned scope and bearer
+token, and verifies the numeric identity through `GET /user` with REST version
+`2026-03-10`. GitHub access tokens exist only during that exchange and lookup;
+refresh tokens are ignored, with no token storage/cache/refresh or revocation API
+call. "Transient" does not mean GitHub revokes the upstream token when its local
+reference is discarded. The machine token returned by this service is separate;
+only its hash is stored. [GitHub device flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow),
+[OAuth scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
+[API versions](https://docs.github.com/en/rest/about-the-rest-api/api-versions).
+
+The Azure host needs a system-assigned managed identity, or the selected
+user-assigned identity. Grant its Cosmos data-plane role metadata reads and item
+read/query/create/replace/delete/batch access for the existing database. The
+built-in Cosmos DB Data Contributor role is one documented option. Control-plane
+Azure Contributor alone is insufficient. Require a Strong account, the container
+settings below, and disabled local/key authentication in the production account.
+The fixed 1000 RU/s account budget is an infrastructure prerequisite. Startup
+reads metadata; it cannot prove write authorization, disabled key access or the RU
+budget. [Cosmos data-plane RBAC](https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-connect-role-based-access-control).
+
+Production constructs exactly one `ManagedIdentityCredential`, never
+`DefaultAzureCredential`, a developer-credential chain, account key or connection
+string fallback. Identity 4.13.3's supported managed-identity path uses the owned
+HTTP transport, zero SDK retries and bounded token acquisition. Any configured
+`AZURE_FEDERATED_TOKEN_FILE`, including an empty value, rejects production startup
+before resources exist. AKS workload identity/token federation is unsupported
+until an adapter can own that SDK path. The identity transport removes advertised
+compression because the pinned default client's partial gzip/deflate decoder can
+fail to join cancellation; unsolicited complete compressed token bodies fail
+redacted parsing. [Azure authentication guidance](https://learn.microsoft.com/en-us/azure/developer/javascript/sdk/authentication/best-practices),
+[supported identity transport options](https://learn.microsoft.com/en-us/javascript/api/%40azure/identity/tokencredentialoptions?view=azure-node-latest).
+
+## Strict configuration
+
+All names below have the `NORTUSCC_SERVICE_` prefix. Unknown variables in that
+namespace reject startup. Other platform variables are ignored except the
+production federation rejection above. Booleans accept exactly `true` or `false`;
+integers accept canonical positive decimal without spaces, signs or leading zeros.
+Configuration failures and startup errors contain no rejected values.
+
+| Suffix | Default | Accepted value |
+| --- | --- | --- |
+| `GITHUB_CLIENT_ID` | Required | 1..100 ASCII letters, digits or underscores |
+| `COSMOS_ENDPOINT` | Required | Credential-free HTTPS root URL, no query/fragment or loopback aliases in production |
+| `COSMOS_DATABASE` | Required | 1..100 ASCII letters/digits/underscore/hyphen, starting with a letter/digit |
+| `MANAGED_IDENTITY_CLIENT_ID` | System identity | UUID for an explicitly selected user identity; forbidden in emulator mode |
+| `HOST` | `127.0.0.1` | `127.0.0.1`, `::1` or `0.0.0.0` |
+| `PORT` | `8080` | 1..65535; zero is forbidden by the environment parser |
+| `OPEN_SIGNUP` | `false` | Boolean |
+| `ALLOWLIST` | Empty | Comma-separated GitHub logins, no spaces, empty entries or case-insensitive duplicates |
+| `POLL_AFTER_SECONDS` | `900` | 1..86400 |
+| `SWEEP_INTERVAL_SECONDS` | `60` | 1..3600 |
+| `SWEEP_TIMEOUT_SECONDS` | `60` | 1..300; also bounds each startup validation, sweep and listener-bind phase |
+| `SHUTDOWN_GRACE_SECONDS` | `10` | 1..60 |
+| `LOCAL_EMULATOR` | `false` | Boolean; an explicit local-only mode |
+| `EMULATOR_KEY` | Unset | Required only in emulator mode, 1..1024 characters without whitespace or controls; forbidden in production |
+
+Emulator mode alone permits HTTP and only the exact root hosts `127.0.0.1` or
+`[::1]`, with an optional port. It never constructs an identity credential, even
+if unrelated Azure identity variables exist. It does not disable TLS certificate
+verification. Production uses one Strong Cosmos client and an owned HTTP agent,
+10-second SDK requests/token acquisitions, no endpoint discovery/background refresh,
+no multiple write locations and no throttling retries. Automatic regional failover
+is deferred. GitHub requests and body reads share a 10-second deadline and 64 KiB
+body cap, refuse redirects and do not silently retry OAuth exchanges.
+
+## Runtime operations
+
+Startup validates existing Cosmos metadata and sweeps expired device sessions
+before binding. Validation, recovery and binding each have the configured startup
+deadline; failure disposes acquired resources and exits nonzero. Exact
+`GET /readyz` returns `{ status: 'ok' }` when startup and the latest recovery
+succeeded, and generic 503 when recovery fails or the runtime drains. It does not
+read storage on demand or continuously prove connectivity. Other methods, bodies
+and queries are rejected. `GET /v1/health` is the unchanged strict liveness
+response and performs no storage read, even when readiness is unhealthy.
+
+One serial recovery loop waits the configured interval after each completed
+sweep. Failure or timeout marks unready, emits only a constant event and retries
+on the next interval; success restores readiness. Multiple processes may run
+CAS-safe recovery, but sweep timing and readiness are process-local. Replicas,
+scale-to-zero and stopped services can leave sweep gaps. Durable bound claims
+remain until a running worker can clean them. TTL is separate from the validity
+deadline and does not promise hard physical erasure, including backups.
+
+SIGINT/SIGTERM share idempotent shutdown. The runtime stops listening, marks
+unready, cancels and joins recovery, drains requests for the grace period, then
+aborts remaining handlers/uploads, closes owned sockets and disposes SDK resources.
+Cancellation and a generic 503 are not rollback: an already sent Cosmos write may
+commit. Durable claims, CAS and retries after restart resolve uncertain writes.
+OAuth exchange or identity-lookup failures consume the pending flow; start a fresh
+sign-in rather than retaining a token to retry verification. Runtime events and
+request diagnostics contain no credential/error payloads; the executable emits
+only constant lifecycle events.
+
+Service quotas are in-memory per process: 10 device starts per socket peer IP per
+hour and 60 requests per machine token per minute. Forwarded IP headers are not
+trusted, so a reverse proxy's socket address shares the start quota. Restart resets
+these quotas and replicas do not share them. GitHub's adapter cooldown is likewise
+process-local; upstream throttling returns bounded `Retry-After`. These mechanisms
+are not distributed abuse controls. The 100-revisions/setup/day quota is stored.
 
 ## Cosmos configuration
 
@@ -166,8 +288,9 @@ account/setup markers retain exactly the previously approved opaque deletion fen
 No permanent credential retention is intended.
 
 The Cosmos Store additionally exposes `sweepExpiredDevices(): Effect<void,
-ServiceFailure>`. The embedder must call it after restart and periodically; this
-package creates no timers or production scheduler. A sweep collects candidate IDs
+ServiceFailure>`. The executable calls it at startup and periodically through its
+owned runtime. An embedder must supply its own scheduling when using the unlistened
+core directly. A sweep collects candidate IDs
 from every page of a cross-partition identities query before cleanup mutates rows.
 It then point-reads each current session, checks the persisted deadline and CAS-writes
 `state: 'expired'` while preserving the current claim. This fences paused claim
@@ -254,8 +377,36 @@ npm run test:cosmos -w apps/service
 
 Checks use an actual loopback HTTP listener, fake upstream GitHub, an injected
 clock, isolated memory Stores and Store fault/barrier wrappers. They do not sign
-in to production, install a native service or touch a person's home. Production
-Cosmos, OAuth, deployment and live acceptance are unverified.
+in to production, install a native service or touch a person's home. Cloud Cosmos,
+real OAuth, managed identity/RBAC, deployment and LIVE acceptance are unverified.
+
+For the tested local vNext release, run a fresh task-owned container and volume.
+The pinned image digest is EN20260907; all published ports are loopback and telemetry
+and explorer are disabled. Choose unique names and unused ports for another task.
+Do not change an existing container's settings or remove another task's volume.
+
+```bash
+docker volume create ncc-hosted-runtime-20261008-data
+docker run -d --name ncc-hosted-runtime-20261008 \
+  -p 127.0.0.1:18081:8081 -p 127.0.0.1:18080:8080 \
+  -e ENABLE_TELEMETRY=false -e ENABLE_EXPLORER=false \
+  -v ncc-hosted-runtime-20261008-data:/data \
+  mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
+curl --fail http://127.0.0.1:18080/ready
+export NORTUSCC_COSMOS_EMULATOR_ENDPOINT=http://127.0.0.1:18081
+export NORTUSCC_COSMOS_EMULATOR_KEY=bG9jYWwtZW11bGF0b3Itb25seQ==
+npm run test:cosmos -w apps/service
+```
+
+Wait for the readiness endpoint before testing. The key above is a local dummy SDK
+key, not an Azure credential. This command sets `NORTUSCC_COSMOS_REQUIRED=1`, fails
+on missing configuration and must finish with zero skipped tests. The harness
+creates and deletes only unique `nortuscc-test-*` databases; it leaves the owned
+container/volume for the operator. No production resources are created. For local
+executable startup, first create a local database with the exact containers above,
+then set `NORTUSCC_SERVICE_LOCAL_EMULATOR=true`, `NORTUSCC_SERVICE_EMULATOR_KEY`
+and the three required service variables. An actual executable sign-in still uses
+GitHub; integration checks instead inject fake upstream transport.
 
 Configured Cosmos checks use the actual local vNext emulator and fresh SDK clients
 after service restart. They run the shared Store, authentication and metadata
@@ -293,3 +444,12 @@ revocation after account deletion on all three machines, local-state preservatio
 and account isolation. Hook registration still does not establish byte adoption in the merged client, so hooks remain waitingForPerson even after
 a person copies their inert fixture text. The tests establish local service/client
 interoperability; they do not establish production or native desktop acceptance.
+
+`checks/cosmos-runtime.spec.ts` runs the complete existing three-client contracts
+through `startServiceRuntime`, production Cosmos resources and the production
+GitHub adapter with recording fake transport. It checks same-port restarts with
+fresh SDK clients, owned idempotent disposal, startup claim recovery, periodic
+failure/readiness/retry and strict liveness. Existing embedded-memory/direct-core
+checks remain. These are LOCAL runtime integration results, not LIVE acceptance.
+The natural TTL test retains its 360-second observation budget without changing
+the emulator's five-minute worker.
