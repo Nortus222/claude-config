@@ -21,6 +21,46 @@ test('new-account preflight fails closed for subscription, providers, region, fr
   const cases = [ { ...snapshot(), subscription: { id: 'wrong', tenantId: tenant, state: 'Enabled' } }, { ...snapshot(), providers: [] }, { ...snapshot(), providers: snapshot().providers.map(p => ({ ...p, registrationState: 'NotRegistered' })) }, { ...snapshot(), providers: snapshot().providers.map(p => ({ ...p, resourceTypes: [] })) }, { ...snapshot(), accounts: [existing()] }, { ...snapshot(), identities: [{ name: 'nortuscc-runtime', clientId: ci }] }, { ...snapshot(), resources: [{ id: `${rg}/providers/Microsoft.Storage/storageAccounts/foreign`, type: 'Microsoft.Storage/storageAccounts', name: 'foreign' }] } ];
   for (const s of cases) assert.throws(() => evaluatePreflight(s, ids, params));
 });
+test('preflight accepts the lowercase Insights namespace returned by Azure', () => {
+  const s = snapshot();
+  s.providers.find(p => p.namespace === 'Microsoft.Insights')!.namespace = 'microsoft.insights';
+  assert.equal(evaluatePreflight(s, ids, params), undefined);
+});
+test('preflight recognizes each required provider regardless of namespace casing', () => {
+  for (const namespace of providers) {
+    for (const variant of [namespace.toUpperCase(), namespace.replace('Microsoft', 'mIcRoSoFt')]) {
+      const s = snapshot();
+      s.providers.find(p => p.namespace === namespace)!.namespace = variant;
+      assert.equal(evaluatePreflight(s, ids, params), undefined, variant);
+    }
+  }
+});
+test('preflight rejects wrong, missing and non-string provider namespaces', () => {
+  for (const namespace of ['Microsoft.Insights.Extra', 'Microsoft.Insight', ' Microsoft.Insights', 'Microsoft.Insights ', '', undefined, null, 42, {}, ['Microsoft.Insights']]) {
+    const s = snapshot();
+    const metadata = s.providers.map(p => p.namespace === 'Microsoft.Insights' ? { ...p, namespace } : p);
+    assert.throws(() => evaluatePreflight({ ...s, providers: metadata }, ids, params), { message: 'Deployment preflight failed.' });
+  }
+  const s = snapshot();
+  assert.throws(() => evaluatePreflight({ ...s, providers: s.providers.filter(p => p.namespace !== 'Microsoft.Insights') }, ids, params), { message: 'Deployment preflight failed.' });
+  assert.throws(() => evaluatePreflight({ ...s, providers: s.providers.map(p => {
+    if (p.namespace !== 'Microsoft.Insights') return p;
+    const { namespace, ...metadata } = p;
+    return metadata;
+  }) }, ids, params), { message: 'Deployment preflight failed.' });
+});
+test('namespace casing does not bypass provider registration or regional support', () => {
+  for (const registrationState of ['NotRegistered', 'Registering', 'registered', undefined]) {
+    const s = snapshot();
+    const metadata = s.providers.map(p => p.namespace === 'Microsoft.Insights' ? { ...p, namespace: 'microsoft.insights', registrationState } : p);
+    assert.throws(() => evaluatePreflight({ ...s, providers: metadata }, ids, params), { message: 'Deployment preflight failed.' });
+  }
+  for (const resourceTypes of [[], [{ resourceType: 'managedEnvironments', locations: ['West US'] }]]) {
+    const s = snapshot();
+    const metadata = s.providers.map(p => p.namespace === 'Microsoft.App' ? { ...p, namespace: 'microsoft.app', resourceTypes } : p);
+    assert.throws(() => evaluatePreflight({ ...s, providers: metadata }, ids, params), { message: 'Deployment preflight failed.' });
+  }
+});
 test('only the prior fixed deployment can own the sole free-tier account', () => {
   const s = { ...snapshot(), accounts: [existing()], deployments: [{ name: 'hosted-service', properties: { outputResources: [{ id: accountId }] } }] };
   assert.equal(evaluatePreflight(s, ids, params), accountId);

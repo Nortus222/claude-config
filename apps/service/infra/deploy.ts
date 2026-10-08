@@ -29,7 +29,7 @@ export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: 
   if (!sameId(subscription.id, ids.subscription) || !sameId(subscription.tenantId, ids.tenant) || subscription.state !== 'Enabled' || !sameId(record(snapshot.group).id, rg)) fail();
   const providers = list(snapshot.providers);
   for (const namespace of requiredProviders) {
-    const provider = providers.find(p => p.namespace === namespace);
+    const provider = providers.find(p => typeof p.namespace === 'string' && p.namespace.toLowerCase() === namespace.toLowerCase());
     if (!provider || provider.registrationState !== 'Registered') fail();
     if (regionalTypes[namespace]) {
       const type = list(provider.resourceTypes).find(t => t.resourceType === regionalTypes[namespace]);
