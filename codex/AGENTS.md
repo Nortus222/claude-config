@@ -22,6 +22,7 @@ commands, PR target, and any stricter rules.
 - Be concise. Focus explanations and progress updates on why a change matters.
 - Write concise comments that state a function's purpose or contract, not a narration of its implementation.
 - Update affected comments whenever code behavior changes.
+- Invoke the `pr` skill when drafting or updating PR summaries or GitHub pull request bodies. Preserve the repository's required PR template and attribution.
 
 ## Git and worktrees
 
