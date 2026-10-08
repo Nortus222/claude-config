@@ -6,9 +6,11 @@ import { fakeGitHub } from './fake-github.ts';
 import type { Store } from '../../src/store.ts';
 import type { ServiceOptions } from '../../src/service.ts';
 
-export async function fixture(options: { store?: Store['Service']; openSignup?: boolean; allowlistedLogins?: readonly string[]; pollAfter?: number; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] } = {}) {
+export type FixtureOptions = { store?: Store['Service']; clock?: { now: number }; openSignup?: boolean; allowlistedLogins?: readonly string[]; pollAfter?: number; diagnostic?: ServiceOptions['diagnostic']; metadata?: ServiceOptions['metadata'] };
+
+export async function fixture(options: FixtureOptions = {}) {
   if (!('makeService' in api)) throw new Error('makeService must be exported');
-  const clock = { now: Date.UTC(2026, 9, 7) };
+  const clock = options.clock ?? { now: Date.UTC(2026, 9, 7) };
   const diagnostics: unknown[] = [];
   const github = fakeGitHub();
   const store = options.store ?? api.makeMemoryStore();
