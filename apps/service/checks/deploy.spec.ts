@@ -141,3 +141,21 @@ test('every initial preflight rejection leaves both bootstrap and final mutation
     assert.ok(fixture.calls.every(args => !args.includes('create')), defect);
   }
 });
+test('prior empty deployment with runtime/log/identity/budget leftovers cannot bootstrap any storage', async () => {
+  for (const leftover of ['workspace', 'identity', 'app', 'budget']) {
+    const fixture = orderedFixture(); let workspaceReads = 0;
+    await assert.rejects(deploy(ids, params, '/tmp/public.json', async args => {
+      if (args[0] === 'deployment' && args[2] === 'list') return [{ name: 'hosted-service', properties: { outputResources: [] } }];
+      if (leftover === 'identity' && args[0] === 'identity') return [{ name: 'nortuscc-runtime', clientId: '44444444-4444-4444-8444-444444444444' }];
+      if (args[0] === 'resource') {
+        if (leftover === 'workspace') return [{ id: `${rg}/providers/Microsoft.OperationalInsights/workspaces/nortuscc-logs`, name: 'nortuscc-logs', type: 'Microsoft.OperationalInsights/workspaces' }];
+        if (leftover === 'app') return [{ id: `${rg}/providers/Microsoft.App/containerApps/nortuscc-service`, name: 'nortuscc-service', type: 'Microsoft.App/containerApps' }];
+      }
+      if (args[0] === 'rest' && args.some(value => value.includes('/workspaces/'))) { workspaceReads++; return { location: 'eastus', properties: { retentionInDays: 999 } }; }
+      if (leftover === 'budget' && args[0] === 'rest' && args.some(value => value.includes('/budgets?'))) return { value: [{ name: 'nortuscc-monthly', properties: { category: 'Cost', timeGrain: 'Monthly', amount: 10, timePeriod: { startDate: '2026-10-01' } } }] };
+      return fixture.runner(args);
+    }), leftover);
+    assert.ok(fixture.calls.every(args => !args.includes('create')), leftover);
+    assert.equal(workspaceReads, 0, 'leftover is rejected by new-account classification, without adopting it');
+  }
+});

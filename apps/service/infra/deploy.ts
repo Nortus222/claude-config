@@ -44,6 +44,8 @@ export function evaluatePreflight(snapshot: Snapshot, ids: AzureInputs, params: 
   if (ownedAccounts.length > 1) fail();
   const expected = ownedAccounts[0]?.id;
   if (expected !== undefined && (typeof expected !== 'string' || !expected.toLowerCase().startsWith(`${rg}/providers/Microsoft.DocumentDB/databaseAccounts/${params.namePrefix}-`.toLowerCase()))) fail();
+  // A failed deployment with runtime leftovers is recovery, not a new-account bootstrap.
+  if (!expected && (identities.length !== 0 || list(snapshot.budgets).length !== 0 || list(snapshot.resources).some(resource => String(resource.type).toLowerCase() !== 'microsoft.resources/deployments'))) fail();
   const accounts = list(snapshot.accounts);
   const free = accounts.filter(a => record(a.properties).enableFreeTier === true);
   const account = expected ? accounts.find(a => sameId(a.id, String(expected))) : undefined;
