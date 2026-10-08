@@ -28,6 +28,7 @@ jobs:
           docker run --detach --name nortuscc-cosmos-ci \
             --publish 127.0.0.1:8081:8081 \
             --publish 127.0.0.1:8080:8080 \
+            --publish 127.0.0.1:8090:8090 \
             --env ENABLE_TELEMETRY=false \
             --env ENABLE_EXPLORER=false \
             mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
@@ -52,6 +53,14 @@ jobs:
           NODE
       - name: Run required Cosmos contracts
         run: npm run test:cosmos -w apps/service
+      - name: Build the production image locally
+        run: docker build --platform linux/amd64 --file apps/service/Dockerfile --tag nortuscc-service:ci .
+      - name: Verify real image startup, recovery, probes and shutdown
+        env:
+          NORTUSCC_SERVICE_IMAGE: nortuscc-service:ci
+          NORTUSCC_SERVICE_IMAGE_EMULATOR_CONTAINER: nortuscc-cosmos-ci
+          NORTUSCC_SERVICE_IMAGE_ORIGIN: http://127.0.0.1:8090
+        run: npm run test:image -w apps/service
       - name: Show emulator logs on failure
         if: failure()
         run: docker logs nortuscc-cosmos-ci

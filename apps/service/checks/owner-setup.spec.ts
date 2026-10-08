@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { test } from 'node:test';
+const path = new URL('../infra/owner-setup.sh', import.meta.url);
+test('owner wizard keeps the shared library intact and only captures public configuration', () => {
+  const wizard = readFileSync(path, 'utf8');
+  const prefix = wizard.slice(0, wizard.indexOf('# STAGES:'));
+  assert.equal(createHash('sha256').update(prefix).digest('hex'), '36ddf7aa3a7da152768664bddc48451a6a738f44840eb94e1c5cb014c531c02d');
+  const stages = wizard.slice(wizard.indexOf('# STAGES:'));
+  assert.equal((stages.match(/^stage /gm) ?? []).length, 5); assert.match(stages, /TOTAL_STAGES=5/);
+  assert.doesNotMatch(stages, /ask_secret|set_secret|set_var|\baz (?:login|ad|deployment|group create)|gh (?:api|variable|secret|workflow)|^\s*(?:eval|source) /m);
+  assert.match(stages, /mktemp "\$SCRIPT_DIR\/owner-public\.XXXXXX"/);
+  for (const key of ['AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_RESOURCE_GROUP', 'LOCATION', 'GITHUB_CLIENT_ID']) assert.match(stages, new RegExp(`capture_public ${key} `));
+  assert.match(stages, /write_env "\$key" "\$value"/);
+  assert.match(stages, /hosted-image/); assert.match(stages, /hosted-production/);
+});

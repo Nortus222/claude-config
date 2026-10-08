@@ -20,6 +20,10 @@ health, account export and account deletion. The memory Store tests cover local
 recovery and paused writers. The executable and adapters are implemented. Real
 OAuth, managed identity/RBAC, cloud provisioning, deployment and LIVE multi-machine acceptance remain unverified.
 
+For manual image publication, protected deployment, owner setup and rollback, see
+the [infrastructure runbook](infra/README.md). Public production configuration is
+intentionally absent until the owner reviews it.
+
 ## Run the service
 
 Install the workspace dependencies once with `npm ci`, then run from the repository
