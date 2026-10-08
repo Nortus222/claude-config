@@ -42,7 +42,7 @@ test('executable isolates malformed SDK logging environment before any SDK initi
   try {
     await assert.rejects(promisify(execFile)(process.execPath, ['apps/service/src/main.ts'], {
       cwd: new URL('../../../', import.meta.url), timeout: 3000,
-      env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', DEBUG: '*', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://PRIVATE_ENDPOINT' },
+      env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', AZURE_COSMOSDB_DIAGNOSTICS_LEVEL: 'PRIVATE_COSMOS_VALUE', DEBUG: '*', NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://PRIVATE_ENDPOINT' },
     }), (error: unknown) => {
       const result = error as { code: number; stdout: string; stderr: string };
       assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.equal(result.stderr, 'startup_failed\n'); return true;
@@ -52,7 +52,8 @@ test('executable isolates malformed SDK logging environment before any SDK initi
 test('executable suppresses enabled SDK endpoint and upstream-body logs through an inert real Cosmos request', async () => {
   const home = await mkdtemp(join(tmpdir(), 'service-main-log-sdk-'));
   try {
-    for (const logging of [{ AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning' }, { DEBUG: '*' }, { DEBUG: 'azure:*,typeSpecRuntime:*' }]) {
+    for (const logging of [{ AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning' }, { DEBUG: '*' }, { DEBUG: 'azure:*,typeSpecRuntime:*' },
+      { AZURE_LOG_LEVEL: 'verbose', TYPESPEC_RUNTIME_LOG_LEVEL: 'verbose', AZURE_COSMOSDB_DIAGNOSTICS_LEVEL: 'debug-unsafe', DEBUG: '*' }]) {
       await assert.rejects(promisify(execFile)(process.execPath, ['--import', new URL('./support/main-inert-sdk-loader.mjs', import.meta.url).href, 'apps/service/src/main.ts'], {
         cwd: new URL('../../../', import.meta.url), timeout: 3000,
         env: { HOME: home, PATH: '/usr/bin:/bin', ...environment, NORTUSCC_SERVICE_COSMOS_ENDPOINT: 'http://127.0.0.1:9/', NORTUSCC_SERVICE_LOCAL_EMULATOR: 'true', NORTUSCC_SERVICE_EMULATOR_KEY: 'inert-key', ...logging },
@@ -75,7 +76,7 @@ test('importing main leaves caller logging, environment and signal ownership unc
       assert.deepEqual({ ...process.env }, before);
       assert.deepEqual([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')], signals);
       console.log('imported');
-    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', DEBUG: '*' } });
+    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'PRIVATE_LOG_VALUE', TYPESPEC_RUNTIME_LOG_LEVEL: 'PRIVATE_TYPESPEC_VALUE', AZURE_COSMOSDB_DIAGNOSTICS_LEVEL: 'PRIVATE_COSMOS_VALUE', DEBUG: '*' } });
     assert.equal(imported.stdout, 'imported\n'); assert.equal(imported.stderr, '');
     const caller = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
       import assert from 'node:assert/strict';
@@ -87,7 +88,7 @@ test('importing main leaves caller logging, environment and signal ownership unc
       assert.equal(getLogLevel(), 'warning'); assert.equal(typeSpecLevel(), 'warning');
       createClientLogger('embedding').warning('caller-owned Azure log');
       typeSpecLogger('embedding').warning('caller-owned TypeSpec log');
-    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning' } });
+    `], { cwd: new URL('../../../', import.meta.url), timeout: 3000, env: { HOME: home, PATH: '/usr/bin:/bin', AZURE_LOG_LEVEL: 'warning', TYPESPEC_RUNTIME_LOG_LEVEL: 'warning', AZURE_COSMOSDB_DIAGNOSTICS_LEVEL: 'debug-unsafe' } });
     assert.equal(caller.stdout, '');
     assert.match(caller.stderr, /azure:embedding:warning caller-owned Azure log/);
     assert.match(caller.stderr, /typeSpecRuntime:embedding:warning caller-owned TypeSpec log/);

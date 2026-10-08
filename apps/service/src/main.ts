@@ -67,6 +67,7 @@ if (isExecutable()) {
     // SDK loggers must initialize disabled for the entire executable lifetime.
     process.env.AZURE_LOG_LEVEL = '';
     process.env.TYPESPEC_RUNTIME_LOG_LEVEL = '';
+    process.env.AZURE_COSMOSDB_DIAGNOSTICS_LEVEL = '';
     process.env.DEBUG = '';
     const [{ CosmosClient }, { ManagedIdentityCredential }, { createDefaultHttpClient }, { makeProductionResources }] = await Promise.all([
       import('@azure/cosmos'), import('@azure/identity'), import('@azure/core-rest-pipeline'), import('./production.ts'),
