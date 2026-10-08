@@ -235,15 +235,40 @@ test('ordinary packaged smoke timeout discovers and stops both genuine agent and
 import { writeFileSync } from 'node:fs';
 import { runDesktopEntry } from ${JSON.stringify(join(resolve(process.env.DESKTOP_AGENT_RESOURCES!), 'agent.mjs'))};
 writeFileSync(${JSON.stringify(agentRecord)}, JSON.stringify({ pid: process.pid, home: process.env.HOME }));
+// Startup may outlast the former six-second timeout before the native child exists.
+await new Promise((done) => setTimeout(done, 7000));
 process.exitCode = await runDesktopEntry({ args: [], env: process.env, resources: ${JSON.stringify(resources)} });
 `);
-  writeFileSync(native, `#!/bin/sh\nprintf '{"pid":%s,"home":"%s"}' "$$" "$HOME" > '${nativeRecord}'\nexec /bin/sleep 30\n`);
+  const nativeReady = join(f.root, 'native-ready');
+  writeFileSync(native, `#!/bin/sh\nprintf '{"pid":%s,"home":"%s"}' "$$" "$HOME" > '${nativeRecord}'\nprintf 'ready' > '${nativeReady}'\nexec /bin/sleep 30\n`);
   chmodSync(native, 0o755);
-  await assert.rejects(promisify(execFile)(process.execPath, ['scripts/smoke.mjs', f.app], {
-    cwd: new URL('..', import.meta.url), env: f.env, timeout: 6000,
-  }), (error: unknown) => (error as { killed?: boolean }).killed === true);
-  const agent = JSON.parse(readFileSync(agentRecord, 'utf8')) as RecordedChild;
-  const nativeChild = JSON.parse(readFileSync(nativeRecord, 'utf8')) as RecordedChild;
+  const smoke = promisify(execFile)(process.execPath, ['scripts/smoke.mjs', f.app], {
+    cwd: new URL('..', import.meta.url), env: f.env, timeout: 15_000,
+  });
+  const timedOut = assert.rejects(smoke, (error: unknown) => (error as { killed?: boolean }).killed === true);
+  const ready = (async () => {
+    while (true) {
+      if (existsSync(nativeReady) && existsSync(f.record)) {
+        const agent = JSON.parse(readFileSync(agentRecord, 'utf8')) as RecordedChild;
+        const nativeChild = JSON.parse(readFileSync(nativeRecord, 'utf8')) as RecordedChild;
+        const owned = JSON.stringify({ home: agent.home, pids: [agent.pid, nativeChild.pid] });
+        if (readFileSync(f.record, 'utf8') === owned) return { agent, nativeChild };
+      }
+      assert.equal(smoke.child.exitCode, null, 'smoke exited before the native fixture was ready');
+      assert.equal(smoke.child.signalCode, null, 'smoke stopped before the native fixture was ready');
+      await new Promise((done) => setTimeout(done, 10));
+    }
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let children: Awaited<typeof ready>;
+  try {
+    // Interrupt the parent only after both children exist; fixture teardown owns their exit.
+    [children] = await Promise.all([ready.then((children) => {
+      timer = setTimeout(() => smoke.child.kill('SIGTERM'), 50);
+      return children;
+    }), timedOut]);
+  } finally { clearTimeout(timer); }
+  const { agent, nativeChild } = children;
   assert.doesNotThrow(() => process.kill(agent.pid, 0));
   assert.doesNotThrow(() => process.kill(nativeChild.pid, 0));
   assert.deepEqual(JSON.parse(readFileSync(f.record, 'utf8')), { home: agent.home, pids: [agent.pid, nativeChild.pid] });

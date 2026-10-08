@@ -119,9 +119,28 @@ function cleanupSession(store: Store['Service'], session: DeviceSessionDocument,
         if (attempt === 31) return yield* Effect.fail(failure('unavailable'));
       }
     }
-    const snapshot = yield* store.readPartition('identities', session.id);
-    if (snapshot.version !== null && !(yield* store.commitPartition('identities', session.id, snapshot.version, [{ type: 'delete', id: session.id }]))) return yield* Effect.fail(failure('unavailable'));
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const snapshot = yield* store.readPartition('identities', session.id);
+      if (snapshot.version === null || (yield* store.commitPartition('identities', session.id, snapshot.version, [{ type: 'delete', id: session.id }]))) break;
+      if (attempt === 31) return yield* Effect.fail(failure('unavailable'));
+    }
     if (session.claim) yield* removeSessionReservation(store,session.claim.accountId,session.id);
+  });
+}
+
+// Fence stale claim/reset writes before recovering from the current persisted claim.
+export function recoverExpiredDeviceSession(store: Store['Service'], key: string, now: number): Effect.Effect<void, ServiceFailure> {
+  return Effect.gen(function* () {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const snapshot = yield* store.readPartition('identities', key);
+      const session = snapshot.documents.find((d): d is DeviceSessionDocument => d.type === 'deviceSession');
+      if (!session || session.expiresAt > now) return;
+      const expired: DeviceSessionDocument = { ...session, state: 'expired' };
+      if (session.state !== 'expired' && !(yield* store.commitPartition('identities', key, snapshot.version, [{ type: 'upsert', document: expired }]))) continue;
+      yield* cleanupSession(store, expired, true);
+      return;
+    }
+    return yield* Effect.fail(failure('unavailable'));
   });
 }
 export function deviceStart(store: Store['Service'], github: GitHub['Service'], body: unknown, now: () => number): Effect.Effect<ServiceResponse, ServiceFailure> {
@@ -146,7 +165,7 @@ export function devicePoll(store: Store['Service'], github: GitHub['Service'], b
     const snapshot = yield* store.readPartition('identities', key);
     const session = snapshot.documents.find((d): d is DeviceSessionDocument => d.type === 'deviceSession');
     if (!session) return yield* Effect.fail(failure('sign_in_expired'));
-    if (session.expiresAt <= now()) { yield* cleanupSession(store, session, true); return yield* Effect.fail(failure('sign_in_expired')); }
+    if (session.expiresAt <= now()) { yield* recoverExpiredDeviceSession(store, key, now()); return yield* Effect.fail(failure('sign_in_expired')); }
     if (session.state !== 'pending') return yield* Effect.fail(failure('sign_in_expired'));
     if (session.nextPollAt > now()) return { status: 202, body: { interval: session.interval } };
     const claimed: DeviceSessionDocument = { ...session, state: 'claimed', claim: null };
@@ -181,7 +200,7 @@ export function devicePoll(store: Store['Service'], github: GitHub['Service'], b
       yield* registerMachine(store, { type: 'machine', version: 1, id: `machine:${machineId}`, accountId: account.accountId, machineId,
         ...session.description, policy: account.defaultPolicy, reportStatus: true, createdAt: timestamp, lastSeenAt: timestamp, tokenHash: owned.claim!.tokenHash });
       const complete = yield* store.readPartition('identities', key);
-      if (now() >= session.expiresAt || !complete.documents.some((d) => d.type === 'deviceSession' && d.claim?.claimId === owned.claim?.claimId)) return yield* Effect.fail(failure('sign_in_expired'));
+      if (now() >= session.expiresAt || !complete.documents.some((d) => d.type === 'deviceSession' && d.state === 'claimed' && d.claim?.claimId === owned.claim?.claimId)) return yield* Effect.fail(failure('sign_in_expired'));
       if (!(yield* store.commitPartition('identities', key, complete.version, [{ type: 'delete', id: key }]))) return yield* Effect.fail(failure('unavailable'));
       yield* removeSessionReservation(store,account.accountId,key);
       return { status: 200, body: response };

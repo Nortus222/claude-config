@@ -7,9 +7,14 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "test": "node --test \"checks/*.spec.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:cosmos": "NORTUSCC_COSMOS_REQUIRED=1 node --test \"checks/cosmos-*.spec.ts\""
   },
-  "dependencies": { "effect": "4.0.1", "@nortuscc/hosted-protocol": "*" },
+  "dependencies": {
+    "@azure/cosmos": "4.10.1",
+    "@nortuscc/hosted-protocol": "*",
+    "effect": "4.0.1"
+  },
   "devDependencies": {
     "@nortuscc/agent": "*",
     "@nortuscc/hosted-client": "*",
