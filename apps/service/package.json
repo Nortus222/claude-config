@@ -1,0 +1,15 @@
+{
+  "name": "@nortuscc/service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Embeddable hosted metadata service core",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --test \"checks/*.spec.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "effect": "4.0.1", "@nortuscc/hosted-protocol": "*" },
+  "devDependencies": { "@types/node": "25.5.0", "typescript": "7.0.2" },
+  "engines": { "node": ">=24" }
+}
