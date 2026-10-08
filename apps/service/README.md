@@ -185,6 +185,9 @@ embedder stops sweeping, bound credentials remain for recovery. TTL can erase an
 unbound session during a paused flow before its claim attaches, which rejects that
 old CAS. A pre-claim account reservation can then remain harmless until account
 deletion, as the existing reservation contract allows.
+An interruption after physical session deletion but before reservation removal can
+also leave a harmless active-account reservation; no claim or credential remains,
+and account deletion erases it.
 
 Cosmos deletes TTL items asynchronously using available request units. Microsoft
 documents immediate query invisibility after TTL expiry, while actual deletion may
