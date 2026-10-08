@@ -26,7 +26,9 @@ test('publication cap resets at UTC day and rejects full-record overhead before 
     while (jsonByteLength(body) > MAX_REVISION_BYTES - 50) body.requiredEnv[body.requiredEnv.length-1] = body.requiredEnv.at(-1)!.slice(0,-1);
     assert.ok(jsonByteLength(body) <= MAX_REVISION_BYTES);
     assert.equal((await f.call('POST',`/v1/setups/${s.setupId}/revisions`,body,owner.token)).status,413);
-    for (const invalid of [{ ...publication(1),changelog:'x'.repeat(16385) },{ ...publication(1),items:Array.from({ length:501 },(_,i) => ({ id:`file:claude:file${i}`,kind:'file',change:'added' })) },{ ...publication(1),items:[{ ...publication(1).items[0],digest:'PRIVATE' }] }]) assert.equal((await f.call('POST',`/v1/setups/${s.setupId}/revisions`,invalid,owner.token)).status,400);
+    assert.equal((await f.call('POST',`/v1/setups/${s.setupId}/revisions`,{ ...publication(1),changelog:'x'.repeat(16385) },owner.token)).status,413);
+    assert.equal((await f.call('POST',`/v1/setups/${s.setupId}/revisions`,{ ...publication(1),items:Array.from({ length:501 },(_,i) => ({ id:`file:claude:file${i}`,kind:'file',change:'added' })) },owner.token)).status,409);
+    assert.equal((await f.call('POST',`/v1/setups/${s.setupId}/revisions`,{ ...publication(1),items:[{ ...publication(1).items[0],digest:'PRIVATE' }] },owner.token)).status,400);
     for (let n = 1; n <= 100; n++) await publish(f,owner.token,s.setupId,n);
     const cap = await f.call('POST',`/v1/setups/${s.setupId}/revisions`,publication(101),owner.token); assert.equal(cap.status,429); assert.ok(Number(cap.headers.get('retry-after')) > 0);
     f.clock.now = Date.UTC(2026,9,8); await publish(f,owner.token,s.setupId,101);
@@ -62,4 +64,19 @@ test('a paused publication against an existing partition never recreates a swept
     const snapshot = await Effect.runPromise(memory.readPartition('setups',s.setupId)); assert.equal(await Effect.runPromise(memory.commitPartition('setups',s.setupId,snapshot.version,snapshot.documents.map((d) => ({ type:'delete' as const,id:d.id })))),true);
     release(); assert.equal((await publishing).status,404); assert.equal((await Effect.runPromise(memory.readPartition('setups',s.setupId))).version,null);
   } finally { release(); await f.close(); }
+});
+test('publication distinguishes valid count/byte overflow from malformed nested metadata', async () => {
+  const f = await fixture(); try { const owner = (await f.login()).body; const s = await setup(f,owner.token);
+    const post = (body: unknown) => f.call('POST',`/v1/setups/${s.setupId}/revisions`,body,owner.token);
+    const large = { ...publication(1),requiredEnv:Array.from({ length:400 },(_,i) => `ENV_${i}_${'X'.repeat(180)}`) }; assert.ok(jsonByteLength(large) > MAX_REVISION_BYTES); assert.ok(jsonByteLength(large) < 128 * 1024);
+    const bytes = await post(large); assert.equal(bytes.status,413); assert.deepEqual(await bytes.json(),{ error:'payload_too_large',message:'Request failed.' });
+    const items = Array.from({ length:501 },(_,i) => ({ id:`file:claude:file${i}`,kind:'file',change:'added' }));
+    const count = await post({ ...publication(1),items }); assert.equal(count.status,409); assert.deepEqual(await count.json(),{ error:'limit_reached',message:'Request failed.' });
+    for (const malformed of [{ ...large,private:'PRIVATE' },{ ...large,items:[{ ...publication(1).items[0],digest:'PRIVATE' }] },{ ...publication(1),items:[...items.slice(0,500),items[0]] },{ ...publication(1),items:items.map((item,i) => i === 500 ? { ...item,path:'PRIVATE' } : item) }]) {
+      const response = await post(malformed); assert.equal(response.status,400); assert.deepEqual(await response.json(),{ error:'invalid',message:'Request failed.' });
+    }
+    const combined = await post({ ...large,items }); assert.equal(combined.status,409);
+    assert.doesNotMatch(JSON.stringify(f.diagnostics),/PRIVATE|digest/);
+    assert.equal((await (await f.call('GET',`/v1/setups/${s.setupId}/revisions`,undefined,owner.token)).json()).revisions.length,0);
+  } finally { await f.close(); }
 });

@@ -98,3 +98,38 @@ test('expired absent-machine recovery at the cap preserves a valid 25-machine pu
     assert.ok(result.machines.every((machine) => machine.name !== 'Interrupted'));
   } finally { await f.close(); }
 });
+test('receipt order resolves overlapping machine fields without dropping an older untouched field', async () => {
+  const memory = makeMemoryStore(); let pause = false; let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => release = resolve); const started = new Promise<void>((resolve) => entered = resolve);
+  const f = await fixture({ store:{ ...memory,commitPartition:(c,k,v,m) => pause && m.some((x) => x.type === 'upsert' && x.document.type === 'machine') ? Effect.gen(function* () { pause = false; entered(); yield* Effect.promise(() => gate); return yield* memory.commitPartition(c,k,v,m); }) : memory.commitPartition(c,k,v,m) } });
+  try { const owner = (await f.login()).body;
+    const summary = { reportedAt:new Date(f.clock.now).toISOString(),policy:'notify',agents:[],setups:[],drift:{ setting:0,skill:0,integration:0,file:0 } }; assert.equal((await f.call('PUT','/v1/machines/self/status',summary,owner.token)).status,204);
+    pause = true; const earlier = f.call('PATCH',`/v1/machines/${owner.machineId}`,{ name:'Earlier name',policy:'auto-apply',reportStatus:false },owner.token); await started;
+    const later = await f.call('PATCH',`/v1/machines/${owner.machineId}`,{ policy:'manual',reportStatus:true },owner.token); assert.equal(later.status,200); release(); assert.equal((await earlier).status,200);
+    const machines = decodeHosted(MachinesResponseSchema,await (await f.call('GET','/v1/machines',undefined,owner.token)).json()); assert.equal(machines.machines[0].name,'Earlier name'); assert.equal(machines.machines[0].policy,'manual'); assert.equal(machines.machines[0].reportStatus,true); assert.deepEqual(machines.machines[0].status,summary);
+    const before = await (await f.call('GET','/v1/sync',undefined,owner.token)).json();
+    const exported = await (await f.call('GET','/v1/account/export',undefined,owner.token)).json(); assert.doesNotMatch(JSON.stringify(exported),/lastReceipt|fieldReceipts|receipt|ticket|position/);
+    assert.equal(exported.account.seq,before.seq);
+  } finally { release(); await f.close(); }
+});
+test('an older fully superseded machine patch cannot change settings or advance seq', async () => {
+  const memory = makeMemoryStore(); let pause = false; let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => release = resolve); const started = new Promise<void>((resolve) => entered = resolve);
+  const f = await fixture({ store:{ ...memory,commitPartition:(c,k,v,m) => pause && m.some((x) => x.type === 'upsert' && x.document.type === 'machine') ? Effect.gen(function* () { pause = false; entered(); yield* Effect.promise(() => gate); return yield* memory.commitPartition(c,k,v,m); }) : memory.commitPartition(c,k,v,m) } });
+  try { const owner = (await f.login()).body; pause = true;
+    const earlier = f.call('PATCH',`/v1/machines/${owner.machineId}`,{ policy:'auto-apply' },owner.token); await started;
+    assert.equal((await f.call('PATCH',`/v1/machines/${owner.machineId}`,{ policy:'manual' },owner.token)).status,200);
+    const before = await (await f.call('GET','/v1/sync',undefined,owner.token)).json(); release(); assert.equal((await (await earlier).json()).policy,'manual');
+    const after = await (await f.call('GET','/v1/sync',undefined,owner.token)).json(); assert.equal(after.seq,before.seq); assert.equal(after.machine.policy,'manual');
+  } finally { release(); await f.close(); }
+});
+test('a newer same-value machine patch fences an earlier conflicting patch without advancing seq', async () => {
+  const memory = makeMemoryStore(); let pause = false; let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => release = resolve); const started = new Promise<void>((resolve) => entered = resolve);
+  const f = await fixture({ store:{ ...memory,commitPartition:(c,k,v,m) => pause && m.some((x) => x.type === 'upsert' && x.document.type === 'machine') ? Effect.gen(function* () { pause = false; entered(); yield* Effect.promise(() => gate); return yield* memory.commitPartition(c,k,v,m); }) : memory.commitPartition(c,k,v,m) } });
+  try { const owner = (await f.login()).body; const before = await f.call('GET','/v1/sync',undefined,owner.token); const beforeBody = await before.json(); pause = true;
+    const earlier = f.call('PATCH',`/v1/machines/${owner.machineId}`,{ policy:'auto-apply' },owner.token); await started;
+    assert.equal((await f.call('PATCH',`/v1/machines/${owner.machineId}`,{ policy:'notify' },owner.token)).status,200); release(); assert.equal((await (await earlier).json()).policy,'notify');
+    const after = await f.call('GET','/v1/sync',undefined,owner.token); assert.equal(after.headers.get('etag'),before.headers.get('etag')); assert.deepEqual(await after.json(),beforeBody);
+  } finally { release(); await f.close(); }
+});

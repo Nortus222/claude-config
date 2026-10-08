@@ -45,11 +45,20 @@ reads if retry reports a revision conflict. No rollback is attempted. Checkpoint
 repair advances seq only for an unseen revision range and never regresses a newer
 checkpoint. Existing-partition publication never initializes an absent setup.
 
-Decision writes prevalidate all references before any mutation. A chunk contains
+Structurally valid decision and machine-patch requests reserve a private account
+receipt ticket in account CAS before asynchronous processing. That durable
+authenticated receipt defines service arrival order across replicas, without a
+global socket-arrival clock. Reservation does not advance public seq. Decision
+writes prevalidate all references before changing decision records. A chunk contains
 at most 99 request positions and 98 distinct decision targets plus the account
 update. Duplicate positions are processed in order and coalesced only at the
-storage boundary. Equal revisions replace; older revisions are stale. A transient
-chunk failure returns a 200 response with the processed prefix and an unprocessed
+storage boundary. Revision precedence comes first; equal revisions use receipt
+ticket and original request position, so a delayed earlier request cannot overwrite
+a later reversal after a CAS retry. Each new HTTP retry gets a new receipt. Older
+revisions and superseded equal-revision receipts are stale. Machine patches keep
+receipt order per field, allowing an older partial patch to change a field untouched
+by a later patch. Only changed public settings advance seq. Counter exhaustion
+fails closed with generic 503. A transient chunk failure returns a 200 response with the processed prefix and an unprocessed
 suffix. Consumers must correlate every result with its original position using
 `decodeDecisionsResponse` before removing queued entries.
 
@@ -70,8 +79,12 @@ wire projection fails generically instead of advancing a client checkpoint past
 omitted decisions.
 
 All incoming metadata is recursively strict. Original HTTP bodies are bounded to
-128 KiB before parsing. Full revision records, including server-added metadata,
-are bounded to 64 KiB. Other-account resources return 404. Status accepts only
+128 KiB before parsing. Under that request bound, malformed or unknown fields
+return 400 before semantic limit classification. Structurally valid counts over
+500 items or decisions return 409 limit_reached. Valid changelogs over 16 KiB or
+full revision records over 64 KiB, including server-added metadata, return 413
+payload_too_large. Count overflow takes precedence when a valid publication exceeds
+both a count and a byte bound. Other-account resources return 404. Status accepts only
 known setup-history item IDs, including removed items, and published revision
 cursors. Reporting optout deletes the stored summary and later uploads return
 409; decision sync continues.
@@ -84,8 +97,8 @@ uses the strict `AccountExportSchema` projection:
 - `setups`, `revisions` and `decisions` contain every public record for the account.
 
 Export has no revision-page cap. It excludes token hashes, OAuth tokens, device
-codes, claims, issuance fences, reservations and concurrency markers. Explicit
-projection keeps storage discriminants and private fields out of every wire
+codes, claims, issuance fences, reservations, receipt counters/order and concurrency
+markers. Explicit projection keeps storage discriminants and private fields out of every wire
 response. Diagnostics contain only request ID, sanitized route template, status,
 duration and an optional account hash. Failures and diagnostic callback errors
 never expose request values or causes.

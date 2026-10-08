@@ -1,5 +1,5 @@
-import { Effect } from 'effect';
-import { decodeHosted, decodeRequestBody, jsonByteLength, MAX_REVISION_BYTES, MAX_REVISIONS, RevisionPublicationSchema, RevisionRecordSchema, type RevisionRecord } from '@nortuscc/hosted-protocol';
+import { Effect, Schema } from 'effect';
+import { decodeHosted, jsonByteLength, utf8ByteLength, MAX_CHANGELOG_BYTES, MAX_ITEMS, MAX_REQUEST_BODY_BYTES, MAX_REVISION_BYTES, MAX_REVISIONS, RevisionItemSchema, RevisionPublicationSchema, RevisionRecordSchema, type RevisionRecord } from '@nortuscc/hosted-protocol';
 import type { AuthenticatedPrincipal } from './auth.ts';
 import type { RevisionDocument } from './documents.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
@@ -8,6 +8,18 @@ import { activeAccount } from './machines.ts';
 import { ownedSetup, reconcileSetup } from './setups.ts';
 import { ServiceFailure } from './errors.ts';
 
+// Relax only count/byte bounds for classification; all nested structure remains strict.
+const PublicationStructureSchema = Schema.Struct({ ...RevisionPublicationSchema.fields,
+  changelog:Schema.String,
+  items:Schema.Array(RevisionItemSchema).check(Schema.makeFilter((items) => new Set(items.map((item) => item.id)).size === items.length)),
+});
+function decodePublication(body: unknown) {
+  if (jsonByteLength(body) > MAX_REQUEST_BODY_BYTES) throw new ServiceFailure({ code:'payload_too_large' });
+  const publication = decodeHosted(PublicationStructureSchema,body);
+  if (publication.items.length > MAX_ITEMS) throw new ServiceFailure({ code:'limit_reached' });
+  if (utf8ByteLength(publication.changelog) > MAX_CHANGELOG_BYTES || jsonByteLength(publication) > MAX_REVISION_BYTES) throw new ServiceFailure({ code:'payload_too_large' });
+  return decodeHosted(RevisionPublicationSchema,publication);
+}
 export function projectRevision(revision: RevisionDocument): RevisionRecord {
   return { setupId:revision.setupId,number:revision.number,commitSha:revision.commitSha,tag:revision.tag,changelog:revision.changelog,items:revision.items,requiredEnv:revision.requiredEnv,publishedAt:revision.publishedAt,machineId:revision.machineId };
 }
@@ -37,7 +49,7 @@ export function revisionRoute(request: ServiceRequest, principal: AuthenticatedP
       const page = all.slice(0,MAX_REVISIONS);
       return { status:200,body:{ revisions:page.map(projectRevision),nextAfter:all.length > page.length ? page.at(-1)!.number : null } };
     }
-    const publication = yield* Effect.try({ try:() => decodeRequestBody(RevisionPublicationSchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
+    const publication = yield* Effect.try({ try:() => decodePublication(request.body),catch:(error) => error instanceof ServiceFailure ? error : new ServiceFailure({ code:'invalid' }) });
     const record: RevisionRecord = { ...publication,setupId,publishedAt:new Date(now()).toISOString(),machineId:principal.machineId };
     if (jsonByteLength(record) > MAX_REVISION_BYTES) return yield* Effect.fail(new ServiceFailure({ code:'payload_too_large' }));
     yield* Effect.try({ try:() => decodeHosted(RevisionRecordSchema,record),catch:() => new ServiceFailure({ code:'invalid' }) });

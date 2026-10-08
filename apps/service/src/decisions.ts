@@ -1,19 +1,28 @@
-import { Effect } from 'effect';
-import { decodeRequestBody, DecisionsRequestSchema, type Decision, type DecisionResult } from '@nortuscc/hosted-protocol';
+import { Effect, Schema } from 'effect';
+import { decodeHosted, DecisionSchema, DecisionsRequestSchema, jsonByteLength, MAX_DECISIONS, MAX_REQUEST_BODY_BYTES, type Decision, type DecisionResult } from '@nortuscc/hosted-protocol';
 import type { AuthenticatedPrincipal } from './auth.ts';
 import type { DecisionDocument } from './documents.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
 import type { Store, Mutation } from './store.ts';
 import { ServiceFailure } from './errors.ts';
 import { ownedSetup } from './setups.ts';
-import { changeAccount } from './machines.ts';
+import { changeAccount, reserveReceipt } from './machines.ts';
 
+// Decode structure first so private or malformed fields cannot masquerade as count overflow.
+const DecisionStructureSchema = Schema.Struct({ decisions:Schema.Array(DecisionSchema).check(Schema.isMinLength(1)) });
+function decodeDecisionRequest(body: unknown) {
+  if (jsonByteLength(body) > MAX_REQUEST_BODY_BYTES) throw new ServiceFailure({ code:'payload_too_large' });
+  const request = decodeHosted(DecisionStructureSchema,body);
+  if (request.decisions.length > MAX_DECISIONS) throw new ServiceFailure({ code:'limit_reached' });
+  return decodeHosted(DecisionsRequestSchema,request);
+}
 const keyOf = (d: Decision) => `decision:${d.setupId}:${d.itemId}`;
 // Position order is preserved even when duplicate targets coalesce into one upsert.
 export function decisionRoute(request: ServiceRequest, principal: AuthenticatedPrincipal, store: Store['Service'], now: () => number): Effect.Effect<ServiceResponse | undefined,ServiceFailure> {
   return Effect.gen(function* () {
     if (request.method !== 'PUT' || request.path !== '/v1/decisions') return undefined;
-    const sent = yield* Effect.try({ try:() => decodeRequestBody(DecisionsRequestSchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
+    const sent = yield* Effect.try({ try:() => decodeDecisionRequest(request.body),catch:(error) => error instanceof ServiceFailure ? error : new ServiceFailure({ code:'invalid' }) });
+    const ticket = yield* reserveReceipt(store,principal.accountId);
     for (const setupId of new Set(sent.decisions.map((d) => d.setupId))) {
       const { snapshot } = yield* ownedSetup(store,principal.accountId,setupId);
       for (const decision of sent.decisions.filter((d) => d.setupId === setupId)) {
@@ -31,10 +40,16 @@ export function decisionRoute(request: ServiceRequest, principal: AuthenticatedP
       const outcome = yield* changeAccount(store,principal.accountId,(snapshot,account) => {
         const existing = new Map(snapshot.documents.filter((d): d is DecisionDocument => d.type === 'decision').map((d) => [d.id,d]));
         const writes = new Map<string,DecisionDocument>(); const positions: DecisionResult[] = []; let nextSeq = account.seq;
-        for (const entry of chunk) {
+        for (const [offset,entry] of chunk.entries()) {
+          const position = results.length + offset;
           const key = keyOf(entry); const previous = existing.get(key);
-          if (previous && previous.revision > entry.revision) { positions.push({ setupId:entry.setupId,itemId:entry.itemId,outcome:'stale' }); continue; }
-          const document: DecisionDocument = { ...entry,type:'decision',version:1,id:key,accountId:principal.accountId,seq:++nextSeq,decidedAt:new Date(now()).toISOString(),machineId:principal.machineId };
+          const previousOrder = previous?.receipt ?? { ticket:0,position:0 };
+          const laterReceipt = previousOrder.ticket > ticket || (previousOrder.ticket === ticket && previousOrder.position > position);
+          if (previous && (previous.revision > entry.revision || (previous.revision === entry.revision && laterReceipt))) {
+            positions.push({ setupId:entry.setupId,itemId:entry.itemId,outcome:'stale' });
+            continue;
+          }
+          const document: DecisionDocument = { ...entry,type:'decision',version:1,id:key,accountId:principal.accountId,receipt:{ ticket,position },seq:++nextSeq,decidedAt:new Date(now()).toISOString(),machineId:principal.machineId };
           existing.set(key,document); writes.set(key,document); positions.push({ setupId:entry.setupId,itemId:entry.itemId,outcome:'stored' });
         }
         const mutations: Mutation[] = [...writes.values()].map((document) => ({ type:'upsert',document }));

@@ -28,6 +28,8 @@ export interface AccountDocument extends Document {
   readonly accountId: string;
   readonly githubId: number;
   readonly login: string;
+  // Private ordering counter; reserving a receipt does not advance public seq.
+  readonly lastReceipt?: number;
   readonly seq: number;
   readonly defaultPolicy: 'notify';
   readonly createdAt: string;
@@ -41,6 +43,7 @@ export interface MachineDocument extends Document, Omit<MachineRecord, 'status'>
   readonly type: 'machine';
   readonly accountId: string;
   readonly tokenHash: string | null;
+  readonly fieldReceipts?: { readonly name?: number; readonly policy?: number; readonly reportStatus?: number };
 }
 
 // Internal fence prevents a delayed issuance from recreating a cleaned machine.
@@ -50,8 +53,11 @@ export interface IssuanceFenceDocument extends Document {
   readonly machineId: string;
 }
 
+export interface ReceiptOrder { readonly ticket: number; readonly position: number }
+
 export interface DecisionDocument extends Document, SyncedDecision {
   readonly type: 'decision';
+  readonly receipt?: ReceiptOrder;
   readonly accountId: string;
   readonly seq: number;
 }

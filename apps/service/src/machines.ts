@@ -25,6 +25,15 @@ export function changeAccount<A>(store: Store['Service'], accountId: string,
     return yield* Effect.fail(new ServiceFailure({ code: 'unavailable' }));
   });
 }
+// Durable authenticated receipt allocation defines service arrival order across replicas.
+export function reserveReceipt(store: Store['Service'], accountId: string) {
+  return changeAccount(store,accountId,(_snapshot,account) => {
+    const previous = account.lastReceipt ?? 0;
+    if (!Number.isSafeInteger(previous) || previous < 0 || previous >= Number.MAX_SAFE_INTEGER) throw new ServiceFailure({ code:'unavailable' });
+    const ticket = previous + 1;
+    return { mutations:[{ type:'upsert',document:{ ...account,lastReceipt:ticket } }],value:ticket };
+  });
+}
 export function projectMachine(machine: MachineDocument, documents: readonly ServiceDocument[]): MachineRecord {
   const status = documents.find((d) => d.type === 'status' && d.machineId === machine.machineId);
   return { machineId: machine.machineId, name: machine.name, os: machine.os, agents: machine.agents, policy: machine.policy,
@@ -50,17 +59,28 @@ export function machineRoute(request: ServiceRequest, principal: AuthenticatedPr
     const signout = method === 'POST' && path === '/v1/auth/sign-out';
     if (!signout && (!match || !['PATCH', 'DELETE'].includes(method))) return undefined;
     const patch = method === 'PATCH' ? yield* Effect.try({ try: () => decodeRequestBody(MachinePatchSchema, request.body), catch: () => new ServiceFailure({ code: 'invalid' }) }) : undefined;
+    const receipt = patch ? yield* reserveReceipt(store,principal.accountId) : 0;
     return yield* changeAccount<ServiceResponse>(store, principal.accountId, (snapshot, account) => {
       const machineId = signout ? principal.machineId : match![1];
       const machine = snapshot.documents.find((d) => d.type === 'machine' && d.machineId === machineId);
       if (!machine || machine.type !== 'machine') throw new ServiceFailure({ code: 'not_found' });
-      const mutations: Mutation[] = [{ type: 'upsert', document: { ...account, seq: account.seq + 1 } }];
       if (patch) {
-        const changed = { ...machine, ...patch };
-        mutations.push({ type: 'upsert', document: changed });
-        if (patch.reportStatus === false) mutations.push({ type: 'delete', id: `status:${machineId}` });
-        return { mutations, value: { status: 200, body: projectMachine(changed, snapshot.documents) } };
+        const nameWins = patch.name !== undefined && receipt > (machine.fieldReceipts?.name ?? 0);
+        const policyWins = patch.policy !== undefined && receipt > (machine.fieldReceipts?.policy ?? 0);
+        const statusWins = patch.reportStatus !== undefined && receipt > (machine.fieldReceipts?.reportStatus ?? 0);
+        if (!nameWins && !policyWins && !statusWins) return { mutations:[],value:{ status:200,body:projectMachine(machine,snapshot.documents) } };
+        const changed: MachineDocument = { ...machine,
+          ...(nameWins ? { name:patch.name! } : {}),
+          ...(policyWins ? { policy:patch.policy! } : {}),
+          ...(statusWins ? { reportStatus:patch.reportStatus! } : {}),
+          fieldReceipts:{ ...machine.fieldReceipts,...(nameWins ? { name:receipt } : {}),...(policyWins ? { policy:receipt } : {}),...(statusWins ? { reportStatus:receipt } : {}) },
+        };
+        const mutations: Mutation[] = [{ type:'upsert',document:changed }];
+        if (changed.name !== machine.name || changed.policy !== machine.policy || changed.reportStatus !== machine.reportStatus) mutations.push({ type:'upsert',document:{ ...account,seq:account.seq + 1 } });
+        if (statusWins && patch.reportStatus === false) mutations.push({ type:'delete',id:`status:${machineId}` });
+        return { mutations,value:{ status:200,body:projectMachine(changed,snapshot.documents) } };
       }
+      const mutations: Mutation[] = [{ type:'upsert',document:{ ...account,seq:account.seq + 1 } }];
       mutations.push(signout ? { type: 'upsert', document: { ...machine, tokenHash: null } } : { type: 'delete', id: machine.id }, { type: 'delete', id: `status:${machineId}` });
       return { mutations, value: { status: 204 } };
     });
