@@ -154,3 +154,19 @@ test('malformed client IDs and timeout bounds fail before transport construction
     assert.throws(() => makeGitHub({ clientId: 'publicClient', now: () => 10000, fetch: transport, timeoutMs }), (error) => error instanceof ServiceFailure && error.code === 'unavailable');
   }
 });
+
+for (const [name, response] of [
+  ['OAuth application error', json({ error: 'incorrect_client_credentials', error_description: 'PRIVATE' }, 200, { 'retry-after': '20' })],
+  ['scoped credential', json({ access_token: 'PRIVATE', token_type: 'bearer', scope: 'scope_secret' }, 200, { 'retry-after': '20' })],
+  ['malformed JSON', new Response('PRIVATE invalid json', { headers: { 'retry-after': '20' } })],
+  ['non-object JSON', json(null, 200, { 'retry-after': '20' })],
+  ['invalid UTF8', new Response(new Uint8Array([0xc3, 0x28]), { headers: { 'retry-after': '20' } })],
+] as const) {
+  test(`HTTP 200 ${name} preserves Retry-After without a throttle cooldown or retry`, async () => {
+    const f = fixture([response, json(startBody)]);
+    await unavailable(f.github.exchange('PRIVATE_DEVICE'), 20);
+    assert.equal(f.requests.length, 1);
+    await Effect.runPromise(f.github.requestDevice());
+    assert.equal(f.requests.length, 2, 'non-throttle failure does not create cooldown');
+  });
+}

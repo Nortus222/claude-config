@@ -60,6 +60,7 @@ export function makeGitHub(options: { readonly clientId: string; readonly fetch:
       };
       signal.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(abort, timeoutMs);
+      let failureDelay = 1;
       try {
         if (signal.aborted) throw unavailable();
         const upstream = options.fetch(url, { ...init, redirect: 'error', signal: controller.signal }).then((response) => {
@@ -68,12 +69,12 @@ export function makeGitHub(options: { readonly clientId: string; readonly fetch:
         });
         const response = await Promise.race([upstream, aborted]);
         if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw unavailable(); }
+        const throttled = response.status === 403 || response.status === 429;
+        failureDelay = retryDelay(response.headers, options.now(), throttled);
         if (response.status !== 200 || response.redirected) {
           void response.body?.cancel().catch(() => {});
-          const throttled = response.status === 403 || response.status === 429;
-          const delay = retryDelay(response.headers, options.now(), throttled);
-          if (throttled) cooldownUntil = Math.max(cooldownUntil, options.now() + delay * 1000);
-          throw unavailable(delay);
+          if (throttled) cooldownUntil = Math.max(cooldownUntil, options.now() + failureDelay * 1000);
+          throw unavailable(failureDelay);
         }
         if (!response.body) throw unavailable();
         reader = response.body.getReader();
@@ -89,6 +90,8 @@ export function makeGitHub(options: { readonly clientId: string; readonly fetch:
         const bytes = new Uint8Array(size); let offset = 0;
         for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
         return project(object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))), startedAt);
+      } catch {
+        throw unavailable(failureDelay);
       } finally {
         clearTimeout(timer); signal.removeEventListener('abort', abort);
         reader?.releaseLock();
