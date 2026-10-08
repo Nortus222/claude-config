@@ -33,7 +33,7 @@ export function projectMachine(machine: MachineDocument, documents: readonly Ser
 }
 export function registerMachine(store: Store['Service'], machine: MachineDocument) {
   return changeAccount(store, machine.accountId, (snapshot, account) => {
-    if (snapshot.documents.some((d) => d.id === machine.id)) throw new ServiceFailure({ code: 'sign_in_expired' });
+    if (snapshot.documents.some((d) => d.id === machine.id || (d.type === 'issuanceFence' && d.machineId === machine.machineId))) throw new ServiceFailure({ code: 'sign_in_expired' });
     if (snapshot.documents.filter((d) => d.type === 'machine').length >= MAX_MACHINES) throw new ServiceFailure({ code: 'limit_reached' });
     return { mutations: [{ type: 'upsert', document: machine }, { type: 'upsert', document: { ...account, seq: account.seq + 1 } }], value: machine };
   });

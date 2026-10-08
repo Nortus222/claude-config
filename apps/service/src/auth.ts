@@ -4,7 +4,7 @@ import type { AccountDocument, DeviceSessionDocument, IdentityDocument, MachineD
 import { ServiceFailure } from './errors.ts';
 import type { GitHub } from './github.ts';
 import { hashTokenSecret, machineToken, newId, newTokenSecret, verifyTokenSecret } from './ids.ts';
-import type { Store } from './store.ts';
+import type { Store, Mutation } from './store.ts';
 import { activeAccount, changeAccount, registerMachine } from './machines.ts';
 import type { ServiceConfig, ServiceResponse } from './service.ts';
 
@@ -80,12 +80,14 @@ function cleanupSession(store: Store['Service'], session: DeviceSessionDocument,
         if (!account) break;
         const existing = snapshot.documents.find((d): d is MachineDocument => d.type === 'machine' && d.machineId === machineId);
         if (existing && existing.tokenHash !== tokenHash && existing.tokenHash !== null) break;
-        // A recovery fence blocks an issuance that was paused before its account CAS.
-        const machine: MachineDocument = existing ?? { type: 'machine', version: 1, id: `machine:${machineId}`, accountId, machineId,
-          ...session.description, policy: 'notify', reportStatus: true, tokenHash: null,
-          createdAt: new Date(session.claim.claimedAt).toISOString(), lastSeenAt: new Date(session.claim.claimedAt).toISOString() };
-        const mutations = recovery && account.type === 'account' && account.state === 'active' ? [{ type: 'upsert' as const, document: { ...machine, tokenHash: null } }, { type: 'delete' as const, id: `status:${machineId}` }]
-          : [{ type: 'delete' as const, id: `machine:${machineId}` }, { type: 'delete' as const, id: `status:${machineId}` }];
+        const mutations: Mutation[] = [
+          { type: 'delete', id: `machine:${machineId}` },
+          { type: 'delete', id: `status:${machineId}` },
+        ];
+        // Fence delayed registration without consuming a public machine slot.
+        mutations.push(recovery && account.state === 'active'
+          ? { type: 'upsert', document: { type: 'issuanceFence', version: 1, id: `issuance:${machineId}`, accountId, machineId } }
+          : { type: 'delete', id: `issuance:${machineId}` });
         if (yield* store.commitPartition('accounts', accountId, snapshot.version, mutations)) break;
         if (attempt === 31) return yield* Effect.fail(failure('unavailable'));
       }

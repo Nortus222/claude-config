@@ -43,6 +43,13 @@ export interface MachineDocument extends Document, Omit<MachineRecord, 'status'>
   readonly tokenHash: string | null;
 }
 
+// Internal fence prevents a delayed issuance from recreating a cleaned machine.
+export interface IssuanceFenceDocument extends Document {
+  readonly type: 'issuanceFence';
+  readonly accountId: string;
+  readonly machineId: string;
+}
+
 export interface DecisionDocument extends Document, SyncedDecision {
   readonly type: 'decision';
   readonly accountId: string;
@@ -102,5 +109,5 @@ export interface DeviceSessionDocument extends Document {
   readonly claim: DeviceClaim | null;
 }
 
-export type ServiceDocument = AccountDocument | MachineDocument | DecisionDocument | StatusDocument
+export type ServiceDocument = AccountDocument | MachineDocument | IssuanceFenceDocument | DecisionDocument | StatusDocument
   | SetupDocument | RevisionDocument | IdentityDocument | DeviceSessionDocument;

@@ -141,3 +141,54 @@ test('interrupted claim recovery never inserts machine metadata into a deleting 
     const after = await Effect.runPromise(memory.readPartition('accounts',accountId)); assert.ok(after.documents.every((d) => d.type !== 'machine'));
   } finally { await f.close(); }
 });
+
+test('expired recovery fences a paused pre-commit issuance without creating public machine metadata', async () => {
+  const memory = makeMemoryStore(); let pause = false; let machineId = ''; let committedPausedMachine = 0;
+  let entered!: () => void; const barrierEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void; const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const f = await fixture({ store: { ...memory, commitPartition: (container,key,version,mutations) => Effect.gen(function* () {
+    const machine = mutations.find((m) => m.type === 'upsert' && m.document.type === 'machine');
+    if (pause && machine?.type === 'upsert' && machine.document.type === 'machine') {
+      pause = false; machineId = machine.document.machineId; entered(); yield* Effect.promise(() => barrier);
+    }
+    const result = yield* memory.commitPartition(container,key,version,mutations);
+    if (result && machine?.type === 'upsert' && machine.document.type === 'machine' && machine.document.machineId === machineId) committedPausedMachine++;
+    return result;
+  }) } });
+  let issuance: Promise<Response> | undefined;
+  try { const owner = (await f.login()).body; const pending = await f.start('Paused'); f.clock.now += 5000; pause = true;
+    const poll = () => f.call('POST','/v1/auth/device/poll',{ pendingId:pending.body.pendingId });
+    issuance = poll(); await barrierEntered; f.clock.now += 900000;
+    assert.equal((await poll()).status,410);
+    const snapshot = await Effect.runPromise(memory.readPartition('accounts',owner.accountId));
+    assert.ok(snapshot.documents.some((d) => d.id === `issuance:${machineId}`), 'recovery retains an internal fence');
+    assert.equal(snapshot.documents.filter((d) => d.type === 'machine').length,1);
+    release(); const result = await issuance; assert.equal(result.status,410); assert.equal(committedPausedMachine,0); assert.ok(!('token' in await result.json()));
+    assert.equal((await (await f.call('GET','/v1/machines',undefined,owner.token)).json()).machines.length,1);
+    const after = await Effect.runPromise(memory.readPartition('accounts',owner.accountId));
+    assert.ok(!after.documents.some((d) => d.type === 'machine' && d.machineId === machineId));
+  } finally { release(); await issuance; await f.close(); }
+});
+
+test('expired interrupted issuance recovery does not resurrect forgotten machine metadata', async () => {
+  const memory = makeMemoryStore(); let failAfterWrite = false; let failCleanup = false;
+  const f = await fixture({ store: { ...memory, commitPartition: (container,key,version,mutations) => Effect.gen(function* () {
+    if (failCleanup && mutations.some((m) => m.type === 'delete' && m.id.startsWith('machine:'))) {
+      failCleanup = false; return yield* Effect.fail(new ServiceFailure({ code:'unavailable' }));
+    }
+    const result = yield* memory.commitPartition(container,key,version,mutations);
+    if (failAfterWrite && mutations.some((m) => m.type === 'upsert' && m.document.type === 'machine')) {
+      failAfterWrite = false; return yield* Effect.fail(new ServiceFailure({ code:'unavailable' }));
+    }
+    return result;
+  }) } });
+  try { const owner = (await f.login()).body; failAfterWrite = true; failCleanup = true;
+    const pending = await f.start('Orphan'); f.clock.now += 5000;
+    const poll = () => f.call('POST','/v1/auth/device/poll',{ pendingId:pending.body.pendingId }); assert.equal((await poll()).status,503);
+    const list = await (await f.call('GET','/v1/machines',undefined,owner.token)).json(); const orphan = list.machines.find((m: { name:string }) => m.name === 'Orphan'); assert.ok(orphan);
+    assert.equal((await f.call('DELETE',`/v1/machines/${orphan.machineId}`,undefined,owner.token)).status,204);
+    f.clock.now += 900000; assert.equal((await poll()).status,410);
+    const after = await (await f.call('GET','/v1/machines',undefined,owner.token)).json(); assert.equal(after.machines.length,1);
+    assert.ok(after.machines.every((m: { machineId:string }) => m.machineId !== orphan.machineId));
+  } finally { await f.close(); }
+});

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Effect } from 'effect';
+import { decodeHosted, MachinesResponseSchema } from '@nortuscc/hosted-protocol';
+import { makeMemoryStore } from '../src/memory-store.ts';
+import { ServiceFailure } from '../src/errors.ts';
 import { fixture } from './support/service.ts';
 
 test('machine patch, isolation, optout, forget and signout have explicit lifecycle', async () => {
@@ -69,5 +72,29 @@ test('lastSeen does not write before its five-minute boundary', async () => {
     const after = await Effect.runPromise(f.store.readPartition('accounts',login.accountId)); assert.equal(after.version,before.version);
     f.clock.now++; await f.call('GET','/v1/machines',undefined,login.token);
     assert.notEqual((await Effect.runPromise(f.store.readPartition('accounts',login.accountId))).version,before.version);
+  } finally { await f.close(); }
+});
+
+test('expired absent-machine recovery at the cap preserves a valid 25-machine public list', async () => {
+  const memory = makeMemoryStore(); let failRegistration = false; let failCleanup = false;
+  const f = await fixture({ store: { ...memory, commitPartition: (container,key,version,mutations) => {
+    if (failRegistration && mutations.some((m) => m.type === 'upsert' && m.document.type === 'machine')) {
+      failRegistration = false; return Effect.fail(new ServiceFailure({ code:'unavailable' }));
+    }
+    if (failCleanup && mutations.some((m) => m.type === 'delete' && m.id.startsWith('machine:'))) {
+      failCleanup = false; return Effect.fail(new ServiceFailure({ code:'unavailable' }));
+    }
+    return memory.commitPartition(container,key,version,mutations);
+  } } });
+  try { const owner = (await f.login()).body; failRegistration = true; failCleanup = true;
+    const pending = await f.start('Interrupted'); f.clock.now += 5000;
+    const poll = () => f.call('POST','/v1/auth/device/poll',{ pendingId:pending.body.pendingId });
+    assert.equal((await poll()).status,503);
+    for (let i = 0; i < 24; i++) { f.clock.now += 360000; assert.equal((await f.login(`Machine ${i}`)).response.status,200); }
+    assert.equal((await (await f.call('GET','/v1/machines',undefined,owner.token)).json()).machines.length,25);
+    assert.equal((await poll()).status,410);
+    const response = await f.call('GET','/v1/machines',undefined,owner.token); assert.equal(response.status,200);
+    const result = decodeHosted(MachinesResponseSchema,await response.json()); assert.equal(result.machines.length,25);
+    assert.ok(result.machines.every((machine) => machine.name !== 'Interrupted'));
   } finally { await f.close(); }
 });
