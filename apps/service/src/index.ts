@@ -11,3 +11,4 @@ export * from './github.ts';
 export * from './limits.ts';
 export * from './diagnostics.ts';
 export * from './cosmos-store.ts';
+export * from './github-http.ts';

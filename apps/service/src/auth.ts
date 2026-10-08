@@ -148,11 +148,17 @@ export function deviceStart(store: Store['Service'], github: GitHub['Service'], 
     const description = yield* checked(() => decodeRequestBody(DeviceStartRequestSchema, body));
     const upstream = yield* github.requestDevice();
     const createdAt = now();
+    const expiresAt = yield* checked(() => {
+      if (!Number.isSafeInteger(upstream.expiresIn) || upstream.expiresIn <= 0) throw failure('unavailable');
+      const deadline = upstream.expiresAt ?? createdAt + upstream.expiresIn * 1000;
+      if (!Number.isSafeInteger(deadline) || deadline <= createdAt) throw failure('unavailable');
+      return Math.min(deadline, createdAt + 900000);
+    }, 'unavailable');
     const pendingId = newId(createdAt);
     const response = yield* checked(() => decodeHosted(DeviceStartResponseSchema, { pendingId, userCode: upstream.userCode, verificationUri: upstream.verificationUri,
-      interval: upstream.interval, expiresIn: Math.min(900, upstream.expiresIn) }), 'unavailable');
+      interval: upstream.interval, expiresIn: Math.floor((expiresAt - createdAt) / 1000) }), 'unavailable');
     const session: DeviceSessionDocument = { type: 'deviceSession', version: 1, id: `device:${pendingId}`, pendingId,
-      deviceCode: upstream.deviceCode, description, createdAt, expiresAt: createdAt + response.expiresIn * 1000,
+      deviceCode: upstream.deviceCode, description, createdAt, expiresAt,
       interval: upstream.interval, nextPollAt: createdAt + upstream.interval * 1000, state: 'pending', claim: null };
     if (!(yield* store.commitPartition('identities', session.id, null, [{ type: 'upsert', document: session }]))) return yield* Effect.fail(failure('unavailable'));
     return { status: 200, body: response };
@@ -175,7 +181,13 @@ export function devicePoll(store: Store['Service'], github: GitHub['Service'], b
       const exchange = yield* github.exchange(session.deviceCode);
       if (now() >= session.expiresAt || exchange.type === 'expired' || exchange.type === 'denied') return yield* Effect.fail(failure('sign_in_expired'));
       if (exchange.type === 'pending' || exchange.type === 'slow-down') {
-        const interval = session.interval + (exchange.type === 'slow-down' ? 5 : 0);
+        const interval = yield* checked(() => {
+          const supplied = exchange.type === 'slow-down' ? exchange.interval : undefined;
+          if (supplied !== undefined && (!Number.isSafeInteger(supplied) || supplied <= 0 || supplied > 3600)) throw failure('unavailable');
+          const value = exchange.type === 'slow-down' ? Math.max(session.interval + 5, supplied ?? 0) : session.interval;
+          if (!Number.isSafeInteger(value) || value <= 0 || value > 3600) throw failure('unavailable');
+          return value;
+        }, 'unavailable');
         const fresh = yield* store.readPartition('identities', key);
         if (!fresh.documents.some((d) => d.type === 'deviceSession' && d.state === 'claimed' && d.claim === null)) return yield* Effect.fail(failure('sign_in_expired'));
         if (!(yield* store.commitPartition('identities', key, fresh.version, [{ type: 'upsert', document: { ...session, interval, nextPollAt: now() + interval * 1000 } }]))) return yield* Effect.fail(failure('sign_in_expired'));
