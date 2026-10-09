@@ -222,7 +222,12 @@ change that shared allowlist.
 
 `claude/settings.keys.json` names the keys the repo owns, and their values;
 every other key in `~/.claude/settings.json` is left exactly as found.
-Today that is `effortLevel`, `tui`, `theme`, and `worktree`.
+Today that is `attribution`, `effortLevel`, `env`, `tui`, `theme`, and `worktree`.
+
+`env` raises `MCP_TIMEOUT` to 60 s. Claude Code's default of about 30 s is
+too short for a stdio MCP server that installs its own packages on a cold
+checkout, as eManageOne's `e2e` server does. The repo owns the whole `env`
+object, so set a machine-only variable in the user environment, not here.
 
 `permissions` and `enabledPlugins` stay user-owned — the latter because
 `integrations.json` already covers plugins. `hooks` is deliberately not

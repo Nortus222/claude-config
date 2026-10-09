@@ -4,6 +4,9 @@
     "pr": ""
   },
   "effortLevel": "high",
+  "env": {
+    "MCP_TIMEOUT": "60000"
+  },
   "tui": "fullscreen",
   "theme": "auto",
   "worktree": {
