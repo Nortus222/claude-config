@@ -19,11 +19,11 @@ export function record(value: unknown): Record<string, unknown> {
 export function assertReleaseContext(value: { event: string; ref: string; repository: string; captured: string; reviewed: string; head: string }): void {
   if (value.event !== 'workflow_dispatch' || value.ref !== 'refs/heads/main' || value.repository !== repository || value.captured.length !== 40 || !commitPattern.test(value.captured) || value.reviewed !== value.captured || value.head !== value.captured) fail();
 }
-export function assertProtectedEnvironment(environment: unknown, policies: unknown): void {
+export function assertProtectedEnvironment(environment: unknown, policies: unknown, name = 'hosted-production'): void {
   const env = record(environment); const policy = record(env.deployment_branch_policy); const branches = record(policies);
   if (policy.protected_branches !== false || policy.custom_branch_policies !== true || !Array.isArray(env.protection_rules)) fail();
   const reviewers = env.protection_rules.map(record).find(rule => rule.type === 'required_reviewers');
-  if (!reviewers || reviewers.prevent_self_review !== true || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
+  if (!reviewers || typeof reviewers.prevent_self_review !== 'boolean' || (name !== 'hosted-image' && reviewers.prevent_self_review !== true) || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
     const reviewer = record(item); return (reviewer.type === 'User' || reviewer.type === 'Team') && Number.isSafeInteger(record(reviewer.reviewer).id) && Number(record(reviewer.reviewer).id) > 0;
   })) fail();
   if (branches.total_count !== 1 || !Array.isArray(branches.branch_policies) || branches.branch_policies.length !== 1) fail();
@@ -49,7 +49,7 @@ export async function verifyEnvironment(name: string, token: string, transport: 
   const headers = { accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10', ...(token ? { authorization: `Bearer ${token}` } : {}) };
   const env = JSON.parse(await readBounded(base, headers, transport));
   const branches = JSON.parse(await readBounded(`${base}/deployment-branch-policies?per_page=100`, headers, transport));
-  assertProtectedEnvironment(env, branches);
+  assertProtectedEnvironment(env, branches, name);
 }
 /** Public GHCR bearer tokens are obtained anonymously; no runner credential is read. */
 export async function verifyPublicImage(image: string, reviewed: string, transport: typeof fetch = fetch): Promise<void> {

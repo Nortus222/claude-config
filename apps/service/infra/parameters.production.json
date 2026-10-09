@@ -1,0 +1,14 @@
+{
+  "location": "westus2",
+  "namePrefix": "claude-config-prod",
+  "githubClientId": "Ov23liPgFg4dxI5YEMcH",
+  "allowlistedLogins": [
+    "Nortus222"
+  ],
+  "openSignup": false,
+  "budgetAmount": 20,
+  "budgetContactEmails": [
+    "ihor@emanageone.com"
+  ],
+  "budgetStartDate": "2026-10-01"
+}
