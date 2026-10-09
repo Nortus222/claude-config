@@ -77,13 +77,27 @@ test('rollback verifies separately reviewed image ancestor using only literal Gi
   assert.equal(calls.length, 0);
 });
 
-test('both release environments require self-review prevention in direct rules and read-only API metadata', async () => {
+test('only image releases allow explicit single-owner self-review in direct rules and API metadata', async () => {
   const { verifyEnvironment } = await import('../infra/release.ts');
   const rule = protectedEnvironment.protection_rules[0]!;
-  for (const prevent_self_review of [false, undefined]) {
+  const singleOwner = { ...protectedEnvironment, protection_rules: [{ ...rule, prevent_self_review: false }] };
+  assert.doesNotThrow(() => assertProtectedEnvironment(singleOwner, policies, 'hosted-image'));
+  assert.throws(() => assertProtectedEnvironment(singleOwner, policies));
+  assert.throws(() => assertProtectedEnvironment(singleOwner, policies, 'hosted-production'));
+  for (const name of ['hosted-image', 'hosted-production']) {
+    let requests = 0;
+    const verification = verifyEnvironment(name, 'runner-token', async (_url, options) => {
+      assert.equal(options?.method ?? 'GET', 'GET'); requests++;
+      return new Response(JSON.stringify(requests === 1 ? singleOwner : policies));
+    });
+    if (name === 'hosted-image') await verification; else await assert.rejects(verification);
+    assert.equal(requests, 2);
+  }
+  for (const prevent_self_review of [undefined, null, 'false', 0]) {
     const environment = { ...protectedEnvironment, protection_rules: [{ ...rule, prevent_self_review }] };
     assert.throws(() => assertProtectedEnvironment(environment, policies));
     for (const name of ['hosted-image', 'hosted-production']) {
+      assert.throws(() => assertProtectedEnvironment(environment, policies, name));
       let requests = 0;
       await assert.rejects(verifyEnvironment(name, 'runner-token', async (_url, options) => {
         assert.equal(options?.method ?? 'GET', 'GET'); requests++;
@@ -96,5 +110,26 @@ test('both release environments require self-review prevention in direct rules a
     let requests = 0;
     await verifyEnvironment(name, 'runner-token', async () => new Response(JSON.stringify(++requests === 1 ? protectedEnvironment : policies)));
     assert.equal(requests, 2);
+  }
+});
+
+test('both approval policies still require valid reviewers and only the main branch', async () => {
+  const { verifyEnvironment } = await import('../infra/release.ts');
+  for (const name of ['hosted-image', 'hosted-production']) {
+    const rule = { ...protectedEnvironment.protection_rules[0]!, prevent_self_review: name !== 'hosted-image' };
+    const environment = { ...protectedEnvironment, protection_rules: [rule] };
+    for (const reviewers of [[], null, [{ type: 'User', reviewer: { id: 0 } }], [{ type: 'Bot', reviewer: { id: 1 } }], [{ type: 'User', reviewer: { id: '1' } }]]) {
+      const malformed = { ...environment, protection_rules: [{ ...rule, reviewers }] };
+      assert.throws(() => assertProtectedEnvironment(malformed, policies, name));
+      let requests = 0;
+      await assert.rejects(verifyEnvironment(name, '', async () => new Response(JSON.stringify(++requests === 1 ? malformed : policies))));
+      assert.equal(requests, 2);
+    }
+    for (const branches of [{ total_count: 0, branch_policies: [] }, { total_count: 2, branch_policies: policies.branch_policies }, { total_count: 1, branch_policies: [{ name: '*', type: 'branch' }] }, { total_count: 1, branch_policies: [{ name: 'main', type: 'tag' }] }]) {
+      assert.throws(() => assertProtectedEnvironment(environment, branches, name));
+      let requests = 0;
+      await assert.rejects(verifyEnvironment(name, '', async () => new Response(JSON.stringify(++requests === 1 ? environment : branches))));
+      assert.equal(requests, 2);
+    }
   }
 });

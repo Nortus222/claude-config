@@ -29,6 +29,9 @@ helpers. Each run captures six **public** values into a new task-owned
 `apps/service/infra/owner-public.XXXXXX` snapshot, leaving prior files intact.
 Do not enter credentials or commit those snapshots. It performs no login, cloud
 mutation, app registration, publication, deployment or acceptance request.
+The reusable wizard describes the stricter future CI deployment setup. For the
+current single-owner image release, use the explicitly approved image-only
+exception below; custom CI Azure roles are not required for owner CLI deployment.
 
 1. Choose subscription/tenant/region and create a dedicated resource group.
    Inspect every subscription Cosmos account: new deployment needs the one
@@ -37,15 +40,21 @@ mutation, app registration, publication, deployment or acceptance request.
    `Microsoft.ManagedIdentity`, `Microsoft.OperationalInsights`,
    `Microsoft.Insights` and `Microsoft.Consumption` yourself.
 2. Create separate `hosted-image` and `hosted-production` GitHub environments.
-   Require an eligible reviewer distinct from the run initiator and enable
-   **Prevent self review** for both environments. Selected deployment branches
-   must contain **only branch `main`**, no tags or wildcards. Disable administrator bypass.
-   Read-only inspection on 2026-10-08 found zero environments. Naming one in YAML is insufficient and can create an
-   unprotected environment, so prepare rejects missing environments, empty
-   reviewers, false/missing self-review prevention, all/protected-branches policies
-   and any policy other than exact branch main. The REST response verifies reviewers, `prevent_self_review: true`
-   and branch rules; disabling administrator bypass remains an owner check.
-3. Create a CI-only Entra app/service principal with **no client secret**. Its
+   Both require an eligible reviewer, selected deployment branches containing
+   **only branch `main`**, no tags or wildcards, and disabled administrator bypass.
+   The current single-owner image release permits Nortus222 to initiate and
+   explicitly approve the same run: disable **Prevent self review** only for
+   `hosted-image`. This accepts one person's review of a GHCR publication; the
+   image job has no Azure OIDC permission. `hosted-production` retains **Prevent
+   self review** and requires a reviewer distinct from its run initiator before
+   any future CI Azure deployment. See [ADR0029](../../../docs/adr/0029-single-owner-image-approval.md).
+   Naming an environment in YAML is insufficient and can create an unprotected
+   environment. Prepare rejects missing environments, empty/malformed reviewers,
+   missing/nonboolean self-review policy and every branch policy except exact
+   branch main. Image policy accepts explicit `true` or `false`; production
+   requires `true`. Disabling administrator bypass remains an owner check.
+3. For future Azure deployment from CI, create a CI-only Entra app/service
+   principal with **no client secret**. Its
    federated issuer is `https://token.actions.githubusercontent.com`, audience
    `api://AzureADTokenExchange`. Verify the repository's actual OIDC subject
    configuration, including organization/repository custom templates and the
@@ -62,7 +71,15 @@ mutation, app registration, publication, deployment or acceptance request.
 5. Review public configuration on main, publish only after separate approval,
    then manually make the first GHCR package public before deploying.
 
-Set these public **environment Variables**, not secrets, in `hosted-production`:
+The currently approved path publishes images from CI and deploys through the
+owner's authenticated Azure CLI. It needs no Azure roles assigned to CI and no
+publish profile. Preserve the reviewed Bicep, immutable image verification and
+read-only deployment preflight when using the owner's CLI; do not bypass the
+storage bootstrap ordering by invoking the template directly. The following
+OIDC setup and custom roles are retained for a future CI Azure deployment.
+
+For that future path, set these public **environment Variables**, not secrets,
+in `hosted-production`:
 
 | Variable | Value |
 | --- | --- |
@@ -71,8 +88,9 @@ Set these public **environment Variables**, not secrets, in `hosted-production`:
 | `AZURE_SUBSCRIPTION_ID` | Intended subscription ID, lowercase UUID |
 | `AZURE_RESOURCE_GROUP` | Dedicated existing group, simple letters/digits/underscore/hyphen name |
 
-Use an owner-created custom CI role assigned **only to the dedicated resource
-group**, with the following control-plane Actions and empty DataActions. These
+For future CI Azure deployment, use an owner-created custom CI role assigned
+**only to the dedicated resource group**, with the following control-plane
+Actions and empty DataActions. These
 allow the checked-in incremental template and its read-only preflight; they do
 not grant deletes, shared-key retrieval, Graph access or ARM RBAC allocation:
 
@@ -145,10 +163,12 @@ Official setup references: [environment protection](https://docs.github.com/en/a
 
 ## Public deployment configuration
 
-The fixed `apps/service/infra/parameters.production.json` is deliberately absent.
-The owner must create it from `parameters.example.json`, replace invalid
-placeholders, validate, review and merge it to main. Dispatch cannot choose a
-parameter path. The helper checks its real path to prevent a symlink escaping the
+The fixed `apps/service/infra/parameters.production.json` contains the owner's
+approved public westus2 configuration, closed signup allowing only Nortus222,
+OAuth Client ID and monthly budget of 20 with the approved public contact email.
+It contains neither an image nor credentials. Review and merge changes to main
+before release. Dispatch cannot choose a parameter path. The helper checks its
+real path to prevent a symlink escaping the
 checkout. Its eight flat fields are `location`, `namePrefix`, `githubClientId`,
 `allowlistedLogins`, `openSignup`, `budgetAmount`, `budgetContactEmails` and
 `budgetStartDate`. Closed signup plus an empty allowlist is a valid deny-all setup.
@@ -189,7 +209,9 @@ this code batch dispatches either workflow.
    HTTPS `pkg-containers.githubusercontent.com` CDN is allowed without forwarding
    its bearer header; all requests are time/size bounded. Private/unavailable or
    changed-host images fail, never trigger a credential fallback.
-3. Dispatch **service-deploy** on main with `reviewed_commit` for the current
+3. For future CI Azure deployment, after roles and a distinct initiator/reviewer
+   are available, dispatch **service-deploy** on main with `reviewed_commit` for
+   the current
    infrastructure/config checkout, `image_commit` for the reviewed image source
    and `image_ref` exactly
    `ghcr.io/nortus222/claude-config-service@sha256:<64 lowercase hex>`.

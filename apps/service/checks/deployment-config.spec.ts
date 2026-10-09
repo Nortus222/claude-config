@@ -61,3 +61,16 @@ test('public configuration cannot request storage bootstrap', () => {
   assert.throws(() => validateDeploymentParameters({ ...valid(), bootstrapOnly: true }));
   assert.throws(() => validateDeploymentParameters({ ...valid(), bootstrapOnly: false }));
 });
+test('approved production public configuration validates without embedded image or credentials', () => {
+  const path = fileURLToPath(new URL('../infra/parameters.production.json', import.meta.url));
+  const result = spawnSync(process.execPath, [validator, path, image], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const arm = JSON.parse(result.stdout);
+  assert.deepEqual(arm.parameters, {
+    location: { value: 'westus2' }, namePrefix: { value: 'claude-config-prod' },
+    githubClientId: { value: 'Ov23liPgFg4dxI5YEMcH' }, allowlistedLogins: { value: ['Nortus222'] },
+    openSignup: { value: false }, budgetAmount: { value: 20 },
+    budgetContactEmails: { value: ['ihor@emanageone.com'] }, budgetStartDate: { value: '2026-10-01' },
+    image: { value: image },
+  });
+});
