@@ -84,8 +84,10 @@ Rust checks exercise fake posting success/refusal, strict payloads, direct hidde
 The bundled foreground agent uses the reviewed public hosted API root by default, with
 `NORTUSCC_HOSTED_URL` in its login environment overriding it. Custom roots must be HTTPS
 and end in `/v1`; invalid overrides remain visible as configuration errors.
-Account/device-flow, setup trust and machine-reporting commands are available through
-`nortuscc agent`; this change adds no renderer account screens or Rust request commands.
+Account/device-flow, setup trust and machine-reporting commands use the existing agent IPC through
+fixed native commands. Native arguments accept public display names, policies, booleans and opaque
+setup IDs, with unknown fields and renderer paths, commands or URLs rejected. Account credentials
+remain agent/keychain-owned. Renderer account screens are added separately.
 See the [agent README](../../packages/agent/README.md#optional-hosted-client).
 
 ### First-run helper
@@ -105,3 +107,22 @@ Explicit URL overrides, including invalid values, retain their meaning. Set the 
 `NORTUSCC_DESKTOP_LOCAL_ONLY=1` to create no hosted client; any other defined value is rejected.
 CLI defaults remain local-only. Resource tests and packaged smoke set this explicitly because a
 temporary HOME does not isolate the OS keychain. Pure setup schemas live in `shared/setup-protocol.ts`.
+
+The native first-run bridge exposes `desktop_setup_state`, `setup_desktop`, and `install_git`.
+Startup checks setup state before invoking ensure; new or corrupt setups wait for the first-run flow.
+`setup_desktop` bootstraps then ensures in one lifecycle reservation and returns the current hello
+with its generation. Account commands are `hosted_state`, `sign_in`, `sign_out`, `sync_now`,
+`trust_setup`, `machine_settings`, `set_policy`, and `resume_agent`. `open_device_login` opens only
+`https://github.com/login/device` after an explicit action. All results use the normal generation/data
+wrapper. New command argument records are strict and bounded to 4096 bytes; helper output is one
+strict JSON line under the existing one MiB framing limit. Helper timeouts stop their owned process
+group and join their pipe readers before returning.
+
+`sign_in` accepts optional local `reportStatus`, which never enters the HTTP device-start body.
+An explicit choice is saved in the durable machine outbox before credentials and job completion.
+A reporting-off patch survives invalid PATCH responses and acknowledgements still reporting true,
+so interrupted sign-in or restart cannot issue a first status upload before false is acknowledged.
+Omitting the choice preserves the CLI behavior. Native display-name Unicode predicates are generated
+without dependencies using `node apps/desktop/scripts/display-name-categories.mjs` on Unicode17.0,
+such as Node24.19. The parity check verifies every code point against the shared predicates; deliberate
+Unicode contract updates should regenerate the table and review shared/native compatibility together.

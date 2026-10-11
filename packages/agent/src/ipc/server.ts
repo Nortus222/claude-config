@@ -245,7 +245,7 @@ export const serveIpc = (input: {
       const unavailable = Effect.fail(new SessionError('NOT_SIGNED_IN', 'Hosted mode is not configured'));
       switch (request.command) {
         case 'hostedState': return hostedResult(Effect.void);
-        case 'signIn': return hosted ? Effect.map(hosted.signIn(request.name), (s) => ({ result: decodeSignInResult(s) })) : unavailable;
+        case 'signIn': return hosted ? Effect.map(hosted.signIn(request.name, request.reportStatus), (s) => ({ result: decodeSignInResult(s) })) : unavailable;
         case 'signOut': return hosted ? hostedResult(hosted.signOut()) : unavailable;
         case 'syncNow': return hosted ? hostedResult(hosted.sync()) : unavailable;
         case 'trustSetup': return hosted ? hostedResult(hosted.trust(request.setupId, client)) : unavailable;

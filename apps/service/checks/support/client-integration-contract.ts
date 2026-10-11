@@ -53,6 +53,26 @@ export function registerClientIntegrationContract(name: string, factory: Service
     } finally { controller.abort(); await joined; }
   });
 
+  test('actual HTTP service: explicit reporting off is acknowledged before first status and survives runtime restart', async (t, backend, clientFixture) => {
+    const f = await clientFixture(t); const machine = f.machine();
+    await machine.run((runtime) => Effect.gen(function* () {
+      yield* runtime.signIn('Private Mac', false); f.clock.now += 5000; yield* runtime.tick;
+      assert.equal((yield* runtime.state).auth, 'signed-in');
+      assert.equal((yield* runtime.state).machine?.reportStatus, false);
+      yield* runtime.runJobs;
+      const patch = machine.requests.find((request) => request.method === 'PATCH');
+      assert.equal(patch?.status, 200);
+      assert.deepEqual(patch?.body, { reportStatus: false });
+      assert.equal(machine.requests.some((request) => request.path === '/v1/machines/self/status'), false);
+      assert.deepEqual(machine.document().accounts[0]!.outbox, []);
+    }));
+    await machine.run((runtime) => Effect.gen(function* () {
+      yield* runtime.runJobs;
+      assert.equal((yield* runtime.state).machine?.reportStatus, false);
+      assert.equal(machine.requests.some((request) => request.path === '/v1/machines/self/status'), false);
+    }));
+  });
+
   test('actual HTTP service: explicit person apply, inert auto apply and notify waiting on three isolated machines', async (t, backend, clientFixture) => {
     const f = await clientFixture(t);
     const publisher = (await f.login('Publisher')).body;
