@@ -41,6 +41,22 @@ const findGit = (input: OnboardingInput) => Effect.gen(function* () {
   return (yield* fs.stat(candidate))?.kind === 'file' ? candidate : null;
 }).pipe(Effect.timeout(input.timeoutMs ?? 10_000), Effect.catch(() => Effect.succeed(null)),
   Effect.provide(Layer.mergeAll(nodeFs, input.processes ?? nodeProcesses({ env: input.env, inherit: 'stderr' }))));
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+// The legacy store normalizes missing fields; onboarding must refuse corrupt setup authority first.
+const validSetupRecord = (text: string): boolean => {
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return false; }
+  if (!isRecord(value) || !Object.hasOwn(value, 'repo') || !(value.repo === null || typeof value.repo === 'string')
+    || (Object.hasOwn(value, 'version') && value.version !== 1) || !isRecord(value.files)) return false;
+  if (!Object.values(value.files).every((baseline) => isRecord(baseline)
+    && typeof baseline.hash === 'string' && typeof baseline.appliedAt === 'string')) return false;
+  if (Object.hasOwn(value, 'skillsOnly') && typeof value.skillsOnly !== 'boolean') return false;
+  if (Object.hasOwn(value, 'configTargets') && (!Array.isArray(value.configTargets)
+    || !value.configTargets.every((target) => target === 'claude' || target === 'codex'))) return false;
+  return true;
+};
 export const setupState = async (input: OnboardingInput): Promise<SetupState> => {
   const paths = await Effect.runPromise(pathsFor(input));
   const recorded = await Effect.runPromise(Effect.gen(function* () {
@@ -49,7 +65,7 @@ export const setupState = async (input: OnboardingInput): Promise<SetupState> =>
     for (const path of [join(paths.stateRoot, 'state.json'), join(paths.claude, '.nortuscc-lock.json')]) {
       const text = yield* fs.readText(path);
       if (text === undefined) continue;
-      const state = parseState(text);
+      const state = validSetupRecord(text) ? parseState(text) : undefined;
       if (state === undefined) throw new Error(`${path} is invalid; repair it before setting up`);
       repo = state.repo;
       break;
@@ -113,10 +129,11 @@ export const bootstrapSetup = async (input: OnboardingInput, rawChoices: SetupCh
     const backups = yield* Backups;
     for (const name of ['state.json', 'overrides.json']) yield* backups.preserve(join(paths.stateRoot, name), name);
     yield* backups.preserve(join(paths.stateRoot, 'agent', 'agent.json'), 'agent.json', 'agent');
-    // Existing overrides (including legacy choices) always win; the first run alone records the picker.
-    if (!(yield* fs.exists(join(paths.stateRoot, 'overrides.json')))) yield* (yield* OverridesStore).write({
-      ...overrides.value, ...(overrides.value.manageConfig !== undefined || overrides.value.configTargets !== undefined
-        ? {} : { manageConfig: choices.configTargets.length > 0, configTargets: choices.configTargets }) });
+    // Explicit current or legacy target choices win; unrelated overrides do not answer the picker.
+    if (overrides.value.manageConfig === undefined && overrides.value.configTargets === undefined) {
+      yield* (yield* OverridesStore).write({ ...overrides.value,
+        manageConfig: choices.configTargets.length > 0, configTargets: choices.configTargets });
+    }
     if (!(yield* fs.exists(join(paths.stateRoot, 'agent', 'agent.json')))) yield* fs.writeTextAtomic(
       join(paths.stateRoot, 'agent', 'agent.json'), JSON.stringify({ version: 1, policy: 'notify', policySource: 'default', paused: null }) + '\n');
     // Publish the repo record last: a retry never mistakes incomplete metadata for a completed setup.

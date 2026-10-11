@@ -210,3 +210,49 @@ test('legacy machine target choices survive first desktop registration', async (
   assert.deepEqual(JSON.parse(readFileSync(join(f.stateRoot, 'overrides.json'), 'utf8')),
     { version: 1, manageConfig: false, configTargets: ['codex'] });
 });
+
+test('malformed or unsupported recorded setup is refused without cloning or changing its bytes', async (t) => {
+  const f = fixture(t); mkdirSync(f.stateRoot);
+  for (const value of [
+    { version: 1, repo: 42, files: {} }, { version: 1, files: {} }, { version: 2, repo: null, files: {} },
+    { version: null, repo: null, files: {} }, { version: 1, repo: false, files: {} },
+    { repo: null, files: [] }, { repo: null, files: { 'claude:CLAUDE.md': null } },
+    { repo: null, files: {}, configTargets: ['unknown'] }, { repo: null, files: {}, skillsOnly: 'false' },
+  ]) {
+    const before = JSON.stringify(value); const path = join(f.stateRoot, 'state.json'); writeFileSync(path, before);
+    await assert.rejects(setupState(f.input), /state.json.*invalid/);
+    await assert.rejects(bootstrapSetup(f.input, { configTargets: [] }), /state.json.*invalid/);
+    assert.equal(readFileSync(path, 'utf8'), before);
+    assert.equal(f.commands.some((command) => command.args.includes('clone')), false);
+    assert.deepEqual(readdirSync(f.stateRoot), ['state.json']);
+  }
+});
+
+test('supported version1 and known unversioned legacy records remain usable', async (t) => {
+  const f = fixture(t); mkdirSync(f.stateRoot); const repo = join(f.home, 'existing'); mkdirSync(join(repo, '.git'), { recursive: true });
+  for (const value of [{ version: 1, repo, files: {} }, { repo, files: { 'CLAUDE.md': { hash: 'legacy', appliedAt: 'before' } }, skillsOnly: true, configTargets: ['codex'] }]) {
+    writeFileSync(join(f.stateRoot, 'state.json'), JSON.stringify(value));
+    assert.equal((await setupState(f.input)).repo, repo);
+  }
+});
+
+test('first target choice is recorded alongside existing unrelated overrides and backs up their original bytes', async (t) => {
+  for (const configTargets of [[], ['claude']] as const) {
+    const f = fixture(t); mkdirSync(f.stateRoot);
+    const unrelated = { version: 1, skills: { demo: false }, settings: { claude: { theme: 'dark' } }, integrations: { fixture: false } };
+    const before = JSON.stringify(unrelated); writeFileSync(join(f.stateRoot, 'overrides.json'), before);
+    const input = { ...f.input, processes: Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+      if (command.args.includes('clone')) {
+        const checkout = command.args.at(-1)!; mkdirSync(join(checkout, '.git'), { recursive: true });
+        writeFileSync(join(checkout, 'integrations.json'), '{"version":1,"integrations":[]}');
+        writeFileSync(join(checkout, 'skills-manifest.txt'), '');
+      }
+      return { code: 0, stdout: command.args.includes('get-url') ? 'https://github.com/Nortus222/claude-config.git' : f.developer };
+    }) }) };
+    await bootstrapSetup(input, { configTargets: [...configTargets] });
+    assert.deepEqual(JSON.parse(readFileSync(join(f.stateRoot, 'overrides.json'), 'utf8')),
+      { ...unrelated, manageConfig: configTargets.length > 0, configTargets: [...configTargets] });
+    const backup = readdirSync(join(f.stateRoot, 'backups'))[0]!;
+    assert.equal(readFileSync(join(f.stateRoot, 'backups', backup, 'overrides.json'), 'utf8'), before);
+  }
+});
