@@ -95,6 +95,37 @@ export const maintenanceState = (input: LifecycleInput) => Effect.gen(function* 
   try { const journal = decodeJournal(text, input); return { ...empty, pending: true, phase: journal.phase, fromVersion: journal.fromVersion, toVersion: journal.toVersion, backupPath: journal.backupPath }; }
   catch { return { ...empty, pending: true, diagnostic: 'Pending update journal is invalid; manual recovery is required.' }; }
 });
+const waitForHealth = async (input: LifecycleInput, options: Pick<MaintenanceOptions, 'connect' | 'pollMs'>, signal: AbortSignal, deadline: number) => {
+  while (Date.now() < deadline) {
+    signal.throwIfAborted();
+    let conn: AgentConnection | undefined;
+    try {
+      conn = await (options.connect ?? (() => connectAgent(input.paths, { client: 'app', timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) })))();
+      signal.throwIfAborted();
+      if (conn.hello.protocol !== 3 || conn.hello.agentVersion !== input.agentVersion) throw new Error('replacement agent health identity mismatch');
+      return;
+    } catch (error) { if (!(error instanceof AgentUnavailable)) throw error; }
+    finally { conn?.close(); }
+    await sleep(options.pollMs ?? 250, undefined, { signal });
+  }
+  throw new Error('replacement agent health timed out; pending update retained');
+};
+const restoredHealth = (input: LifecycleInput, options: MaintenanceOptions) => Effect.scoped(Effect.gen(function* () {
+  const fs = yield* Fs;
+  const controller = new AbortController();
+  const health = (async () => {
+    await waitForHealth(input, options, controller.signal, Date.now() + (options.timeoutMs ?? 60_000));
+    controller.signal.throwIfAborted();
+    await Effect.runPromise(fs.remove(pendingPath(input)));
+  })();
+  // Join a cancelled health probe before the containing maintenance scope releases either lock.
+  yield* Effect.addFinalizer(() => Effect.promise(async () => {
+    controller.abort();
+    await health.catch(() => undefined);
+  }));
+  yield* attempt(() => health);
+}));
+
 export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions) => Effect.scoped(Effect.gen(function* () {
   const records = maintenanceRecords(options.stdin)[Symbol.asyncIterator]();
   const versions = decodePrepareUpdate(yield* nextRecord(records, 5000));
@@ -146,11 +177,13 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
   for (const [path, name] of [[unitPath(input.target), 'service.plist'], ...['agent.json', 'setups.json', 'app-service.json'].map(name => [join(input.paths.stateRoot, 'agent', name), name])]) yield* backups.preserve(path!, name!, 'desktop-update');
   options.stdout({ ready: true, backupPath });
   let installing = false;
+  let restoreAttempted = false;
   const restore = Effect.gen(function* () {
+    restoreAttempted = true;
     if (journal.phase !== 'prepared' || (yield* installedIdentity(input)).appVersion !== journal.fromVersion
       || (yield* attempt(() => digestTree(identity.bundlePath))) !== journal.oldBundleHash) throw new Error('old app identity cannot be proved; pending update retained');
     yield* installService(input.target, resourceProgram(input), { retryDelayMs: options.retryDelayMs });
-    yield* fs.remove(pendingPath(input));
+    yield* restoredHealth(input, options);
   });
   const session = Effect.gen(function* () {
     while (true) {
@@ -167,7 +200,7 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
       }
     }
   });
-  return yield* session.pipe(Effect.onExit(exit => exit._tag === 'Failure' && !installing ? restore.pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
+  return yield* session.pipe(Effect.onExit(exit => exit._tag === 'Failure' && !installing && !restoreAttempted ? restore.pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
 }));
 export const recoverUpdate = (input: LifecycleInput, options: Omit<MaintenanceOptions, 'stdout'>) => Effect.gen(function* () {
   const records = maintenanceRecords(options.stdin)[Symbol.asyncIterator]();
@@ -187,19 +220,9 @@ export const recoverUpdate = (input: LifecycleInput, options: Omit<MaintenanceOp
   const deadline = Date.now() + (options.timeoutMs ?? 60_000);
   yield* ensureAgent(input, { restart: true, connect: options.connect, pollMs: options.pollMs, timeoutMs: options.timeoutMs, retryDelayMs: options.retryDelayMs,
     recovery: { journal: text, afterRegistration: async signal => {
-      while (Date.now() < deadline) {
-        signal.throwIfAborted();
-        let conn: AgentConnection | undefined;
-        try {
-          conn = await (options.connect ?? (() => connectAgent(input.paths, { client: 'app', timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) })))();
-          signal.throwIfAborted();
-          if (conn.hello.protocol !== 3 || conn.hello.agentVersion !== input.agentVersion) throw new Error('replacement agent health identity mismatch');
-          await Effect.runPromise(fs.remove(pendingPath(input))); return;
-        } catch (error) { if (!(error instanceof AgentUnavailable)) throw error; }
-        finally { conn?.close(); }
-        await sleep(options.pollMs ?? 250, undefined, { signal });
-      }
-      throw new Error('replacement agent health timed out; pending update retained');
+      await waitForHealth(input, options, signal, deadline);
+      signal.throwIfAborted();
+      await Effect.runPromise(fs.remove(pendingPath(input)));
     } } });
   return { recovered: true, interrupted, stateRoot: input.paths.stateRoot };
 });

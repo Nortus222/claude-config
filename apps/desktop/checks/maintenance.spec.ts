@@ -249,3 +249,47 @@ test('authority and journal fields never coerce array values into valid strings'
   const journal = JSON.parse(readFileSync(f.journalPath, 'utf8')); journal.oldBundleHash = [journal.oldBundleHash]; writeFileSync(f.journalPath, JSON.stringify(journal));
   assert.equal((await f.run(maintenance.maintenanceState(f.input))).phase, null);
 });
+
+test('successful old service registration retains prepared pending when fresh IPC health is unavailable or wrong', async t => {
+  for (const failure of ['unavailable', 'wrong-version', 'wrong-protocol'] as const) {
+    const f = fixture(t); let connects = 0;
+    const connect = async (): Promise<AgentConnection> => {
+      if (++connects === 1) return f.connect();
+      assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid);
+      assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), process.pid);
+      if (failure === 'unavailable') throw new AgentUnavailable('fresh service not ready');
+      const conn = await f.connect();
+      return { ...conn, hello: { ...conn.hello, ...(failure === 'wrong-version' ? { agentVersion: 'wrong' } : { protocol: 2 }) } } as AgentConnection;
+    };
+    await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: 50, pollMs: 1, retryDelayMs: 0 })), /health.*timed out|health identity/);
+    assert.ok(f.events.includes('bootstrap')); assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'prepared');
+    assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
+  }
+});
+
+test('prepared EOF retains pending when the restarted service fails fresh health', async t => {
+  const f = fixture(t); let connects = 0;
+  const connect = async (): Promise<AgentConnection> => {
+    if (++connects === 1) return f.connect();
+    throw new AgentUnavailable('not ready');
+  };
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }), stdout: () => {}, connect, timeoutMs: 50, pollMs: 1, retryDelayMs: 0 })), /EOF/);
+  assert.ok(existsSync(f.journalPath));
+});
+
+test('prepared restoration cancellation joins fresh health before releasing fences and preserves pending', async t => {
+  const f = fixture(t); const controller = new AbortController(); let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }); let connects = 0;
+  const connect = async (): Promise<AgentConnection> => {
+    if (++connects === 2) { entered(); await new Promise(resolve => setTimeout(resolve, 40)); }
+    return f.connect();
+  };
+  const running = f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: 200, pollMs: 1, retryDelayMs: 0 }), controller.signal);
+  const rejected = assert.rejects(running);
+  await ready; assert.ok(existsSync(f.journalPath)); controller.abort(); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid);
+  assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), process.pid);
+  await rejected;
+  assert.ok(existsSync(f.journalPath)); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
+  assert.equal(f.events.filter(event => event === 'bootstrap').length, 1, 'failed restoration is not repeated during interruption cleanup');
+});
