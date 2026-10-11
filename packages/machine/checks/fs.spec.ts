@@ -14,6 +14,25 @@ import { Fs, nodeFs } from '../src/index.ts';
 const run = <A, E>(effect: Effect.Effect<A, E, Fs>) => Effect.runPromise(effect.pipe(Effect.provide(nodeFs)));
 const scratch = () => mkdtempSync(join(tmpdir(), 'machine-fs-'));
 
+test('createDirectory exclusively reserves a new directory without replacing existing entries or creating parents', async (t) => {
+  const dir = scratch();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, 'reserved');
+  const reserve = (path: string) => run(Fs.use((fs) => fs.createDirectory(path)));
+  const competing = await Promise.allSettled([reserve(target), reserve(target)]);
+  assert.equal(competing.filter((result) => result.status === 'fulfilled').length, 1);
+  writeFileSync(join(target, 'keep'), 'owner data');
+  writeFileSync(join(dir, 'file'), 'owner file');
+  symlinkSync(target, join(dir, 'link'));
+  for (const name of ['reserved', 'file', 'link', 'missing/child']) {
+    await assert.rejects(reserve(join(dir, name)), /FsFailed/);
+  }
+  assert.equal(readFileSync(join(target, 'keep'), 'utf8'), 'owner data');
+  assert.equal(readFileSync(join(dir, 'file'), 'utf8'), 'owner file');
+  assert.ok(lstatSync(join(dir, 'link')).isSymbolicLink());
+  assert.equal(existsSync(join(dir, 'missing')), false);
+});
+
 test('readText returns undefined for an absent file', async () => {
   assert.equal(await run(Fs.use((fs) => fs.readText(join(scratch(), 'nope')))), undefined);
 });

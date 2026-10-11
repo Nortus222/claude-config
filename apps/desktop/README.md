@@ -102,6 +102,14 @@ apply lock. It leaves configuration unchanged and preserves the clone if subsequ
 fails. The native app runs its existing ensure helper after bootstrap. Existing or corrupt recorded
 setups are never silently replaced.
 
+The whole bootstrap has a 110-second cancellation deadline, beginning before login probing and
+prerequisite checks. This leaves cleanup time before the native 120-second timeout. If that outer
+timeout fires, native sends SIGTERM and waits up to five seconds for the helper to cancel and join
+its detached Git child, remove its owned incomplete directory, and release the lock before killing
+the helper group. Ensure/restart retain their existing timeout behavior. A forced kill or OS crash
+can bypass finalizers and leave an incomplete directory or detached child; the dead-owner lock is
+recoverable on retry, but cleanup after a crash is not guaranteed.
+
 Desktop foreground agents use the public hosted API root when `NORTUSCC_HOSTED_URL` is absent.
 Explicit URL overrides, including invalid values, retain their meaning. Set the desktop-only
 `NORTUSCC_DESKTOP_LOCAL_ONLY=1` to create no hosted client; any other defined value is rejected.

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { loadProfile, nodeFiles, requireValid } from '@nortuscc/profile-engine';
@@ -57,10 +56,10 @@ const validSetupRecord = (text: string): boolean => {
     || !value.configTargets.every((target) => target === 'claude' || target === 'codex'))) return false;
   return true;
 };
-export const setupState = async (input: OnboardingInput): Promise<SetupState> => {
-  const paths = await Effect.runPromise(pathsFor(input));
-  const recorded = await Effect.runPromise(Effect.gen(function* () {
-    const fs = yield* Fs;
+const inspectSetup = (input: OnboardingInput) => Effect.gen(function* () {
+  const paths = yield* pathsFor(input);
+  const fs = yield* Fs;
+  const recorded = yield* Effect.gen(function* () {
     let repo: string | null = null;
     for (const path of [join(paths.stateRoot, 'state.json'), join(paths.claude, '.nortuscc-lock.json')]) {
       const text = yield* fs.readText(path);
@@ -71,11 +70,13 @@ export const setupState = async (input: OnboardingInput): Promise<SetupState> =>
       break;
     }
     return input.env.NORTUSCC_REPO_DIR || repo;
-  }).pipe(Effect.provide(nodeFs)));
+  });
   if (recorded !== null && (!isAbsolute(recorded) || !isGitCheckout(recorded))) throw new Error('the recorded repository is not an existing checkout; repair its record');
-  return { needsSetup: recorded === null, repo: recorded, gitAvailable: (await Effect.runPromise(findGit(input))) !== null,
-    canInstallGit: input.platform === 'darwin', defaultRepoUrl: DEFAULT_REPO_URL };
-};
+  return { needsSetup: recorded === null, repo: recorded, gitAvailable: (yield* findGit(input)) !== null,
+    canInstallGit: input.platform === 'darwin', defaultRepoUrl: DEFAULT_REPO_URL } satisfies SetupState;
+});
+export const setupState = (input: OnboardingInput): Promise<SetupState> =>
+  Effect.runPromise(inspectSetup(input).pipe(Effect.provide(nodeFs)), { signal: input.signal });
 
 export const requestGitInstall = async (input: OnboardingInput): Promise<void> => {
   if (input.platform !== 'darwin') throw new Error('the system Git installer is available only on macOS');
@@ -95,7 +96,7 @@ export const bootstrapSetup = async (input: OnboardingInput, rawChoices: SetupCh
     machinePaths(paths), nodeFs, input.processes ?? nodeProcesses({ env: isolatedEnv, inherit: 'stderr' }))));
   return Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* acquirePidLock(join(paths.stateRoot, 'apply.lock'));
-    const current = yield* Effect.tryPromise({ try: () => setupState(input), catch: (error) => error });
+    const current = yield* inspectSetup(input);
     if (!current.needsSetup) return { stateRoot: paths.stateRoot };
     if (!current.gitAvailable) return yield* Effect.fail(new Error('Git is required; install it and recheck before setup'));
     const fs = yield* Fs;
@@ -105,7 +106,7 @@ export const bootstrapSetup = async (input: OnboardingInput, rawChoices: SetupCh
     const root = join(paths.stateRoot, `desktop-setup-${randomUUID()}`);
     const temp = join(root, '.clone');
     const repo = join(root, 'repo');
-    yield* Effect.tryPromise({ try: () => mkdir(root), catch: (error) => error });
+    yield* fs.createDirectory(root);
     let promoted = false;
     yield* Effect.addFinalizer(() => promoted ? Effect.void : fs.remove(root).pipe(Effect.orDie));
     const processes = yield* Processes;

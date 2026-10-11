@@ -21,6 +21,7 @@ const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const BOOTSTRAP_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 type Pending = HashMap<String, mpsc::Sender<Result<Value, String>>>;
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 
@@ -639,7 +640,7 @@ pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<Path
     let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
     let mut command = helper_command(resources, Setup::Bootstrap, None)?;
     command.stdin(Stdio::piped());
-    setup_root(run_json_helper(command, HELPER_TIMEOUT, Some(input))?)
+    setup_root(run_json_helper_with_cancel(command, HELPER_TIMEOUT, Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
 }
 pub fn install_git(resources: &Path) -> Result<Value, String> {
     let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Duration::from_secs(30), None)?;
@@ -687,9 +688,14 @@ fn run_helper(command: Command, timeout: Duration) -> Result<PathBuf, String> {
     setup_root(run_json_helper(command, timeout, None)?)
 }
 /// The native host owns and joins every helper child and pipe reader before returning.
-fn run_json_helper(mut command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<Value, String> {
+fn run_json_helper(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<Value, String> {
+    run_json_helper_with_cancel(command, timeout, input, Duration::ZERO)
+}
+fn run_json_helper_with_cancel(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
     if input.as_ref().is_some_and(|v| v.len() > 4096) { return Err("Setup input exceeds limit".into()); }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    wait_json_helper(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout)
+}
+fn wait_json_helper(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
     let stdout = child.stdout.take().ok_or("Missing helper stdout")?;
     let stderr = child.stderr.take().ok_or("Missing helper stderr")?;
     let (send, receive) = mpsc::channel();
@@ -728,6 +734,18 @@ fn run_json_helper(mut command: Command, timeout: Duration, input: Option<Vec<u8
         Ok(value)
     })();
     if result.is_err() {
+        // Bootstrap's signal handler cancels and joins its detached Git group before cleanup.
+        // Other lifecycle helpers retain their existing immediate termination contract.
+        if !cancel_timeout.is_zero() && child.try_wait().ok().flatten().is_none() {
+            unsafe { libc::kill(child.id() as i32, libc::SIGTERM); }
+            let cancel_deadline = Instant::now() + cancel_timeout;
+            while Instant::now() < cancel_deadline {
+                if child.try_wait().ok().flatten().is_some() { break; }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        // Also close any inherited pipes held by children in the helper's group.
+        // A forced kill or crash cannot run finalizers for children in separate groups.
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
         let _ = child.kill(); let _ = child.wait();
     }
@@ -1136,6 +1154,86 @@ mod helper_tests {
         std::fs::write(root.join("bun"), format!("#!/bin/sh\n{source}\n")).unwrap();
         std::fs::set_permissions(root.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
         root
+    }
+    #[test]
+    fn bootstrap_outer_timeout_joins_detached_git_and_removes_only_its_owned_directory_and_lock() {
+        struct Fixture { root: PathBuf, child: Option<std::process::Child> }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(child) = self.child.take() { let _ = wait_json_helper(child, Duration::ZERO, None, BOOTSTRAP_CANCEL_TIMEOUT); }
+                if let Ok(text) = std::fs::read_to_string(self.root.join("git.pid")) {
+                    if let Ok(pid) = text.parse::<i32>() { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap();
+        let node = Command::new("node").args(["-p", "process.execPath"]).output().unwrap();
+        assert!(node.status.success());
+        let node = String::from_utf8(node.stdout).unwrap().trim().to_owned();
+        let root = resources(&format!("exec '{}' '{}' \"$PWD\"", node.replace('\'', "'\\''"), repo.join("apps/desktop/checks/support/native-bootstrap-fixture.ts").display()));
+        let mut fixture = Fixture { root: root.clone(), child: None };
+        let home = root.join("home"); std::fs::create_dir(&home).unwrap();
+        let tools = root.join("tools"); std::fs::create_dir(&tools).unwrap();
+        std::fs::write(tools.join("git"), format!(r#"#!{node}
+const fs = require('node:fs');
+if (!process.argv.includes('clone')) {{ console.log('fake Git'); process.exit(0); }}
+process.on('SIGTERM', () => {{}});
+setInterval(() => {{}}, 1000);
+fs.mkdirSync(process.argv.at(-1), {{recursive:true}});
+fs.writeFileSync({pid:?}, String(process.pid));
+fs.writeFileSync({owned:?} + '.tmp', process.argv.at(-1));
+fs.renameSync({owned:?} + '.tmp', {owned:?});
+"#, pid=root.join("git.pid").to_str().unwrap(), owned=root.join("owned").to_str().unwrap())).unwrap();
+        std::fs::set_permissions(tools.join("git"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = home.join("state"); std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(state.join("desktop-setup-existing")).unwrap();
+        std::fs::write(state.join("desktop-setup-existing/keep"), "owner data").unwrap();
+        fixture.child = Some(helper_command(&root, Setup::Bootstrap, None).unwrap().spawn().unwrap());
+        // The fixture's fixed choices let the real clone start before the scaled outer deadline.
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("owned").exists() && Instant::now() < ready_deadline { thread::sleep(Duration::from_millis(10)); }
+        assert!(root.join("owned").exists(), "fake clone did not become ready");
+        let start = Instant::now();
+        let result = wait_json_helper(fixture.child.take().unwrap(), Duration::from_millis(100), None, BOOTSTRAP_CANCEL_TIMEOUT);
+        let elapsed = start.elapsed();
+        // Capture evidence, then always clean up this fixture's child before asserting RED/GREEN.
+        let pid = std::fs::read_to_string(root.join("git.pid")).unwrap().parse::<i32>().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        let owned = PathBuf::from(std::fs::read_to_string(root.join("owned")).unwrap());
+        let directory_remains = owned.parent().unwrap().exists();
+        let lock_remains = state.join("apply.lock").exists();
+        let recorded = state.join("state.json").exists();
+        let unrelated = std::fs::read_to_string(state.join("desktop-setup-existing/keep")).unwrap();
+        if alive { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(elapsed < Duration::from_secs(9));
+        assert!(!alive, "detached Git survived native timeout");
+        assert!(!directory_remains, "owned clone directory survived native timeout");
+        assert!(!lock_remains, "apply lock survived native timeout");
+        assert!(!recorded, "failed clone recorded setup authority");
+        assert_eq!(unrelated, "owner data");
+    }
+    #[test]
+    fn bootstrap_escalates_and_joins_a_helper_that_ignores_graceful_cancellation() {
+        let root = resources("exec /bin/sleep 30");
+        let mut command = helper_command(&root, Setup::Bootstrap, None).unwrap();
+        use std::os::unix::process::CommandExt;
+        // Install before exec, so SIGTERM is ignored even if the script has not started.
+        unsafe { command.pre_exec(|| { libc::signal(libc::SIGTERM, libc::SIG_IGN); Ok(()) }); }
+        let child = command.spawn().unwrap();
+        let pid = child.id() as i32;
+        let start = Instant::now();
+        let result = wait_json_helper(child,
+            Duration::from_millis(100), None, Duration::from_millis(50));
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap_err(), "Agent setup timed out");
+        assert!(start.elapsed() >= Duration::from_millis(150), "SIGTERM bypassed the grace interval");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!alive, "helper survived hard escalation");
     }
     #[test]
     fn first_run_helpers_use_fixed_arguments_and_bounded_json_stdin() {

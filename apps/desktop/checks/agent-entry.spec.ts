@@ -274,6 +274,66 @@ test('a completed first-run clone survives failed service registration and retri
   assert.deepEqual(JSON.parse(readFileSync(join(f.stateRoot, 'overrides.json'), 'utf8')).configTargets, ['claude']);
 });
 
+test('the whole bootstrap deadline starts before probing and refuses to clone after it expires', async (t) => {
+  const f = fixture(t); rmSync(join(f.stateRoot, 'state.json'));
+  const stdin = async function* () { yield '{"configTargets":[]}'; };
+  const code = await runDesktopEntry({ ...f.input, args: ['--bootstrap', '--app', '/native/app'],
+    bootstrapTimeoutMs: 10, stdin: stdin(),
+    probe: async () => {
+      await new Promise((done) => setTimeout(done, 30));
+      return { env: { HOME: f.home, NORTUSCC_STATE_DIR: f.stateRoot } };
+    },
+  });
+  assert.equal(code, 1);
+  assert.deepEqual(f.commands, [], 'expired setup never reaches Git or registration');
+  assert.equal(existsSync(join(f.stateRoot, 'state.json')), false);
+  assert.equal(existsSync(join(f.stateRoot, 'apply.lock')), false);
+});
+
+test('bootstrap cancellation joins a detached Git prerequisite before releasing the lock', {
+  skip: process.platform === 'win32' ? 'POSIX executable fixture' : false, timeout: 15000,
+}, async (t) => {
+  const f = fixture(t); rmSync(join(f.stateRoot, 'state.json'));
+  const bin = join(f.home, 'tools'); mkdirSync(bin);
+  const pidFile = join(f.home, 'git.pid');
+  const git = join(bin, 'git');
+  writeFileSync(git, `#!${process.execPath}\nconst fs = require('node:fs');
+process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);
+fs.writeFileSync(${JSON.stringify(pidFile + '.tmp')}, String(process.pid));
+fs.renameSync(${JSON.stringify(pidFile + '.tmp')}, ${JSON.stringify(pidFile)});\n`);
+  chmodSync(git, 0o700);
+  const stdin = async function* () { yield '{"configTargets":[]}'; };
+  const env = { HOME: f.home, NORTUSCC_STATE_DIR: f.stateRoot, PATH: bin };
+  const controller = new AbortController();
+  let pid: number | undefined;
+  const running = runDesktopEntry({ ...f.input, args: ['--bootstrap', '--app', '/native/app'],
+    processes: undefined, platform: 'linux', env, probe: async () => ({ env }),
+    signal: controller.signal, stdin: stdin(),
+  });
+  t.after(async () => {
+    controller.abort();
+    await running;
+    if (pid !== undefined) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+  });
+  const readyDeadline = Date.now() + 5000;
+  while (!existsSync(pidFile) && Date.now() < readyDeadline) await new Promise((done) => setTimeout(done, 10));
+  assert.ok(existsSync(pidFile), 'fake Git prerequisite did not become ready');
+  const recordedPid = Number(readFileSync(pidFile, 'utf8'));
+  assert.ok(Number.isInteger(recordedPid) && recordedPid > 0);
+  pid = recordedPid;
+  const start = Date.now();
+  controller.abort();
+  assert.equal(await running, 1);
+  const elapsed = Date.now() - start;
+  let alive = true;
+  try { process.kill(pid, 0); } catch { alive = false; }
+  if (alive) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+  assert.equal(alive, false, 'prerequisite child is joined before bootstrap returns');
+  assert.ok(elapsed < 2500, `prerequisite cancellation took ${elapsed}ms`);
+  assert.equal(existsSync(join(f.stateRoot, 'apply.lock')), false);
+  assert.equal(existsSync(join(f.stateRoot, 'state.json')), false);
+});
+
 test('the desktop default enables signed-out account controls without signing in, trusting or contacting the service', {
   skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
 }, async (t) => {

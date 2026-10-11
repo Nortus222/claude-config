@@ -23,6 +23,7 @@ export type DesktopEntryInput = {
   readonly processes?: Layer.Layer<Processes>;
   readonly probe?: typeof probeLoginEnvironment;
   readonly signal?: AbortSignal;
+  readonly bootstrapTimeoutMs?: number;
   readonly stdin?: AsyncIterable<string | Uint8Array>;
   readonly hostedDependencies?: Pick<HostedOptions, 'transport' | 'keychain' | 'now'>;
   readonly stdout?: (text: string) => void;
@@ -37,6 +38,8 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
   const stop = () => controller.abort();
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
+  // Starts before probes/input/Git, leaving ten seconds before the native 120-second deadline.
+  const deadline = input.args[0] === '--bootstrap' ? setTimeout(stop, input.bootstrapTimeoutMs ?? 110_000) : undefined;
   try {
     return await Effect.runPromise(Effect.gen(function* () {
       const [arg, appFlag, appPath] = input.args;
@@ -53,6 +56,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
         });
         if (login.error) stderr(`nortuscc agent: ${login.error}\n`);
         const helperInput = { env: login.env, home: login.env.HOME ?? input.env.HOME ?? homedir(), platform: input.platform ?? process.platform, processes: input.processes, signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal };
+        helperInput.signal.throwIfAborted();
         if (arg === '--setup-state') {
           stdout(JSON.stringify(yield* Effect.tryPromise({ try: () => setupState(helperInput), catch: (error) => error })) + '\n');
           return 0;
@@ -64,6 +68,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
         }
         if (arg === '--bootstrap') {
           const choices = yield* Effect.tryPromise({ try: () => readSetupChoices(input.stdin ?? process.stdin), catch: (error) => error }).pipe(Effect.timeout(5000));
+          helperInput.signal.throwIfAborted();
           const result = yield* Effect.tryPromise({ try: () => bootstrapSetup(helperInput, choices), catch: (error) => error });
           stdout(JSON.stringify(result) + '\n');
           return 0;
@@ -118,6 +123,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       return 1;
     }))));
   } finally {
+    clearTimeout(deadline);
     if (input.args[0] === '--bootstrap' && input.stdin === undefined) process.stdin.destroy();
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
