@@ -10,7 +10,7 @@ import {
   backupsForRun, configDomain, execute, integrationsDomain, machinePaths, nodeFs, nodeProcesses, overridesStore,
   OverridesStore, pathsFromEnvironment, skillsDomain, stateStore,
   type Backups, type Domain, type DomainServices, type Fs, type FsFailed, type IntegrationsServices, type LaunchFailed, type LockHeld,
-  type MachinePaths, type MachinePathsValue, type MachineReport, type Plan, type PluginState, type Processes, type RepoNotFound,
+  type MachinePaths, type MachinePathsValue, type MachineReport, type MaintenancePending, type Plan, type PluginState, type Processes, type RepoNotFound,
   type StateStore, type Step,
 } from '@nortuscc/machine';
 import { desiredFor, SyncStore, syncStore, type Holds, type Snapshot, type SyncStateInvalid } from '@nortuscc/sync';
@@ -181,7 +181,7 @@ export function runPlan<const D extends ReadonlyArray<Domain<any>>>(
   report: MachineReport,
   domains: D,
   options: { signal?: AbortSignal; onStarted?: (step: Step) => void } = {},
-): Effect.Effect<Ran, LockHeld, DomainServices<D> | MachinePaths | Backups> {
+): Effect.Effect<Ran, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups> {
   const ran: Ran = { results: [], cancelled: false };
   return Stream.runForEach(execute(plan, report, domains, { signal: options.signal }), (event) => Effect.sync(() => {
     switch (event.type) {

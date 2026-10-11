@@ -2,7 +2,7 @@ import { isAbsolute, join } from 'node:path';
 import { Effect } from 'effect';
 import {
   AgentStateStore, installService, renderLaunchAgent, renderSystemdUnit, restartService, SetupsStore, stopService,
-  trustOwnSetup, unitPath, LAUNCH_AGENT_LABEL, type ServiceProgram, type ServiceTarget,
+  trustOwnSetup, unitPath, LAUNCH_AGENT_LABEL, POLICIES, type ServiceProgram, type ServiceTarget,
 } from '@nortuscc/agent';
 import { decodeWireStatus } from '@nortuscc/agent/ipc/protocol';
 import { acquirePidLock, Backups, Fs, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
@@ -21,6 +21,8 @@ export type LifecycleInput = {
 };
 export type LifecycleOptions = {
   readonly restart?: boolean;
+  // Only the fixed recovery helper supplies an exact journal and verifies health under both locks.
+  readonly recovery?: { readonly journal: string; readonly afterRegistration: (signal: AbortSignal) => Promise<void> };
   readonly connect?: () => Promise<AgentConnection>;
   readonly timeoutMs?: number;
   readonly pollMs?: number;
@@ -55,6 +57,78 @@ export const resourceProgram = (input: LifecycleInput): ServiceProgram => {
 };
 const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: (error) => error });
 
+export const pendingPath = (input: LifecycleInput) => join(input.paths.stateRoot, 'agent/pending-update.json');
+const validPath = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value) && !/[\x00-\x1f\x7f]/.test(value);
+
+export const validateExistingAuthority = (input: LifecycleInput) => Effect.gen(function* () {
+  const fs = yield* Fs;
+  const text = yield* fs.readText(join(input.paths.stateRoot, 'agent/agent.json'));
+  if (text !== undefined) {
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('agent.json is invalid');
+    const raw = value as Record<string, unknown>;
+    if (raw.version !== 1 || !POLICIES.includes(raw.policy as typeof POLICIES[number]) || (raw.policySource !== 'person' && raw.policySource !== 'default')
+      || !(raw.paused === null || (typeof raw.paused === 'object' && raw.paused !== null && !Array.isArray(raw.paused)
+        && typeof (raw.paused as Record<string, unknown>).reason === 'string' && typeof (raw.paused as Record<string, unknown>).at === 'string'
+        && (!Object.hasOwn(raw.paused, 'runId') || typeof (raw.paused as Record<string, unknown>).runId === 'string')))
+      || (raw.installedBy !== undefined && raw.installedBy !== 'app' && raw.installedBy !== 'cli')
+      || (raw.agentVersion !== undefined && typeof raw.agentVersion !== 'string') || (raw.appPath !== undefined && !validPath(raw.appPath))) throw new Error('agent.json is invalid; repair it before installing');
+  }
+  if ((yield* (yield* SetupsStore).read) === undefined) throw new Error('agent/setups.json is invalid; repair it before installing');
+  for (const path of [join(input.paths.stateRoot, 'state.json'), join(input.paths.claude, '.nortuscc-lock.json')]) {
+    const setup = yield* fs.readText(path);
+    if (setup === undefined) continue;
+    const raw = JSON.parse(setup) as Record<string, unknown>;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !(raw.repo === null || typeof raw.repo === 'string')
+      || (raw.version !== undefined && raw.version !== 1) || !raw.files || typeof raw.files !== 'object' || Array.isArray(raw.files)
+      || !Object.values(raw.files).every(value => value !== null && typeof value === 'object' && typeof (value as Record<string, unknown>).hash === 'string'
+        && typeof (value as Record<string, unknown>).appliedAt === 'string')
+      || (raw.skillsOnly !== undefined && typeof raw.skillsOnly !== 'boolean')
+      || (raw.configTargets !== undefined && (!Array.isArray(raw.configTargets) || !raw.configTargets.every(value => value === 'claude' || value === 'codex')))) throw new Error('setup authority is invalid; repair it before installing');
+    break;
+  }
+});
+
+// Edit only registration values. Stored policy, pause and unknown JSON bytes keep their original form.
+const registrationText = (text: string, changes: Readonly<Record<string, string>>): string => {
+  const spans = new Map<string, [number, number]>();
+  let at = text.indexOf('{') + 1;
+  const whitespace = () => { while (/\s/.test(text[at] ?? '') && at < text.length) at++; };
+  const stringEnd = (start: number) => {
+    let index = start + 1;
+    while (index < text.length) {
+      if (text[index] === '\\') index += 2;
+      else if (text[index++] === '"') return index;
+    }
+    throw new Error('agent.json is invalid');
+  };
+  while (true) {
+    whitespace(); if (text[at] === '}') break;
+    const keyStart = at; at = stringEnd(at);
+    const key = JSON.parse(text.slice(keyStart, at)) as string;
+    whitespace(); at++; whitespace(); const start = at;
+    let depth = 0;
+    while (at < text.length) {
+      const char = text[at];
+      if (char === '"') { at = stringEnd(at); continue; }
+      if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') { if (depth === 0) break; depth--; }
+      if (char === ',' && depth === 0) break;
+      at++;
+    }
+    let end = at; while (/\s/.test(text[end - 1] ?? '')) end--;
+    spans.set(key, [start, end]);
+    if (text[at] === ',') at++; else break;
+  }
+  const edits = Object.entries(changes).flatMap(([key, value]) => {
+    const span = spans.get(key); return span ? [{ start: span[0], end: span[1], value: JSON.stringify(value) }] : [];
+  });
+  for (const edit of edits.sort((a, b) => b.start - a.start)) text = text.slice(0, edit.start) + edit.value + text.slice(edit.end);
+  const additions = Object.entries(changes).filter(([key]) => !spans.has(key)).map(([key, value]) => JSON.stringify(key) + ':' + JSON.stringify(value));
+  if (additions.length) { const end = text.lastIndexOf('}'); text = text.slice(0, end) + (spans.size ? ',' : '') + additions.join(',') + text.slice(end); }
+  return text;
+};
+
 // A matching unit alone does not prove a successful bootstrap. The marker is written only after
 // registration succeeds, so a failed install remains retryable even if it wrote the desired unit.
 export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {}) => Effect.scoped(Effect.gen(function* () {
@@ -63,6 +137,10 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   const { paths, target } = input;
   const fs = yield* Fs;
   yield* acquirePidLock(join(paths.stateRoot, 'agent', 'app-install.lock'));
+  const pending = yield* fs.readText(pendingPath(input));
+  if (pending !== undefined && (options.recovery === undefined || pending !== options.recovery.journal)) return yield* Effect.fail(new Error('pending app update requires recovery before ensuring the agent'));
+  if (options.recovery !== undefined && pending !== options.recovery.journal) return yield* Effect.fail(new Error('pending update changed before recovery'));
+  yield* validateExistingAuthority(input);
   const state = yield* AgentStateStore;
   const recorded = yield* state.read;
   const program = resourceProgram(input);
@@ -139,7 +217,13 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
     yield* backups.preserve(join(paths.stateRoot, 'agent', name), name, 'agent');
   }
   if (firstInstallation) yield* trustOwnSetup('app');
-  yield* state.update((s) => ({ ...s, installedBy: 'app', agentVersion: input.agentVersion }));
+  yield* validateExistingAuthority(input);
+  const statePath = join(paths.stateRoot, 'agent', 'agent.json');
+  const updateRegistration = (changes: Readonly<Record<string, string>>) => Effect.gen(function* () {
+    const text = (yield* fs.readText(statePath)) ?? JSON.stringify(yield* state.read);
+    yield* fs.writeTextAtomic(statePath, registrationText(text, changes));
+  });
+  yield* updateRegistration({ installedBy: 'app', agentVersion: input.agentVersion });
   const serviceOptions = { retryDelayMs: options.retryDelayMs };
   // A reachable unchanged registration remains loaded after graceful shutdown. Recovery of an
   // unreachable job re-registers it, since neither the unit nor the marker proves it is loaded.
@@ -148,7 +232,17 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   } else {
     yield* installService(target, program, serviceOptions);
   }
-  yield* state.update((s) => ({ ...s, appPath: input.appPath }));
+  yield* updateRegistration({ appPath: input.appPath });
   yield* fs.writeTextAtomic(markerPath, marker + '\n');
+  if (options.recovery) {
+    const healthController = new AbortController();
+    const health = options.recovery.afterRegistration(healthController.signal);
+    // Cancellation joins health before releasing either lock, so a late callback cannot clear pending.
+    yield* Effect.addFinalizer(() => Effect.promise(async () => {
+      healthController.abort();
+      await health.catch(() => undefined);
+    }));
+    yield* attempt(() => health);
+  }
   return { stateRoot: paths.stateRoot };
 }));

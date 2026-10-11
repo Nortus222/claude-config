@@ -51,7 +51,8 @@ jobs:
           const effectRoot = dirname(createRequire(resolve('package.json')).resolve('effect/package.json'));
           await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
           const agentVersion = createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex');
-          await writeFile(resolve(resources, 'runtime.json'), JSON.stringify({ target, bun: bunVersion, executable: 'bun', agentVersion }, null, 2));
+          const appVersion = JSON.parse(await readFile('apps/desktop/package.json', 'utf8')).version;
+          await writeFile(resolve(resources, 'runtime.json'), JSON.stringify({ target, appVersion, maintenanceProtocol: 1, bun: bunVersion, executable: 'bun', agentVersion }, null, 2));
           await appendFile(process.env.GITHUB_ENV, `DESKTOP_AGENT_RESOURCES=${resources}\n`);
           NODE
       - run: npm run test:packages

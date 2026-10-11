@@ -35,7 +35,8 @@ try {
   await copyFile(join(dirname(require.resolve('effect/package.json')), 'LICENSE'), join(resources, 'EFFECT-LICENSE'));
   const agentVersion = createHash('sha256').update(await readFile(join(resources, 'agent.mjs'))).digest('hex');
   await writeFile(join(resources, 'runtime.json'), JSON.stringify({
-    target: `${process.platform}-${process.arch}`, bun: bunVersion, executable, agentVersion,
+    target: `${process.platform}-${process.arch}`, appVersion: JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version,
+    maintenanceProtocol: 1, bun: bunVersion, executable, agentVersion,
   }, null, 2));
   execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts'], {
     cwd: root, env: { ...process.env, DESKTOP_AGENT_RESOURCES: resources },

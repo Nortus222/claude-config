@@ -22,7 +22,7 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   mkdirSync(join(repo, '.git'), { recursive: true });
   mkdirSync(stateRoot);
   writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash' }));
-  writeFileSync(join(stateRoot, 'state.json'), JSON.stringify({ repo }));
+  writeFileSync(join(stateRoot, 'state.json'), JSON.stringify({ version: 1, repo, files: {} }));
   const stdout: string[] = [];
   const stderr: string[] = [];
   const commands: Command[] = [];
@@ -357,4 +357,18 @@ test('the desktop default enables signed-out account controls without signing in
     await conn.request({ command: 'shutdown' });
   } finally { conn.close(); controller.abort(); }
   assert.equal(await running, 0, f.stderr.join(''));
+});
+
+test('maintenance state remains readable before setup without service manager actions', async t => {
+  const f = fixture(t); rmSync(join(f.stateRoot, 'state.json'));
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--maintenance-state', '--app', f.input.args[2]!] }), 0);
+  assert.deepEqual(JSON.parse(f.stdout.at(-1)!), { pending: false, phase: null, fromVersion: null, toVersion: null, backupPath: null, diagnostic: null });
+  assert.deepEqual(f.commands, []);
+});
+
+test('cancelled maintenance helper returns bounded failure without an unhandled interruption', async t => {
+  const f = fixture(t); const controller = new AbortController(); controller.abort();
+  const stdin = async function* () { yield '{"fromVersion":"1.0.0","toVersion":"1.1.0"}\n'; };
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--prepare-update', '--app', f.input.args[2]!], stdin: stdin(), signal: controller.signal }), 1);
+  assert.deepEqual(f.commands, []);
 });

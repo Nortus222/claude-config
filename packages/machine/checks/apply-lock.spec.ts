@@ -176,3 +176,14 @@ test('a lock records the uptime it was taken at', async () => {
   assert.equal(written.pid, process.pid);
   assert.ok(typeof written.uptime === 'number' && written.uptime <= uptime());
 });
+
+test('pending or corrupt desktop maintenance blocks changes after a dead updater releases its pid lock', async () => {
+  for (const content of ['{"phase":"installing"}', 'corrupt']) {
+    const { lock, run } = setup();
+    mkdirSync(join(dirname(lock), 'agent'), { recursive: true });
+    writeFileSync(join(dirname(lock), 'agent', 'pending-update.json'), content);
+    const exit = await run(Effect.andThen(acquireApplyLock, Effect.sync(() => assert.fail('pending maintenance must prevent machine changes'))));
+    assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('MaintenancePending'));
+    assert.equal(existsSync(lock), false, 'refusal releases the scoped apply fence');
+  }
+});

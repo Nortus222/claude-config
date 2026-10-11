@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod updates;
+mod update_payload;
+mod update_service;
+mod updater_transport;
 mod display_name_categories;
 mod notifications;
 use host::{Agent, Request, Setup};
@@ -23,10 +27,16 @@ struct Owner {
     resources: PathBuf,
     app: tauri::AppHandle,
     review: Arc<notifications::ReviewRoute>,
+    updates: Arc<updates::Coordinator>,
 }
 impl Owner {
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<Agent, String> {
-        let state_root = host::setup_agent(&self.resources, setup)?;
+        let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && update_service::maintenance_state(&self.resources)?.pending;
+        let state_root = if recovered {
+            let result=update_service::recover(&self.resources,&self.app.package_info().version.to_string());
+            if result.is_err() {self.updates.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
+            result?
+        } else {host::setup_agent(&self.resources, setup)?};
         let app = self.app.clone();
         let (send, receive) = std::sync::mpsc::channel();
         let agent = Agent::connect_ready(&state_root, Arc::new(move |mut event| {
@@ -37,6 +47,11 @@ impl Owner {
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
         }))?;
+        let metadata:Value=serde_json::from_slice(&std::fs::read(self.resources.join("runtime.json")).map_err(|_|"Cannot read installed agent identity")?).map_err(|_|"Invalid installed agent identity")?;
+        if metadata["agentVersion"].as_str()!=agent.hello["agentVersion"].as_str() {
+            agent.disconnect();return Err("Connected agent does not match the installed app runtime".into());
+        }
+        if recovered {self.updates.recovered();}
         let owner = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Ok(delivery) = receive.recv() {
@@ -225,6 +240,43 @@ async fn install_git(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::R
 async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, |_| host::open_device_login()).await
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields,rename_all="camelCase")]
+struct CheckUpdateArgs { automatic: bool }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields,rename_all="camelCase")]
+struct UpdatePreferencesArgs { automatic_checks: bool }
+#[tauri::command]
+fn update_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;Ok(owner.updates.snapshot())
+}
+#[tauri::command]
+async fn check_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let args:CheckUpdateArgs=native_args(request)?;let coordinator=owner.updates.clone();Ok(coordinator.check(args.automatic,updates::now_ms()).await)
+}
+#[tauri::command]
+async fn download_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;let coordinator=owner.updates.clone();Ok(coordinator.download().await)
+}
+#[tauri::command]
+fn cancel_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;Ok(owner.updates.cancel())
+}
+#[tauri::command]
+fn update_preferences(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let args:UpdatePreferencesArgs=native_args(request)?;Ok(owner.updates.preferences(args.automatic_checks))
+}
+#[tauri::command]
+async fn install_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle=owner.lifecycle.lock().unwrap();
+        if owner.session.lock().unwrap().closed {return Err("App connection closed".into());}
+        let result=owner.updates.install();
+        if result.phase=="restarting" {close(&owner.session);owner.app.restart();}
+        Ok(result)
+    }).await.map_err(|_|"Native update installation stopped".to_string())?
+}
 /// Bootstrap and ensure share one lifecycle reservation without recursively taking its mutex.
 fn setup_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, bootstrap: impl FnOnce() -> Result<(), String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
     restart(session, lifecycle, |g| { bootstrap()?; connect(g) })
@@ -308,6 +360,17 @@ fn smoke(home: PathBuf) -> Result<(), String> {
 }
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Release preparation verifies files without creating a window, service or OS integration.
+    if args.first().map(String::as_str)==Some("--verify-update-release") {
+        let result=(|| {
+            if args.len()!=5 {return Err("Expected artifact, signature, version and public key".to_string());}
+            let bytes=std::fs::read(&args[1]).map_err(|_|"Cannot read release artifact")?;
+            let signature=std::fs::read_to_string(&args[2]).map_err(|_|"Cannot read release signature")?;
+            update_payload::verify_signature(&bytes,&signature,&args[4],&args[3])?;
+            update_payload::validate_bundle(&bytes,&args[3])
+        })();
+        if let Err(error)=result {eprintln!("{error}");std::process::exit(1);}return;
+    }
     match notifications::notify_argument(&args) {
         Ok(Some(id)) => {
             match notify_mode(&id) {
@@ -339,9 +402,18 @@ fn main() {
             let resources = app.path().resource_dir()?.join("agent-runtime");
             #[cfg(debug_assertions)]
             let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
+            let source=updater_transport::source(app.handle());
+            let preferences=host::setup_agent(&resources,Setup::Paths).ok().map(|root|root.join("agent/update-settings.json"));
+            let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
+            if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
+            match update_service::maintenance_state(&resources) {
+                Ok(state) if state.pending=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
+                Err(_)=>coordinator.recovery("Maintenance state could not be read. Existing setup is retained; retry startup recovery."),
+                _=>{},
+            }
             let owner = Arc::new(Owner {
                 session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false }),
-                lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),
+                lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),updates:coordinator,
             });
             app.manage(owner.clone());
             notifications::request_permission();
@@ -350,7 +422,7 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login])
+        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
@@ -367,6 +439,16 @@ mod tests {
     use host::fixtures::{idle_agent, Fixture};
     use std::{sync::mpsc, thread, time::{Duration, Instant}};
     fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false }) }
+    #[test]
+    fn update_commands_accept_only_fixed_intent_arguments() {
+        assert!(host::decode_args::<CheckUpdateArgs>(json!({"automatic":false})).is_ok());
+        assert!(host::decode_args::<UpdatePreferencesArgs>(json!({"automaticChecks":true})).is_ok());
+        for field in ["url","path","pubkey","bytes","command","installerPid"] {
+            let mut args=json!({"automatic":false});args[field]=json!("arbitrary renderer value");
+            assert!(host::decode_args::<CheckUpdateArgs>(args).is_err());
+            assert!(host::decode_args::<host::EmptyArgs>(json!({field:"arbitrary renderer value"})).is_err());
+        }
+    }
     #[test]
     fn initial_startup_never_ensures_a_missing_or_corrupt_setup() {
         let session = session(1); let lifecycle = Mutex::new(());
