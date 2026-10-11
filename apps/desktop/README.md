@@ -59,7 +59,7 @@ npm run desktop:build -w apps/desktop
 npm run smoke -w apps/desktop -- src-tauri/target/release/bundle/macos/Nortuscc.app
 ```
 
-Resources are Bun, `agent.mjs`, `runtime.json` with the bundled agent version, and runtime licenses under `Contents/Resources/agent-runtime`. Runtime and build output are git-ignored. The version identifies the packaged bundle's contents rather than the installed setup checkout.
+Resources are Bun, `agent.mjs`, `runtime.json` with the app version, bundled agent hash and maintenance protocol, and runtime licenses under `Contents/Resources/agent-runtime`. Runtime and build output are git-ignored. The version identifies the packaged bundle's contents rather than the installed setup checkout.
 
 Both smoke modes create a compact temporary HOME with an inert local Git setup and bare origin. The fixture has no skills or integrations and applies only config. The agent starts in the foreground with an empty inherited PATH; a temporary login shell exposes only the fixture's Git wrapper. Checks exercise inspect, preview, apply and progress, a live cancel held at a deterministic Git gate, malformed and oversized records, strict unknown fields, unknown keys and plan ids, bad tokens, and a missing hello. Closing a client leaves the agent running. JavaScript sends shutdown, waits for exit, checks lock and socket cleanup, then removes HOME. Automated smoke checks also record their agent and native child PIDs outside HOME; independent fixture teardown stops and joins those owned children before deleting files if the smoke parent times out or an assertion fails.
 
@@ -161,7 +161,7 @@ Machine name/reporting updates acknowledge queued local changes rather than clai
 persistence. Policy updates keep any automatic-apply pause until explicit Resume. Offered setup
 repositories require separate unchecked consent before sending an opaque setup ID for trust;
 account membership supplies no trust badge. Sync displays returned freshness, errors and retry time.
-The renderer does not implement updater, authoring, fleet, restoration, publishing or discovery.
+Authoring, fleet, restoration, publishing and discovery remain unfinished.
 
 Controller checks use fake Bridge implementations and injected clocks. Rendered-view fixtures
 use the existing React server renderer with tsx. These tests do not establish actual macOS
@@ -212,3 +212,13 @@ Checks and downloads do not require hosted login or a working agent connection. 
 this initial release requires a valid existing app-owned setup and service registration. A new,
 CLI-owned or corrupt setup stops maintenance with a diagnostic; updates never silently bootstrap
 or take ownership of it. Complete the explicit first-run setup before installing an update.
+
+Settings and first-run screens show installed/available versions, plain release notes, bounded
+automatic checks, download progress and explicit Install and restart. Downloads are verified and
+retained by Rust while the app and agent continue operating. Installation waits for active applies,
+backs up the bundle and service state, and holds the shared apply and app-install locks through
+replacement. A durable pending journal fences machine changes after interruption. Recovery requires
+an intact expected bundle and fresh protocol/runtime health before clearing pending. An installing
+journal also refuses recovery while the native installer PID lives or liveness cannot be proved;
+PID reuse can conservatively require owner inspection. Recovery retains backups and machine state
+without promising automatic app rollback or crash-proof cleanup.
