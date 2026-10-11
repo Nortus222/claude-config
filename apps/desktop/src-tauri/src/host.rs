@@ -657,7 +657,9 @@ pub fn open_device_login() -> Result<Value, String> {
     run_browser(device_login_command(), Duration::from_secs(5))
 }
 fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String> {
-    let mut child = command.spawn().map_err(|_| "Unable to open GitHub")?;
+    wait_browser(command.spawn().map_err(|_| "Unable to open GitHub")?, timeout)
+}
+fn wait_browser(mut child: std::process::Child, timeout: Duration) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     let result = (|| {
         loop {
@@ -1151,11 +1153,13 @@ mod helper_tests {
     }
     #[test]
     fn explicit_browser_execution_is_bounded_and_joins_only_its_owned_child() {
-        let root = resources("printf '%s' \"$$\" > pid\nexec /bin/sleep 30");
+        let root = resources("/bin/sleep 0.2\nexec /bin/sleep 30");
         let mut command = Command::new(root.join("bun")); command.current_dir(&root);
         use std::os::unix::process::CommandExt; command.process_group(0);
-        assert!(run_browser(command,Duration::from_millis(100)).unwrap_err().contains("timed out"));
-        let pid = std::fs::read_to_string(root.join("pid")).unwrap().parse::<i32>().unwrap();
+        let child = command.spawn().unwrap();
+        // A valid timeout may expire before the fake program's first instruction.
+        let pid = child.id() as i32;
+        assert!(wait_browser(child,Duration::from_millis(100)).unwrap_err().contains("timed out"));
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
