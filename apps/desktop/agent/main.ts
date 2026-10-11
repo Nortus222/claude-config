@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Cause, Effect, Layer } from 'effect';
 import { agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
 import {
-  backupsForRun, configDomain, Fs, integrationsDomain, nodeFs, nodeProcesses, pathsFromEnvironment, skillsDomain,
+  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, pathsFromEnvironment, skillsDomain,
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
 import { setupSourceLayer } from '@nortuscc/sync';
@@ -115,6 +115,7 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
           return yield* ensureAgent(lifecycleInput, { restart: arg === '--restart' });
         });
         const result = yield* operation.pipe(
+          Effect.provide(nodeFileIntegrity),
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))),
         );
         stdout(JSON.stringify(result) + '\n');

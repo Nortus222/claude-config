@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { agentLayer, DEFAULT_STATE, renderLaunchAgent, unitPath } from '@nortuscc/agent';
-import { backupsForRun, Processes, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
+import { backupsForRun, FileIntegrity, FsFailed, nodeFileIntegrity, Processes, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentUnavailable, type AgentConnection } from '../../../src/agent-client.ts';
 import { resourceProgram, ensureAgent } from '../agent/lifecycle.ts';
 import * as maintenance from '../agent/maintenance.ts';
 import { decodePrepareUpdate, decodeMaintenanceAction, decodeRecoverUpdate } from '../shared/maintenance-protocol.ts';
 
-const fixture = (t: { after: (f: () => void) => void }) => {
+const fixture = (t: { after: (f: () => void) => void }, integrityOverrides?: Partial<FileIntegrity['Service']>) => {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'update-maintenance-')));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stateRoot = join(home, 'state');
@@ -44,7 +44,9 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   const connect = async (): Promise<AgentConnection> => ({ hello: { protocol: 3, agentVersion, policy: 'manual', paused: null },
     request: async <A>(request: object): Promise<A> => { const command = (request as { command: string }).command; events.push(command); return (command === 'status' ? { at: '2026-10-11T00:00:00Z', policy: 'manual', paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 }, applying } : { shutdown: true }) as A; },
     close: () => { events.push('close'); }, onEvent: () => () => {}, onClose: () => () => {} });
-  const layer = backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })));
+  const integrity = integrityOverrides === undefined ? nodeFileIntegrity
+    : Layer.effect(FileIntegrity, FileIntegrity.use(service => Effect.succeed({ ...service, ...integrityOverrides }))).pipe(Layer.provide(nodeFileIntegrity));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.merge(agentLayer(paths, { processes }), integrity)));
   const run = <A, E, R>(effect: Effect.Effect<A, E, R>, signal?: AbortSignal) => Effect.runPromise(effect.pipe(Effect.provide(layer)) as Effect.Effect<A, E>, { signal });
   const journalPath = join(stateRoot, 'agent/pending-update.json');
   return { input, paths, resources, appPath, bundle, agentVersion, events, connect, run, journalPath,
@@ -315,4 +317,23 @@ test('begin-install PID is strict and commit acknowledges completion without ret
   const f = fixture(t);
   await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: () => {}, connect: f.connect }));
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).installerPid, null);
+});
+
+test('injected durability failure denies native readiness or installing acknowledgement and retains pending', async t => {
+  for (const failAt of [1, 3]) {
+    let syncs = 0; const output: unknown[] = [];
+    const f = fixture(t, { syncPath: path => ++syncs === failAt ? Effect.fail(new FsFailed({ op: 'sync', path, reason: 'injected durability failure' })) : Effect.void });
+    await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: value => output.push(value), connect: f.connect })), /injected durability failure/);
+    assert.ok(existsSync(f.journalPath)); assert.ok(!output.some(value => (value as { installing?: boolean }).installing));
+    assert.equal(output.length, failAt === 1 ? 0 : 1);
+    if (failAt === 1) assert.ok(!f.events.includes('shutdown'));
+    assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
+  }
+});
+
+test('an injected backup digest mismatch denies shutdown and native readiness', async t => {
+  let hashes = 0; const output: unknown[] = [];
+  const f = fixture(t, { digestTree: () => Effect.succeed((++hashes === 1 ? 'a' : 'b').repeat(64)) });
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }), stdout: value => output.push(value), connect: f.connect })), /changed while backing up/);
+  assert.deepEqual(output, []); assert.ok(!f.events.includes('shutdown')); assert.ok(!existsSync(f.journalPath));
 });

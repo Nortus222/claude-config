@@ -1,11 +1,9 @@
-import { createHash } from 'node:crypto';
-import { lstat, open, readFile, readdir, readlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Effect } from 'effect';
 import { AgentStateStore, installService, renderLaunchAgent, LAUNCH_AGENT_LABEL, unitPath } from '@nortuscc/agent';
 import { decodeWireStatus } from '@nortuscc/agent/ipc/protocol';
-import { acquirePidLock, Backups, Fs, liveLockHolder, Processes } from '@nortuscc/machine';
+import { acquirePidLock, Backups, FileIntegrity, Fs, liveLockHolder, Processes } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
 import { decodeMaintenanceAction, decodePrepareUpdate, decodeRecoverUpdate, validInstallerPid, type MaintenanceState } from '../shared/maintenance-protocol.ts';
 import { ensureAgent, pendingPath, resourceProgram, validateExistingAuthority, type LifecycleInput } from './lifecycle.ts';
@@ -42,17 +40,7 @@ const bundleFor = (appPath: string) => {
   if (!validPath(appPath) || !/\.app\/Contents\/MacOS\/[^/]+$/.test(appPath)) throw new Error('maintenance needs an app bundle executable');
   return dirname(dirname(dirname(appPath)));
 };
-const digestTree = async (path: string): Promise<string> => {
-  const hash = createHash('sha256');
-  const visit = async (entry: string, name: string): Promise<void> => {
-    const stat = await lstat(entry); hash.update(JSON.stringify(name));
-    if (stat.isSymbolicLink()) hash.update('link:' + await readlink(entry));
-    else if (stat.isDirectory()) { hash.update('dir'); for (const child of (await readdir(entry)).sort()) await visit(join(entry, child), join(name, child)); }
-    else if (stat.isFile()) { hash.update('file:' + stat.mode); hash.update(await readFile(entry)); }
-    else throw new Error('unsupported app bundle entry');
-  };
-  await visit(path, ''); return hash.digest('hex');
-};
+
 const installedIdentity = (input: LifecycleInput) => Effect.gen(function* () {
   if (input.target.platform !== 'darwin') throw new Error('desktop updates are supported only on macOS');
   const fs = yield* Fs;
@@ -67,7 +55,7 @@ const installedIdentity = (input: LifecycleInput) => Effect.gen(function* () {
   if (runtime?.maintenanceProtocol !== 1) throw new Error('unsupported maintenance protocol compatibility');
   if (!runtime || runtime.target !== 'darwin-arm64' || runtime.executable !== 'bun' || runtime.agentVersion !== input.agentVersion
     || !hashPattern.test(input.agentVersion)) throw new Error('installed runtime identity is invalid');
-  const actual = yield* attempt(async () => createHash('sha256').update(await readFile(join(input.resources, 'agent.mjs'))).digest('hex'));
+  const actual = yield* (yield* FileIntegrity).sha256File(join(input.resources, 'agent.mjs'));
   if (actual !== input.agentVersion) throw new Error('installed agent hash does not match runtime identity');
   return { bundlePath, appVersion: versions[0]![1]! };
 });
@@ -87,7 +75,9 @@ const decodeJournal = (text: string, input: LifecycleInput): Journal => {
 const durableJournal = (input: LifecycleInput, journal: Journal) => Effect.gen(function* () {
   const fs = yield* Fs; const path = pendingPath(input);
   yield* fs.writeTextAtomic(path, JSON.stringify(journal) + '\n');
-  yield* attempt(async () => { for (const target of [path, dirname(path)]) { const file = await open(target, 'r'); try { await file.sync(); } finally { await file.close(); } } });
+  const integrity = yield* FileIntegrity;
+  yield* integrity.syncPath(path);
+  yield* integrity.syncPath(dirname(path));
 });
 export const maintenanceState = (input: LifecycleInput) => Effect.gen(function* () {
   const text = yield* (yield* Fs).readText(pendingPath(input));
@@ -163,8 +153,9 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
   const backups = yield* Backups;
   const backupPath = yield* backups.preserve(identity.bundlePath, 'Nortuscc.app', 'desktop-update');
   if (!backupPath) throw new Error('app bundle backup failed');
-  const oldBundleHash = yield* attempt(() => digestTree(backupPath));
-  if ((yield* attempt(() => digestTree(identity.bundlePath))) !== oldBundleHash) throw new Error('app bundle changed while backing up');
+  const integrity = yield* FileIntegrity;
+  const oldBundleHash = yield* integrity.digestTree(backupPath);
+  if ((yield* integrity.digestTree(identity.bundlePath)) !== oldBundleHash) throw new Error('app bundle changed while backing up');
   let journal: Journal = { version: 1, phase: 'prepared', ...versions, bundlePath: identity.bundlePath, appPath: input.appPath,
     oldAgentVersion: input.agentVersion, oldBundleHash, backupPath, installerPid: null };
   yield* durableJournal(input, journal);
@@ -182,7 +173,7 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
   const restore = Effect.gen(function* () {
     restoreAttempted = true;
     if (journal.phase !== 'prepared' || (yield* installedIdentity(input)).appVersion !== journal.fromVersion
-      || (yield* attempt(() => digestTree(identity.bundlePath))) !== journal.oldBundleHash) throw new Error('old app identity cannot be proved; pending update retained');
+      || (yield* integrity.digestTree(identity.bundlePath)) !== journal.oldBundleHash) throw new Error('old app identity cannot be proved; pending update retained');
     yield* installService(input.target, resourceProgram(input), { retryDelayMs: options.retryDelayMs });
     yield* restoredHealth(input, options);
   });
@@ -218,7 +209,7 @@ export const recoverUpdate = (input: LifecycleInput, options: Omit<MaintenanceOp
   const interrupted = appVersion === journal.fromVersion;
   if (interrupted) {
     if (input.agentVersion !== journal.oldAgentVersion
-      || (yield* attempt(() => digestTree(identity.bundlePath))) !== journal.oldBundleHash) throw new Error('interrupted installation has no proven intact old bundle');
+      || (yield* (yield* FileIntegrity).digestTree(identity.bundlePath)) !== journal.oldBundleHash) throw new Error('interrupted installation has no proven intact old bundle');
   } else if (appVersion !== journal.toVersion || journal.phase === 'prepared') throw new Error('installed app does not match pending update');
   const deadline = Date.now() + (options.timeoutMs ?? 60_000);
   yield* ensureAgent(input, { restart: true, connect: options.connect, pollMs: options.pollMs, timeoutMs: options.timeoutMs, retryDelayMs: options.retryDelayMs,
