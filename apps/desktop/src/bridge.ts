@@ -3,8 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import { Schema } from 'effect';
 import { decodeMessage, type RunEvent, type StatusEvent } from '@nortuscc/agent/ipc/protocol';
 
-// The renderer's whole reach: these commands, with opaque keys and plan ids as their only arguments.
-export type Command = 'agent_generation' | 'agent_status' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_agent' | 'take_review_request';
+// Fixed native commands accept public metadata, enums and opaque IDs.
+export type Command = 'agent_generation' | 'agent_status' | 'inspect_machine' | 'preview_plan' | 'apply_plan' | 'cancel_apply' | 'restart_agent' | 'take_review_request' | 'desktop_setup_state' | 'setup_desktop' | 'install_git' | 'hosted_state' | 'sign_in' | 'sign_out' | 'sync_now' | 'trust_setup' | 'machine_settings' | 'set_policy' | 'resume_agent' | 'open_device_login';
 export type HostEvent = (RunEvent | StatusEvent | { event: 'disconnected'; detail: string } | { event: 'review-requested' }) & { generation: number };
 export type Envelope = { generation: number; data: unknown };
 export interface Bridge {
@@ -36,10 +36,13 @@ export const nativeBridge: Bridge = {
     listen<unknown>('machine-agent', (event) => {
       try {
         receive(decodeHostEvent(event.payload));
-      } catch (error) {
-        console.error('Invalid host event', error);
+      } catch {
+        console.error('Invalid host event');
       }
     }),
-  invoke: async (command, args) =>
-    Schema.decodeUnknownSync(HostEnvelope, { onExcessProperty: 'error' })(await invoke(command, args)),
+  invoke: async (command, args) => {
+    const result = await invoke(command, args);
+    try { return Schema.decodeUnknownSync(HostEnvelope, { onExcessProperty: 'error' })(result); }
+    catch { throw new Error('Invalid native response'); }
+  },
 };

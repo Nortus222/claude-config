@@ -145,3 +145,17 @@ for (const cancel of [false, true]) test(`device long retry wakes for expiry wit
     assert.equal(polls, 1, 'no transport poll after retry, expiry or cancellation');
   }), f.source);
 });
+
+test('runtime passes reporting intent only as local sign-in preference', async () => {
+  const m = agentMachine(); const f = setupFixture(m.root); const calls: string[] = [];
+  await m.run(Effect.scoped(Effect.gen(function* () {
+    const client = { ...fakeClient(calls), startSignIn: (input: unknown, reporting?: boolean) => Effect.sync(() => {
+      assert.deepEqual(input, { os: 'macos', agents: ['claude', 'codex'], name: 'My Mac' });
+      assert.equal(reporting, false);
+      return { userCode: 'ABCD', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 };
+    }) };
+    const runtime = yield* makeHostedRuntime(client, { domains: () => m.domains, os: 'macos' });
+    const handle = yield* startAgent(() => m.domains, { hosted: runtime, deferStart: true });
+    yield* handle.hosted!.signIn('My Mac', false);
+  })), f.source);
+});

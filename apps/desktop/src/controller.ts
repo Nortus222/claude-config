@@ -24,6 +24,7 @@ export type ViewState = {
   readonly pending: boolean;
   readonly detail: string;
   readonly reviewRequested: number;
+  readonly session: number;
 };
 
 // The agent can own a manual run that began before this window connected.
@@ -34,6 +35,10 @@ const MAX_EARLY_EVENTS = 10_000;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
+const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
+  try { return decode(value); }
+  catch { throw new Error('MALFORMED: incompatible agent response. Restart or reinstall the agent explicitly.'); }
+};
 
 // Folds one progress event into a run's view.
 export function advance(run: RunView, progress: RunProgress): RunView {
@@ -57,7 +62,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
 export class MachineController {
   state: ViewState = {
     connection: 'connecting', inspection: null, status: null, hello: null, excluded: [], preview: null, run: null, pending: false,
-    detail: 'Connecting to the local agent', reviewRequested: 0,
+    detail: 'Connecting to the local agent', reviewRequested: 0, session: 0,
   };
   private bridge: Bridge | null;
   private generation: number | null = null;
@@ -82,6 +87,16 @@ export class MachineController {
     return () => { this.listeners.delete(listener); };
   };
   snapshot = () => this.state;
+
+  sessionToken = () => ({ session: this.state.session, generation: this.generation });
+  ownsSession = (token: ReturnType<MachineController['sessionToken']>, reply?: Envelope) =>
+    !this.disposed && this.state.connection === 'connected' && token.session === this.state.session
+    && token.generation === this.generation && (!reply || reply.generation === this.generation);
+  acceptStatus(token: ReturnType<MachineController['sessionToken']>, reply: Envelope) {
+    if (!this.ownsSession(token, reply)) return false;
+    this.showStatus(decodeWireStatus(reply.data));
+    return true;
+  }
 
   private update(update: Partial<ViewState>) {
     if (this.disposed) return;
@@ -154,7 +169,8 @@ export class MachineController {
     this.earlyReviews.clear();
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
-    this.update({ pending: true });
+    this.unlisten?.();
+    this.update({ pending: true, connection: 'connecting', session: this.state.session + 1 });
     try {
       const unlisten = await this.bridge.subscribe((event) => this.receive(event));
       if (!this.owns(revision)) {
@@ -212,7 +228,7 @@ export class MachineController {
     try {
       const reply = await this.bridge!.invoke('inspect_machine');
       if (!this.current(revision, reply)) return;
-      const inspection = decodeInspectResult(reply.data);
+      const inspection = checkedReply(decodeInspectResult, reply.data);
       const keys = new Set(inspection.items.map((item) => item.key));
       this.update({
         inspection, status: inspection.status ?? this.state.status, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
@@ -247,7 +263,7 @@ export class MachineController {
     try {
       const reply = await this.bridge!.invoke('preview_plan', { exclude: [...this.state.excluded] });
       if (!this.current(revision, reply)) return;
-      const preview = decodePreviewResult(reply.data);
+      const preview = checkedReply(decodePreviewResult, reply.data);
       this.update({ preview, detail: `${preview.plan.steps.length} steps, ${preview.plan.skipped.length} skipped` });
     } catch (error) {
       if (this.owns(revision)) this.refused(error);
@@ -272,7 +288,7 @@ export class MachineController {
     try {
       const reply = await this.bridge!.invoke('apply_plan', { planId: preview.planId });
       if (!this.current(revision, reply)) return;
-      const result = decodeApplyResult(reply.data);
+      const result = checkedReply(decodeApplyResult, reply.data);
       if (result.status === 'stale') {
         this.update({ preview: { planId: result.planId, plan: result.plan }, detail: STALE });
         await this.settlePreparation(revision, STALE);
@@ -331,7 +347,7 @@ export class MachineController {
     this.early = [];
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
-    this.update({ pending: true, connection: 'connecting', run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
+    this.update({ pending: true, connection: 'connecting', session: this.state.session + 1, run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
@@ -344,6 +360,7 @@ export class MachineController {
   }
 
   dispose() {
+    this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false });
     this.disposed = true;
     this.earlyReviews.clear();
     this.reviewRefresh = false;
@@ -370,7 +387,7 @@ export class MachineController {
       const run = this.state.run?.outcome === 'running'
         ? { ...this.state.run, outcome: 'failed' as const, summary: 'Agent disconnected during the run' }
         : this.state.run;
-      this.update({ connection: 'disconnected', pending: false, detail: event.detail, run });
+      this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false, detail: event.detail, run });
       return;
     }
     if (this.state.connection !== 'connected') return;

@@ -21,3 +21,9 @@ test('safe hosted results reject pending credentials and unknown nested metadata
   assert.deepEqual(protocol.decodeSignInResult(start), start);
   assert.throws(() => protocol.decodeSignInResult({ ...start, pendingId: 'private' }));
 });
+
+test('reporting choice exists only on strict local sign-in requests', () => {
+  for (const reportStatus of [true, false]) assert.deepEqual(protocol.decodeRequest({ version: 3, id: '1', command: 'signIn', reportStatus }), { version: 3, id: '1', command: 'signIn', reportStatus });
+  for (const reportStatus of [null, 'false', 0, {}]) assert.throws(() => protocol.decodeRequest({ version: 3, id: '1', command: 'signIn', reportStatus }));
+  assert.throws(() => protocol.decodeRequest({ version: 3, id: '1', command: 'signIn', reportStatus: false, token: 'secret' }));
+});

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -21,16 +21,25 @@ const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const BOOTSTRAP_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 type Pending = HashMap<String, mpsc::Sender<Result<Value, String>>>;
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 
-/// Renderer arguments are opaque item keys and plan ids, never paths or commands.
+/// Renderer arguments are public metadata, enums and opaque IDs, never paths or commands.
 pub enum Request {
     Status,
     Inspect,
     Preview { exclude: Vec<String> },
     Apply { plan_id: String },
     Cancel,
+    HostedState,
+    SignIn { name: Option<String>, report_status: Option<bool> },
+    SignOut,
+    SyncNow,
+    TrustSetup { setup_id: String },
+    MachineSettings { patch: MachinePatch },
+    SetPolicy { policy: Policy },
+    Resume,
     Hello { token: String },
     Subscribe,
     Notification { notification_id: String },
@@ -44,6 +53,14 @@ impl Request {
             Self::Preview { .. } => "preview",
             Self::Apply { .. } => "apply",
             Self::Cancel => "cancel",
+            Self::HostedState => "hostedState",
+            Self::SignIn { .. } => "signIn",
+            Self::SignOut => "signOut",
+            Self::SyncNow => "syncNow",
+            Self::TrustSetup { .. } => "trustSetup",
+            Self::MachineSettings { .. } => "machineSettings",
+            Self::SetPolicy { .. } => "setPolicy",
+            Self::Resume => "resume",
             Self::Hello { .. } => "hello",
             Self::Subscribe => "subscribe",
             Self::Notification { .. } => "notification",
@@ -52,8 +69,8 @@ impl Request {
     }
     fn timeout(&self) -> Duration {
         match self {
-            Self::Inspect | Self::Apply { .. } => Duration::from_secs(60),
-            Self::Cancel => Duration::from_secs(30),
+            Self::Inspect | Self::Apply { .. } | Self::SyncNow => Duration::from_secs(60),
+            Self::Cancel | Self::SignOut => Duration::from_secs(30),
             Self::Hello { .. } => HELLO_TIMEOUT,
             Self::NotificationAck { .. } => Duration::from_secs(1),
             _ => Duration::from_secs(10),
@@ -72,6 +89,16 @@ impl Request {
                 if !valid_id(plan_id) { return Err("Invalid plan id".into()); }
                 record["planId"] = json!(plan_id);
             }
+            Self::SignIn { name, report_status } => {
+                if let Some(name) = name { validate_display_name(name)?; record["name"] = json!(name); }
+                if let Some(value) = report_status { record["reportStatus"] = json!(value); }
+            }
+            Self::TrustSetup { setup_id } => {
+                if setup_id == "local" || setup_id.is_empty() || setup_id.len() > 100 || !setup_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') { return Err("Invalid setup id".into()); }
+                record["setupId"] = json!(setup_id);
+            }
+            Self::MachineSettings { patch } => { patch.validate()?; record["patch"] = json!(patch); }
+            Self::SetPolicy { policy } => { record["policy"] = json!(policy); }
             Self::Hello { token } => {
                 if token.is_empty() || token.encode_utf16().count() > 200 { return Err("Invalid agent token".into()); }
                 record["token"] = json!(token);
@@ -94,13 +121,87 @@ impl Request {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Policy {
+pub enum Policy {
     AutoApply,
     Notify,
     Manual,
 }
+pub fn decode_args<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+    if !value.is_object() { return Err("Expected command argument object".into()); }
+    if serde_json::to_vec(&value).map_err(|_| "Invalid command arguments")?.len() > 4096 { return Err("Command arguments exceed limit".into()); }
+    serde_json::from_value(value).map_err(|_| "Invalid command arguments".into())
+}
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyArgs {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SignInArgs {
+    #[serde(default, deserialize_with = "present")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub report_status: Option<bool>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TrustArgs { pub setup_id: String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineArgs { pub patch: MachinePatch }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyArgs { pub policy: Policy }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SetupArgs { pub config_targets: Vec<String> }
+/// Public metadata only. The agent applies the shared HTTP schema as a second boundary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachinePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<Policy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_status: Option<bool>,
+}
+impl<'de> Deserialize<'de> for MachinePatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self,D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if !value.is_object() { return Err(serde::de::Error::custom("Expected machine patch object")); }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Fields {
+            #[serde(default, deserialize_with = "present")]
+            name: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            policy: Option<Policy>,
+            #[serde(default, deserialize_with = "present")]
+            report_status: Option<bool>,
+        }
+        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { name:fields.name, policy:fields.policy, report_status:fields.report_status })
+    }
+}
+impl MachinePatch {
+    fn validate(&self) -> Result<(), String> {
+        if self.name.is_none() && self.policy.is_none() && self.report_status.is_none() { return Err("Empty machine patch".into()); }
+        if let Some(name) = &self.name { validate_display_name(name)?; }
+        Ok(())
+    }
+}
+fn validate_display_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.trim() != name || name.chars().count() > 100
+        || !name.chars().any(crate::display_name_categories::visible)
+        || name.chars().any(crate::display_name_categories::disallowed) { return Err("Invalid display name".into()); }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Paused {
@@ -466,6 +567,9 @@ pub enum Setup {
     Ensure,
     Restart,
     Paths,
+    State,
+    Bootstrap,
+    InstallGit,
 }
 impl Setup {
     fn argument(self) -> &'static str {
@@ -473,6 +577,9 @@ impl Setup {
             Self::Ensure => "--ensure",
             Self::Restart => "--restart",
             Self::Paths => "--paths",
+            Self::State => "--setup-state",
+            Self::Bootstrap => "--bootstrap",
+            Self::InstallGit => "--install-git",
         }
     }
 }
@@ -488,7 +595,7 @@ fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if !matches!(setup, Setup::Paths) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Ensure | Setup::Restart | Setup::Bootstrap) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -506,41 +613,143 @@ fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
     run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(3) } else { HELPER_TIMEOUT })
 }
-fn run_helper(mut command: Command, timeout: Duration) -> Result<PathBuf, String> {
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SetupChoices { config_targets: Vec<String> }
+impl SetupChoices {
+    pub fn decode(config_targets: Vec<String>) -> Result<Self, String> {
+        if config_targets.len() > 2 || config_targets.iter().any(|v| v != "claude" && v != "codex")
+            || (config_targets.len() == 2 && config_targets[0] == config_targets[1]) { return Err("Invalid config targets".into()); }
+        Ok(Self { config_targets })
+    }
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DesktopSetupState { needs_setup: bool, repo: Option<String>, git_available: bool, can_install_git: bool, default_repo_url: String }
+fn validate_setup_state(value: Value) -> Result<Value, String> {
+    // Option alone accepts a missing key; every field is required by the helper contract.
+    if value.as_object().is_none_or(|o| o.len() != 5 || !o.contains_key("repo")) { return Err("Invalid setup state".into()); }
+    let state: DesktopSetupState = serde_json::from_value(value).map_err(|_| "Invalid setup state")?;
+    if state.default_repo_url != "https://github.com/Nortus222/claude-config.git" { return Err("Invalid setup repository".into()); }
+    serde_json::to_value(state).map_err(|_| "Invalid setup state".into())
+}
+pub fn desktop_setup_state(resources: &Path) -> Result<Value, String> {
+    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Duration::from_secs(10), None)?)
+}
+pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<PathBuf, String> {
+    let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
+    let mut command = helper_command(resources, Setup::Bootstrap, None)?;
+    command.stdin(Stdio::piped());
+    setup_root(run_json_helper_with_cancel(command, HELPER_TIMEOUT, Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
+}
+pub fn install_git(resources: &Path) -> Result<Value, String> {
+    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Duration::from_secs(30), None)?;
+    if value != json!({"requested":true}) { return Err("Invalid installer result".into()); }
+    Ok(value)
+}
+pub fn device_login_command() -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command.arg("https://github.com/login/device").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+}
+pub fn open_device_login() -> Result<Value, String> {
+    run_browser(device_login_command(), Duration::from_secs(5))
+}
+fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String> {
+    wait_browser(command.spawn().map_err(|_| "Unable to open GitHub")?, timeout)
+}
+fn wait_browser(mut child: std::process::Child, timeout: Duration) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    let result = (|| {
+        loop {
+            if let Some(status) = child.try_wait().map_err(|_| "Unable to open GitHub")? {
+                return if status.success() { Ok(json!({"opened":true})) } else { Err("Unable to open GitHub".into()) };
+            }
+            if Instant::now() >= deadline { return Err("Opening GitHub timed out".into()); }
+            thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if result.is_err() {
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+        let _ = child.kill(); let _ = child.wait();
+    }
+    result
+}
+
+fn setup_root(value: Value) -> Result<PathBuf, String> {
+    if !value.is_object() { return Err("Expected setup result object".into()); }
+    let result: SetupResult = serde_json::from_value(value).map_err(|_| "Invalid setup result")?;
+    if !result.state_root.is_absolute() { return Err("Invalid setup stateRoot".into()); }
+    Ok(result.state_root)
+}
+fn run_helper(command: Command, timeout: Duration) -> Result<PathBuf, String> {
+    setup_root(run_json_helper(command, timeout, None)?)
+}
+/// The native host owns and joins every helper child and pipe reader before returning.
+fn run_json_helper(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<Value, String> {
+    run_json_helper_with_cancel(command, timeout, input, Duration::ZERO)
+}
+fn run_json_helper_with_cancel(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
+    if input.as_ref().is_some_and(|v| v.len() > 4096) { return Err("Setup input exceeds limit".into()); }
+    wait_json_helper(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout)
+}
+fn wait_json_helper(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
+    let stdout = child.stdout.take().ok_or("Missing helper stdout")?;
+    let stderr = child.stderr.take().ok_or("Missing helper stderr")?;
     let (send, receive) = mpsc::channel();
-    thread::spawn(move || {
-        let result = (|| -> Result<PathBuf, String> {
+    let reader = thread::spawn(move || {
+        let result = (|| -> Result<Value, String> {
             let mut reader = BufReader::new(stdout);
             let line = bounded_line(&mut reader)?.ok_or("Missing setup result")?;
-            let result: SetupResult = serde_json::from_slice(&line).map_err(|_| "Invalid setup result")?;
-            if !result.state_root.is_absolute() { return Err("Invalid setup stateRoot".into()); }
+            let value = serde_json::from_slice(&line).map_err(|_| "Invalid setup result")?;
             if bounded_line(&mut reader)?.is_some() { return Err("Unexpected setup output".into()); }
-            Ok(result.state_root)
+            Ok(value)
         })();
         let _ = send.send(result);
     });
-    thread::spawn(move || {
+    let (done, drained) = mpsc::channel();
+    let errors = thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        while let Ok(Some(line)) = bounded_line(&mut reader) { eprintln!("agent setup: {}", String::from_utf8_lossy(&line)); }
+        while let Ok(Some(_)) = bounded_line(&mut reader) {} // Diagnostics never enter renderer or token-bearing logs.
+        let _ = done.send(());
+    });
+    let (sent, written) = mpsc::channel();
+    let writer = input.map(|input| {
+        let mut stdin = child.stdin.take().expect("Piped helper input");
+        thread::spawn(move || { let result = stdin.write_all(&input).and_then(|_| stdin.flush()); drop(stdin); let _ = sent.send(result); })
     });
     let deadline = Instant::now() + timeout;
-    let result = (|| -> Result<PathBuf, String> {
+    let result = (|| -> Result<Value, String> {
+        if writer.is_some() { written.recv_timeout(Duration::from_secs(5).min(timeout)).map_err(|_| "Setup input timed out")?.map_err(|_| "Setup input failed")?; }
         let status = loop {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? { break status; }
             if Instant::now() >= deadline { return Err("Agent setup timed out".into()); }
             thread::sleep(Duration::from_millis(10));
         };
         if !status.success() { return Err(format!("Agent setup failed: {status}")); }
-        receive.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| "Agent setup output timed out")?
+        let value = receive.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| "Agent setup output timed out")??;
+        drained.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| "Agent setup diagnostics timed out")?;
+        Ok(value)
     })();
     if result.is_err() {
+        // Bootstrap's signal handler cancels and joins its detached Git group before cleanup.
+        // Other lifecycle helpers retain their existing immediate termination contract.
+        if !cancel_timeout.is_zero() && child.try_wait().ok().flatten().is_none() {
+            unsafe { libc::kill(child.id() as i32, libc::SIGTERM); }
+            let cancel_deadline = Instant::now() + cancel_timeout;
+            while Instant::now() < cancel_deadline {
+                if child.try_wait().ok().flatten().is_some() { break; }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        // Also close any inherited pipes held by children in the helper's group.
+        // A forced kill or crash cannot run finalizers for children in separate groups.
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child.kill(); let _ = child.wait();
     }
+    let _ = reader.join(); let _ = errors.join(); if let Some(writer) = writer { let _ = writer.join(); }
     result
 }
 
@@ -947,6 +1156,128 @@ mod helper_tests {
         root
     }
     #[test]
+    fn bootstrap_outer_timeout_joins_detached_git_and_removes_only_its_owned_directory_and_lock() {
+        struct Fixture { root: PathBuf, child: Option<std::process::Child> }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(child) = self.child.take() { let _ = wait_json_helper(child, Duration::ZERO, None, BOOTSTRAP_CANCEL_TIMEOUT); }
+                if let Ok(text) = std::fs::read_to_string(self.root.join("git.pid")) {
+                    if let Ok(pid) = text.parse::<i32>() { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap();
+        let node = Command::new("node").args(["-p", "process.execPath"]).output().unwrap();
+        assert!(node.status.success());
+        let node = String::from_utf8(node.stdout).unwrap().trim().to_owned();
+        let root = resources(&format!("exec '{}' '{}' \"$PWD\"", node.replace('\'', "'\\''"), repo.join("apps/desktop/checks/support/native-bootstrap-fixture.ts").display()));
+        let mut fixture = Fixture { root: root.clone(), child: None };
+        let home = root.join("home"); std::fs::create_dir(&home).unwrap();
+        let tools = root.join("tools"); std::fs::create_dir(&tools).unwrap();
+        std::fs::write(tools.join("git"), format!(r#"#!{node}
+const fs = require('node:fs');
+if (!process.argv.includes('clone')) {{ console.log('fake Git'); process.exit(0); }}
+process.on('SIGTERM', () => {{}});
+setInterval(() => {{}}, 1000);
+fs.mkdirSync(process.argv.at(-1), {{recursive:true}});
+fs.writeFileSync({pid:?}, String(process.pid));
+fs.writeFileSync({owned:?} + '.tmp', process.argv.at(-1));
+fs.renameSync({owned:?} + '.tmp', {owned:?});
+"#, pid=root.join("git.pid").to_str().unwrap(), owned=root.join("owned").to_str().unwrap())).unwrap();
+        std::fs::set_permissions(tools.join("git"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = home.join("state"); std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(state.join("desktop-setup-existing")).unwrap();
+        std::fs::write(state.join("desktop-setup-existing/keep"), "owner data").unwrap();
+        fixture.child = Some(helper_command(&root, Setup::Bootstrap, None).unwrap().spawn().unwrap());
+        // The fixture's fixed choices let the real clone start before the scaled outer deadline.
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("owned").exists() && Instant::now() < ready_deadline { thread::sleep(Duration::from_millis(10)); }
+        assert!(root.join("owned").exists(), "fake clone did not become ready");
+        let start = Instant::now();
+        let result = wait_json_helper(fixture.child.take().unwrap(), Duration::from_millis(100), None, BOOTSTRAP_CANCEL_TIMEOUT);
+        let elapsed = start.elapsed();
+        // Capture evidence, then always clean up this fixture's child before asserting RED/GREEN.
+        let pid = std::fs::read_to_string(root.join("git.pid")).unwrap().parse::<i32>().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        let owned = PathBuf::from(std::fs::read_to_string(root.join("owned")).unwrap());
+        let directory_remains = owned.parent().unwrap().exists();
+        let lock_remains = state.join("apply.lock").exists();
+        let recorded = state.join("state.json").exists();
+        let unrelated = std::fs::read_to_string(state.join("desktop-setup-existing/keep")).unwrap();
+        if alive { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(elapsed < Duration::from_secs(9));
+        assert!(!alive, "detached Git survived native timeout");
+        assert!(!directory_remains, "owned clone directory survived native timeout");
+        assert!(!lock_remains, "apply lock survived native timeout");
+        assert!(!recorded, "failed clone recorded setup authority");
+        assert_eq!(unrelated, "owner data");
+    }
+    #[test]
+    fn bootstrap_escalates_and_joins_a_helper_that_ignores_graceful_cancellation() {
+        let root = resources("exec /bin/sleep 30");
+        let mut command = helper_command(&root, Setup::Bootstrap, None).unwrap();
+        use std::os::unix::process::CommandExt;
+        // Install before exec, so SIGTERM is ignored even if the script has not started.
+        unsafe { command.pre_exec(|| { libc::signal(libc::SIGTERM, libc::SIG_IGN); Ok(()) }); }
+        let child = command.spawn().unwrap();
+        let pid = child.id() as i32;
+        let start = Instant::now();
+        let result = wait_json_helper(child,
+            Duration::from_millis(100), None, Duration::from_millis(50));
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive { unsafe { libc::kill(-pid, libc::SIGKILL); } }
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap_err(), "Agent setup timed out");
+        assert!(start.elapsed() >= Duration::from_millis(150), "SIGTERM bypassed the grace interval");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!alive, "helper survived hard escalation");
+    }
+    #[test]
+    fn first_run_helpers_use_fixed_arguments_and_bounded_json_stdin() {
+        let root = resources(r#"case "$2" in
+--setup-state) [ "$#" = 2 ] || exit 2; printf '%s\n' '{"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"}' ;;
+--install-git) [ "$#" = 2 ] || exit 3; printf '%s\n' '{"requested":true}' ;;
+--bootstrap) [ "$#" = 4 ] || exit 4; [ "$3" = --app ] || exit 5; /bin/cat > input; printf '%s\n' '{"stateRoot":"/tmp/bootstrapped"}' ;;
+*) exit 6;; esac"#);
+        assert_eq!(desktop_setup_state(&root).unwrap()["needsSetup"],true);
+        assert_eq!(install_git(&root).unwrap(),json!({"requested":true}));
+        assert_eq!(bootstrap_desktop(&root, SetupChoices::decode(vec!["codex".into()]).unwrap()).unwrap(),PathBuf::from("/tmp/bootstrapped"));
+        assert_eq!(std::fs::read_to_string(root.join("input")).unwrap(),"{\"configTargets\":[\"codex\"]}");
+        assert!(run_json_helper(helper_command(&root, Setup::State, None).unwrap(),Duration::from_secs(1),Some(vec![b'x';4097])).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn explicit_browser_execution_is_bounded_and_joins_only_its_owned_child() {
+        let root = resources("/bin/sleep 0.2\nexec /bin/sleep 30");
+        let mut command = Command::new(root.join("bun")); command.current_dir(&root);
+        use std::os::unix::process::CommandExt; command.process_group(0);
+        let child = command.spawn().unwrap();
+        // A valid timeout may expire before the fake program's first instruction.
+        let pid = child.id() as i32;
+        assert!(wait_browser(child,Duration::from_millis(100)).unwrap_err().contains("timed out"));
+        assert_eq!(unsafe {libc::kill(pid,0)},-1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn helper_output_is_one_complete_bounded_record() {
+        for output in ["printf '%s' '{}'", "printf '%s\\n' '{}\n{}'", "dd if=/dev/zero bs=1048576 count=1 2>/dev/null"] {
+            let root = resources(output);
+            assert!(run_json_helper(helper_command(&root, Setup::State, None).unwrap(),Duration::from_secs(1),None).is_err());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        let root = resources("printf '%s' \"$$\" > pid\n/bin/cat >/dev/null\n/bin/sleep 30 &\nprintf '%s\\n' '{\"stateRoot\":\"/tmp/x\"}'");
+        let mut command = helper_command(&root, Setup::Bootstrap, None).unwrap(); command.stdin(Stdio::piped());
+        let started = Instant::now();
+        assert!(run_json_helper(command,Duration::from_millis(100),Some(b"{\"configTargets\":[]}".to_vec())).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pid = std::fs::read_to_string(root.join("pid")).unwrap().parse::<i32>().unwrap();
+        assert_eq!(unsafe {libc::kill(pid,0)},-1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn paths_helper_has_no_registration_arguments() {
         let root = resources(r#"[ "$#" = 2 ] || exit 9
 [ "$2" = --paths ] || exit 8
@@ -1034,5 +1365,65 @@ mod notification_tests {
         }
         for field in ["extra", "received_at"] { let mut bad = good.clone(); bad[field] = json!(true); assert!(validate(&bad).is_err()); }
         let mut bad = good; bad["notification"]["extra"] = json!(true); assert!(validate(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod onboarding_bridge_tests {
+    use super::*;
+    #[test]
+    fn account_requests_use_only_strict_public_values() {
+        let record: Value = serde_json::from_str(&Request::SignIn { name: Some("My Mac".into()), report_status: Some(false) }.record("1").unwrap()).unwrap();
+        assert_eq!(record, json!({"version":3,"id":"1","command":"signIn","name":"My Mac","reportStatus":false}));
+        let patch: MachinePatch = serde_json::from_value(json!({"reportStatus":false,"policy":"notify"})).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&Request::MachineSettings { patch }.record("2").unwrap()).unwrap()["patch"], json!({"reportStatus":false,"policy":"notify"}));
+        for invalid in [json!({}), json!({"name":" bad"}), json!({"reportStatus":false,"path":"/tmp"}), json!({"policy":"shell"}), json!({"reportStatus":{"command":"x"}})] {
+            let decoded = serde_json::from_value::<MachinePatch>(invalid);
+            assert!(decoded.is_err() || Request::MachineSettings { patch: decoded.unwrap() }.record("2").is_err());
+        }
+        for name in ["", " ", "bad\nname", "bad\u{200b}name", "bad\u{0378}name", "\u{0301}"] {
+            assert!(Request::SignIn { name: Some(name.into()), report_status: None }.record("1").is_err());
+        }
+        for id in ["local", "/tmp/repo", "a_b", ""] { assert!(Request::TrustSetup { setup_id:id.into() }.record("1").is_err()); }
+        assert!(Request::SignIn { name: Some("😀".repeat(100)), report_status: Some(true) }.record("1").is_ok());
+        assert!(Request::SignIn { name: Some("😀".repeat(101)), report_status: None }.record("1").is_err());
+        assert_eq!(Request::SignOut.timeout(), Duration::from_secs(30));
+        assert_eq!(Request::SyncNow.timeout(), Duration::from_secs(60));
+    }
+    #[test]
+    fn command_args_reject_unknown_nested_null_and_oversized_values() {
+        assert!(decode_args::<SignInArgs>(json!({"reportStatus":false})).is_ok());
+        for value in [json!({"name":null}), json!({"reportStatus":null}), json!({"reportStatus":false,"token":"secret"}), json!({"name":"x".repeat(4096)})] {
+            assert!(decode_args::<SignInArgs>(value).is_err());
+        }
+        assert!(decode_args::<EmptyArgs>(json!({"url":"https://evil.invalid"})).is_err());
+        for value in [json!({"patch":{"name":null}}), json!({"patch":{"reportStatus":false,"command":"x"}}), json!({"patch":{"reportStatus":false},"token":"secret"})] {
+            assert!(decode_args::<MachineArgs>(value).is_err());
+        }
+        assert!(decode_args::<SetupArgs>(json!({"configTargets":[],"repo":"/tmp"})).is_err());
+    }
+    #[test]
+    fn native_records_reject_positional_arrays_before_actions_or_ipc() {
+        assert!(decode_args::<EmptyArgs>(json!([])).is_err());
+        assert!(decode_args::<SetupArgs>(json!([["codex"]])).is_err());
+        assert!(decode_args::<SignInArgs>(json!(["My Mac",false])).is_err());
+        assert!(decode_args::<MachineArgs>(json!({"patch":["My Mac","notify",false]})).is_err());
+        assert!(serde_json::from_value::<MachinePatch>(json!(["My Mac","notify",false])).is_err());
+        assert!(setup_root(json!(["/tmp/owned"])).is_err());
+        assert!(decode_args::<SetupArgs>(json!({"configTargets":["codex"]})).is_ok());
+        assert!(decode_args::<SignInArgs>(json!({})).is_ok());
+        assert!(decode_args::<MachineArgs>(json!({"patch":{"reportStatus":false}})).is_ok());
+        assert_eq!(setup_root(json!({"stateRoot":"/tmp/owned"})).unwrap(),PathBuf::from("/tmp/owned"));
+    }
+    #[test]
+    fn choices_and_setup_state_have_no_renderer_authority() {
+        assert!(SetupChoices::decode(vec!["claude".into(),"codex".into()]).is_ok());
+        for values in [vec!["claude".into(),"claude".into()], vec!["/tmp".into()]] { assert!(SetupChoices::decode(values).is_err()); }
+        assert!(validate_setup_state(json!({"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"})).is_ok());
+        assert!(validate_setup_state(json!({"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://evil.invalid"})).is_err());
+        assert!(validate_setup_state(json!({"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git","path":"/tmp"})).is_err());
+        let command = device_login_command();
+        assert_eq!(command.get_program(), "/usr/bin/open");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["https://github.com/login/device"]);
     }
 }

@@ -49,7 +49,7 @@ test('packaged agent serves socket clients on temporary HOME and prints no helpe
   writeFileSync(shell, '#!/bin/sh\nexec /bin/sh -c "$2"\n');
   chmodSync(shell, 0o755);
   const child = spawn(join(resolve(resources!), 'bun'), [join(resolve(resources!), 'agent.mjs')], {
-    env: { HOME: home, PATH: '', SHELL: shell, NORTUSCC_STATE_DIR: stateRoot }, stdio: ['ignore', 'pipe', 'pipe'], cwd: '/',
+    env: { HOME: home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', PATH: '', SHELL: shell, NORTUSCC_STATE_DIR: stateRoot }, stdio: ['ignore', 'pipe', 'pipe'], cwd: '/',
   });
   let stdout = '';
   let stderr = '';

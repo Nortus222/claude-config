@@ -1,4 +1,4 @@
-# Nortuscc desktop
+# Claude Config desktop
 
 The React renderer inspects, previews, applies and cancels through the local agent. The Tauri 2 Rust host connects to `<stateRoot>/agent/agent.sock`, reads `agent.token` fresh, authenticates with protocol v3 as `app`, and subscribes to status and progress events. Closing the window closes its connection and leaves the agent running.
 
@@ -81,9 +81,89 @@ Native work has a three-second budget from event enqueue or hidden-mode entry, i
 
 Rust checks exercise fake posting success/refusal, strict payloads, direct hidden connections, the read-only helper, startup events before session publication, off-reader acknowledgments, stale generations and queued clicks. They never initialize the notification center or show a window. On a disposable macOS machine, manually verify permission grant/denial, Notification Center with banners disabled, foreground presentation, warm and cold clicks, hidden posting with the app closed, no permission dialog in hidden mode, and exit after posting. Also verify the hidden path leaves service registration and machine state unchanged. These OS behaviors are not established by automated tests or a successful native build.
 
-The bundled foreground agent supports optional hosted sync through
-`NORTUSCC_HOSTED_URL` in its login environment, using the same runtime as the CLI.
-The value must be an explicit HTTPS root ending in `/v1`; no endpoint is guessed.
-Account/device-flow, setup trust and machine-reporting commands are available through
-`nortuscc agent`; this change adds no renderer account screens or Rust request commands.
+The bundled foreground agent uses the reviewed public hosted API root by default, with
+`NORTUSCC_HOSTED_URL` in its login environment overriding it. Custom roots must be HTTPS
+and end in `/v1`; invalid overrides remain visible as configuration errors.
+Account/device-flow, setup trust and machine-reporting commands use the existing agent IPC through
+fixed native commands. Native arguments accept public display names, policies, booleans and opaque
+setup IDs, with unknown fields and renderer paths, commands or URLs rejected. Account credentials
+remain agent/keychain-owned. The renderer exposes these controls in Settings.
 See the [agent README](../../packages/agent/README.md#optional-hosted-client).
+
+### First-run helper
+
+The fixed bundled helper supports `--setup-state`, `--bootstrap --app <absolute native executable>`
+(with a strict `{ "configTargets": ["claude", "codex"] }` stdin record, maximum 4096 bytes), and
+`--install-git`. Read-only state checks never invoke Apple's Git shim or open an installer. The
+explicit installer action invokes only `xcode-select --install`; finish Apple's dialog before rechecking.
+Bootstrap clones the fixed public Nortus222/claude-config repository into an exclusively owned state
+subdirectory, validates its origin and profile, and records choices with backups under the shared
+apply lock. It leaves configuration unchanged and preserves the clone if subsequent agent registration
+fails. The native app runs its existing ensure helper after bootstrap. Existing or corrupt recorded
+setups are never silently replaced.
+
+The whole bootstrap has a 110-second cancellation deadline, beginning before login probing and
+prerequisite checks. This leaves cleanup time before the native 120-second timeout. If that outer
+timeout fires, native sends SIGTERM and waits up to five seconds for the helper to cancel and join
+its detached Git child, remove its owned incomplete directory, and release the lock before killing
+the helper group. Ensure/restart retain their existing timeout behavior. A forced kill or OS crash
+can bypass finalizers and leave an incomplete directory or detached child; the dead-owner lock is
+recoverable on retry, but cleanup after a crash is not guaranteed.
+
+Desktop foreground agents use the public hosted API root when `NORTUSCC_HOSTED_URL` is absent.
+Explicit URL overrides, including invalid values, retain their meaning. Set the desktop-only
+`NORTUSCC_DESKTOP_LOCAL_ONLY=1` to create no hosted client; any other defined value is rejected.
+CLI defaults remain local-only. Resource tests and packaged smoke set this explicitly because a
+temporary HOME does not isolate the OS keychain. Pure setup schemas live in `shared/setup-protocol.ts`.
+
+The native first-run bridge exposes `desktop_setup_state`, `setup_desktop`, and `install_git`.
+Startup checks setup state before invoking ensure; new or corrupt setups wait for the first-run flow.
+`setup_desktop` bootstraps then ensures in one lifecycle reservation and returns the current hello
+with its generation. Account commands are `hosted_state`, `sign_in`, `sign_out`, `sync_now`,
+`trust_setup`, `machine_settings`, `set_policy`, and `resume_agent`. `open_device_login` opens only
+`https://github.com/login/device` after an explicit action. All results use the normal generation/data
+wrapper. New command argument records are strict and bounded to 4096 bytes; helper output is one
+strict JSON line under the existing one MiB framing limit. Helper timeouts stop their owned process
+group and join their pipe readers before returning.
+
+`sign_in` accepts optional local `reportStatus`, which never enters the HTTP device-start body.
+An explicit choice is saved in the durable machine outbox before credentials and job completion.
+A reporting-off patch survives invalid PATCH responses and acknowledgements still reporting true,
+so interrupted sign-in or restart cannot issue a first status upload before false is acknowledged.
+Omitting the choice preserves the CLI behavior. Native display-name Unicode predicates are generated
+without dependencies using `node apps/desktop/scripts/display-name-categories.mjs` on Unicode17.0,
+such as Node24.19. The parity check verifies every code point against the shared predicates; deliberate
+Unicode contract updates should regenerate the table and review shared/native compatibility together.
+
+
+## Desktop screens
+
+The renderer starts with a read-only setup check before it requires an agent connection.
+New installations show the fixed setup repository and Claude, Codex, both or neither choices.
+Missing Git exposes an explicit Apple installer request and recheck. Bootstrap retries preserve
+completed native-owned checkouts; existing recorded setups are inspected without bootstrap.
+Setup prepares the agent and does not apply configuration changes.
+
+The sidebar contains Overview, Review & apply, Resolved and Settings. Overview reads the current
+agent status. Resolved shows inspected items and their available layer/source provenance.
+Review keeps selection, stale replacement previews, progress, cancellation and reconnect behavior.
+Notification clicks route to Review, refresh it and focus its heading without applying.
+Browser preview shows empty real states with native actions disabled.
+
+Settings offers optional GitHub Device Flow and defaults status sharing off before sign-in.
+The code lives only in renderer memory. Open GitHub is an explicit fixed native action.
+Pending-state reads use bounded injected timers, independently of the service sync cadence.
+Expiry clears the code and reads authoritative account state; only explicit Cancel or Sign out
+revokes credentials. Serial account operations fence replies and timers on sign-out, account
+change, disconnect, restart and disposal. Strict decoding failures use generic bounded errors.
+
+Machine name/reporting updates acknowledge queued local changes rather than claiming server
+persistence. Policy updates keep any automatic-apply pause until explicit Resume. Offered setup
+repositories require separate unchecked consent before sending an opaque setup ID for trust;
+account membership supplies no trust badge. Sync displays returned freshness, errors and retry time.
+The renderer does not implement updater, authoring, fleet, restoration, publishing or discovery.
+
+Controller checks use fake Bridge implementations and injected clocks. Rendered-view fixtures
+use the existing React server renderer with tsx. These tests do not establish actual macOS
+installer dialogs, service registration, browser/device authorization, notification behavior or
+native GUI interaction. Release/resource checks and packaged smoke remain separate verification.

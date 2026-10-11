@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod display_name_categories;
 mod notifications;
 use host::{Agent, Request, Setup};
 use serde_json::{json, Value};
@@ -113,6 +114,14 @@ fn restart(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce
         }
     }
 }
+/// A first-run machine waits for consent before the normal lifecycle helper can run.
+fn initial_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, state: impl FnOnce() -> Result<Value, String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Option<Value>, String> {
+    match state()?["needsSetup"].as_bool() {
+        Some(true) => Ok(None),
+        Some(false) => restart(session, lifecycle, connect).map(Some),
+        None => Err("Invalid setup state".into()),
+    }
+}
 fn close(session: &Mutex<Session>) {
     let agent = {
         let mut session = session.lock().unwrap();
@@ -152,6 +161,81 @@ async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, Stri
 async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
     let owner = owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || restart(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart))).await.map_err(|e| e.to_string())?
+}
+fn native_args<T: serde::de::DeserializeOwned>(request: tauri::ipc::Request<'_>) -> Result<T, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Json(value) => host::decode_args(value.clone()),
+        _ => Err("Expected JSON command arguments".into()),
+    }
+}
+#[tauri::command]
+async fn hosted_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::HostedState).await
+}
+#[tauri::command]
+async fn sign_in(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::SignInArgs = native_args(request)?;
+    dispatch(owner, Request::SignIn { name: args.name, report_status: args.report_status }).await
+}
+#[tauri::command]
+async fn sign_out(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::SignOut).await
+}
+#[tauri::command]
+async fn sync_now(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::SyncNow).await
+}
+#[tauri::command]
+async fn trust_setup(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::TrustArgs = native_args(request)?; dispatch(owner, Request::TrustSetup { setup_id: args.setup_id }).await
+}
+#[tauri::command]
+async fn machine_settings(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::MachineArgs = native_args(request)?; dispatch(owner, Request::MachineSettings { patch: args.patch }).await
+}
+#[tauri::command]
+async fn set_policy(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::PolicyArgs = native_args(request)?; dispatch(owner, Request::SetPolicy { policy: args.policy }).await
+}
+#[tauri::command]
+async fn resume_agent(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::Resume).await
+}
+async fn helper_dispatch(owner: tauri::State<'_, Arc<Owner>>, action: fn(&std::path::Path) -> Result<Value, String>) -> Result<Value, String> {
+    let owner = owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mine = { let current = owner.session.lock().unwrap(); if current.closed { return Err("App connection closed".into()); } current.generation };
+        let _lifecycle = owner.lifecycle.lock().unwrap();
+        if owner.session.lock().unwrap().generation != mine { return Err("Superseded by a newer restart".into()); }
+        let data = action(&owner.resources)?;
+        let current = owner.session.lock().unwrap();
+        if current.closed || current.generation != mine { return Err("Superseded by a newer restart".into()); }
+        Ok(json!({"generation":mine,"data":data}))
+    }).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
+async fn desktop_setup_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, host::desktop_setup_state).await
+}
+#[tauri::command]
+async fn install_git(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, host::install_git).await
+}
+#[tauri::command]
+async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, |_| host::open_device_login()).await
+}
+/// Bootstrap and ensure share one lifecycle reservation without recursively taking its mutex.
+fn setup_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, bootstrap: impl FnOnce() -> Result<(), String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
+    restart(session, lifecycle, |g| { bootstrap()?; connect(g) })
+}
+#[tauri::command]
+async fn setup_desktop(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::SetupArgs = native_args(request)?;
+    let choices = host::SetupChoices::decode(args.config_targets)?;
+    let owner = owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || setup_connection(&owner.session, &owner.lifecycle,
+        || host::bootstrap_desktop(&owner.resources, choices).map(|_|()), |g| owner.connect(g, Setup::Ensure))).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 fn take_review_request(owner: tauri::State<'_, Arc<Owner>>) -> Value {
@@ -256,15 +340,17 @@ fn main() {
             #[cfg(debug_assertions)]
             let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
             let owner = Arc::new(Owner {
-                session: Mutex::new(Session { agent: None, generation: 0, error: None, closed: false }),
+                session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false }),
                 lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),
             });
             app.manage(owner.clone());
             notifications::request_permission();
-            if let Err(error) = restart(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Ensure)) { eprintln!("Agent startup failed: {error}"); }
+            if let Err(error) = initial_connection(&owner.session, &owner.lifecycle, || host::desktop_setup_state(&owner.resources), |g| owner.connect(g, Setup::Ensure)) {
+                owner.session.lock().unwrap().error = Some(error);
+            }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request])
+        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
@@ -281,6 +367,46 @@ mod tests {
     use host::fixtures::{idle_agent, Fixture};
     use std::{sync::mpsc, thread, time::{Duration, Instant}};
     fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false }) }
+    #[test]
+    fn initial_startup_never_ensures_a_missing_or_corrupt_setup() {
+        let session = session(1); let lifecycle = Mutex::new(());
+        assert!(initial_connection(&session,&lifecycle,|| Ok(json!({"needsSetup":true})), |_| panic!("New machine must await consent")).unwrap().is_none());
+        assert!(initial_connection(&session,&lifecycle,|| Err("Corrupt metadata".into()), |_| panic!("Corrupt setup must not be replaced")).is_err());
+        assert_eq!(session.lock().unwrap().generation,1);
+        let (agent,fixture) = idle_agent();
+        assert_eq!(initial_connection(&session,&lifecycle,|| Ok(json!({"needsSetup":false})), |_| Ok(agent)).unwrap().unwrap()["generation"],2);
+        close(&session); fixture.finish();
+    }
+    #[test]
+    fn bootstrap_then_ensure_uses_one_reservation_and_preserves_failure_for_retry() {
+        let session = session(1); let lifecycle = Mutex::new(());
+        let steps = Mutex::new(Vec::new());
+        assert!(setup_connection(&session, &lifecycle, || { steps.lock().unwrap().push("bootstrap"); Err("Registration retry preserves clone".into()) }, |_| panic!("Failed bootstrap must not connect")).is_err());
+        assert_eq!(session.lock().unwrap().generation,2);
+        let (agent, fixture) = idle_agent();
+        let result = setup_connection(&session, &lifecycle, || { steps.lock().unwrap().push("bootstrap retry"); assert!(lifecycle.try_lock().is_err()); Ok(()) }, |g| {
+            assert_eq!(g,3); steps.lock().unwrap().push("ensure"); assert!(lifecycle.try_lock().is_err()); Ok(agent)
+        }).unwrap();
+        assert_eq!(result["generation"],3); assert_eq!(result["data"]["hello"]["protocol"],3);
+        assert_eq!(*steps.lock().unwrap(),vec!["bootstrap","bootstrap retry","ensure"]);
+        close(&session); fixture.finish();
+    }
+    #[test]
+    fn account_reply_in_flight_retains_its_original_generation_after_restart() {
+        let (entered, received) = mpsc::channel(); let (release, held) = mpsc::channel();
+        let fixture = Fixture::new(move |mut wire| {
+            wire.handshake(); let request = wire.next().unwrap(); assert_eq!(request["command"],"signIn");
+            entered.send(()).unwrap(); held.recv().unwrap(); wire.reply(&request,json!({"userCode":"ABCD"}));
+            assert!(wire.next().is_none());
+        });
+        let session = Arc::new(session(7)); session.lock().unwrap().agent = Some(Arc::new(fixture.connect(Arc::new(|_|{}))));
+        let pending = session.clone(); let job = thread::spawn(move || request(&pending,Request::SignIn {name:None,report_status:Some(false)}));
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        // Reserve a newer generation while the old reply is held. The renderer can fence it.
+        session.lock().unwrap().generation = 8;
+        release.send(()).unwrap(); assert_eq!(job.join().unwrap().unwrap()["generation"],7);
+        close(&session); fixture.finish();
+    }
     #[test]
     fn startup_notification_waits_for_publication_and_acks_off_reader() {
         let (sent, received) = mpsc::channel();

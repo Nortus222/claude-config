@@ -27,7 +27,7 @@ export type HostedClientOptions = {
 export type HostedClient = {
   readonly state: Effect.Effect<HostedState, HostedFailure>;
   readonly revisions: (setupId: string) => Effect.Effect<ReadonlyArray<SyncRevision>, HostedFailure>;
-  readonly startSignIn: (request: SignInRequest) => Effect.Effect<SignInStarted, HostedFailure>;
+  readonly startSignIn: (request: SignInRequest, reportStatus?: boolean) => Effect.Effect<SignInStarted, HostedFailure>;
   readonly pollSignIn: () => Effect.Effect<SignInPoll, HostedFailure>;
   readonly signOut: () => Effect.Effect<void, HostedFailure>;
   // Repairs durable local decisions and policy before jobs, without making hosted requests.
@@ -76,7 +76,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
   const history = yield* HistoryStore;
   const lock = yield* Semaphore.make(1);
   const now = options.now ?? (() => new Date());
-  let pending: { pendingId: string; expiresAt: number; nextAt: number; interval: number } | undefined;
+  let pending: { pendingId: string; expiresAt: number; nextAt: number; interval: number; reportStatus?: boolean } | undefined;
   const deadline = (seconds: number, jitter = false) => Effect.try({
     try: () => {
       const delay = seconds * 1000;
@@ -154,12 +154,12 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     while (a.outbox.length > 0) {
       const head = a.outbox[0]!;
       if (head.kind === 'machine') {
-        const result = yield* request(a, { method: 'PATCH', path: `/machines/${a.machineId}`, body: head.patch }).pipe(Effect.catch((error) => error.code === 'invalid'
+        const result = yield* request(a, { method: 'PATCH', path: `/machines/${a.machineId}`, body: head.patch }).pipe(Effect.catch((error) => error.code === 'invalid' && head.patch.reportStatus !== false
           ? drop(a, 1).pipe(Effect.as(undefined)) : Effect.fail(error)));
         if (result !== undefined) {
           if (result.status !== 200) return yield* Effect.fail(invalidResponse());
           const machine = yield* decode(MachineRecordSchema, result.body);
-          if (machine.machineId !== a.machineId) return yield* Effect.fail(invalidResponse());
+          if (machine.machineId !== a.machineId || (head.patch.reportStatus === false && machine.reportStatus !== false)) return yield* Effect.fail(invalidResponse());
           yield* updateAccount(a.accountId, (current) => ({ ...current, outbox: current.outbox.slice(1), machine: { policy: machine.policy, reportStatus: machine.reportStatus } }));
         }
       } else {
@@ -250,14 +250,15 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       const a = active(doc);
       return a ? store.revisions(a.accountId, setupId) : Effect.succeed([]);
     }),
-    startSignIn: (input) => Effect.gen(function* () {
+    startSignIn: (input, reportStatus) => Effect.gen(function* () {
+      if (reportStatus !== undefined) yield* decode(Schema.Boolean, reportStatus, true);
       const body = yield* decode(DeviceStartRequestSchema, { ...input, name: input.name ?? `${osNames[input.os]} machine` }, true);
       const reply = yield* transport.request({ method: 'POST', path: '/auth/device/start', body });
       if (reply.status !== 200) return yield* Effect.fail(invalidResponse());
       const response = yield* decode(DeviceStartResponseSchema, reply.body);
       const expiresAt = yield* deadline(response.expiresIn);
       const nextAt = yield* deadline(response.interval);
-      pending = { pendingId: response.pendingId, expiresAt, nextAt, interval: response.interval };
+      pending = { pendingId: response.pendingId, expiresAt, nextAt, interval: response.interval, ...(reportStatus === undefined ? {} : { reportStatus }) };
       const { pendingId: _pendingId, ...safe } = response;
       return safe;
     }).pipe(lock.withPermit),
@@ -292,6 +293,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
         accountId: result.accountId, login: result.login, machineId: result.machineId, auth: 'signed-in', seq: 0, cursors: [], setups: [],
         authoritative: [], outbox: [], machine: { policy: result.defaultPolicy, reportStatus: true }, lastSyncAt: null, retryAt: null, error: null, pollAfter: 900,
       };
+      if (flow.reportStatus !== undefined) next = { ...next, outbox: [...next.outbox, { kind: 'machine', patch: { reportStatus: flow.reportStatus } }] };
       if (policy.policySource === 'person') next = { ...next, outbox: [...next.outbox, { kind: 'machine', patch: { policy: policy.policy } }] };
       next = { ...withoutEtag(next), machine: { policy: result.defaultPolicy, reportStatus: true } };
       // Bind metadata first. A credential left from another account cannot pass request's identity check.

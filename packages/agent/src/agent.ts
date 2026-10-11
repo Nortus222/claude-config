@@ -27,7 +27,7 @@ export type AgentHandle = {
   readonly afterPerson?: HostedRuntime['afterPerson'];
   readonly hosted?: {
     readonly state: HostedRuntime['state'];
-    readonly signIn: (name?: string) => Effect.Effect<SignInStarted, HostedFailure | SessionError>;
+    readonly signIn: (name?: string, reportStatus?: boolean) => Effect.Effect<SignInStarted, HostedFailure | SessionError>;
     readonly signOut: () => Effect.Effect<void, unknown>;
     readonly sync: () => Effect.Effect<void, unknown>;
     readonly trust: (id: string, actor: Actor) => Effect.Effect<void, unknown>;
@@ -133,7 +133,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         afterPerson: hosted.afterPerson,
         hosted: {
           state: hosted.state,
-          signIn: (name?: string) => mutation(hosted.signIn(name)),
+          signIn: (name?: string, reportStatus?: boolean) => mutation(hosted.signIn(name, reportStatus)),
           signOut: () => mutation(hosted.signOut()),
           sync: () => mutation(hosted.sync).pipe(Effect.andThen(scheduler.request('inspect')), Effect.asVoid),
           trust: (id: string, actor: Actor) => mutation(hosted.trust(id, actor)).pipe(Effect.andThen(scheduler.request('inspect')), Effect.asVoid),

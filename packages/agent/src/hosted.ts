@@ -187,9 +187,9 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     trust: (id: string, actor: Actor) => remember(Effect.gen(function* () {
       invalidate(); yield* withServices(trustHostedSetup(id, yield* client.state, actor));
     })),
-    signIn: (name?: string) => remember(Effect.gen(function* () {
+    signIn: (name?: string, reportStatus?: boolean) => remember(Effect.gen(function* () {
       invalidate();
-      const started = yield* client.startSignIn({ os: input.os, agents, ...(name === undefined ? {} : { name }) });
+      const started = yield* client.startSignIn({ os: input.os, agents, ...(name === undefined ? {} : { name }) }, reportStatus);
       signingIn = true;
       const now = (yield* clock.now).getTime();
       pollAt = now + started.interval * 1000; expiresAt = now + started.expiresIn * 1000;

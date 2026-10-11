@@ -53,7 +53,7 @@ const DecisionSchema = Schema.Union([LocalDecisionSchema, Schema.Struct({ setupI
 
 export const RequestSchema = Schema.Union([
   Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['hostedState', 'signOut', 'syncNow']) }),
-  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema), reportStatus: Schema.optionalKey(Schema.Boolean) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('trustSetup'), setupId: HostedId }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('machineSettings'), patch: MachinePatchSchema }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notification'), notificationId: NotificationId }),

@@ -24,6 +24,7 @@ const fixture = async (t: TestContext) => {
   let clock = Date.parse('2026-10-07T00:00:00Z');
   let token: string | undefined;
   let removeFailure = false;
+  let writeFailure = false;
   let account = 'account1';
   let policy: 'auto-apply' | 'notify' | 'manual' = 'notify';
   let policySource: 'person' | 'default' = 'default';
@@ -46,7 +47,7 @@ const fixture = async (t: TestContext) => {
     if (req.method === 'PATCH') return Effect.succeed({ status: 200, body: { machineId: 'machine1', name: 'Mac', os: 'macos', agents: ['claude'], policy: (req.body as any).policy ?? policy, reportStatus: (req.body as any).reportStatus ?? true, createdAt: '2026-10-07T00:00:00Z', lastSeenAt: '2026-10-07T00:00:00Z', status: null } });
     return Effect.succeed({ status: 204 });
   } });
-  const credentials = Layer.succeed(MachineTokenStore, { read: () => Effect.succeed(token), write: (value) => Effect.sync(() => { token = value; }), remove: () => removeFailure ? Effect.fail(new HostedFailure({ code: 'credential_storage' })) : Effect.sync(() => { token = undefined; }) });
+  const credentials = Layer.succeed(MachineTokenStore, { read: () => Effect.succeed(token), write: (value) => writeFailure ? Effect.fail(new HostedFailure({ code: 'credential_storage' })) : Effect.sync(() => { token = value; }), remove: () => removeFailure ? Effect.fail(new HostedFailure({ code: 'credential_storage' })) : Effect.sync(() => { token = undefined; }) });
   const layer = Layer.mergeAll(stores, transport, credentials);
   // Capture actual services once; restarts recreate only the client, retaining files and credential fake.
   const services = await Effect.runPromise(Effect.gen(function* () { return { store: yield* HostedStore, decisions: yield* DecisionsStore, history: yield* HistoryStore, transport: yield* HostedTransport, credentials: yield* MachineTokenStore }; }).pipe(Effect.provide(layer)));
@@ -57,7 +58,7 @@ const fixture = async (t: TestContext) => {
   const signIn = async () => { await Effect.runPromise(client.startSignIn({ os: 'macos', agents: ['claude'] })); clock += 5000; return Effect.runPromise(client.pollSignIn()); };
   return { root, paths, services, requests, actions, signIn, get client() { return client; }, restart: async () => { client = await create(); },
     advance: (ms: number) => { clock += ms; }, setResponse: (next: SyncResponse) => { response = next; }, setAccount: (next: string) => { account = next; },
-    person: () => { policy = 'manual'; policySource = 'person'; }, get policy() { return policy; }, setCrash: (next: boolean) => { crash = next; }, get token() { return token; }, setToken: (next: string) => { token = next; }, failWrite: (suffix?: string) => { failSuffix = suffix; }, failRemove: (next: boolean) => { removeFailure = next; } };
+    person: () => { policy = 'manual'; policySource = 'person'; }, get policy() { return policy; }, setCrash: (next: boolean) => { crash = next; }, get token() { return token; }, setToken: (next: string) => { token = next; }, failWrite: (suffix?: string) => { failSuffix = suffix; }, failRemove: (next: boolean) => { removeFailure = next; }, failCredentialWrite: (next: boolean) => { writeFailure = next; } };
 };
 const run = Effect.runPromise;
 
@@ -539,4 +540,53 @@ for (const retryAfter of [2_147_484, Number.MAX_SAFE_INTEGER]) test(`device long
   f.advance(1000); await assert.rejects(run(f.client.pollSignIn()), /sign_in_expired/);
   f.advance(2_147_484_000); await assert.rejects(run(f.client.pollSignIn()), /sign_in_expired/);
   assert.equal(f.requests.length, count, 'expiry and timer-ceiling jumps cannot restart HTTP polling');
+});
+
+for (const reportStatus of [false, true]) test(`local sign-in reporting ${reportStatus} persists before credentials and survives restart`, async (t) => {
+  const f = await fixture(t);
+  await run(f.client.startSignIn({ os: 'macos', agents: ['claude'] }, reportStatus));
+  assert.deepEqual(f.requests[0]!.body, { os: 'macos', agents: ['claude'], name: 'macOS machine' });
+  f.advance(5000); await run(f.client.pollSignIn());
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, [{ kind: 'machine', patch: { reportStatus } }]);
+  await f.restart(); await run(f.client.recover());
+  assert.equal((await run(f.client.state)).machine?.reportStatus, reportStatus);
+  await run(f.client.reportStatus({ reportedAt: '2026-10-07T00:00:05Z', policy: 'notify', agents: ['claude'], setups: [], drift: { setting: 0, skill: 0, integration: 0, file: 0 } }));
+  assert.equal(f.requests.filter((r) => r.path === '/machines/self/status').length, reportStatus ? 1 : 0);
+});
+
+for (const failure of ['invalid', 'contradictory'] as const) test(`reporting off remains durable after ${failure} PATCH and restart`, async (t) => {
+  const f = await fixture(t); await f.signIn();
+  await run(f.client.enqueueMachine({ reportStatus: false }));
+  f.actions.push(() => failure === 'invalid' ? Effect.fail(new HostedFailure({ code: 'invalid' })) : Effect.succeed({ status: 200, body: {
+    machineId: 'machine1', name: 'Mac', os: 'macos', agents: ['claude'], policy: 'notify', reportStatus: true,
+    createdAt: '2026-10-07T00:00:00Z', lastSeenAt: '2026-10-07T00:00:00Z', status: null,
+  } }));
+  await assert.rejects(run(f.client.sync()), failure === 'invalid' ? /invalid/ : /invalid_response/);
+  await f.restart(); await run(f.client.recover());
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, [{ kind: 'machine', patch: { reportStatus: false } }]);
+  await run(f.client.reportStatus({ reportedAt: '2026-10-07T00:00:05Z', policy: 'notify', agents: ['claude'], setups: [], drift: { setting: 0, skill: 0, integration: 0, file: 0 } }));
+  assert.equal(f.requests.filter((r) => r.path === '/machines/self/status').length, 0);
+  f.advance(1_000_000); f.setResponse(delta({ machine: { policy: 'notify', reportStatus: false } })); await run(f.client.sync());
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+  assert.equal((await run(f.client.state)).machine?.reportStatus, false);
+});
+
+test('credential interruption leaves reporting intent durable before sign-in can finish', async (t) => {
+  const f = await fixture(t); f.failCredentialWrite(true);
+  await run(f.client.startSignIn({ os: 'macos', agents: ['claude'] }, false)); f.advance(5000);
+  await assert.rejects(run(f.client.pollSignIn()), /credential_storage/);
+  assert.equal(f.token, undefined);
+  await f.restart(); await run(f.client.recover());
+  assert.equal((await run(f.client.state)).machine?.reportStatus, false);
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, [{ kind: 'machine', patch: { reportStatus: false } }]);
+  await run(f.client.reportStatus({ reportedAt: '2026-10-07T00:00:05Z', policy: 'notify', agents: ['claude'], setups: [], drift: { setting: 0, skill: 0, integration: 0, file: 0 } }));
+  assert.equal(f.requests.filter((r) => r.path === '/machines/self/status').length, 0);
+});
+
+test('invalid local reporting preferences fail before HTTP device start', async (t) => {
+  const f = await fixture(t);
+  for (const preference of ['false', null, 0]) {
+    await assert.rejects(run(f.client.startSignIn({ os: 'macos', agents: ['claude'] }, preference as unknown as boolean)), /invalid_request/);
+  }
+  assert.deepEqual(f.requests, []);
 });
