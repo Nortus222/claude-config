@@ -57,9 +57,12 @@ impl NativeHelper {
 struct NativeHandoff { session: Session, installing: bool, terminal: bool }
 impl NativeHandoff {
     fn action(&mut self, action: &str, expected: Value, terminal: bool) -> Result<(), String> {
+        self.action_with_input(json!({"action":action}),expected,terminal)
+    }
+    fn action_with_input(&mut self, input: Value, expected: Value, terminal: bool) -> Result<(), String> {
         if self.terminal { return Err("Maintenance session already ended".into()); }
         let result = (|| {
-            self.session.write(&json!({"action":action}), None)?;
+            self.session.write(&input, None)?;
             if self.session.record(self.session.deadline, None)? != expected { return Err("Invalid maintenance acknowledgement".into()); }
             if terminal { self.session.finish()?; self.terminal = true; }
             Ok(())
@@ -71,7 +74,7 @@ impl NativeHandoff {
 impl Handoff for NativeHandoff {
     fn begin_install(&mut self) -> Result<(), String> {
         if self.installing { return Err("Maintenance installation already began".into()); }
-        self.action("begin-install", json!({"installing":true}), false)?;
+        self.action_with_input(json!({"action":"begin-install","installerPid":std::process::id()}), json!({"installing":true}), false)?;
         self.installing = true; Ok(())
     }
     fn commit(&mut self) -> Result<(), String> {
@@ -267,12 +270,13 @@ mod tests {
  fn cancelled()->Arc<AtomicBool> {Arc::new(AtomicBool::new(false))}
  #[test]
  fn retains_helper_until_commit_and_uses_fixed_native_arguments() {
-  let f=Fixture::new(&format!("{}\nprintf '%s\n' \"$initial\" > input\nread begin; printf '%s\n' '{{\"installing\":true}}'\nread commit; printf '%s\n' '{{\"committed\":true}}'\nsleep 0.03", READY));
+  let f=Fixture::new(&format!("{}\nprintf '%s\n' \"$initial\" > input\nread begin; printf '%s\n' \"$begin\" > begin\n printf '%s\n' '{{\"installing\":true}}'\nread commit; printf '%s\n' '{{\"committed\":true}}'\nsleep 0.03", READY));
   let mut handoff=f.helper().prepare("0.1.0","0.2.0",cancelled()).unwrap();
   handoff.begin_install().unwrap();handoff.commit().unwrap();f.exited();
   let args=fs::read_to_string(f.root.join("args")).unwrap();let args:Vec<_>=args.lines().collect();
   assert_eq!(args.len(),4);assert_eq!(args[1],"--prepare-update");assert_eq!(args[2],"--app");assert_eq!(Path::new(args[3]),std::env::current_exe().unwrap());
   assert_eq!(serde_json::from_str::<serde_json::Value>(&fs::read_to_string(f.root.join("input")).unwrap()).unwrap(),serde_json::json!({"fromVersion":"0.1.0","toVersion":"0.2.0"}));
+  assert_eq!(serde_json::from_str::<Value>(&fs::read_to_string(f.root.join("begin")).unwrap()).unwrap(),json!({"action":"begin-install","installerPid":std::process::id()}));
  }
  #[test]
  fn abort_joins_the_helper_before_returning() {

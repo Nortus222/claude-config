@@ -19,6 +19,8 @@ test('resources contain only the agent runtime, hashed version and bundled licen
   assert.equal(metadata.agentVersion, createHash('sha256').update(readFileSync(join(resources!, 'agent.mjs'))).digest('hex'));
   assert.equal(metadata.executable, executable);
   assert.equal(metadata.target, `${process.platform}-${process.arch}`);
+  assert.equal(metadata.appVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+  assert.equal(metadata.maintenanceProtocol, 1);
   assert.ok(readFileSync(join(resources!, 'BUN-LICENSE.md'), 'utf8').trim());
   assert.ok(readFileSync(join(resources!, 'EFFECT-LICENSE'), 'utf8').trim());
 });

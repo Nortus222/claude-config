@@ -52,6 +52,6 @@ const effectRoot = dirname(createRequire(import.meta.url).resolve('effect/packag
 await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
 await writeFile(
   resolve(resources, 'runtime.json'),
-  JSON.stringify({ target, bun: bunVersion, executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
+  JSON.stringify({ target, appVersion: JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version, maintenanceProtocol: 1, bun: bunVersion, executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
 );
 console.log(`Bundled agent and Bun ${bunVersion} for ${target}`);

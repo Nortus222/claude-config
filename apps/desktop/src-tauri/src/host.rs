@@ -1274,12 +1274,13 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
             assert!(run_json_helper(helper_command(&root, Setup::State, None).unwrap(),Duration::from_secs(1),None).is_err());
             std::fs::remove_dir_all(root).unwrap();
         }
-        let root = resources("printf '%s' \"$$\" > pid\n/bin/cat >/dev/null\n/bin/sleep 30 &\nprintf '%s\\n' '{\"stateRoot\":\"/tmp/x\"}'");
+        let root = resources("/bin/cat >/dev/null\n/bin/sleep 30 &\nprintf '%s\\n' '{\"stateRoot\":\"/tmp/x\"}'");
         let mut command = helper_command(&root, Setup::Bootstrap, None).unwrap(); command.stdin(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let pid = child.id() as i32;
         let started = Instant::now();
-        assert!(run_json_helper(command,Duration::from_millis(100),Some(b"{\"configTargets\":[]}".to_vec())).is_err());
+        assert!(wait_json_helper(child,Duration::from_millis(100),Some(b"{\"configTargets\":[]}".to_vec()),Duration::ZERO).is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
-        let pid = std::fs::read_to_string(root.join("pid")).unwrap().parse::<i32>().unwrap();
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
