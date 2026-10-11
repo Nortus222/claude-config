@@ -17,7 +17,7 @@ export function UpdateView({ controller, state }: { controller: UpdateController
   return <section className="form-section updates">
     <h2>Updates</h2>
     <p>Installed version: {update?.installedVersion ?? 'Unknown'}</p>
-    <p className="muted">Stable app updates do not require an account or completed setup.</p>
+    <p className="muted">Update checks and downloads do not require an account or completed setup.</p>
     {update?.enabled ? <p role="status">{state.deferred ? 'Update deferred. Return here when ready.' : descriptions[update.phase]}</p> : null}
     {!state.deferred && update?.enabled && update.availableVersion ? <p>Available version: {update.availableVersion}</p> : null}
     {!state.deferred && update?.enabled && update.notes ? <details><summary>Release notes</summary><p className="update-notes">{update.notes}</p></details> : null}
