@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Effect, type Scope } from 'effect';
-import { LockHeld } from './errors.ts';
+import { LockHeld, MaintenancePending } from './errors.ts';
 import { MachinePaths } from './paths.ts';
 
 const alive = (pid: number) => {
@@ -135,4 +135,10 @@ export const acquirePidLock = (path: string): Effect.Effect<void, LockHeld, Scop
 export const acquireApplyLock = Effect.gen(function* () {
   const { stateRoot } = yield* MachinePaths;
   yield* acquirePidLock(join(stateRoot, 'apply.lock'));
+  // Check inside the shared fence so maintenance cannot start between the check and a run.
+  const pending = yield* Effect.sync(() => {
+    try { lstatSync(join(stateRoot, 'agent', 'pending-update.json')); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+  });
+  if (pending) return yield* Effect.fail(new MaintenancePending());
 });

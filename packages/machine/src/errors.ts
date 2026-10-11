@@ -32,6 +32,11 @@ export class LockHeld extends Data.TaggedError('LockHeld')<{ readonly path: stri
   }
 }
 
+// Interrupted app maintenance must be recovered before any machine-changing run.
+export class MaintenancePending extends Data.TaggedError('MaintenancePending')<{}> {
+  override get message() { return 'desktop update recovery is pending; open Claude Config to recover before applying'; }
+}
+
 // decisions.json exists but is not a decisions file; nothing rewrites it until a person fixes it.
 export class DecisionsInvalid extends Data.TaggedError('DecisionsInvalid')<{ readonly path: string; readonly reason: string }> {
   override get message() {

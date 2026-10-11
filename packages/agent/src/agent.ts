@@ -110,7 +110,8 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         }
         return yield* effect;
       })))).pipe(Effect.provideService(MachinePaths, paths),
-        Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))));
+        Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
+        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
     const hosted = options.hosted;
     const changes = (decisions: ReadonlyArray<Decision>, actor: Actor) => mutation(Effect.forEach(decisions, (decision): Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure> =>
       decision.revision === null ? withServices(recordDecision(decision, actor))

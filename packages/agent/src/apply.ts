@@ -90,6 +90,7 @@ export const autoApply = (
     }
     const outcome = yield* Effect.scoped(runUnderLock(planned, report, domains, options.signal)).pipe(
       Effect.catchTag('LockHeld', () => Effect.succeed(LOCK_HELD)),
+      Effect.catchTag('MaintenancePending', () => Effect.succeed(LOCK_HELD)),
     );
     // The run is already in History; a pruning failure must not hide it. Old backups are retried
     // after the next run.

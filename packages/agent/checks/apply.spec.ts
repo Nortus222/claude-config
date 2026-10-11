@@ -123,3 +123,14 @@ test('a pruning failure after a run still answers the run', async () => {
   assert.equal(outcome.result, 'done');
   assert.deepEqual(await m.kinds(), ['apply-started', 'apply-finished']);
 });
+
+test('an interrupted desktop update fences automatic apply after service restart without changing policy or History', async () => {
+  const m = agentMachine();
+  m.write(join(m.paths.stateRoot, 'agent', 'pending-update.json'), '{"phase":"installing"}');
+  m.write(join(m.paths.stateRoot, 'agent', 'agent.json'), '{"policy":"manual","paused":{"reason":"person","at":"2026-10-11T00:00:00Z"}}');
+  const before = m.read(join(m.paths.stateRoot, 'agent', 'agent.json'));
+  const outcome = await applyWith(m, reportOf(item('config:a')), ['config:a'], [fakeDomain('config', 'write-file')]);
+  assert.deepEqual(outcome, { kind: 'lock-held' });
+  assert.deepEqual(await m.kinds(), []);
+  assert.equal(m.read(join(m.paths.stateRoot, 'agent', 'agent.json')), before);
+});

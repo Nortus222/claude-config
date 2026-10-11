@@ -2,7 +2,7 @@ import { Cause, Effect, Exit, Queue, Stream } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import { acquireApplyLock } from './apply-lock.ts';
 import { Backups } from './backups.ts';
-import type { LockHeld } from './errors.ts';
+import type { LockHeld, MaintenancePending } from './errors.ts';
 import type { MachinePaths } from './paths.ts';
 import type { Domain, MachineReport, Plan, PlanKind, Progress, Selection, Skipped, Step, StepResult } from './model.ts';
 
@@ -88,8 +88,8 @@ export const execute = <const D extends ReadonlyArray<Domain<any>>>(
   report: MachineReport,
   domains: D,
   options: { readonly signal?: AbortSignal; readonly lockHeld?: boolean } = {},
-): Stream.Stream<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups> =>
-  Stream.callback<Progress, LockHeld, DomainServices<D> | MachinePaths | Backups>((queue) =>
+): Stream.Stream<Progress, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups> =>
+  Stream.callback<Progress, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups>((queue) =>
     Effect.gen(function* () {
       if (!options.lockHeld) yield* acquireApplyLock;
       const backups = yield* Backups;

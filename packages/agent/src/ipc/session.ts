@@ -183,6 +183,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             Scope.provide(lock),
             Effect.provideContext(context),
             Effect.catchTag('LockHeld', (held) => Effect.fail(new SessionError('LOCKED', `${held.message}; apply again when it finishes`))),
+            Effect.catchTag('MaintenancePending', (pending) => Effect.fail(new SessionError('LOCKED', pending.message))),
           );
           if (wanted.generation !== (yield* (handle.generation ?? Effect.succeed(0)))) {
             previewed = undefined;
