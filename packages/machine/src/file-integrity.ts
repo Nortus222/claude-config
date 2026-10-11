@@ -8,6 +8,7 @@ import { FsFailed } from './errors.ts';
 export class FileIntegrity extends Context.Service<FileIntegrity, {
   readonly digestTree: (path: string) => Effect.Effect<string, FsFailed>;
   readonly sha256File: (path: string) => Effect.Effect<string, FsFailed>;
+  // Flush an existing Unix file or directory; unsupported platforms report FsFailed.
   readonly syncPath: (path: string) => Effect.Effect<void, FsFailed>;
 }>()('machine/FileIntegrity') {}
 const attempt = <A>(op: string, path: string, run: () => Promise<A>) => Effect.tryPromise({

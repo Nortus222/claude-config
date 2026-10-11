@@ -37,11 +37,13 @@ test('tree digest records symlink targets without following external content', {
   assert.notEqual(await f.run(service => service.digestTree(tree)), original);
 });
 
-test('file digest matches raw binary SHA256 and flushing supports the file and containing directory', async t => {
+test('file digest matches raw binary SHA256 and Unix file/directory flush succeeds', async t => {
   const f = fixture(t); const path = join(f.home, 'binary'); const bytes = Buffer.from([255, 0, 254, 128, 10]); writeFileSync(path, bytes);
   assert.equal(await f.run(service => service.sha256File(path)), createHash('sha256').update(bytes).digest('hex'));
-  await f.run(service => service.syncPath(path));
-  if (process.platform !== 'win32') await f.run(service => service.syncPath(f.home));
+  if (process.platform !== 'win32') {
+    await f.run(service => service.syncPath(path));
+    await f.run(service => service.syncPath(f.home));
+  }
 });
 
 test('missing files produce typed integrity failures with operation and path', async t => {

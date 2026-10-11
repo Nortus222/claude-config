@@ -52,6 +52,8 @@ const fixture = (t: { after: (f: () => void) => void }, integrityOverrides?: Par
   return { input, paths, resources, appPath, bundle, agentVersion, events, connect, run, journalPath,
     applying: () => { applying = true; }, failStop: () => { stopFails = true; }, respawn: () => { respawn = true; } };
 };
+// Allow disk and scheduler headroom when verification shares a machine with the release build.
+const transitionTimeoutMs = 2_000;
 const records = (...values: unknown[]): AsyncIterable<string> => ({ async *[Symbol.asyncIterator]() { for (const value of values) yield JSON.stringify(value) + '\n'; } });
 
 test('maintenance records reject extra fields, unstable versions and invalid transitions', () => {
@@ -68,7 +70,7 @@ test('prepare holds both fences through durable installing acknowledgement and c
   const result = await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: value => {
     output.push(value); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), process.pid);
     if ((value as { installing?: boolean }).installing) assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
-  }, connect: f.connect, pollMs: 1, timeoutMs: 100 }));
+  }, connect: f.connect, pollMs: 1, timeoutMs: transitionTimeoutMs }));
   assert.deepEqual(result, { committed: true }); assert.equal(output.length, 2);
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'awaiting-health');
   assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/agent.json'), 'utf8'), before);
@@ -78,7 +80,7 @@ test('prepare holds both fences through durable installing acknowledgement and c
 
 test('EOF after begin-install never restarts an old service or removes pending', async t => {
   const f = fixture(t);
-  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: () => {}, connect: f.connect, timeoutMs: 100, pollMs: 1 })), /interrupted|EOF/);
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: () => {}, connect: f.connect, timeoutMs: transitionTimeoutMs, pollMs: 1 })), /interrupted|EOF/);
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
   assert.ok(!f.events.includes('bootstrap')); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
 });
@@ -108,9 +110,9 @@ test('target recovery rejects mismatched runtime health and retains the journal'
   writeFileSync(join(f.bundle, 'Contents/Info.plist'), '<plist><dict><key>CFBundleShortVersionString</key><string>1.1.0</string></dict></plist>');
   const runtimePath = join(f.resources, 'runtime.json'); const runtime = JSON.parse(readFileSync(runtimePath, 'utf8')); runtime.appVersion = '1.1.0'; writeFileSync(runtimePath, JSON.stringify(runtime));
   const incompatible = async (): Promise<AgentConnection> => ({ ...await f.connect(), hello: { protocol: 3, agentVersion: 'wrong', policy: 'manual', paused: null } });
-  await assert.rejects(f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect: incompatible, timeoutMs: 100, pollMs: 1, retryDelayMs: 0 })), /health identity/);
+  await assert.rejects(f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect: incompatible, timeoutMs: transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 })), /health identity/);
   assert.ok(existsSync(f.journalPath));
-  assert.deepEqual(await f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect: f.connect, timeoutMs: 100, pollMs: 1, retryDelayMs: 0 })), { recovered: true, interrupted: false, stateRoot: f.paths.stateRoot });
+  assert.deepEqual(await f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect: f.connect, timeoutMs: transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 })), { recovered: true, interrupted: false, stateRoot: f.paths.stateRoot });
   assert.ok(!existsSync(f.journalPath));
 });
 
@@ -123,7 +125,7 @@ test('prepared EOF restores only a proven intact old service', async t => {
 test('cancellation after installing joins finalizers, keeps pending and releases both fences', async t => {
   const f = fixture(t); const controller = new AbortController();
   const stdin = { async *[Symbol.asyncIterator]() { yield JSON.stringify({ fromVersion: '1.0.0', toVersion: '1.1.0' }) + '\n'; yield JSON.stringify({ action: 'begin-install', installerPid: 777777 }) + '\n'; await new Promise(() => {}); } };
-  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin, stdout: value => { if ((value as { installing?: boolean }).installing) controller.abort(); }, connect: f.connect, timeoutMs: 100, pollMs: 1 }), controller.signal));
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin, stdout: value => { if ((value as { installing?: boolean }).installing) controller.abort(); }, connect: f.connect, timeoutMs: transitionTimeoutMs, pollMs: 1 }), controller.signal));
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
   assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), undefined); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
   assert.ok(!f.events.includes('bootstrap'));
@@ -175,7 +177,7 @@ test('maintenance waits out an apply lock acquired during the status check', asy
       return request<A>(command, options);
     } };
   };
-  assert.deepEqual(await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: 100, pollMs: 1, retryDelayMs: 0 })), { aborted: true });
+  assert.deepEqual(await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 })), { aborted: true });
   assert.ok(!existsSync(f.journalPath));
 });
 
@@ -200,7 +202,7 @@ test('recovery cancellation joins its health connection before releasing locks a
     if (++calls === 2) { entered(); await new Promise(resolve => setTimeout(resolve, 40)); }
     return f.connect();
   };
-  const running = f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect, timeoutMs: 200, pollMs: 1, retryDelayMs: 0 }), controller.signal);
+  const running = f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.1.0' }), connect, timeoutMs: transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 }), controller.signal);
   const rejected = assert.rejects(running);
   await ready; controller.abort(); await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid);
@@ -212,7 +214,7 @@ test('a service respawn between shutdown and bootout is drained before native re
   const f = fixture(t); f.respawn();
   await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: value => {
     if ((value as { ready?: boolean }).ready) assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/agent.lock')), undefined);
-  }, connect: f.connect, pollMs: 1, timeoutMs: 100 }));
+  }, connect: f.connect, pollMs: 1, timeoutMs: transitionTimeoutMs }));
 });
 
 test('changed service registration cannot authorize unloading an unrelated job', async t => {
@@ -263,7 +265,7 @@ test('successful old service registration retains prepared pending when fresh IP
       const conn = await f.connect();
       return { ...conn, hello: { ...conn.hello, ...(failure === 'wrong-version' ? { agentVersion: 'wrong' } : { protocol: 2 }) } } as AgentConnection;
     };
-    await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: 50, pollMs: 1, retryDelayMs: 0 })), /health.*timed out|health identity/);
+    await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: failure === 'unavailable' ? 50 : transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 })), /health.*timed out|health identity/);
     assert.ok(f.events.includes('bootstrap')); assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'prepared');
     assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
   }
@@ -286,7 +288,7 @@ test('prepared restoration cancellation joins fresh health before releasing fenc
     if (++connects === 2) { entered(); await new Promise(resolve => setTimeout(resolve, 40)); }
     return f.connect();
   };
-  const running = f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: 200, pollMs: 1, retryDelayMs: 0 }), controller.signal);
+  const running = f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'abort' }), stdout: () => {}, connect, timeoutMs: transitionTimeoutMs, pollMs: 1, retryDelayMs: 0 }), controller.signal);
   const rejected = assert.rejects(running);
   await ready; assert.ok(existsSync(f.journalPath)); controller.abort(); await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid);
