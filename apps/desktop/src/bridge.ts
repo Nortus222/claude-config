@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Schema } from 'effect';
+import { decodeUpdateSnapshot } from '../shared/update-protocol.ts';
+import type { UpdateBridge } from './update-controller.ts';
 import { decodeMessage, type RunEvent, type StatusEvent } from '@nortuscc/agent/ipc/protocol';
 
 // Fixed native commands accept public metadata, enums and opaque IDs.
@@ -44,5 +46,14 @@ export const nativeBridge: Bridge = {
     const result = await invoke(command, args);
     try { return Schema.decodeUnknownSync(HostEnvelope, { onExcessProperty: 'error' })(result); }
     catch { throw new Error('Invalid native response'); }
+  },
+};
+
+// Updater snapshots do not share the agent connection's generation envelope.
+export const nativeUpdateBridge: UpdateBridge = {
+  invoke: async (command, args) => {
+    const result = await invoke(command, args);
+    try { return decodeUpdateSnapshot(result); }
+    catch { throw new Error('Invalid native update response'); }
   },
 };

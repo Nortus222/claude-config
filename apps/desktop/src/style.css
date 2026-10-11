@@ -527,3 +527,25 @@ input[type='text'], select {
     gap: 16px;
   }
 }
+
+.first-run-updates {
+  margin: auto;
+  padding: 0 38px 24px;
+}
+.updates details {
+  margin: 18px 0 0;
+}
+.update-notes {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.update-progress {
+  margin-top: 18px;
+}
+.update-progress progress {
+  width: min(100%, 420px);
+  accent-color: #b1d9bf;
+}
+.updates .feedback {
+  overflow-wrap: anywhere;
+}
