@@ -128,6 +128,7 @@ async function checkContext(env: NodeJS.ProcessEnv) {
 }
 async function main() {
   const env = process.env; const mode = process.argv[2];
+  if (mode === 'publish' && env.DESKTOP_PUBLISH !== 'true') fail('publication must be explicitly enabled');
   await checkContext(env);
   if (mode === 'overlay') { await writeFile(env.RELEASE_OVERLAY ?? fail('overlay path required'), JSON.stringify(releaseOverlay(env.DESKTOP_UPDATER_PUBLIC_KEY ?? ''), null, 2)); return; }
   if (mode !== 'prepare' && mode !== 'publish') fail('unknown mode');

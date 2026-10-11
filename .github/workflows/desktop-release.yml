@@ -15,6 +15,11 @@ on:
         description: 'Plain text release notes'
         required: true
         type: string
+      publish:
+        description: 'Publish versioned artifacts and advance the stable update channel'
+        required: true
+        default: false
+        type: boolean
 
 permissions: {}
 concurrency:
@@ -51,7 +56,6 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           node apps/desktop/scripts/release.ts overlay
-          # Deliberately absent until the owner commits reviewed, tested Bun entitlements.
           test -f apps/desktop/release/bun-entitlements.plist
           plutil -lint apps/desktop/release/bun-entitlements.plist
           if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' apps/desktop/release/bun-entitlements.plist 2>/dev/null | grep -qx true; then exit 1; fi
@@ -128,8 +132,14 @@ jobs:
             grep -Eq '^CodeDirectory .*flags=.*runtime' "$RUNNER_TEMP/signing-details.txt"
             grep -Fx "Authority=$APPLE_SIGNING_IDENTITY" "$RUNNER_TEMP/signing-details.txt"
             grep -q '^Timestamp=' "$RUNNER_TEMP/signing-details.txt"
-            codesign --display --entitlements - "$binary" > "$RUNNER_TEMP/actual-entitlements.plist"
-            if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$RUNNER_TEMP/actual-entitlements.plist" 2>/dev/null | grep -qx true; then exit 1; fi
+            codesign --display --entitlements :- "$binary" > "$RUNNER_TEMP/actual-entitlements.plist"
+            if test -s "$RUNNER_TEMP/actual-entitlements.plist"; then
+              plutil -lint "$RUNNER_TEMP/actual-entitlements.plist"
+              if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$RUNNER_TEMP/actual-entitlements.plist" 2>/dev/null | grep -qx true; then exit 1; fi
+            fi
+            if test "$binary" = "$app/Contents/Resources/agent-runtime/bun"; then
+              plutil -convert json -o - "$RUNNER_TEMP/actual-entitlements.plist" | node --input-type=module -e 'import {readFileSync} from "node:fs"; const value=JSON.parse(readFileSync(0,"utf8")); if(Object.keys(value).length!==1 || value["com.apple.security.cs.allow-jit"]!==true) throw new Error("Unexpected Bun entitlements");'
+            fi
           done
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=2 "$app"
@@ -174,7 +184,7 @@ jobs:
 
   publish:
     needs: prepare
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'Nortus222/claude-config'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'Nortus222/claude-config' && inputs.publish == true
     runs-on: macos-15
     timeout-minutes: 20
     permissions:
@@ -195,6 +205,7 @@ jobs:
           path: ${{ runner.temp }}/desktop-release-artifacts
       - name: Reverify transferred signature and publish versioned artifacts then channel metadata
         env:
+          DESKTOP_PUBLISH: ${{ inputs.publish }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_ARTIFACTS: ${{ runner.temp }}/desktop-release-artifacts
         run: |

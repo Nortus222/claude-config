@@ -4,11 +4,46 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { assertContext, releaseOverlay, prepareRelease, verifyChecks, publishRelease } from '../scripts/release.ts';
 
 const sha = 'a'.repeat(40);
 const publicKey = Buffer.from(`untrusted comment: test only\n${Buffer.concat([Buffer.from('Ed'), Buffer.alloc(40, 1)]).toString('base64')}\n`).toString('base64');
 const context = { event: 'workflow_dispatch', ref: 'refs/heads/main', repository: 'Nortus222/claude-config', captured: sha, reviewed: sha, head: sha, main: sha, version: '0.2.0', versions: ['0.2.0', '0.2.0', '0.2.0'] };
+
+test('publication command requires explicit opt-in before inspecting source or making requests', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'desktop-publish-guard-'));
+  try {
+    const script = fileURLToPath(new URL('../scripts/release.ts', import.meta.url));
+    for (const value of [undefined, '', 'false', 'TRUE', '1']) {
+      const result = spawnSync(process.execPath, [script, 'publish'], {
+        cwd: home, encoding: 'utf8', timeout: 10_000,
+        env: { HOME: home, ...(value === undefined ? {} : { DESKTOP_PUBLISH: value }) },
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /publication must be explicitly enabled/);
+    }
+    const optedIn = spawnSync(process.execPath, [script, 'publish'], {
+      cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8', timeout: 10_000,
+      env: { HOME: home, DESKTOP_PUBLISH: 'true' },
+    });
+    assert.equal(optedIn.status, 1);
+    assert.match(optedIn.stderr, /dispatch must name the exact reviewed main SHA/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('manual release workflow defaults to validation and grants publication only to an opted-in job', async () => {
+  const workflow = await readFile(new URL('../../../.github/workflows/desktop-release.yml', import.meta.url), 'utf8');
+  const [header, jobs] = workflow.split('\njobs:\n');
+  assert.match(header!, /\n      publish:\n(?:        [^\n]+\n)*        default: false\n/);
+  assert.match(header!, /\n      publish:\n(?:        [^\n]+\n)*        type: boolean\n/);
+  const [preparation, publication] = jobs!.split('\n  publish:\n');
+  assert.ok(!preparation!.includes('DESKTOP_PUBLISH'));
+  assert.ok(!preparation!.includes('contents: write'));
+  assert.match(publication!, /if: .*inputs\.publish == true/);
+  assert.ok(publication!.includes('DESKTOP_PUBLISH: ${{ inputs.publish }}'));
+});
 
 test('release requires exact reviewed main source and synchronized stable versions', () => {
   assert.doesNotThrow(() => assertContext(context));
