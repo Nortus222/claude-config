@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 const read = (name: string) => readFileSync(new URL(`../../../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
-test('delivery workflows are manual main-only with approval-isolated least privileges and immutable source', () => {
+test('delivery workflows are manual main-only with environment-isolated least privileges and immutable source', () => {
   for (const [file, job, environment, write] of [['service-image', 'publish', 'hosted-image', 'packages: write'], ['service-deploy', 'deploy', 'hosted-production', 'id-token: write']]) {
     const yaml = read(file!);
     const trigger = yaml.slice(yaml.indexOf('\non:'), yaml.indexOf('\npermissions:'));

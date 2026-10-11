@@ -1,15 +1,15 @@
 # Hosted service delivery
 
-This directory prepares the existing metadata service for an owner-approved Azure
-release. No cloud deployment, OAuth sign-in, LIVE acceptance or billing proof has
-been performed. Issues #51 and #81 remain open. Local image/emulator tests and
+This directory defines the existing metadata service's Azure delivery. Deployment
+completion and public health/readiness checks do not establish OAuth sign-in,
+LIVE acceptance or billing proof. Issues #51 and #81 remain open. Local image/emulator tests and
 Bicep compilation do not establish Azure identity, Strong consistency, capacity,
 regional availability or ingress behavior.
 
 `service-image.yml` and `service-deploy.yml` accept **workflow_dispatch only**.
 Both reject forks, tags and branches other than this repository's `main`.
 `reviewed_commit` must equal the run's captured `github.sha` and checked-out HEAD;
-an approval waiting while main advances still releases that captured source.
+a run waiting while main advances still releases that captured source.
 The checkout retains no Git credentials. Ordinary PR/push checks build locally,
 exercise the real image against the isolated emulator and compile Bicep; they
 cannot publish or obtain cloud OIDC credentials.
@@ -29,9 +29,8 @@ helpers. Each run captures six **public** values into a new task-owned
 `apps/service/infra/owner-public.XXXXXX` snapshot, leaving prior files intact.
 Do not enter credentials or commit those snapshots. It performs no login, cloud
 mutation, app registration, publication, deployment or acceptance request.
-The reusable wizard describes the stricter future CI deployment setup. For the
-current single-owner image release, use the explicitly approved image-only
-exception below; custom CI Azure roles are not required for owner CLI deployment.
+The reusable wizard describes image publication and the stricter future CI
+deployment setup. Custom CI Azure roles are not required for owner CLI deployment.
 
 1. Choose subscription/tenant/region and create a dedicated resource group.
    Inspect every subscription Cosmos account: new deployment needs the one
@@ -40,19 +39,22 @@ exception below; custom CI Azure roles are not required for owner CLI deployment
    `Microsoft.ManagedIdentity`, `Microsoft.OperationalInsights`,
    `Microsoft.Insights` and `Microsoft.Consumption` yourself.
 2. Create separate `hosted-image` and `hosted-production` GitHub environments.
-   Both require an eligible reviewer, selected deployment branches containing
-   **only branch `main`**, no tags or wildcards, and disabled administrator bypass.
-   The current single-owner image release permits Nortus222 to initiate and
-   explicitly approve the same run: disable **Prevent self review** only for
-   `hosted-image`. This accepts one person's review of a GHCR publication; the
-   image job has no Azure OIDC permission. `hosted-production` retains **Prevent
-   self review** and requires a reviewer distinct from its run initiator before
-   any future CI Azure deployment. See [ADR0029](../../../docs/adr/0029-single-owner-image-approval.md).
+   Both require selected deployment branches containing **only branch `main`**,
+   no tags or wildcards, and disabled administrator bypass. Leave **Required
+   reviewers** disabled for `hosted-image`: manual dispatch of the exact reviewed
+   main commit is the publication approval, with no second GitHub approval step.
+   The image job has no Azure OIDC permission. `hosted-production` retains
+   **Required reviewers** and **Prevent self review** and requires a reviewer
+   distinct from its run initiator before any future CI Azure deployment. See
+   [ADR0029](../../../docs/adr/0029-single-owner-image-approval.md).
    Naming an environment in YAML is insufficient and can create an unprotected
-   environment. Prepare rejects missing environments, empty/malformed reviewers,
-   missing/nonboolean self-review policy and every branch policy except exact
-   branch main. Image policy accepts explicit `true` or `false`; production
-   requires `true`. Disabling administrator bypass remains an owner check.
+   environment. Prepare rejects missing environments, malformed protection rules
+   and every branch policy except exact branch main. Only image policy permits
+   no reviewer rule. If a reviewer rule is present, empty/malformed reviewers,
+   missing/nonboolean self-review policy and duplicate reviewer rules fail.
+   Image reviewer policy accepts explicit `true` or `false`; production requires
+   exactly one valid reviewer rule with `true`. Disabling administrator bypass
+   remains an owner check.
 3. For future Azure deployment from CI, create a CI-only Entra app/service
    principal with **no client secret**. Its
    federated issuer is `https://token.actions.githubusercontent.com`, audience
@@ -68,7 +70,7 @@ exception below; custom CI Azure roles are not required for owner CLI deployment
    Flow and copy only its public Client ID. The adapter requests **no OAuth
    scopes** and uses **no client secret**. Device-flow authorization and user
    acceptance are later, separately authorized work.
-5. Review public configuration on main, publish only after separate approval,
+5. Review public configuration on main, authorize publication by manual dispatch,
    then manually make the first GHCR package public before deploying.
 
 The currently approved path publishes images from CI and deploys through the
@@ -195,8 +197,9 @@ this code batch dispatches either workflow.
 
 1. Dispatch **service-image** on main with `reviewed_commit` equal to the exact
    captured commit. The read-only prepare job verifies current protections and
-   builds the reviewed image locally. Inspect its summary and source before
-   `hosted-image` approval. Only that approved job has `packages:write`; it has no
+   builds the reviewed image locally. Manual dispatch is the publication approval;
+   there is no additional `hosted-image` review gate. Only the publish job has
+   `packages:write`; it has no
    OIDC permission. It publishes `linux/amd64`, commit tag and OCI source/revision
    labels, then records the immutable digest in the job summary. Full action
    commits and the Node base digest are pinned.

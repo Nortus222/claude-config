@@ -22,10 +22,15 @@ export function assertReleaseContext(value: { event: string; ref: string; reposi
 export function assertProtectedEnvironment(environment: unknown, policies: unknown, name = 'hosted-production'): void {
   const env = record(environment); const policy = record(env.deployment_branch_policy); const branches = record(policies);
   if (policy.protected_branches !== false || policy.custom_branch_policies !== true || !Array.isArray(env.protection_rules)) fail();
-  const reviewers = env.protection_rules.map(record).find(rule => rule.type === 'required_reviewers');
-  if (!reviewers || typeof reviewers.prevent_self_review !== 'boolean' || (name !== 'hosted-image' && reviewers.prevent_self_review !== true) || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
+  const rules = env.protection_rules.map(record);
+  if (rules.some(rule => typeof rule.type !== 'string' || rule.type.length === 0)) fail();
+  const reviewerRules = rules.filter(rule => rule.type === 'required_reviewers');
+  if (reviewerRules.length > 1) fail();
+  const reviewers = reviewerRules[0];
+  if (!reviewers && name !== 'hosted-image') fail();
+  if (reviewers && (typeof reviewers.prevent_self_review !== 'boolean' || (name !== 'hosted-image' && reviewers.prevent_self_review !== true) || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0 || !reviewers.reviewers.every(item => {
     const reviewer = record(item); return (reviewer.type === 'User' || reviewer.type === 'Team') && Number.isSafeInteger(record(reviewer.reviewer).id) && Number(record(reviewer.reviewer).id) > 0;
-  })) fail();
+  }))) fail();
   if (branches.total_count !== 1 || !Array.isArray(branches.branch_policies) || branches.branch_policies.length !== 1) fail();
   const branch = record(branches.branch_policies[0]);
   if (branch.name !== 'main' || branch.type !== 'branch') fail();
