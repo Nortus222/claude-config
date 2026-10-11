@@ -8,6 +8,7 @@ import {
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
 import { setupSourceLayer } from '@nortuscc/sync';
+import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
 import { ensureAgent } from './lifecycle.ts';
 import { probeLoginEnvironment } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
@@ -30,7 +31,7 @@ export type DesktopEntryInput = {
   readonly stderr?: (text: string) => void;
 };
 
-// No arguments run the service; fixed helper arguments return exactly one JSON line on success.
+// No arguments run the service. Fixed helpers emit JSON records; prepare keeps its session open through installation.
 export async function runDesktopEntry(input: DesktopEntryInput): Promise<number> {
   const stdout = input.stdout ?? ((text) => { process.stdout.write(text); });
   const stderr = input.stderr ?? ((text) => { process.stderr.write(text); });
@@ -43,11 +44,11 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
   try {
     return await Effect.runPromise(Effect.gen(function* () {
       const [arg, appFlag, appPath] = input.args;
-      const serviceHelper = arg === '--ensure' || arg === '--restart' || arg === '--bootstrap';
+      const serviceHelper = arg === '--ensure' || arg === '--restart' || arg === '--bootstrap' || arg === '--prepare-update' || arg === '--recover-update' || arg === '--maintenance-state';
       if (!(input.args.length === 0 || (['--paths', '--setup-state', '--install-git'].includes(arg ?? '') && input.args.length === 1)
         || (serviceHelper && input.args.length === 3 && appFlag === '--app' && appPath !== undefined
           && isAbsolute(appPath) && !/[\x00-\x1f\x7f]/.test(appPath)))) {
-        return yield* Effect.fail(new Error('Usage: agent.mjs [--ensure | --restart | --bootstrap] --app <absolute executable> | --paths | --setup-state | --install-git'));
+        return yield* Effect.fail(new Error('Usage: agent.mjs [--ensure | --restart | --bootstrap | --prepare-update | --recover-update | --maintenance-state] --app <absolute executable> | --paths | --setup-state | --install-git'));
       }
       if (arg === '--paths' || arg === '--setup-state' || arg === '--install-git' || arg === '--bootstrap') {
         // First-run helpers need no existing checkout or bundled runtime metadata.
@@ -95,15 +96,22 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       const hostedUrl = desktopHostedUrl(env);
       const home = env.HOME ?? input.env.HOME ?? homedir();
       const platform = input.platform ?? process.platform;
-      const paths = yield* pathsFromEnvironment({ env, home, platform });
+      const paths = yield* pathsFromEnvironment({ env, home, platform, ...(arg === '--maintenance-state' ? { fallbackRepo: home } : {}) });
       const processes = input.processes ?? nodeProcesses({ env, inherit: 'stderr' });
       if (arg !== undefined) {
         if (platform !== 'darwin' && platform !== 'linux') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
-        const result = yield* ensureAgent({
+        const lifecycleInput = {
           paths, env, shellEnvironment: input.env, resources: input.resources, agentVersion,
           appPath: appPath!,
           target: { platform, home, uid: input.uid ?? process.getuid?.() ?? 0, user: input.user ?? userInfo().username, stateRoot: paths.stateRoot },
-        }, { restart: arg === '--restart' }).pipe(
+        };
+        const operation = Effect.gen(function* () {
+          if (arg === '--maintenance-state') return yield* maintenanceState(lifecycleInput);
+          if (arg === '--prepare-update') return yield* prepareUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin, stdout: value => stdout(JSON.stringify(value) + '\n') });
+          if (arg === '--recover-update') return yield* recoverUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin });
+          return yield* ensureAgent(lifecycleInput, { restart: arg === '--restart' });
+        });
+        const result = yield* operation.pipe(
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))),
         );
         stdout(JSON.stringify(result) + '\n');
@@ -121,10 +129,13 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
       const error = Cause.squash(cause);
       stderr(`nortuscc agent: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
-    }))));
+    }))), ['--prepare-update', '--recover-update'].includes(input.args[0] ?? '') ? { signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal } : undefined);
+  } catch (error) {
+    stderr(`nortuscc agent: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
   } finally {
     clearTimeout(deadline);
-    if (input.args[0] === '--bootstrap' && input.stdin === undefined) process.stdin.destroy();
+    if (['--bootstrap', '--prepare-update', '--recover-update'].includes(input.args[0] ?? '') && input.stdin === undefined) process.stdin.destroy();
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
   }
