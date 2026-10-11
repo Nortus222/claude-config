@@ -570,6 +570,9 @@ pub enum Setup {
     State,
     Bootstrap,
     InstallGit,
+    PrepareUpdate,
+    RecoverUpdate,
+    MaintenanceState,
 }
 impl Setup {
     fn argument(self) -> &'static str {
@@ -580,6 +583,9 @@ impl Setup {
             Self::State => "--setup-state",
             Self::Bootstrap => "--bootstrap",
             Self::InstallGit => "--install-git",
+            Self::PrepareUpdate => "--prepare-update",
+            Self::RecoverUpdate => "--recover-update",
+            Self::MaintenanceState => "--maintenance-state",
         }
     }
 }
@@ -589,13 +595,13 @@ struct SetupResult {
     state_root: PathBuf,
 }
 const ISOLATED_CONFIG_VARS: [&str; 4] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "ZDOTDIR"];
-fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result<Command, String> {
+pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result<Command, String> {
     let bun = resources.join("bun");
     let script = resources.join("agent.mjs");
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if matches!(setup, Setup::Ensure | Setup::Restart | Setup::Bootstrap) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
