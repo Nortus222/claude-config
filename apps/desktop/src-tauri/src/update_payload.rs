@@ -70,6 +70,13 @@ mod tests {
         assert!(verify_signature(DATA,SIG,KEY,"9.9.9").is_err());
         assert!(verify_signature(DATA,"malformed",KEY,"0.2.0").is_err());
         assert!(verify_signature(DATA,SIG,"wrong-key","0.2.0").is_err());
+        let decoded=String::from_utf8(base64::engine::general_purpose::STANDARD.decode(KEY.trim()).unwrap()).unwrap();
+        let mut lines=decoded.lines();let comment=lines.next().unwrap();
+        let mut other=base64::engine::general_purpose::STANDARD.decode(lines.next().unwrap()).unwrap();other[10]^=1;
+        let text=format!("{comment}\n{}\n",base64::engine::general_purpose::STANDARD.encode(other));
+        assert!(PublicKey::decode(&text).is_ok());
+        let other=base64::engine::general_purpose::STANDARD.encode(text);
+        assert!(verify_signature(DATA,SIG,&other,"0.2.0").is_err());
     }
     fn bundle(target: &str, version: &str, protocol: u64, cpu: u32) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(),flate2::Compression::fast()));
