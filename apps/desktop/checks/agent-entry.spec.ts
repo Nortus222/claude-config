@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
+import { HostedFailure, HostedTransport } from '@nortuscc/hosted-client';
 import { AgentError, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
 import { runDesktopEntry } from '../agent/main.ts';
 
@@ -15,6 +16,9 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   const repo = join(home, 'repo');
   const stateRoot = join(home, 'state');
   mkdirSync(resources);
+  const developer = join(resources, 'developer');
+  mkdirSync(join(developer, 'usr/bin'), { recursive: true });
+  writeFileSync(join(developer, 'usr/bin/git'), 'inert Git fixture');
   mkdirSync(join(repo, '.git'), { recursive: true });
   mkdirSync(stateRoot);
   writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash' }));
@@ -24,6 +28,7 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   const commands: Command[] = [];
   const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => {
     commands.push(command);
+    if (command.cmd === '/usr/bin/xcode-select') return { code: 0, stdout: developer, stderr: '' };
     if (command.cmd === 'launchctl') return { code: 0, stdout: '', stderr: '' };
     assert.equal(command.cmd, 'git');
     return { code: 1, stdout: '', stderr: 'fixture has no commit' };
@@ -31,8 +36,10 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   let probes = 0;
   const input = {
     args: ['--ensure', '--app', join(home, 'Nortuscc.app/Contents/MacOS/Nortuscc')], resources,
-    env: { HOME: home, SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
+    env: { HOME: home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
     platform: 'darwin' as const, uid: 501, user: 'fixture', processes,
+    hostedDependencies: { keychain: { read: () => Effect.succeed(undefined), write: () => Effect.void, remove: () => Effect.void },
+      transport: Layer.succeed(HostedTransport, { request: () => Effect.fail(new HostedFailure({ code: 'network' })) }) },
     probe: async () => { probes++; return { env: { HOME: home, PATH: '/login/bin', NORTUSCC_STATE_DIR: stateRoot } }; },
     stdout: (line: string) => stdout.push(line), stderr: (line: string) => stderr.push(line),
   };
@@ -120,7 +127,7 @@ test('registered service hands selected SHELL and startup directory to its foreg
   let probed = false;
   const foreground = runDesktopEntry({
     ...f.input, args: [], platform: process.platform, signal: controller.signal,
-    env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
+    env: { HOME: f.home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
     probe: async (input) => {
       assert.equal(input.env.SHELL, shell);
       assert.equal(input.env.ZDOTDIR, zdotdir);
@@ -161,7 +168,7 @@ test('startup selectors introduced by the helper probe remain absent before the 
     ...f.input, args: [], processes: Layer.succeed(Processes, { run: (command) => command.cmd === 'git'
       ? Processes.use((processes) => processes.run(command)).pipe(Effect.provide(nodeProcesses({ env: exported, inherit: 'stderr' })))
       : Effect.succeed({ code: 1, stdout: '', stderr: 'notification unavailable in fixture' }) }), signal: controller.signal,
-    env: { HOME: f.home, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
+    env: { HOME: f.home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, ...handoff },
     probe: async (input) => {
       assert.equal(input.env.ZDOTDIR, undefined);
       assert.equal(input.env.XDG_CONFIG_HOME, undefined);
@@ -210,7 +217,7 @@ test('foreground hosted opt-in comes from login environment and invalid URL keep
   skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
 }, async (t) => {
   const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
-  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
+  const running = runDesktopEntry({ ...f.input, env: { ...f.input.env, NORTUSCC_DESKTOP_LOCAL_ONLY: undefined }, args: [], signal: controller.signal,
     probe: async () => ({ env: { HOME: f.home, PATH: '/fake', NORTUSCC_STATE_DIR: f.stateRoot, NORTUSCC_HOSTED_URL: 'http://invalid/v1' } }) });
   let conn: AgentConnection | undefined;
   for (let n = 0; n < 100 && !conn; n++) {
@@ -224,4 +231,70 @@ test('foreground hosted opt-in comes from login environment and invalid URL keep
     await conn.request({ command: 'shutdown' });
   } finally { conn.close(); controller.abort(); }
   assert.equal(await running, 0);
+});
+
+test('setup helpers are available before a checkout or runtime metadata and bootstrap stdin is strict and bounded', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.stateRoot, 'state.json')); rmSync(join(f.input.resources, 'runtime.json'));
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--setup-state'] }), 0);
+  assert.deepEqual(JSON.parse(f.stdout.at(-1)!), { needsSetup: true, repo: null, gitAvailable: true, canInstallGit: true,
+    defaultRepoUrl: 'https://github.com/Nortus222/claude-config.git' });
+  const stdin = async function* (text: string) { yield text; };
+  for (const text of ['{"configTargets":[],"path":"/tmp"}', '{bad', 'x'.repeat(4097)]) {
+    assert.equal(await runDesktopEntry({ ...f.input, args: ['--bootstrap', '--app', '/native/app'], stdin: stdin(text) }), 1);
+  }
+  assert.ok(f.commands.every((command) => command.cmd === '/usr/bin/xcode-select'));
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--install-git'] }), 0);
+  assert.deepEqual(JSON.parse(f.stdout.at(-1)!), { requested: true });
+  assert.ok(f.commands.at(-1)?.args.includes('--install'));
+});
+
+test('a completed first-run clone survives failed service registration and retries without cloning or changing choices', async (t) => {
+  const f = fixture(t); rmSync(join(f.stateRoot, 'state.json'));
+  let failRegistration = true;
+  const processes = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    f.commands.push(command);
+    if (command.cmd === '/usr/bin/xcode-select') return { code: 0, stdout: join(f.input.resources, 'developer') };
+    if (command.cmd === 'launchctl') return { code: command.args.includes('bootstrap') && failRegistration ? 1 : 0, stdout: '' };
+    if (command.args.includes('clone')) {
+      const repo = command.args.at(-1)!; mkdirSync(join(repo, '.git'), { recursive: true });
+      writeFileSync(join(repo, 'integrations.json'), '{"version":1,"integrations":[]}'); writeFileSync(join(repo, 'skills-manifest.txt'), '');
+    }
+    return { code: 0, stdout: command.args.includes('get-url') || command.args.includes('--get') ? 'https://github.com/Nortus222/claude-config.git' : 'a'.repeat(40) };
+  }) });
+  const stdin = async function* () { yield '{"configTargets":["claude"]}'; };
+  assert.equal(await runDesktopEntry({ ...f.input, processes, args: ['--bootstrap', '--app', '/native/app'], stdin: stdin() }), 0);
+  const state = readFileSync(join(f.stateRoot, 'state.json'), 'utf8');
+  assert.equal(await runDesktopEntry({ ...f.input, processes }), 1);
+  assert.equal(readFileSync(join(f.stateRoot, 'state.json'), 'utf8'), state);
+  failRegistration = false;
+  assert.equal(await runDesktopEntry({ ...f.input, processes, args: ['--bootstrap', '--app', '/native/app'], stdin: stdin() }), 0);
+  assert.equal(await runDesktopEntry({ ...f.input, processes }), 0);
+  assert.equal(f.commands.filter((c) => c.args.includes('clone')).length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.stateRoot, 'overrides.json'), 'utf8')).configTargets, ['claude']);
+});
+
+test('the desktop default enables signed-out account controls without signing in, trusting or contacting the service', {
+  skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
+}, async (t) => {
+  const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
+  let requests = 0;
+  const running = runDesktopEntry({ ...f.input, args: [], env: { ...f.input.env, NORTUSCC_DESKTOP_LOCAL_ONLY: undefined },
+    signal: controller.signal, hostedDependencies: {
+      keychain: { read: () => Effect.succeed(undefined), write: () => Effect.die('unexpected token write'), remove: () => Effect.die('unexpected token remove') },
+      transport: Layer.succeed(HostedTransport, { request: () => Effect.sync(() => { requests++; throw new Error('unexpected hosted request'); }) }),
+    } });
+  let conn: AgentConnection | undefined;
+  for (let n = 0; n < 100 && !conn; n++) {
+    try { conn = await connectAgent(f.paths, { timeoutMs: 50 }); } catch { await new Promise((r) => setTimeout(r, 10)); }
+  }
+  assert.ok(conn, f.stderr.join(''));
+  try {
+    const hosted = await conn.request<{ enabled: boolean; auth: string; signingIn: boolean }>({ command: 'hostedState' });
+    assert.equal(hosted.enabled, true); assert.equal(hosted.auth, 'signed-out'); assert.equal(hosted.signingIn, false);
+    assert.equal(requests, 0);
+    assert.equal(existsSync(join(f.stateRoot, 'agent/setups.json')), false);
+    await conn.request({ command: 'shutdown' });
+  } finally { conn.close(); controller.abort(); }
+  assert.equal(await running, 0, f.stderr.join(''));
 });

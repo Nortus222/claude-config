@@ -81,9 +81,27 @@ Native work has a three-second budget from event enqueue or hidden-mode entry, i
 
 Rust checks exercise fake posting success/refusal, strict payloads, direct hidden connections, the read-only helper, startup events before session publication, off-reader acknowledgments, stale generations and queued clicks. They never initialize the notification center or show a window. On a disposable macOS machine, manually verify permission grant/denial, Notification Center with banners disabled, foreground presentation, warm and cold clicks, hidden posting with the app closed, no permission dialog in hidden mode, and exit after posting. Also verify the hidden path leaves service registration and machine state unchanged. These OS behaviors are not established by automated tests or a successful native build.
 
-The bundled foreground agent supports optional hosted sync through
-`NORTUSCC_HOSTED_URL` in its login environment, using the same runtime as the CLI.
-The value must be an explicit HTTPS root ending in `/v1`; no endpoint is guessed.
+The bundled foreground agent uses the reviewed public hosted API root by default, with
+`NORTUSCC_HOSTED_URL` in its login environment overriding it. Custom roots must be HTTPS
+and end in `/v1`; invalid overrides remain visible as configuration errors.
 Account/device-flow, setup trust and machine-reporting commands are available through
 `nortuscc agent`; this change adds no renderer account screens or Rust request commands.
 See the [agent README](../../packages/agent/README.md#optional-hosted-client).
+
+### First-run helper
+
+The fixed bundled helper supports `--setup-state`, `--bootstrap --app <absolute native executable>`
+(with a strict `{ "configTargets": ["claude", "codex"] }` stdin record, maximum 4096 bytes), and
+`--install-git`. Read-only state checks never invoke Apple's Git shim or open an installer. The
+explicit installer action invokes only `xcode-select --install`; finish Apple's dialog before rechecking.
+Bootstrap clones the fixed public Nortus222/claude-config repository into an exclusively owned state
+subdirectory, validates its origin and profile, and records choices with backups under the shared
+apply lock. It leaves configuration unchanged and preserves the clone if subsequent agent registration
+fails. The native app runs its existing ensure helper after bootstrap. Existing or corrupt recorded
+setups are never silently replaced.
+
+Desktop foreground agents use the public hosted API root when `NORTUSCC_HOSTED_URL` is absent.
+Explicit URL overrides, including invalid values, retain their meaning. Set the desktop-only
+`NORTUSCC_DESKTOP_LOCAL_ONLY=1` to create no hosted client; any other defined value is rejected.
+CLI defaults remain local-only. Resource tests and packaged smoke set this explicitly because a
+temporary HOME does not isolate the OS keychain. Pure setup schemas live in `shared/setup-protocol.ts`.

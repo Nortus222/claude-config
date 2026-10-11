@@ -26,7 +26,7 @@ const gate = join(home, 'gate');
 const blocked = join(home, 'blocked');
 const fifo = join(home, 'release');
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-const env = { HOME: home, PATH: '', TMPDIR: temporaryRoot, SHELL: join(home, 'shell'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+const env = { HOME: home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', PATH: '', TMPDIR: temporaryRoot, SHELL: join(home, 'shell'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 const git = (...args) => execFileSync('/usr/bin/git', args, { cwd: repo, env, encoding: 'utf8' }).trim();
 const write = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); };
 const until = async (get, ms = 30_000) => {
