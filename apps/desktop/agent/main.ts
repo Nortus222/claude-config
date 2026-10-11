@@ -108,7 +108,10 @@ export async function runDesktopEntry(input: DesktopEntryInput): Promise<number>
         const operation = Effect.gen(function* () {
           if (arg === '--maintenance-state') return yield* maintenanceState(lifecycleInput);
           if (arg === '--prepare-update') return yield* prepareUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin, stdout: value => stdout(JSON.stringify(value) + '\n') });
-          if (arg === '--recover-update') return yield* recoverUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin });
+          if (arg === '--recover-update') return yield* recoverUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin, installerAlive: pid => {
+            try { process.kill(pid, 0); return true; }
+            catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+          } });
           return yield* ensureAgent(lifecycleInput, { restart: arg === '--restart' });
         });
         const result = yield* operation.pipe(

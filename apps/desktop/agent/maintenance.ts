@@ -7,14 +7,14 @@ import { AgentStateStore, installService, renderLaunchAgent, LAUNCH_AGENT_LABEL,
 import { decodeWireStatus } from '@nortuscc/agent/ipc/protocol';
 import { acquirePidLock, Backups, Fs, liveLockHolder, Processes } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
-import { decodeMaintenanceAction, decodePrepareUpdate, decodeRecoverUpdate, type MaintenanceState } from '../shared/maintenance-protocol.ts';
+import { decodeMaintenanceAction, decodePrepareUpdate, decodeRecoverUpdate, validInstallerPid, type MaintenanceState } from '../shared/maintenance-protocol.ts';
 import { ensureAgent, pendingPath, resourceProgram, validateExistingAuthority, type LifecycleInput } from './lifecycle.ts';
 
 const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: error => error });
 type Journal = { version: 1; phase: 'prepared' | 'installing' | 'awaiting-health'; appPath: string; bundlePath: string;
-  fromVersion: string; toVersion: string; oldAgentVersion: string; oldBundleHash: string; backupPath: string };
+  fromVersion: string; toVersion: string; oldAgentVersion: string; oldBundleHash: string; backupPath: string; installerPid: number | null };
 export type MaintenanceOptions = { stdin: AsyncIterable<string | Uint8Array>; stdout: (value: unknown) => void;
-  connect?: () => Promise<AgentConnection>; timeoutMs?: number; pollMs?: number; sessionTimeoutMs?: number; retryDelayMs?: number };
+  connect?: () => Promise<AgentConnection>; timeoutMs?: number; pollMs?: number; sessionTimeoutMs?: number; retryDelayMs?: number; installerAlive?: (pid: number) => boolean };
 
 // Records have a bounded size and deadline; stdin remains open throughout the native installation.
 export async function* maintenanceRecords(stdin: AsyncIterable<string | Uint8Array>) {
@@ -74,9 +74,10 @@ const installedIdentity = (input: LifecycleInput) => Effect.gen(function* () {
 
 const decodeJournal = (text: string, input: LifecycleInput): Journal => {
   const raw = JSON.parse(text) as Journal;
-  const keys = ['version', 'phase', 'appPath', 'bundlePath', 'fromVersion', 'toVersion', 'oldAgentVersion', 'oldBundleHash', 'backupPath'];
+  const keys = ['version', 'phase', 'appPath', 'bundlePath', 'fromVersion', 'toVersion', 'oldAgentVersion', 'oldBundleHash', 'backupPath', 'installerPid'];
   if (!raw || typeof raw !== 'object' || Object.keys(raw).length !== keys.length || !keys.every(key => Object.hasOwn(raw, key))
-    || raw.version !== 1 || !['prepared', 'installing', 'awaiting-health'].includes(raw.phase) || raw.appPath !== input.appPath
+    || raw.version !== 1 || (raw.phase === 'installing' ? !validInstallerPid(raw.installerPid) : raw.installerPid !== null)
+    || !['prepared', 'installing', 'awaiting-health'].includes(raw.phase) || raw.appPath !== input.appPath
     || raw.bundlePath !== bundleFor(input.appPath) || typeof raw.oldAgentVersion !== 'string' || !hashPattern.test(raw.oldAgentVersion)
     || typeof raw.oldBundleHash !== 'string' || !hashPattern.test(raw.oldBundleHash)
     || !validPath(raw.backupPath) || relative(input.paths.backups, raw.backupPath).startsWith('..') || raw.backupPath === input.paths.backups) throw new Error('pending update journal is invalid');
@@ -165,7 +166,7 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
   const oldBundleHash = yield* attempt(() => digestTree(backupPath));
   if ((yield* attempt(() => digestTree(identity.bundlePath))) !== oldBundleHash) throw new Error('app bundle changed while backing up');
   let journal: Journal = { version: 1, phase: 'prepared', ...versions, bundlePath: identity.bundlePath, appPath: input.appPath,
-    oldAgentVersion: input.agentVersion, oldBundleHash, backupPath };
+    oldAgentVersion: input.agentVersion, oldBundleHash, backupPath, installerPid: null };
   yield* durableJournal(input, journal);
   if (conn) { yield* attempt(() => conn!.request({ command: 'shutdown' }, { timeoutMs: 5000 })); conn.close(); conn = undefined; }
   while (liveLockHolder(join(input.paths.stateRoot, 'agent/agent.lock')) !== undefined) { budget(); yield* Effect.sleep(poll); }
@@ -187,13 +188,13 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
   });
   const session = Effect.gen(function* () {
     while (true) {
-      const { action } = decodeMaintenanceAction(yield* nextRecord(records, options.sessionTimeoutMs ?? 180_000));
-      if (action === 'begin-install') {
+      const record = decodeMaintenanceAction(yield* nextRecord(records, options.sessionTimeoutMs ?? 180_000));
+      if (record.action === 'begin-install') {
         if (installing) throw new Error('installation already began');
-        journal = { ...journal, phase: 'installing' }; yield* durableJournal(input, journal); installing = true; options.stdout({ installing: true });
-      } else if (action === 'commit') {
+        journal = { ...journal, phase: 'installing', installerPid: record.installerPid }; yield* durableJournal(input, journal); installing = true; options.stdout({ installing: true });
+      } else if (record.action === 'commit') {
         if (!installing) throw new Error('commit requires begin-install');
-        yield* durableJournal(input, { ...journal, phase: 'awaiting-health' }); return { committed: true };
+        yield* durableJournal(input, { ...journal, phase: 'awaiting-health', installerPid: null }); return { committed: true };
       } else {
         if (installing) throw new Error('installation interrupted; pending recovery required');
         yield* restore; return { aborted: true };
@@ -210,6 +211,8 @@ export const recoverUpdate = (input: LifecycleInput, options: Omit<MaintenanceOp
   const fs = yield* Fs; const text = yield* fs.readText(pendingPath(input));
   if (text === undefined) return { recovered: false, interrupted: false, stateRoot: input.paths.stateRoot };
   const journal = decodeJournal(text, input);
+  // A live native installer keeps recovery fenced after its helper session times out.
+  if (journal.phase === 'installing' && options.installerAlive?.(journal.installerPid!) !== false) throw new Error('native installer may still be running; exit the installing app before recovery');
   const identity = yield* installedIdentity(input);
   if (identity.appVersion !== appVersion) throw new Error('native app version does not match installed bundle');
   const interrupted = appVersion === journal.fromVersion;

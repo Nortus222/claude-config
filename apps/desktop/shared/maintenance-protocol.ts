@@ -16,11 +16,20 @@ export const decodePrepareUpdate = (value: unknown): { fromVersion: string; toVe
   if (first < 0 || newParts[first]! <= oldParts[first]!) throw new Error('update version must increase');
   return { fromVersion, toVersion };
 };
-export const decodeMaintenanceAction = (value: unknown): { action: 'begin-install' | 'commit' | 'abort' } => {
+export const validInstallerPid = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+export type MaintenanceAction = { action: 'begin-install'; installerPid: number } | { action: 'commit' | 'abort' };
+export const decodeMaintenanceAction = (value: unknown): MaintenanceAction => {
+  const action = typeof value === 'object' && value !== null && 'action' in value ? value.action : undefined;
+  if (action === 'begin-install') {
+    const raw = record(value, ['action', 'installerPid']);
+    if (!validInstallerPid(raw.installerPid)) throw new Error('invalid native installer PID');
+    return { action, installerPid: raw.installerPid };
+  }
   const raw = record(value, ['action']);
-  if (raw.action !== 'begin-install' && raw.action !== 'commit' && raw.action !== 'abort') throw new Error('invalid maintenance action');
+  if (raw.action !== 'commit' && raw.action !== 'abort') throw new Error('invalid maintenance action');
   return { action: raw.action };
 };
+
 export const decodeRecoverUpdate = (value: unknown): { appVersion: string } => {
   const raw = record(value, ['appVersion']); return { appVersion: stableVersion(raw.appVersion) };
 };

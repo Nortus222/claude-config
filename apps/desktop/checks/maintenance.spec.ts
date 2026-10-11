@@ -55,7 +55,7 @@ const records = (...values: unknown[]): AsyncIterable<string> => ({ async *[Symb
 test('maintenance records reject extra fields, unstable versions and invalid transitions', () => {
   assert.deepEqual(decodePrepareUpdate({ fromVersion: '1.0.0', toVersion: '1.1.0' }), { fromVersion: '1.0.0', toVersion: '1.1.0' });
   for (const value of [{ fromVersion: '1.0.0', toVersion: '1.0.0' }, { fromVersion: '1.0.0', toVersion: '2.0.0-beta' }, { fromVersion: '1.0.0', toVersion: '2.0.0', path: '/bad' }]) assert.throws(() => decodePrepareUpdate(value));
-  assert.deepEqual(decodeMaintenanceAction({ action: 'begin-install' }), { action: 'begin-install' });
+  assert.deepEqual(decodeMaintenanceAction({ action: 'begin-install', installerPid: 777777 }), { action: 'begin-install', installerPid: 777777 });
   assert.throws(() => decodeMaintenanceAction({ action: 'commit', extra: true }));
   assert.throws(() => decodeRecoverUpdate({ appVersion: '1.0.0', path: '/bad' }));
 });
@@ -63,7 +63,7 @@ test('maintenance records reject extra fields, unstable versions and invalid tra
 test('prepare holds both fences through durable installing acknowledgement and commit preserves state bytes', async t => {
   const f = fixture(t); const output: unknown[] = [];
   const before = readFileSync(join(f.paths.stateRoot, 'agent/agent.json'), 'utf8');
-  const result = await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }, { action: 'commit' }), stdout: value => {
+  const result = await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: value => {
     output.push(value); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), process.pid); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), process.pid);
     if ((value as { installing?: boolean }).installing) assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
   }, connect: f.connect, pollMs: 1, timeoutMs: 100 }));
@@ -76,7 +76,7 @@ test('prepare holds both fences through durable installing acknowledgement and c
 
 test('EOF after begin-install never restarts an old service or removes pending', async t => {
   const f = fixture(t);
-  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }), stdout: () => {}, connect: f.connect, timeoutMs: 100, pollMs: 1 })), /interrupted|EOF/);
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: () => {}, connect: f.connect, timeoutMs: 100, pollMs: 1 })), /interrupted|EOF/);
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
   assert.ok(!f.events.includes('bootstrap')); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
 });
@@ -102,7 +102,7 @@ test('existing corrupt agent authority is refused before shutdown and byte-prese
 
 test('target recovery rejects mismatched runtime health and retains the journal', async t => {
   const f = fixture(t);
-  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }, { action: 'commit' }), stdout: () => {}, connect: f.connect, retryDelayMs: 0 }));
+  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: () => {}, connect: f.connect, retryDelayMs: 0 }));
   writeFileSync(join(f.bundle, 'Contents/Info.plist'), '<plist><dict><key>CFBundleShortVersionString</key><string>1.1.0</string></dict></plist>');
   const runtimePath = join(f.resources, 'runtime.json'); const runtime = JSON.parse(readFileSync(runtimePath, 'utf8')); runtime.appVersion = '1.1.0'; writeFileSync(runtimePath, JSON.stringify(runtime));
   const incompatible = async (): Promise<AgentConnection> => ({ ...await f.connect(), hello: { protocol: 3, agentVersion: 'wrong', policy: 'manual', paused: null } });
@@ -120,7 +120,7 @@ test('prepared EOF restores only a proven intact old service', async t => {
 
 test('cancellation after installing joins finalizers, keeps pending and releases both fences', async t => {
   const f = fixture(t); const controller = new AbortController();
-  const stdin = { async *[Symbol.asyncIterator]() { yield JSON.stringify({ fromVersion: '1.0.0', toVersion: '1.1.0' }) + '\n'; yield JSON.stringify({ action: 'begin-install' }) + '\n'; await new Promise(() => {}); } };
+  const stdin = { async *[Symbol.asyncIterator]() { yield JSON.stringify({ fromVersion: '1.0.0', toVersion: '1.1.0' }) + '\n'; yield JSON.stringify({ action: 'begin-install', installerPid: 777777 }) + '\n'; await new Promise(() => {}); } };
   await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin, stdout: value => { if ((value as { installing?: boolean }).installing) controller.abort(); }, connect: f.connect, timeoutMs: 100, pollMs: 1 }), controller.signal));
   assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).phase, 'installing');
   assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/app-install.lock')), undefined); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
@@ -190,7 +190,7 @@ test('runtime app version cannot differ from the installed bundle', async t => {
 
 test('recovery cancellation joins its health connection before releasing locks and never clears pending later', async t => {
   const f = fixture(t);
-  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }, { action: 'commit' }), stdout: () => {}, connect: f.connect, retryDelayMs: 0 }));
+  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: () => {}, connect: f.connect, retryDelayMs: 0 }));
   writeFileSync(join(f.bundle, 'Contents/Info.plist'), '<plist><dict><key>CFBundleShortVersionString</key><string>1.1.0</string></dict></plist>');
   const path = join(f.resources, 'runtime.json'); const raw = JSON.parse(readFileSync(path, 'utf8')); raw.appVersion = '1.1.0'; writeFileSync(path, JSON.stringify(raw));
   const controller = new AbortController(); let entered!: () => void; const ready = new Promise<void>(resolve => { entered = resolve; }); let calls = 0;
@@ -208,7 +208,7 @@ test('recovery cancellation joins its health connection before releasing locks a
 
 test('a service respawn between shutdown and bootout is drained before native readiness', async t => {
   const f = fixture(t); f.respawn();
-  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }, { action: 'commit' }), stdout: value => {
+  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: value => {
     if ((value as { ready?: boolean }).ready) assert.equal(liveLockHolder(join(f.paths.stateRoot, 'agent/agent.lock')), undefined);
   }, connect: f.connect, pollMs: 1, timeoutMs: 100 }));
 });
@@ -221,16 +221,16 @@ test('changed service registration cannot authorize unloading an unrelated job',
 
 test('explicit old-version recovery can restore an intact installing bundle and reports interruption', async t => {
   const f = fixture(t);
-  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }), stdout: () => {}, connect: f.connect })), /EOF/);
-  assert.deepEqual(await f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect, retryDelayMs: 0 })), { recovered: true, interrupted: true, stateRoot: f.paths.stateRoot });
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: () => {}, connect: f.connect })), /EOF/);
+  assert.deepEqual(await f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect, installerAlive: () => false, retryDelayMs: 0 })), { recovered: true, interrupted: true, stateRoot: f.paths.stateRoot });
   assert.ok(!existsSync(f.journalPath));
 });
 
 test('changed old app bytes refuse recovery even if version and runtime metadata are unchanged', async t => {
   const f = fixture(t);
-  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }), stdout: () => {}, connect: f.connect })), /EOF/);
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }), stdout: () => {}, connect: f.connect })), /EOF/);
   writeFileSync(f.appPath, 'modified executable'); f.events.length = 0;
-  await assert.rejects(f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect })), /intact old bundle/);
+  await assert.rejects(f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect, installerAlive: () => false })), /intact old bundle/);
   assert.deepEqual(f.events, []); assert.ok(existsSync(f.journalPath));
 });
 
@@ -245,7 +245,7 @@ test('authority and journal fields never coerce array values into valid strings'
   const f = fixture(t); const path = join(f.paths.stateRoot, 'agent/agent.json'); const raw = JSON.parse(readFileSync(path, 'utf8')); raw.policySource = ['person']; writeFileSync(path, JSON.stringify(raw));
   await assert.rejects(f.run(ensureAgent(f.input, { restart: true, connect: f.connect, retryDelayMs: 0 })), /invalid/);
   raw.policySource = 'person'; writeFileSync(path, JSON.stringify(raw));
-  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install' }, { action: 'commit' }), stdout: () => {}, connect: f.connect }));
+  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: () => {}, connect: f.connect }));
   const journal = JSON.parse(readFileSync(f.journalPath, 'utf8')); journal.oldBundleHash = [journal.oldBundleHash]; writeFileSync(f.journalPath, JSON.stringify(journal));
   assert.equal((await f.run(maintenance.maintenanceState(f.input))).phase, null);
 });
@@ -292,4 +292,27 @@ test('prepared restoration cancellation joins fresh health before releasing fenc
   await rejected;
   assert.ok(existsSync(f.journalPath)); assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
   assert.equal(f.events.filter(event => event === 'bootstrap').length, 1, 'failed restoration is not repeated during interruption cleanup');
+});
+
+test('helper timeout after begin-install cannot recover intact old bytes while native installation still lives', async t => {
+  const f = fixture(t); const stdin = { async *[Symbol.asyncIterator]() {
+    yield JSON.stringify({ fromVersion: '1.0.0', toVersion: '1.1.0' }) + '\n';
+    yield JSON.stringify({ action: 'begin-install', installerPid: 777777 }) + '\n';
+    await new Promise(() => {});
+  } };
+  await assert.rejects(f.run(maintenance.prepareUpdate(f.input, { stdin, stdout: () => {}, connect: f.connect, sessionTimeoutMs: 15 })), /timed out|Timeout/);
+  assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).installerPid, 777777);
+  f.events.length = 0;
+  await assert.rejects(f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect, installerAlive: pid => { assert.equal(pid, 777777); return true; } })), /installer.*running|live installer/);
+  assert.deepEqual(f.events, []); assert.ok(existsSync(f.journalPath));
+  assert.deepEqual(await f.run(maintenance.recoverUpdate(f.input, { stdin: records({ appVersion: '1.0.0' }), connect: f.connect, installerAlive: () => false, retryDelayMs: 0 })), { recovered: true, interrupted: true, stateRoot: f.paths.stateRoot });
+});
+
+test('begin-install PID is strict and commit acknowledges completion without retaining a live installer fence', async t => {
+  for (const installerPid of [0, -1, 1.5, '42', null, 2147483648]) assert.throws(() => decodeMaintenanceAction({ action: 'begin-install', installerPid }));
+  assert.throws(() => decodeMaintenanceAction({ action: 'begin-install' }));
+  assert.throws(() => decodeMaintenanceAction({ action: 'commit', installerPid: 42 }));
+  const f = fixture(t);
+  await f.run(maintenance.prepareUpdate(f.input, { stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }), stdout: () => {}, connect: f.connect }));
+  assert.equal(JSON.parse(readFileSync(f.journalPath, 'utf8')).installerPid, null);
 });
