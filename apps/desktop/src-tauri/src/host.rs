@@ -128,6 +128,7 @@ pub enum Policy {
     Manual,
 }
 pub fn decode_args<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+    if !value.is_object() { return Err("Expected command argument object".into()); }
     if serde_json::to_vec(&value).map_err(|_| "Invalid command arguments")?.len() > 4096 { return Err("Command arguments exceed limit".into()); }
     serde_json::from_value(value).map_err(|_| "Invalid command arguments".into())
 }
@@ -158,15 +159,33 @@ pub struct PolicyArgs { pub policy: Policy }
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SetupArgs { pub config_targets: Vec<String> }
 /// Public metadata only. The agent applies the shared HTTP schema as a second boundary.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MachinePatch {
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy: Option<Policy>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     report_status: Option<bool>,
+}
+impl<'de> Deserialize<'de> for MachinePatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self,D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if !value.is_object() { return Err(serde::de::Error::custom("Expected machine patch object")); }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Fields {
+            #[serde(default, deserialize_with = "present")]
+            name: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            policy: Option<Policy>,
+            #[serde(default, deserialize_with = "present")]
+            report_status: Option<bool>,
+        }
+        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { name:fields.name, policy:fields.policy, report_status:fields.report_status })
+    }
 }
 impl MachinePatch {
     fn validate(&self) -> Result<(), String> {
@@ -657,6 +676,7 @@ fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String>
 }
 
 fn setup_root(value: Value) -> Result<PathBuf, String> {
+    if !value.is_object() { return Err("Expected setup result object".into()); }
     let result: SetupResult = serde_json::from_value(value).map_err(|_| "Invalid setup result")?;
     if !result.state_root.is_absolute() { return Err("Invalid setup stateRoot".into()); }
     Ok(result.state_root)
@@ -1279,6 +1299,19 @@ mod onboarding_bridge_tests {
             assert!(decode_args::<MachineArgs>(value).is_err());
         }
         assert!(decode_args::<SetupArgs>(json!({"configTargets":[],"repo":"/tmp"})).is_err());
+    }
+    #[test]
+    fn native_records_reject_positional_arrays_before_actions_or_ipc() {
+        assert!(decode_args::<EmptyArgs>(json!([])).is_err());
+        assert!(decode_args::<SetupArgs>(json!([["codex"]])).is_err());
+        assert!(decode_args::<SignInArgs>(json!(["My Mac",false])).is_err());
+        assert!(decode_args::<MachineArgs>(json!({"patch":["My Mac","notify",false]})).is_err());
+        assert!(serde_json::from_value::<MachinePatch>(json!(["My Mac","notify",false])).is_err());
+        assert!(setup_root(json!(["/tmp/owned"])).is_err());
+        assert!(decode_args::<SetupArgs>(json!({"configTargets":["codex"]})).is_ok());
+        assert!(decode_args::<SignInArgs>(json!({})).is_ok());
+        assert!(decode_args::<MachineArgs>(json!({"patch":{"reportStatus":false}})).is_ok());
+        assert_eq!(setup_root(json!({"stateRoot":"/tmp/owned"})).unwrap(),PathBuf::from("/tmp/owned"));
     }
     #[test]
     fn choices_and_setup_state_have_no_renderer_authority() {
