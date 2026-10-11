@@ -36,10 +36,13 @@ export const nativeBridge: Bridge = {
     listen<unknown>('machine-agent', (event) => {
       try {
         receive(decodeHostEvent(event.payload));
-      } catch (error) {
-        console.error('Invalid host event', error);
+      } catch {
+        console.error('Invalid host event');
       }
     }),
-  invoke: async (command, args) =>
-    Schema.decodeUnknownSync(HostEnvelope, { onExcessProperty: 'error' })(await invoke(command, args)),
+  invoke: async (command, args) => {
+    const result = await invoke(command, args);
+    try { return Schema.decodeUnknownSync(HostEnvelope, { onExcessProperty: 'error' })(result); }
+    catch { throw new Error('Invalid native response'); }
+  },
 };

@@ -1,4 +1,4 @@
-# Nortuscc desktop
+# Claude Config desktop
 
 The React renderer inspects, previews, applies and cancels through the local agent. The Tauri 2 Rust host connects to `<stateRoot>/agent/agent.sock`, reads `agent.token` fresh, authenticates with protocol v3 as `app`, and subscribes to status and progress events. Closing the window closes its connection and leaves the agent running.
 
@@ -87,7 +87,7 @@ and end in `/v1`; invalid overrides remain visible as configuration errors.
 Account/device-flow, setup trust and machine-reporting commands use the existing agent IPC through
 fixed native commands. Native arguments accept public display names, policies, booleans and opaque
 setup IDs, with unknown fields and renderer paths, commands or URLs rejected. Account credentials
-remain agent/keychain-owned. Renderer account screens are added separately.
+remain agent/keychain-owned. The renderer exposes these controls in Settings.
 See the [agent README](../../packages/agent/README.md#optional-hosted-client).
 
 ### First-run helper
@@ -126,3 +126,36 @@ Omitting the choice preserves the CLI behavior. Native display-name Unicode pred
 without dependencies using `node apps/desktop/scripts/display-name-categories.mjs` on Unicode17.0,
 such as Node24.19. The parity check verifies every code point against the shared predicates; deliberate
 Unicode contract updates should regenerate the table and review shared/native compatibility together.
+
+
+## Desktop screens
+
+The renderer starts with a read-only setup check before it requires an agent connection.
+New installations show the fixed setup repository and Claude, Codex, both or neither choices.
+Missing Git exposes an explicit Apple installer request and recheck. Bootstrap retries preserve
+completed native-owned checkouts; existing recorded setups are inspected without bootstrap.
+Setup prepares the agent and does not apply configuration changes.
+
+The sidebar contains Overview, Review & apply, Resolved and Settings. Overview reads the current
+agent status. Resolved shows inspected items and their available layer/source provenance.
+Review keeps selection, stale replacement previews, progress, cancellation and reconnect behavior.
+Notification clicks route to Review, refresh it and focus its heading without applying.
+Browser preview shows empty real states with native actions disabled.
+
+Settings offers optional GitHub Device Flow and defaults status sharing off before sign-in.
+The code lives only in renderer memory. Open GitHub is an explicit fixed native action.
+Pending-state reads use bounded injected timers, independently of the service sync cadence.
+Expiry clears the code and reads authoritative account state; only explicit Cancel or Sign out
+revokes credentials. Serial account operations fence replies and timers on sign-out, account
+change, disconnect, restart and disposal. Strict decoding failures use generic bounded errors.
+
+Machine name/reporting updates acknowledge queued local changes rather than claiming server
+persistence. Policy updates keep any automatic-apply pause until explicit Resume. Offered setup
+repositories require separate unchecked consent before sending an opaque setup ID for trust;
+account membership supplies no trust badge. Sync displays returned freshness, errors and retry time.
+The renderer does not implement updater, authoring, fleet, restoration, publishing or discovery.
+
+Controller checks use fake Bridge implementations and injected clocks. Rendered-view fixtures
+use the existing React server renderer with tsx. These tests do not establish actual macOS
+installer dialogs, service registration, browser/device authorization, notification behavior or
+native GUI interaction. Release/resource checks and packaged smoke remain separate verification.

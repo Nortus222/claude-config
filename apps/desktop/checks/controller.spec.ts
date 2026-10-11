@@ -735,3 +735,14 @@ test('a review refresh refusal is visible and does not retry indefinitely', asyn
   assert.equal(c.state.connection, 'connected');
   assert.match(c.state.detail, /status unavailable/);
 });
+test('malformed inspection and plan replies never expose rejected values', async () => {
+  for (const command of ['inspect_machine', 'preview_plan', 'apply_plan'] as const) {
+    const f = fake({ inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }), [command]: () => ({ token: 'DO-NOT-PRINT' }) });
+    const c = new MachineController(f.bridge);
+    await c.connect();
+    if (command !== 'inspect_machine') await c.previewPlan();
+    if (command === 'apply_plan') await c.apply();
+    assert.doesNotMatch(c.state.detail, /DO-NOT-PRINT|token/, command);
+    assert.match(c.state.detail, /incompatible agent response/, command);
+  }
+});
