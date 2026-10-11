@@ -51,6 +51,24 @@ test('environment API failures fail closed before approval jobs', async () => {
   await verifyEnvironment('hosted-image', 'runner-token', async (_url, options) => { assert.equal(new Headers(options?.headers).get('authorization'), 'Bearer runner-token'); return new Response(JSON.stringify(++requests === 1 ? protectedEnvironment : policies)); });
   assert.equal(requests, 2);
 });
+test('manual image dispatch needs no reviewer gate while production still requires one', async () => {
+  const { verifyEnvironment } = await import('../infra/release.ts');
+  const environment = { ...protectedEnvironment, protection_rules: [{ type: 'branch_policy', id: 2 }] };
+  assert.doesNotThrow(() => assertProtectedEnvironment(environment, policies, 'hosted-image'));
+  assert.throws(() => assertProtectedEnvironment(environment, policies));
+  assert.throws(() => assertProtectedEnvironment(environment, policies, 'hosted-production'));
+  for (const name of ['hosted-image', 'hosted-production']) {
+    let requests = 0;
+    const verification = verifyEnvironment(name, 'runner-token', async (_url, options) => {
+      assert.equal(options?.method ?? 'GET', 'GET');
+      assert.equal(new Headers(options?.headers).get('authorization'), 'Bearer runner-token');
+      return new Response(JSON.stringify(++requests === 1 ? environment : policies));
+    });
+    if (name === 'hosted-image') await verification; else await assert.rejects(verification);
+    assert.equal(requests, 2);
+  }
+  assert.doesNotThrow(() => assertProtectedEnvironment({ ...environment, protection_rules: [] }, policies, 'hosted-image'));
+});
 test('GHCR blob follows one known HTTPS CDN redirect without sending its anonymous bearer token', async () => {
   const f = fixture(); let cdn = 0;
   const configTransport: typeof fetch = async (url, options) => {
@@ -77,7 +95,7 @@ test('rollback verifies separately reviewed image ancestor using only literal Gi
   assert.equal(calls.length, 0);
 });
 
-test('only image releases allow explicit single-owner self-review in direct rules and API metadata', async () => {
+test('optional image reviewer rules allow self-review while production rules prevent it', async () => {
   const { verifyEnvironment } = await import('../infra/release.ts');
   const rule = protectedEnvironment.protection_rules[0]!;
   const singleOwner = { ...protectedEnvironment, protection_rules: [{ ...rule, prevent_self_review: false }] };
@@ -113,7 +131,7 @@ test('only image releases allow explicit single-owner self-review in direct rule
   }
 });
 
-test('both approval policies still require valid reviewers and only the main branch', async () => {
+test('present reviewer rules require valid metadata and both environments remain main-only', async () => {
   const { verifyEnvironment } = await import('../infra/release.ts');
   for (const name of ['hosted-image', 'hosted-production']) {
     const rule = { ...protectedEnvironment.protection_rules[0]!, prevent_self_review: name !== 'hosted-image' };
@@ -129,6 +147,20 @@ test('both approval policies still require valid reviewers and only the main bra
       assert.throws(() => assertProtectedEnvironment(environment, branches, name));
       let requests = 0;
       await assert.rejects(verifyEnvironment(name, '', async () => new Response(JSON.stringify(++requests === 1 ? environment : branches))));
+      assert.equal(requests, 2);
+    }
+  }
+});
+
+test('duplicate reviewer rules and malformed protection rules fail closed in both environments', async () => {
+  const { verifyEnvironment } = await import('../infra/release.ts');
+  const rule = protectedEnvironment.protection_rules[0]!;
+  for (const name of ['hosted-image', 'hosted-production']) {
+    for (const protection_rules of [[rule, rule], [rule, { ...rule, reviewers: [] }], null, {}, [null], [rule, []], [{}], [rule, { type: 1 }]]) {
+      const environment = { ...protectedEnvironment, protection_rules };
+      assert.throws(() => assertProtectedEnvironment(environment, policies, name));
+      let requests = 0;
+      await assert.rejects(verifyEnvironment(name, '', async () => new Response(JSON.stringify(++requests === 1 ? environment : policies))));
       assert.equal(requests, 2);
     }
   }
