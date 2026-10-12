@@ -69,6 +69,17 @@ Packaged mode uses Rust's `--smoke <temporary HOME>` without registering a login
 
 The agent resolves configuration from HOME, machine overrides and `state.json`'s recorded repository without a bundled-checkout fallback. The login shell environment supplies installer tools; its output and installer diagnostics stay off the helper's stdout and the socket protocol. Each job builds domains from its own verified snapshot, as ADR 0016 requires.
 
+Normal GUI startup invokes one fixed `--startup --app <absolute executable>` helper with bounded
+native-owned `{appVersion}` input. The helper resolves the login environment once, keeps it private,
+validates existing setup and maintenance, then uses the existing ensure or health-gated recovery.
+It returns only the strict state root, setup, maintenance and fixed outcome. Native update preferences
+use that root even if ensure fails; an invalid root disables updater initialization. Startup never
+bootstraps a missing or failed setup. Native connects directly and validates the bundled runtime
+identity. The first renderer setup read consumes the initial display snapshot once; subsequent reads
+are fresh, and restart, bootstrap or Git installation invalidate it. Explicit lifecycle actions retain
+their existing helpers and locks. The legacy read-only paths helper has a ten-second outer deadline,
+allowing its five-second login-shell probe and bounded overhead to finish.
+
 On a disposable machine, verify inspect, selection, preview, apply, cancellation, offline recovery and Restart agent. Close the window during apply and reconnect to the continuing service. Check relocation and an upgrade while a run is active. Real launchd behavior, notifications and GUI interaction need manual verification; socket fixtures and fake Processes do not exercise the OS service manager.
 
 ## Startup diagnostics
@@ -77,7 +88,7 @@ Normal macOS GUI startup writes local timings to
 `~/Library/Logs/com.nortuscc.desktop/startup.log`. The foreground login service writes its
 timings to the existing `<stateRoot>/agent/agent.log`, normally
 `~/.config/nortuscc/agent/agent.log`. Fixed helper timings go to stderr; the native host
-persists only recognized structured records from its setup, paths, ensure and restart helpers.
+persists only recognized structured records from its startup, setup, paths, ensure and restart helpers.
 Maintenance-session stderr is still discarded; native `maintenance_state` timings cover the
 total duration of that startup step. Release verification, hidden notification and packaged
 smoke modes do not initialize the native log.
@@ -89,6 +100,11 @@ start; terminal phase records also include `durationMs` when the phase has a sta
 Native timings cover GUI setup, helper execution, maintenance checks, authenticated IPC
 readiness and runtime identity. They measure native setup through agent connection, not
 renderer paint or time before Tauri setup begins.
+
+The bundled entry records `module_load` before dynamically evaluating its implementation, then
+passes the same trace into the helper or foreground agent. It remains one hashed `agent.mjs` resource.
+This phase measures module evaluation after the first JavaScript instruction; it cannot attribute
+OS/runtime delay before that instruction or prove that cold-start delay has been eliminated.
 
 For a slow login probe, `shell_ready` measures reaching the first fixed marker after shell
 startup; `environment_ready` measures the bundled runtime's environment capture after that

@@ -252,4 +252,3 @@ export const readSetupChoices = async (stdin: AsyncIterable<string | Uint8Array>
   }
   return decodeSetupChoices(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 };
-
