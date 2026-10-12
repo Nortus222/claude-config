@@ -69,13 +69,25 @@ Packaged mode uses Rust's `--smoke <temporary HOME>` without registering a login
 
 The agent resolves configuration from HOME, machine overrides and `state.json`'s recorded repository without a bundled-checkout fallback. The login shell environment supplies installer tools; its output and installer diagnostics stay off the helper's stdout and the socket protocol. Each job builds domains from its own verified snapshot, as ADR 0016 requires.
 
-Normal GUI startup invokes one fixed `--startup --app <absolute executable>` helper with bounded
+Tauri setup creates the native owner and launches one owned startup worker before returning.
+The window can show the existing checking state while machine and lifecycle commands await
+validated readiness. Update commands await the coordinator's earlier milestone, after preferences
+have been read from the validated state root; ordinary checks do not wait for agent connectivity.
+Successful interrupted recovery publishes its first update snapshot after native health validation,
+so startup reads the recovery result and can perform an eligible automatic check. Failed recovery
+retains its diagnostic and permits explicit metadata checks without requiring an online agent.
+No enabled provisional coordinator or inferred machine data is exposed during startup.
+
+The worker invokes one fixed `--startup --app <absolute executable>` helper with bounded
 native-owned `{appVersion}` input. The helper resolves the login environment once, keeps it private,
 validates existing setup and maintenance, then uses the existing ensure or health-gated recovery.
 It returns only the strict state root, setup, maintenance and fixed outcome. Native update preferences
 use that root even if ensure fails; an invalid root disables updater initialization. Startup never
 bootstraps a missing or failed setup. Native connects directly and validates the bundled runtime
-identity. The first renderer setup read consumes the initial display snapshot once; subsequent reads
+identity. Closing signals cancellation to the helper, its login probe and native readiness retries;
+waiting commands refuse and late publication is fenced. The owned worker is joined after the Tauri
+event loop returns, outside UI callbacks. Closing leaves a successfully launched persistent agent
+running. Forced kills and crashes can still bypass cleanup. The first renderer setup read consumes the initial display snapshot once; subsequent reads
 are fresh, and restart, bootstrap or Git installation invalidate it. Explicit lifecycle actions retain
 their existing helpers and locks. The legacy read-only paths helper has a ten-second outer deadline,
 allowing its five-second login-shell probe and bounded overhead to finish.
@@ -97,9 +109,10 @@ Lines beginning `[nortuscc-startup] ` contain schema version 1, a component, ope
 PID, run start timestamp, sequence, fixed phase/status names and monotonic milliseconds.
 Group a process run by `(pid, startedAt)`. `elapsedMs` is time since that run's diagnostic
 start; terminal phase records also include `durationMs` when the phase has a start record.
-Native timings cover GUI setup, helper execution, maintenance checks, authenticated IPC
-readiness and runtime identity. They measure native setup through agent connection, not
-renderer paint or time before Tauri setup begins.
+Native timings distinguish `app_setup`, which returns after scheduling, from `startup_worker`,
+which includes helper execution and authenticated agent readiness. `runtime_ready` records Tauri's
+Ready event. It does not prove renderer paint. Maintenance and runtime-identity timings remain;
+time before Tauri setup and the first JavaScript instruction is not measured.
 
 The bundled entry records `module_load` before dynamically evaluating its implementation, then
 passes the same trace into the helper or foreground agent. It remains one hashed `agent.mjs` resource.

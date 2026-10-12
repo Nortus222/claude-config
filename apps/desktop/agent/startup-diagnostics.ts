@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
 
 export const STARTUP_PREFIX = '[nortuscc-startup] ';
-export const STARTUP_PHASES = ['module_load', 'entry', 'runtime_metadata', 'login_probe', 'shell_spawn', 'shell_ready', 'environment_ready', 'probe_cleanup', 'paths', 'lifecycle', 'lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc', 'running', 'shutdown', 'ipc_closed', 'stopped', 'app_setup', 'updater_source', 'preferences_paths', 'maintenance_state', 'setup_state', 'helper', 'ready_wait', 'runtime_identity'] as const;
+export const STARTUP_PHASES = ['module_load', 'entry', 'runtime_metadata', 'login_probe', 'shell_spawn', 'shell_ready', 'environment_ready', 'probe_cleanup', 'paths', 'lifecycle', 'lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc', 'running', 'shutdown', 'ipc_closed', 'stopped', 'app_setup', 'startup_worker', 'runtime_ready', 'updater_source', 'preferences_paths', 'maintenance_state', 'setup_state', 'helper', 'ready_wait', 'runtime_identity'] as const;
 export type StartupPhase = typeof STARTUP_PHASES[number];
 export type StartupStatus = 'started' | 'completed' | 'failed' | 'timed_out' | 'fallback' | 'cancelled';
 export type StartupOperation = 'app_startup' | 'foreground' | 'ensure' | 'restart' | 'paths' | 'setup_state' | 'bootstrap' | 'install_git' | 'prepare_update' | 'recover_update' | 'maintenance_state' | 'invalid';
