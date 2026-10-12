@@ -44,7 +44,7 @@ npm run test:resources -w apps/desktop
 
 `test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and the agent hash, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
 
-`status` may answer `NO_REPORT` while startup is still inspecting; this remains connected, and a later status event loads the inspection. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
+Unknown local setup displays **Opening Claude Config**; first-run consent appears only after a validated setup-needed reply. Existing installations wait for genuine connection and initial reads. `status` may answer `NO_REPORT` before the first inspection; this remains connected with a waiting explanation and a read-only **Recheck agent status** action. A current report completes that wait, and an active apply exposes the existing Cancel control. Actual transport, setup and inspection failures remain visible with explicit recheck or Settings recovery; they are not treated as startup progress. Startup uses one focused loading card with confirmed Local setup, Agent connection and Local inspection milestones. Activity is indeterminate, announced politely and respects reduced motion. Updates remain available in a secondary disclosure independently of agent readiness; update activity, availability and retry open it automatically, while idle checks start compact. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
 
 Every JSON line is bounded to 1,048,576 bytes. Inspect/apply time out after 60 seconds, preview after 10, cancel after 30, and shutdown after 5. The shared `<stateRoot>/apply.lock` keeps the agent and standalone CLI from changing the machine together. An apply re-inspects and returns a replacement preview when the plan is stale.
 
@@ -69,6 +69,29 @@ Packaged mode uses Rust's `--smoke <temporary HOME>` without registering a login
 
 The agent resolves configuration from HOME, machine overrides and `state.json`'s recorded repository without a bundled-checkout fallback. The login shell environment supplies installer tools; its output and installer diagnostics stay off the helper's stdout and the socket protocol. Each job builds domains from its own verified snapshot, as ADR 0016 requires.
 
+Tauri setup creates the native owner and launches one owned startup worker before returning.
+The window can show the existing checking state while machine and lifecycle commands await
+validated readiness. Update commands await the coordinator's earlier milestone, after preferences
+have been read from the validated state root; ordinary checks do not wait for agent connectivity.
+Successful interrupted recovery publishes its first update snapshot after native health validation,
+so startup reads the recovery result and can perform an eligible automatic check. Failed recovery
+retains its diagnostic and permits explicit metadata checks without requiring an online agent.
+No enabled provisional coordinator or inferred machine data is exposed during startup.
+
+The worker invokes one fixed `--startup --app <absolute executable>` helper with bounded
+native-owned `{appVersion}` input. The helper resolves the login environment once, keeps it private,
+validates existing setup and maintenance, then uses the existing ensure or health-gated recovery.
+It returns only the strict state root, setup, maintenance and fixed outcome. Native update preferences
+use that root even if ensure fails; an invalid root disables updater initialization. Startup never
+bootstraps a missing or failed setup. Native connects directly and validates the bundled runtime
+identity. Closing signals cancellation to the helper, its login probe and native readiness retries;
+waiting commands refuse and late publication is fenced. The owned worker is joined after the Tauri
+event loop returns, outside UI callbacks. Closing leaves a successfully launched persistent agent
+running. Forced kills and crashes can still bypass cleanup. The first renderer setup read consumes the initial display snapshot once; subsequent reads
+are fresh, and restart, bootstrap or Git installation invalidate it. Explicit lifecycle actions retain
+their existing helpers and locks. The legacy read-only paths helper has a ten-second outer deadline,
+allowing its five-second login-shell probe and bounded overhead to finish.
+
 On a disposable machine, verify inspect, selection, preview, apply, cancellation, offline recovery and Restart agent. Close the window during apply and reconnect to the continuing service. Check relocation and an upgrade while a run is active. Real launchd behavior, notifications and GUI interaction need manual verification; socket fixtures and fake Processes do not exercise the OS service manager.
 
 ## Startup diagnostics
@@ -77,7 +100,7 @@ Normal macOS GUI startup writes local timings to
 `~/Library/Logs/com.nortuscc.desktop/startup.log`. The foreground login service writes its
 timings to the existing `<stateRoot>/agent/agent.log`, normally
 `~/.config/nortuscc/agent/agent.log`. Fixed helper timings go to stderr; the native host
-persists only recognized structured records from its setup, paths, ensure and restart helpers.
+persists only recognized structured records from its startup, setup, paths, ensure and restart helpers.
 Maintenance-session stderr is still discarded; native `maintenance_state` timings cover the
 total duration of that startup step. Release verification, hidden notification and packaged
 smoke modes do not initialize the native log.
@@ -86,9 +109,15 @@ Lines beginning `[nortuscc-startup] ` contain schema version 1, a component, ope
 PID, run start timestamp, sequence, fixed phase/status names and monotonic milliseconds.
 Group a process run by `(pid, startedAt)`. `elapsedMs` is time since that run's diagnostic
 start; terminal phase records also include `durationMs` when the phase has a start record.
-Native timings cover GUI setup, helper execution, maintenance checks, authenticated IPC
-readiness and runtime identity. They measure native setup through agent connection, not
-renderer paint or time before Tauri setup begins.
+Native timings distinguish `app_setup`, which returns after scheduling, from `startup_worker`,
+which includes helper execution and authenticated agent readiness. `runtime_ready` records Tauri's
+Ready event. It does not prove renderer paint. Maintenance and runtime-identity timings remain;
+time before Tauri setup and the first JavaScript instruction is not measured.
+
+The bundled entry records `module_load` before dynamically evaluating its implementation, then
+passes the same trace into the helper or foreground agent. It remains one hashed `agent.mjs` resource.
+This phase measures module evaluation after the first JavaScript instruction; it cannot attribute
+OS/runtime delay before that instruction or prove that cold-start delay has been eliminated.
 
 For a slow login probe, `shell_ready` measures reaching the first fixed marker after shell
 startup; `environment_ready` measures the bundled runtime's environment capture after that
@@ -99,6 +128,13 @@ IPC readiness and shutdown. `shutdown: started` followed by `ipc_closed: complet
 `stopped` distinguishes a cleanup wait after IPC removal from never reaching IPC readiness.
 IPC closure is reported only after successful initialization. No startup timeout is shortened
 and these records do not establish the cause of an intermittent reboot failure.
+
+`running: started` means IPC is accepting requests. The separate `first_job` phase measures
+the initial scheduled job through its first returned status, including any fetch, inspection
+and policy-controlled apply. It records `failed` when that status reports a job error and
+`cancelled` when the request is interrupted. Completion does not prove every item is healthy;
+the genuine status and inspection carry those outcomes. This timing does not change scheduling
+or make native runtime health wait for the initial job.
 
 Structured records accept only fixed enums and safe integers, excluding environment values,
 tokens, paths, URLs and arbitrary error text. Existing unstructured agent diagnostics retain

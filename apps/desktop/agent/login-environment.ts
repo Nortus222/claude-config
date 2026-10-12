@@ -31,11 +31,10 @@ const parse = (text: string | undefined): Record<string, string> | undefined => 
   }
 };
 
-// Resolves with the output between the markers as soon as it is printed, or undefined when the shell
-// closes stdout without it; either way the shell's process group is killed, so background jobs an
-// rc file started cannot hold the probe open.
-const capture = (shell: string, script: string, env: Readonly<Record<string, string | undefined>>, timeoutMs: number, progress: StartupDiagnostics['record']) =>
+// Stops the detached probe group once capture ends and joins the child and pipes before settling.
+const capture = (shell: string, script: string, env: Readonly<Record<string, string | undefined>>, timeoutMs: number, progress: StartupDiagnostics['record'], signal?: AbortSignal) =>
   new Promise<string | undefined>((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Login environment probe cancelled', 'AbortError')); return; }
     let phase: StartupPhase = 'shell_spawn';
     progress(phase, 'started');
     let child: ReturnType<typeof spawn>;
@@ -45,10 +44,14 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
     let out = '';
     let bytes = 0;
     let settled = false;
+    let complete: (() => void) | undefined;
+    const cancelled = () => finish('cancelled', () => reject(new DOMException('Login environment probe cancelled', 'AbortError')));
     const finish = (status: StartupStatus, settle: () => void) => {
       if (settled) return;
       settled = true;
+      complete = settle;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', cancelled);
       progress(phase, status);
       progress('probe_cleanup', 'started');
       try {
@@ -56,9 +59,10 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
       } catch {
         // Already gone.
       }
-      settle();
     };
     const timer = setTimeout(() => finish('timed_out', () => reject(new Error(`timed out after ${timeoutMs} ms`))), timeoutMs);
+    signal?.addEventListener('abort', cancelled, { once: true });
+    if (signal?.aborted) cancelled();
     child.once('spawn', () => {
       if (settled) return;
       progress(phase, 'completed');
@@ -85,6 +89,7 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
     child.once('close', () => {
       finish('failed', () => resolve(undefined));
       progress('probe_cleanup', 'completed');
+      complete!();
     });
   });
 
@@ -93,13 +98,13 @@ export const loginShell = (env: Readonly<Record<string, string | undefined>>): s
   env.SHELL && isAbsolute(env.SHELL) ? env.SHELL : '/bin/zsh';
 
 // Reads the environment once from the user's login shell, so installers and MCP prerequisites see
-// what a terminal sees. Never rejects: on any failure it returns the inherited environment with the
-// reason as `error`.
+// what a terminal sees. Failures fall back to inherited values; cancellation rejects after cleanup.
 export async function probeLoginEnvironment(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
   readonly runtime?: string;
   readonly onProgress?: StartupDiagnostics['record'];
+  readonly signal?: AbortSignal;
 }): Promise<LoginEnvironment> {
   const fallback = strings(input.env);
   const shell = loginShell(input.env);
@@ -107,10 +112,12 @@ export async function probeLoginEnvironment(input: {
     try { input.onProgress?.(phase, status); } catch {}
   };
   try {
-    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000, progress));
+    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000, progress, input.signal));
+    input.signal?.throwIfAborted();
     if (found) return { env: found };
     return { env: fallback, error: `login shell ${shell} reported no environment; using the app's` };
   } catch (err) {
+    if (input.signal?.aborted) throw new DOMException('Login environment probe cancelled', 'AbortError');
     return { env: fallback, error: `could not read the environment from login shell ${shell}: ${err instanceof Error ? err.message : String(err)}` };
   }
 }

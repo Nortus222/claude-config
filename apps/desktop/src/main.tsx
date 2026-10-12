@@ -7,7 +7,7 @@ import { UpdateController } from './update-controller.ts';
 import { UpdateView } from './update-view.tsx';
 import { nativeAvailable, nativeBridge, nativeUpdateBridge } from './bridge.ts';
 import { ReviewView } from './review-view.tsx';
-import { OverviewView, ResolvedView, SettingsView, SetupView, ShellView, screenForReview, type Screen } from './views.tsx';
+import { OverviewView, ResolvedView, SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, type Screen } from './views.tsx';
 import './style.css';
 
 function App() {
@@ -45,21 +45,20 @@ function App() {
     reviewTarget.current.focus();
     reviewTarget.current.scrollIntoView({ block: 'start' });
     focusReview.current = false;
-  }, [screen, state.reviewRequested]);
+  }, [screen, state.reviewRequested, setupState.phase, state.initialReadPending, state.waitingForReport]);
 
-  if (setupState.phase !== 'ready' && setupState.phase !== 'browser') return <>
-    <SetupView state={setupState} controller={setup} />
-    <div className="onboarding first-run-updates"><UpdateView state={updateState} controller={updates} /></div>
-  </>;
-  return <ShellView screen={screen} navigate={setScreen}>
-    {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} /> : null}
-    {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
-    {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
-    {screen === 'settings' ? <>
-      <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />
-      <UpdateView state={updateState} controller={updates} />
-    </> : null}
-  </ShellView>;
+  return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
+    updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
+    <ShellView screen={screen} navigate={setScreen}>
+      {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
+      {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
+      {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
+      {screen === 'settings' ? <>
+        <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />
+        <UpdateView state={updateState} controller={updates} />
+      </> : null}
+    </ShellView>
+  </StartupBoundary>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

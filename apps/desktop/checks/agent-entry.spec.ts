@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
@@ -441,4 +442,256 @@ test('signal cancellation of a promise-based helper is logged as cancellation at
   assert.ok(records.some(r => r.phase === 'lifecycle' && r.status === 'cancelled'));
   assert.equal(records.some(r => r.phase === 'lifecycle' && r.status === 'failed'), false);
   assert.ok(records.some(r => r.phase === 'entry' && r.status === 'cancelled'));
+});
+
+const startupInput = (f: ReturnType<typeof fixture>) => ({ ...f.input,
+  args: ['--startup', '--app', f.input.args[2]!],
+  stdin: { async *[Symbol.asyncIterator]() { yield JSON.stringify({ appVersion: '0.1.3' }); } },
+});
+const startupResult = (f: ReturnType<typeof fixture>) => {
+  assert.equal(f.stdout.length, 1);
+  return JSON.parse(f.stdout[0]!);
+};
+
+test('startup cancellation joins a real held login capture before returning without setup or service actions', {
+  skip: process.platform === 'win32' ? 'requires detached POSIX process groups' : false, timeout: 10000,
+}, async t => {
+  const f = fixture(t);
+  const shell = join(f.home, 'held-login-shell');
+  const runtime = join(f.home, 'held-capture-runtime');
+  const shellPid = join(f.home, 'shell.pid');
+  const runtimePid = join(f.home, 'runtime.pid');
+  writeFileSync(shell, `#!/bin/sh\necho $$ > '${shellPid}'\nexec /bin/sh -c "$2"\n`); chmodSync(shell, 0o755);
+  writeFileSync(runtime, `#!/bin/sh\necho $$ > '${runtimePid}'\nexec /bin/sleep 30\n`); chmodSync(runtime, 0o755);
+  const controller = new AbortController();
+  const running = runDesktopEntry({ ...startupInput(f), signal: controller.signal,
+    env: { ...f.input.env, SHELL: shell, API_TOKEN: 'private-capture-token' },
+    probe: input => probeLoginEnvironment({ ...input, runtime, timeoutMs: 1000 }) });
+  const pids: number[] = [];
+  try {
+    const until = Date.now() + 3000;
+    while (!existsSync(runtimePid) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+    assert.ok(existsSync(runtimePid), 'probe reached the held capture');
+    pids.push(Number(readFileSync(shellPid, 'utf8')), Number(readFileSync(runtimePid, 'utf8')));
+    controller.abort();
+    assert.equal(await running, 1);
+    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} must be joined before helper return`);
+    assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
+    const records = startupRecords(f.stderr);
+    assert.ok(records.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
+    assert.ok(records.some(r => r.phase === 'login_probe' && r.status === 'cancelled'));
+    assert.equal(records.some(r => r.phase === 'login_probe' && r.status === 'fallback'), false);
+    assert.equal(records.some(r => r.phase === 'paths' || r.phase === 'setup_state' || r.phase === 'lifecycle'), false);
+    assert.equal(f.stderr.join('').includes('private-capture-token'), false);
+  } finally {
+    controller.abort(); await running;
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  }
+});
+
+test('startup resolves one private login identity and refuses lifecycle for missing setup', async t => {
+  const f = fixture(t);
+  rmSync(join(f.stateRoot, 'state.json'));
+  let probes = 0;
+  const loginHome = join(f.home, 'login-home'); mkdirSync(loginHome);
+  const loginState = join(loginHome, 'custom-state');
+  const secret = 'secret-never-in-startup-context';
+  assert.equal(await runDesktopEntry({ ...startupInput(f), probe: async input => {
+    probes++; assert.equal(input.env.SHELL, '/fake/shell');
+    return { env: { HOME: loginHome, NORTUSCC_STATE_DIR: loginState, PATH: '/login/bin', API_TOKEN: secret } };
+  } }), 0);
+  assert.equal(probes, 1);
+  assert.deepEqual(startupResult(f), { stateRoot: loginState,
+    setup: { needsSetup: true, repo: null, gitAvailable: true, canInstallGit: true, defaultRepoUrl: 'https://github.com/Nortus222/claude-config.git' },
+    maintenance: { pending: false, phase: null, fromVersion: null, toVersion: null, backupPath: null, diagnostic: null }, outcome: 'needs_setup' });
+  assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'), 'prerequisite reads never register a service');
+  assert.equal(f.stdout.join('').includes(secret), false);
+  assert.equal(f.stderr.join('').includes(secret), false);
+  assert.equal(existsSync(join(loginState, 'agent/agent.json')), false);
+});
+
+test('startup preserves login state and original shell selectors when ensuring the service once', async t => {
+  const f = fixture(t);
+  const loginHome = join(f.home, 'login-home'); mkdirSync(loginHome);
+  const selectors = { SHELL: '/fake/selected-shell', ZDOTDIR: join(f.home, 'selected-startup'), ENV: join(f.home, 'selected-env') };
+  let probes = 0;
+  assert.equal(await runDesktopEntry({ ...startupInput(f), env: { ...f.input.env, ...selectors }, probe: async input => {
+    probes++; assert.equal(input.env.SHELL, selectors.SHELL);
+    return { env: { HOME: loginHome, PATH: '/login/bin', NORTUSCC_STATE_DIR: f.stateRoot, SHELL: '/fake/exported-shell', ZDOTDIR: '/exported/startup', API_TOKEN: 'never-output-this' } };
+  } }), 0);
+  const result = startupResult(f);
+  assert.equal(result.outcome, 'ready'); assert.equal(result.stateRoot, f.stateRoot);
+  assert.equal(result.setup.repo, f.repo); assert.equal(result.maintenance.pending, false); assert.equal(probes, 1);
+  const unit = readFileSync(join(loginHome, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8');
+  assert.ok(unit.includes('/login/bin')); assert.ok(unit.includes(loginHome));
+  for (const value of Object.values(selectors)) assert.ok(unit.includes(value));
+  assert.equal(unit.includes('/fake/exported-shell'), false); assert.equal(unit.includes('/exported/startup'), false);
+  assert.equal(f.stdout.join('').includes('never-output-this'), false);
+  assert.ok(f.commands.filter(c => c.cmd === 'launchctl').some(c => c.args[0] === 'bootstrap'));
+});
+
+test('startup rejects malformed native input and app arguments before probing or services', async t => {
+  for (const text of ['{}', '{"appVersion":"0.1.3","env":{}}', '{"appVersion":"0.1.3-beta"}', 'null', '{"appVersion":"0.1.3"}\n{}', 'x'.repeat(4097)]) {
+    const f = fixture(t);
+    assert.equal(await runDesktopEntry({ ...startupInput(f), stdin: { async *[Symbol.asyncIterator]() { yield text; } } }), 1);
+    assert.equal(f.probes(), 0); assert.deepEqual(f.commands, []); assert.deepEqual(f.stdout, []);
+  }
+  const f = fixture(t);
+  assert.equal(await runDesktopEntry({ ...startupInput(f), args: ['--startup', '--app', 'relative'] }), 1);
+  assert.equal(f.probes(), 0); assert.deepEqual(f.commands, []);
+});
+
+test('startup corrupt setup and runtime failures retain the root without lifecycle or raw output', async t => {
+  const corrupt = fixture(t);
+  writeFileSync(join(corrupt.stateRoot, 'state.json'), '{"API_TOKEN":"raw-private-secret"');
+  assert.equal(await runDesktopEntry(startupInput(corrupt)), 0);
+  assert.deepEqual(startupResult(corrupt), { stateRoot: corrupt.stateRoot, setup: null, maintenance: null, outcome: 'setup_failed' });
+  assert.deepEqual(corrupt.commands, []); assert.equal(corrupt.stderr.join('').includes('raw-private-secret'), false);
+  const runtime = fixture(t);
+  writeFileSync(join(runtime.input.resources, 'runtime.json'), '{"error":"runtime-private-secret"}');
+  assert.equal(await runDesktopEntry(startupInput(runtime)), 0);
+  const result = startupResult(runtime);
+  assert.equal(result.stateRoot, runtime.stateRoot); assert.equal(result.outcome, 'runtime_failed');
+  assert.equal(result.setup.repo, runtime.repo); assert.equal(result.maintenance, null);
+  assert.ok(runtime.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
+  assert.equal(runtime.stdout.join('').includes('runtime-private-secret'), false);
+});
+
+test('startup ensure failure retains setup and root while refusing readiness', async t => {
+  const f = fixture(t);
+  mkdirSync(join(f.stateRoot, 'agent'));
+  writeFileSync(join(f.stateRoot, 'agent/agent.json'), '{"version":1,"policy":"broken-private-secret"}');
+  assert.equal(await runDesktopEntry(startupInput(f)), 0);
+  const result = startupResult(f);
+  assert.equal(result.outcome, 'ensure_failed'); assert.equal(result.stateRoot, f.stateRoot);
+  assert.equal(result.setup.repo, f.repo); assert.equal(result.maintenance.pending, false);
+  assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
+  assert.equal(f.stdout.join('').includes('broken-private-secret'), false);
+});
+
+test('startup retains a malformed journal and a live native installer without service mutation', async t => {
+  for (const live of [false, true]) {
+    const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent'));
+    const appPath = f.input.args[2]!;
+    const journal = live ? JSON.stringify({ version: 1, phase: 'installing', appPath,
+      bundlePath: join(f.home, 'Nortuscc.app'), fromVersion: '0.1.2', toVersion: '0.1.3',
+      oldAgentVersion: 'a'.repeat(64), oldBundleHash: 'b'.repeat(64), backupPath: join(f.stateRoot, 'backups/old-app'), installerPid: process.pid }) : '{private-invalid-journal';
+    writeFileSync(join(f.stateRoot, 'agent/pending-update.json'), journal);
+    assert.equal(await runDesktopEntry(startupInput(f)), 0);
+    const result = startupResult(f);
+    assert.equal(result.outcome, 'recovery_failed'); assert.equal(result.stateRoot, f.stateRoot); assert.equal(result.maintenance.pending, true);
+    assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
+    assert.equal(readFileSync(join(f.stateRoot, 'agent/pending-update.json'), 'utf8'), journal);
+    assert.equal(f.stdout.join('').includes('private-invalid-journal'), false);
+  }
+});
+
+test('startup with missing setup retains a pending journal and never attempts recovery', async t => {
+  const f = fixture(t); rmSync(join(f.stateRoot, 'state.json')); mkdirSync(join(f.stateRoot, 'agent'));
+  writeFileSync(join(f.stateRoot, 'agent/pending-update.json'), '{invalid');
+  assert.equal(await runDesktopEntry(startupInput(f)), 0);
+  const result = startupResult(f);
+  assert.equal(result.outcome, 'needs_setup'); assert.equal(result.setup.needsSetup, true); assert.equal(result.maintenance.pending, true);
+  assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
+  assert.equal(readFileSync(join(f.stateRoot, 'agent/pending-update.json'), 'utf8'), '{invalid');
+});
+
+test('startup cancellation emits no context and registers no service after a deferred probe', { timeout: 5000 }, async t => {
+  const f = fixture(t); const controller = new AbortController();
+  let entered!: () => void; let release!: () => void;
+  const invoked = new Promise<void>(done => { entered = done; });
+  const gate = new Promise<void>(done => { release = done; });
+  const running = runDesktopEntry({ ...startupInput(f), signal: controller.signal, probe: async () => {
+    entered(); await gate; return { env: { HOME: f.home, NORTUSCC_STATE_DIR: f.stateRoot } };
+  } });
+  await invoked; controller.abort(); release();
+  assert.equal(await running, 1); assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
+  assert.ok(startupRecords(f.stderr).some(r => r.phase === 'entry' && r.status === 'cancelled'));
+});
+
+test('startup maintenance read failure preserves the resolved root and setup without ensuring', async t => {
+  const f = fixture(t);
+  mkdirSync(join(f.stateRoot, 'agent/pending-update.json'), { recursive: true });
+  assert.equal(await runDesktopEntry(startupInput(f)), 0);
+  const result = startupResult(f);
+  assert.equal(result.stateRoot, f.stateRoot); assert.equal(result.outcome, 'maintenance_failed');
+  assert.equal(result.setup.repo, f.repo); assert.equal(result.maintenance, null);
+  assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
+});
+
+test('startup recovery verifies replacement health before clearing its journal and preserves user state', {
+  skip: process.platform === 'win32' ? 'requires Unix agent IPC (ADR 0019)' : false, timeout: 10000,
+}, async t => {
+  const f = fixture(t);
+  const bundle = join(realpathSync(f.home), 'Nortuscc.app');
+  const resources = join(bundle, 'Contents/Resources/agent-runtime');
+  const appPath = join(bundle, 'Contents/MacOS/Nortuscc');
+  mkdirSync(resources, { recursive: true }); mkdirSync(join(bundle, 'Contents/MacOS'));
+  writeFileSync(appPath, 'inert app executable'); writeFileSync(join(resources, 'bun'), 'inert Bun');
+  writeFileSync(join(resources, 'agent.mjs'), 'inert replacement agent');
+  const agentVersion = createHash('sha256').update('inert replacement agent').digest('hex');
+  writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion, appVersion: '0.1.3', maintenanceProtocol: 1, target: 'darwin-arm64', executable: 'bun' }));
+  writeFileSync(join(bundle, 'Contents/Info.plist'), '<plist><dict><key>CFBundleShortVersionString</key><string>0.1.3</string></dict></plist>');
+  mkdirSync(join(f.stateRoot, 'agent'));
+  const agentPath = join(f.stateRoot, 'agent/agent.json');
+  writeFileSync(agentPath, JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: { reason: 'keep pause', at: '2026-10-12T00:00:00Z' }, installedBy: 'app', appPath, agentVersion, future: 'keep' }));
+  const preserved = ['overrides.json', 'sync.json', 'history.json', 'credentials.json', 'device.json', 'agent/setups.json'].map(name => {
+    const text = name === 'agent/setups.json' ? '{"version":1,"setups":[],"future":"keep trust"}' : `private original ${name}`;
+    writeFileSync(join(f.stateRoot, name), text); return [name, text] as const;
+  });
+  const journalPath = join(f.stateRoot, 'agent/pending-update.json');
+  writeFileSync(journalPath, JSON.stringify({ version: 1, phase: 'awaiting-health', appPath, bundlePath: bundle,
+    fromVersion: '0.1.2', toVersion: '0.1.3', oldAgentVersion: 'a'.repeat(64), oldBundleHash: 'b'.repeat(64), backupPath: join(f.stateRoot, 'backups/old-app'), installerPid: null }));
+  let foreground: Promise<number> | undefined;
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const processes = Layer.succeed(Processes, { run: command => Effect.sync(() => {
+    f.commands.push(command);
+    if (command.cmd === '/usr/bin/xcode-select') return { code: 0, stdout: join(f.input.resources, 'developer'), stderr: '' };
+    if (command.cmd === 'git') return { code: 1, stdout: '', stderr: 'inert checkout' };
+    assert.equal(command.cmd, 'launchctl');
+    if (command.args[0] === 'bootstrap') {
+      assert.equal(existsSync(journalPath), true, 'registration alone must not clear pending');
+      foreground = runDesktopEntry({ ...f.input, args: [], resources, processes, signal: controller.signal,
+        stderr: f.input.stderr, stdout: text => assert.fail(`foreground emitted a helper record: ${text}`) });
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  }) });
+  try {
+    assert.equal(await runDesktopEntry({ ...startupInput(f), args: ['--startup', '--app', appPath], resources, processes }), 0, f.stderr.join(''));
+    const result = startupResult(f);
+    assert.equal(result.outcome, 'recovered'); assert.equal(result.stateRoot, f.stateRoot);
+    assert.equal(result.maintenance.pending, true, 'startup records the journal observed before successful recovery');
+    assert.equal(result.maintenance.phase, 'awaiting-health'); assert.equal(existsSync(journalPath), false);
+    const after = JSON.parse(readFileSync(agentPath, 'utf8'));
+    assert.equal(after.policy, 'manual'); assert.equal(after.policySource, 'person');
+    assert.deepEqual(after.paused, { reason: 'keep pause', at: '2026-10-12T00:00:00Z' }); assert.equal(after.future, 'keep');
+    for (const [name, bytes] of preserved) assert.equal(readFileSync(join(f.stateRoot, name), 'utf8'), bytes);
+    assert.equal(f.probes(), 2, 'one startup probe plus the independent foreground agent probe');
+    const connection = await connectAgent(f.paths, { client: 'app' });
+    try { assert.equal(connection.hello.agentVersion, agentVersion); await connection.request({ command: 'shutdown' }); }
+    finally { connection.close(); }
+  } finally { controller.abort(); if (foreground) assert.equal(await foreground, 0); }
+});
+
+test('startup refuses an unsafe resolved root before setup reads or lifecycle', async t => {
+  const f = fixture(t);
+  assert.equal(await runDesktopEntry({ ...startupInput(f), probe: async () => ({ env: { HOME: f.home, NORTUSCC_STATE_DIR: 'relative-state' } }) }), 1);
+  assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
+});
+
+test('startup refuses an unsafe recorded checkout before service commands or state writes', async t => {
+  const f = fixture(t);
+  const unsafeRepo = join(f.home, 'unsafe\ncheckout');
+  mkdirSync(join(unsafeRepo, '.git'), { recursive: true });
+  const original = JSON.stringify({ version: 1, repo: unsafeRepo, files: {} });
+  writeFileSync(join(f.stateRoot, 'state.json'), original);
+  const code = await runDesktopEntry(startupInput(f));
+  assert.equal(f.commands.some(c => c.cmd === 'launchctl'), false, 'unsafe setup cannot enter service registration');
+  assert.equal(existsSync(join(f.stateRoot, 'agent')), false, 'unsafe setup cannot write lifecycle locks or metadata');
+  assert.equal(existsSync(join(f.home, 'Library/LaunchAgents')), false, 'unsafe setup cannot write a service unit');
+  assert.equal(readFileSync(join(f.stateRoot, 'state.json'), 'utf8'), original);
+  assert.equal(code, 0);
+  assert.deepEqual(startupResult(f), { stateRoot: f.stateRoot, setup: null, maintenance: null, outcome: 'setup_failed' });
+  const records = startupRecords(f.stderr);
+  assert.equal(records.some(r => r.phase === 'runtime_metadata' || r.phase === 'maintenance_state' || r.phase === 'lifecycle'), false);
 });

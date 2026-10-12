@@ -22,6 +22,9 @@ export type ViewState = {
   readonly preview: PreviewResult | null;
   readonly run: RunView | null;
   readonly pending: boolean;
+  readonly initialReadPending: boolean;
+  readonly waitingForReport: boolean;
+  readonly initialReadError: string | null;
   readonly detail: string;
   readonly reviewRequested: number;
   readonly session: number;
@@ -62,6 +65,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
 export class MachineController {
   state: ViewState = {
     connection: 'connecting', inspection: null, status: null, hello: null, excluded: [], preview: null, run: null, pending: false,
+    initialReadPending: true, waitingForReport: false, initialReadError: null,
     detail: 'Connecting to the local agent', reviewRequested: 0, session: 0,
   };
   private bridge: Bridge | null;
@@ -76,10 +80,11 @@ export class MachineController {
   private earlyReviews = new Set<number>();
   private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
+  private statusRevision = 0;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
-    if (!bridge) this.state = { ...this.state, connection: 'browser', detail: 'Browser preview. Open the desktop app to inspect this machine.' };
+    if (!bridge) this.state = { ...this.state, connection: 'browser', initialReadPending: false, detail: 'Browser preview. Open the desktop app to inspect this machine.' };
   }
 
   subscribe = (listener: () => void) => {
@@ -146,7 +151,7 @@ export class MachineController {
     this.earlyDisconnects.clear();
     if (disconnected) {
       this.revision++;
-      this.update({ connection: 'disconnected', pending: false, detail: disconnected.detail });
+      this.update({ connection: 'disconnected', pending: false, initialReadPending: false, waitingForReport: false, initialReadError: disconnected.detail, detail: disconnected.detail });
       return false;
     }
     let hello: HelloResult | null = null;
@@ -155,6 +160,7 @@ export class MachineController {
       catch { throw new Error('Incompatible agent protocol. Restart or reinstall the agent explicitly.'); }
     }
     this.update({ connection: 'connected', detail, hello, status });
+    if (status) this.showStatus(status);
     const review = this.earlyReviews.has(reply.generation);
     this.earlyReviews.clear();
     if (review) this.requestReview();
@@ -170,7 +176,8 @@ export class MachineController {
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
     this.unlisten?.();
-    this.update({ pending: true, connection: 'connecting', session: this.state.session + 1 });
+    this.update({ pending: true, initialReadPending: true, waitingForReport: false, initialReadError: null, connection: 'connecting',
+      session: this.state.session + 1, inspection: null, status: null, hello: null, preview: null, run: null, detail: 'Connecting to the local agent' });
     try {
       const unlisten = await this.bridge.subscribe((event) => this.receive(event));
       if (!this.owns(revision)) {
@@ -180,11 +187,11 @@ export class MachineController {
       this.unlisten = unlisten;
       if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision)) await this.load(revision);
+      if (await this.loadStatus(revision, true)) await this.load(revision);
     } catch (error) {
-      if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
+      if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
-      if (this.owns(revision)) this.update({ pending: false });
+      if (this.owns(revision)) this.update({ pending: false, initialReadPending: false });
     }
   }
 
@@ -192,32 +199,50 @@ export class MachineController {
     const detail = status.error ? `${status.error}${status.detail ? `: ${status.detail}` : ''}`
       : status.applying ? 'The agent is applying changes'
       : status.paused ? `Automatic apply paused: ${status.paused.reason}` : undefined;
-    this.update({ status, ...(detail && this.state.run?.outcome !== 'running' ? { detail } : {}) });
+    this.statusRevision++;
+    this.update({ status, waitingForReport: false,
+      ...(status.applying || status.error ? { initialReadPending: false }
+        : this.state.waitingForReport && !this.state.inspection ? { initialReadPending: true } : {}),
+      ...(detail && this.state.run?.outcome !== 'running' ? { detail } : {}) });
   }
 
   private refused(error: unknown, update: Partial<ViewState> = {}) {
     const detail = message(error);
     const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : detail;
     const offline = /UNAUTHORIZED|MALFORMED|OVERSIZED|CLOSED|disconnected|closed the connection|incompatible|protocol/i.test(code);
-    this.update({ ...update, detail, ...(offline ? { connection: 'disconnected' } : {}) });
+    this.update({ ...update, initialReadPending: false, waitingForReport: false,
+      ...(this.state.initialReadPending || this.state.waitingForReport ? { initialReadError: detail } : {}),
+      detail, ...(offline ? { connection: 'disconnected' } : {}) });
   }
 
-  private async loadStatus(revision: number): Promise<boolean> {
+  private async loadStatus(revision: number, initialConnection = false): Promise<boolean> {
+    const statusRevision = this.statusRevision;
     try {
       const reply = await this.bridge!.invoke('agent_status');
       if (!this.current(revision, reply)) return false;
       let status: WireStatus;
       try { status = decodeWireStatus(reply.data); }
       catch { throw new Error('MALFORMED: incompatible agent status. Restart or reinstall the agent explicitly.'); }
+      if (this.statusRevision !== statusRevision && this.state.status) {
+        return !this.state.status.applying && (!initialConnection || !this.state.status.error);
+      }
       this.showStatus(status);
-      return !status.applying;
+      return !status.applying && (!initialConnection || !status.error);
     } catch (error) {
       if (!this.owns(revision)) return false;
-      this.refused(error);
       const noReport = typeof error === 'object' && error !== null && 'code' in error
         ? error.code === 'NO_REPORT' : /^NO_REPORT\b/.test(message(error));
-      return noReport && this.state.inspection === null && this.state.connection === 'connected'
-        && this.state.status !== null && !this.state.status.applying;
+      if (noReport && this.state.connection === 'connected') {
+        if (this.state.status !== null && (initialConnection || this.state.initialReadPending && this.state.inspection === null || this.statusRevision !== statusRevision)) {
+          return !this.state.status.applying && (!initialConnection || !this.state.status.error);
+        }
+        if (this.state.status === null && this.state.initialReadPending && this.state.inspection === null) {
+          this.update({ waitingForReport: true, detail: 'Waiting for the agent’s first inspection.' });
+          return false;
+        }
+      }
+      this.refused(error);
+      return false;
     }
   }
 
@@ -225,28 +250,31 @@ export class MachineController {
   private async load(revision: number) {
     this.reviewRefresh = false;
     this.update({ detail: 'Inspecting this machine' });
+    const statusRevision = this.statusRevision;
+    const initialRead = this.state.initialReadPending;
     try {
       const reply = await this.bridge!.invoke('inspect_machine');
       if (!this.current(revision, reply)) return;
       const inspection = checkedReply(decodeInspectResult, reply.data);
+      const status = this.statusRevision !== statusRevision ? this.state.status : inspection.status ?? this.state.status;
       const keys = new Set(inspection.items.map((item) => item.key));
       this.update({
-        inspection, status: inspection.status ?? this.state.status, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
-        detail: inspection.status?.error ? `${inspection.status.error}: ${inspection.status.detail ?? ''}` : `Inspected ${inspection.items.length} items`,
+        inspection, status, initialReadError: null, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
+        detail: status?.error ? `${status.error}: ${status.detail ?? ''}` : `Inspected ${inspection.items.length} items`,
       });
     } catch (error) {
-      if (this.owns(revision)) this.refused(error, { inspection: null, preview: null });
+      if (this.owns(revision)) this.refused(error, { inspection: null, preview: null, ...(initialRead ? { initialReadError: message(error) } : {}) });
     }
   }
 
   async inspect() {
     if (!this.bridge || this.state.connection !== 'connected' || this.state.pending || this.state.run?.outcome === 'running') return;
     const revision = ++this.revision;
-    this.update({ pending: true });
+    this.update({ pending: true, ...(this.state.waitingForReport || this.state.initialReadError ? { initialReadPending: true, initialReadError: null } : {}) });
     try {
       if (await this.loadStatus(revision)) await this.load(revision);
     } finally {
-      if (this.owns(revision)) this.update({ pending: false });
+      if (this.owns(revision)) this.update({ pending: false, initialReadPending: false });
     }
   }
 
@@ -347,20 +375,20 @@ export class MachineController {
     this.early = [];
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
-    this.update({ pending: true, connection: 'connecting', session: this.state.session + 1, run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
+    this.update({ pending: true, initialReadPending: true, waitingForReport: false, initialReadError: null, connection: 'connecting', session: this.state.session + 1, run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision)) await this.load(revision);
+      if (await this.loadStatus(revision, true)) await this.load(revision);
     } catch (error) {
-      if (this.owns(revision)) this.update({ connection: 'disconnected', detail: message(error) });
+      if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
-      if (this.owns(revision)) this.update({ pending: false });
+      if (this.owns(revision)) this.update({ pending: false, initialReadPending: false });
     }
   }
 
   dispose() {
-    this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false });
+    this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false, initialReadPending: false, waitingForReport: false });
     this.disposed = true;
     this.earlyReviews.clear();
     this.reviewRefresh = false;
@@ -387,7 +415,8 @@ export class MachineController {
       const run = this.state.run?.outcome === 'running'
         ? { ...this.state.run, outcome: 'failed' as const, summary: 'Agent disconnected during the run' }
         : this.state.run;
-      this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false, detail: event.detail, run });
+      this.update({ connection: 'disconnected', session: this.state.session + 1, pending: false, initialReadPending: false, waitingForReport: false,
+        ...(this.state.initialReadPending || this.state.waitingForReport ? { initialReadError: event.detail } : {}), detail: event.detail, run });
       return;
     }
     if (this.state.connection !== 'connected') return;

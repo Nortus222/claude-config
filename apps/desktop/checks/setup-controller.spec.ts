@@ -63,3 +63,32 @@ test('browser preview and disposed setup never invoke native actions or accept l
   const check = f.controller.check(); f.controller.dispose(); resolve(setup()); await check;
   assert.equal(f.controller.state.setup, null);
 });
+test('first-run choices and native mutations require a validated setup-needed state', async () => {
+  let broken = false;
+  const f = fixture((command) => command === 'desktop_setup_state' ? broken ? { invalid: true } : setup({ needsSetup: false, repo: '/existing', gitAvailable: true }) : null);
+  f.controller.choose([]);
+  await f.controller.bootstrap(); await f.controller.installGit();
+  assert.deepEqual(f.controller.state.configTargets, ['claude', 'codex']);
+  assert.equal(f.calls.length, 0);
+  await f.controller.check();
+  broken = true;
+  await f.controller.check();
+  assert.equal(f.controller.state.phase, 'error');
+  assert.equal(f.controller.state.setup?.repo, '/existing');
+  const calls = f.calls.length;
+  f.controller.choose([]);
+  await f.controller.bootstrap(); await f.controller.installGit();
+  assert.deepEqual(f.controller.state.configTargets, ['claude', 'codex']);
+  assert.equal(f.calls.length, calls);
+});
+test('successful first-run bootstrap followed by a connection failure cannot offer bootstrap again', async () => {
+  const f = fixture((command) => command === 'desktop_setup_state' ? setup({ gitAvailable: true })
+    : command === 'setup_desktop' ? { hello }
+    : command === 'agent_generation' ? Promise.reject(new Error('CLOSED: agent exited')) : null);
+  await f.controller.check();
+  await f.controller.bootstrap();
+  assert.equal(f.controller.state.phase, 'ready');
+  assert.equal(f.machine.state.connection, 'disconnected');
+  await f.controller.bootstrap();
+  assert.equal(f.calls.filter(([command]) => command === 'setup_desktop').length, 1);
+});

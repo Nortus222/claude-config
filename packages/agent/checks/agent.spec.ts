@@ -327,6 +327,52 @@ test('with ipc, runAgent serves the socket, and a shutdown request ends it like 
   }
 });
 
+test('first job timing distinguishes IPC readiness, returned failure and interrupted work', { skip: process.platform === 'win32', timeout: 15000 }, async (t) => {
+  for (const result of ['completed', 'failed', 'cancelled'] as const) await t.test(result, async (t) => {
+    const m = agentMachine('/tmp');
+    t.after(() => rmSync(m.root, { recursive: true, force: true }));
+    const fixture = setupFixture(join(m.root, 'setup'));
+    const entered = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    const source = Layer.succeed(SetupSource, { ...fixture.service,
+      current: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)),
+        Effect.andThen(result === 'failed' ? Effect.die(new Error('private fixture detail')) : fixture.service.current)),
+    });
+    const events: string[] = [];
+    const dir = join(m.paths.stateRoot, 'agent');
+    const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source, agentVersion: 'test', ipc: true,
+      onLifecycle: (phase, status) => {
+        events.push(`${phase}:${status}`);
+        if (result === 'completed') throw new Error('observer private detail');
+      },
+    }));
+    try {
+      assert.equal((await Effect.runPromise(Deferred.await(entered).pipe(Effect.timeoutOption('2 seconds'))))._tag, 'Some');
+      assert.ok(events.includes('running:started'), 'IPC is usable while the first job remains held');
+      assert.deepEqual(events.filter(e => e.startsWith('first_job:')), ['first_job:started']);
+      const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+      const status = () => converse(join(dir, 'agent.sock'), [
+        { version: 3, id: 'h', command: 'hello', token, client: 'cli' }, { version: 3, id: 's', command: 'status' },
+      ]);
+      const [hello, pending] = await status();
+      assert.equal(hello?.ok, true);
+      assert.equal(pending?.error?.code, 'NO_REPORT');
+      if (result === 'cancelled') await Effect.runPromise(Fiber.interrupt(fiber));
+      else {
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        for (let i = 0; i < 200 && !events.includes(`first_job:${result}`); i++) await new Promise(resolve => setTimeout(resolve, 10));
+        const [, reply] = await status();
+        assert.equal(reply?.ok, true);
+        assert.equal(reply?.result.error, result === 'failed' ? 'JOB_FAILED' : undefined);
+      }
+      assert.deepEqual(events.filter(e => e.startsWith('first_job:')), ['first_job:started', `first_job:${result}`]);
+      assert.ok(events.indexOf('running:started') < events.indexOf(`first_job:${result}`));
+      assert.ok(events.every(e => !e.includes('private')));
+    } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
+    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+  });
+});
+
 test('runAgent observes readiness, IPC cleanup and final lock release without leaking state', { skip: process.platform === 'win32' }, async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
@@ -338,7 +384,7 @@ test('runAgent observes readiness, IPC cleanup and final lock release without le
   }));
   try {
     for (let i = 0; i < 200 && !events.some((e) => e.phase === 'running'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.deepEqual(events.filter((e) => e.status === 'completed').map((e) => e.phase), ['lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc']);
+    assert.deepEqual(events.filter((e) => e.status === 'completed' && e.phase !== 'first_job').map((e) => e.phase), ['lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc']);
     const token = readFileSync(join(dir, 'agent.token'), 'utf8');
     await converse(join(dir, 'agent.sock'), [
       { version: 3, id: 'h', command: 'hello', token, client: 'cli' },

@@ -32,13 +32,13 @@ export class SetupController {
   private update(fields: Partial<SetupViewState>) { if (this.disposed) return; this.state = { ...this.state, ...fields }; for (const listener of this.listeners) listener(); }
   private owns(revision: number) { return !this.disposed && this.revision === revision; }
   choose(configTargets: SetupChoices['configTargets']) {
-    if (this.state.pending || this.state.phase === 'ready') return;
+    if (this.state.pending || this.state.phase !== 'needed' || !this.state.setup?.needsSetup) return;
     this.update({ configTargets: decodeSetupChoices({ configTargets }).configTargets });
   }
   async check() {
     if (!this.bridge || this.state.pending) return;
     const revision = ++this.revision;
-    this.update({ pending: true });
+    this.update({ pending: true, phase: 'checking', detail: 'Checking local setup' });
     try {
       const reply = await this.bridge.invoke('desktop_setup_state');
       if (!this.owns(revision)) return;
@@ -49,7 +49,7 @@ export class SetupController {
     finally { if (this.owns(revision)) this.update({ pending: false }); }
   }
   async installGit() {
-    if (!this.bridge || this.state.pending || !this.state.setup?.canInstallGit || this.state.setup.gitAvailable) return;
+    if (!this.bridge || this.state.pending || this.state.phase !== 'needed' || !this.state.setup?.needsSetup || !this.state.setup.canInstallGit || this.state.setup.gitAvailable) return;
     const revision = ++this.revision;
     this.update({ pending: true });
     try {
@@ -61,7 +61,7 @@ export class SetupController {
     finally { if (this.owns(revision)) this.update({ pending: false }); }
   }
   async bootstrap() {
-    if (!this.bridge || this.state.pending || !this.state.setup?.gitAvailable || this.state.phase === 'ready') return;
+    if (!this.bridge || this.state.pending || this.state.phase !== 'needed' || !this.state.setup?.needsSetup || !this.state.setup.gitAvailable) return;
     const revision = ++this.revision;
     this.update({ pending: true, detail: 'Preparing the fixed setup and background agent' });
     try {
