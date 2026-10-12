@@ -188,7 +188,7 @@ mod tests {
         let valid = format!("{PREFIX}{}", serde_json::to_string(&safe).unwrap());
         assert!(parse_record(valid.as_bytes()).is_some());
         for text in [
-            "token SECRET", "[nortuscc-startup] {", 
+            "token SECRET", "[nortuscc-startup] {",
             &valid.replace("\"ensure\"", "\"https://secret.invalid\""),
             &valid.replace("\"v\":1", "\"v\":2"),
             &valid.replace("\"pid\":7", "\"pid\":9007199254740992"),
