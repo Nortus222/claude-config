@@ -90,7 +90,7 @@ export const tempSetup = () => {
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   other.git('remote', 'add', 'origin', origin);
   other.git('push', '-q', '-u', 'origin', 'main');
-  execFileSync('git', ['clone', '-q', origin, checkout]);
+  execFileSync('git', ['clone', '-q', '--no-local', origin, checkout]);
   const inCheckout = (...args: string[]) => execFileSync('git', [...IDENTITY, ...args], { cwd: checkout, encoding: 'utf8' }).trim();
   const push = (changes: Readonly<Record<string, string | null>>) => {
     const sha = other.commit(changes);
