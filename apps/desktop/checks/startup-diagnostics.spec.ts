@@ -35,3 +35,20 @@ test('diagnostic records reject arbitrary text and broken clocks or sinks stay h
   assert.doesNotThrow(() => brokenClock.record('entry', 'started'));
   assert.equal(lines.length, 0);
 });
+
+test('first job records retain the fixed phase, terminal outcome and measured duration', () => {
+  let now = 0;
+  const lines: string[] = [];
+  const trace = startupDiagnostics({ component: 'agent', operation: 'foreground', write: line => lines.push(line),
+    clock: { monotonic: () => now, wall: () => 1000 } });
+  for (const status of ['completed', 'failed', 'cancelled'] as const) {
+    trace.record('first_job', 'started');
+    now += 25;
+    trace.record('first_job', status);
+  }
+  const records = lines.map(line => JSON.parse(line.slice(STARTUP_PREFIX.length)));
+  assert.equal(records.length, 6);
+  assert.ok(records.every(record => record.phase === 'first_job'));
+  assert.deepEqual(records.filter(record => record.status !== 'started').map(record => [record.status, record.durationMs]),
+    [['completed', 25], ['failed', 25], ['cancelled', 25]]);
+});

@@ -165,7 +165,7 @@ const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
     return Effect.sync(() => signal.removeEventListener('abort', onAbort));
   });
 
-export type AgentLifecyclePhase = 'lock' | 'log_rotation' | 'services' | 'scheduler' | 'session' | 'ipc' | 'running' | 'shutdown' | 'ipc_closed' | 'stopped';
+export type AgentLifecyclePhase = 'lock' | 'log_rotation' | 'services' | 'scheduler' | 'session' | 'ipc' | 'first_job' | 'running' | 'shutdown' | 'ipc_closed' | 'stopped';
 export type AgentLifecycleStatus = 'started' | 'completed' | 'failed' | 'cancelled';
 
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
@@ -235,7 +235,8 @@ export const runAgent = (input: {
       yield* phase('ipc', serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, notifier, onShutdown: () => shutdown.abort() }));
       ipcReady = true;
     }
-    yield* Effect.forkScoped(handle.request('start'));
+    yield* Effect.forkScoped(observe('first_job', 'started').pipe(Effect.andThen(handle.request('start')),
+      Effect.onExit(exit => observe('first_job', Exit.isSuccess(exit) && exit.value.error !== undefined ? 'failed' : outcome(exit)))));
     yield* observe('running', 'started');
     yield* untilAborted(signal);
   }).pipe(Effect.onExit(() => observe('shutdown', 'started')))).pipe(

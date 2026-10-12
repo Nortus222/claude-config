@@ -20,7 +20,7 @@ macro_rules! closed_enum {
 }
 closed_enum!(Component { Native, Helper, Agent });
 closed_enum!(Operation { AppStartup, Foreground, Ensure, Restart, Paths, SetupState, Bootstrap, InstallGit, PrepareUpdate, RecoverUpdate, MaintenanceState, Invalid });
-closed_enum!(Phase { ModuleLoad, Entry, RuntimeMetadata, LoginProbe, ShellSpawn, ShellReady, EnvironmentReady, ProbeCleanup, Paths, Lifecycle, Lock, LogRotation, Services, Scheduler, Session, Ipc, Running, Shutdown, IpcClosed, Stopped, AppSetup, StartupWorker, RuntimeReady, UpdaterSource, PreferencesPaths, MaintenanceState, SetupState, Helper, ReadyWait, RuntimeIdentity });
+closed_enum!(Phase { ModuleLoad, Entry, RuntimeMetadata, LoginProbe, ShellSpawn, ShellReady, EnvironmentReady, ProbeCleanup, Paths, Lifecycle, Lock, LogRotation, Services, Scheduler, Session, Ipc, FirstJob, Running, Shutdown, IpcClosed, Stopped, AppSetup, StartupWorker, RuntimeReady, UpdaterSource, PreferencesPaths, MaintenanceState, SetupState, Helper, ReadyWait, RuntimeIdentity });
 closed_enum!(Status { Started, Completed, Failed, TimedOut, Fallback, Cancelled });
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +205,22 @@ mod tests {
             &valid.replace("\"phase\":\"login_probe\"", "\"phase\":\"token SECRET\""),
             &valid.replace("{\"v\":1", "{\"secret\":\"SECRET\",\"v\":1"),
         ] { assert!(parse_record(text.as_bytes()).is_none(), "accepted {text}"); }
+    }
+    #[test]
+    fn first_job_records_forward_fixed_phase_outcomes_and_duration() {
+        let events = Arc::new(Mutex::new(Vec::new())); let captured = events.clone();
+        let diagnostics = Diagnostics::new(move |record| captured.lock().unwrap().push(record));
+        for status in ["started", "completed", "failed", "cancelled"] {
+            let text = format!("{PREFIX}{{\"v\":1,\"component\":\"agent\",\"pid\":7,\"startedAt\":11,\"seq\":1,\"elapsedMs\":25,\"phase\":\"first_job\",\"status\":\"{status}\",\"durationMs\":25,\"operation\":\"foreground\"}}");
+            diagnostics.forward(text.as_bytes());
+        }
+        let records = events.lock().unwrap(); assert_eq!(records.len(), 4);
+        for record in records.iter() {
+            assert_eq!(serde_json::to_value(record).unwrap()["phase"], "first_job");
+            assert_eq!(record.component, Component::Agent); assert_eq!(record.operation, Operation::Foreground);
+            assert_eq!(record.duration_ms, Some(25));
+        }
+        assert_eq!(records.iter().map(|record| record.status).collect::<Vec<_>>(), vec![Status::Started, Status::Completed, Status::Failed, Status::Cancelled]);
     }
     #[test]
     fn native_trace_records_monotonic_duration_without_errors_or_paths() {

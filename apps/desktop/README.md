@@ -129,6 +129,13 @@ IPC readiness and shutdown. `shutdown: started` followed by `ipc_closed: complet
 IPC closure is reported only after successful initialization. No startup timeout is shortened
 and these records do not establish the cause of an intermittent reboot failure.
 
+`running: started` means IPC is accepting requests. The separate `first_job` phase measures
+the initial scheduled job through its first returned status, including any fetch, inspection
+and policy-controlled apply. It records `failed` when that status reports a job error and
+`cancelled` when the request is interrupted. Completion does not prove every item is healthy;
+the genuine status and inspection carry those outcomes. This timing does not change scheduling
+or make native runtime health wait for the initial job.
+
 Structured records accept only fixed enums and safe integers, excluding environment values,
 tokens, paths, URLs and arbitrary error text. Existing unstructured agent diagnostics retain
 their prior behavior; review them for credentials before sharing. Native logging uses a
