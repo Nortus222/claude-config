@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -24,9 +24,33 @@ test('publication command requires explicit opt-in before inspecting source or m
       assert.equal(result.status, 1);
       assert.match(result.stderr, /publication must be explicitly enabled/);
     }
+    const source = join(home, 'source');
+    const hooks = join(home, 'empty-hooks');
+    const env = {
+      HOME: home, PATH: process.env.PATH ?? '', GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      ...(process.platform === 'win32' && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    };
+    await mkdir(join(source, 'apps/desktop/src-tauri'), { recursive: true });
+    await mkdir(hooks);
+    await writeFile(join(source, 'apps/desktop/package.json'), JSON.stringify({ version: '0.2.0' }));
+    await writeFile(join(source, 'apps/desktop/src-tauri/tauri.conf.json'), JSON.stringify({ version: '0.2.0' }));
+    await writeFile(join(source, 'apps/desktop/src-tauri/Cargo.toml'), 'version = "0.2.0"\n');
+    for (const args of [
+      ['init', '--template=', '--initial-branch=main'],
+      ['add', '.'],
+      ['-c', 'user.name=Release fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'fixture'],
+      ['update-ref', 'refs/remotes/origin/main', 'HEAD'],
+    ]) {
+      const result = spawnSync('git', ['-c', `core.hooksPath=${hooks}`, '-c', 'commit.gpgSign=false', ...args], {
+        cwd: source, env, encoding: 'utf8', timeout: 10_000,
+      });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+    }
     const optedIn = spawnSync(process.execPath, [script, 'publish'], {
-      cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8', timeout: 10_000,
-      env: { HOME: home, DESKTOP_PUBLISH: 'true' },
+      cwd: source, encoding: 'utf8', timeout: 10_000,
+      env: { ...env, DESKTOP_PUBLISH: 'true' },
     });
     assert.equal(optedIn.status, 1);
     assert.match(optedIn.stderr, /dispatch must name the exact reviewed main SHA/);
