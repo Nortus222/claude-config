@@ -405,6 +405,10 @@ impl Agent {
         Self::connect_deadline(state_root, emit, hello_timeout, None, true)
     }
     fn connect_deadline(state_root: &Path, emit: Emit, hello_timeout: Duration, deadline: Option<Instant>, subscribe: bool) -> Result<Self, String> {
+        Self::connect_deadline_cancelled(state_root,emit,hello_timeout,deadline,subscribe,None)
+    }
+    fn connect_deadline_cancelled(state_root: &Path, emit: Emit, hello_timeout: Duration, deadline: Option<Instant>, subscribe: bool, cancel: Option<Arc<AtomicBool>>) -> Result<Self, String> {
+        if cancelled(cancel.as_ref()) {return Err("Desktop startup cancelled".into());}
         let remaining = |limit: Duration| deadline.map_or(limit, |end| limit.min(end.saturating_duration_since(Instant::now())));
         let directory = state_root.join("agent");
         let token = std::fs::read_to_string(directory.join("agent.token")).map_err(|e| format!("UNREACHABLE: Agent token: {e}"))?;
@@ -449,14 +453,17 @@ impl Agent {
             read.disconnect(&result.unwrap_err());
         });
         let mut agent = Self { inner, hello: Value::Null };
-        let hello = agent.request_timeout(Request::Hello { token }, remaining(hello_timeout))?;
+        let hello = agent.request_timeout_cancelled(Request::Hello { token }, remaining(hello_timeout),cancel.clone())?;
         validate_hello(&hello)?;
         agent.hello = hello;
-        if subscribe { agent.request_timeout(Request::Subscribe, remaining(Request::Subscribe.timeout()))?; }
+        if subscribe { agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?; }
         Ok(agent)
     }
     pub fn connect_notification(state_root: &Path, deadline: Instant) -> Result<Self, String> {
         Self::connect_deadline(state_root, Arc::new(|_| {}), HELLO_TIMEOUT, Some(deadline), false)
+    }
+    pub fn connect_ready_cancelled(state_root: &Path, emit: Emit, operation: Operation, cancel: Option<Arc<AtomicBool>>) -> Result<Self,String> {
+        Self::connect_ready_observed_cancelled(state_root,emit,READY_TIMEOUT,startup_diagnostics::current(),operation,cancel)
     }
     pub fn connect_ready(state_root: &Path, emit: Emit, operation: Operation) -> Result<Self, String> {
         Self::connect_ready_observed(state_root, emit, READY_TIMEOUT, startup_diagnostics::current(), operation)
@@ -466,12 +473,16 @@ impl Agent {
         Self::connect_ready_observed(state_root, emit, timeout, None, Operation::Ensure)
     }
     fn connect_ready_observed(state_root: &Path, emit: Emit, timeout: Duration, diagnostics: Option<Diagnostics>, operation: Operation) -> Result<Self, String> {
+        Self::connect_ready_observed_cancelled(state_root,emit,timeout,diagnostics,operation,None)
+    }
+    fn connect_ready_observed_cancelled(state_root: &Path, emit: Emit, timeout: Duration, diagnostics: Option<Diagnostics>, operation: Operation, cancel: Option<Arc<AtomicBool>>) -> Result<Self, String> {
         let trace = Trace::new(diagnostics, operation);
         trace.record(Phase::ReadyWait, Status::Started, None);
         let started = Instant::now(); let deadline = started + timeout;
         let result = (|| { loop {
-            match Self::connect_deadline(state_root, emit.clone(), HELLO_TIMEOUT, Some(deadline), true) {
-                Ok(agent) => return Ok(agent),
+            if cancelled(cancel.as_ref()) {return Err("Desktop startup cancelled".into());}
+            match Self::connect_deadline_cancelled(state_root, emit.clone(), HELLO_TIMEOUT, Some(deadline), true,cancel.clone()) {
+                Ok(agent) => {if cancelled(cancel.as_ref()) {agent.disconnect();return Err("Desktop startup cancelled".into());} return Ok(agent);},
                 Err(error) if error.starts_with("UNREACHABLE:") => {
                     if Instant::now() >= deadline { return Err(error); }
                     thread::sleep(Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())));
@@ -479,7 +490,7 @@ impl Agent {
                 Err(error) => return Err(error),
             }
         } })();
-        trace.record(Phase::ReadyWait, if result.is_ok() { Status::Completed } else if Instant::now() >= deadline { Status::TimedOut } else { Status::Failed }, Some(started.elapsed()));
+        trace.record(Phase::ReadyWait, if result.is_ok() { Status::Completed } else if cancelled(cancel.as_ref()) { Status::Cancelled } else if Instant::now() >= deadline { Status::TimedOut } else { Status::Failed }, Some(started.elapsed()));
         result
     }
     pub fn request_before(&self, request: Request, deadline: Instant) -> Result<Value, String> {
@@ -490,6 +501,10 @@ impl Agent {
         self.request_timeout(request, timeout)
     }
     fn request_timeout(&self, request: Request, timeout: Duration) -> Result<Value, String> {
+        self.request_timeout_cancelled(request,timeout,None)
+    }
+    fn request_timeout_cancelled(&self, request: Request, timeout: Duration, cancel: Option<Arc<AtomicBool>>) -> Result<Value, String> {
+        if cancelled(cancel.as_ref()) {return Err("Desktop startup cancelled".into());}
         let deadline = Instant::now() + timeout;
         let is_status = matches!(request, Request::Status);
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst).to_string();
@@ -506,12 +521,17 @@ impl Agent {
         // Dropping this sender cancels the watchdog on every success, refusal and early error.
         let (_cancel_deadline, wait_deadline) = mpsc::channel::<()>();
         thread::spawn(move || {
-            if matches!(
-                wait_deadline.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ) {
-                expired.store(true, Ordering::SeqCst);
-                watch.disconnect("Agent request timed out; restart explicitly");
+            loop {
+                if cancelled(cancel.as_ref()) {watch.disconnect("Desktop startup cancelled");return;}
+                let remaining=deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    expired.store(true,Ordering::SeqCst);
+                    watch.disconnect("Agent request timed out; restart explicitly");return;
+                }
+                match wait_deadline.recv_timeout(if cancel.is_some() {remaining.min(Duration::from_millis(10))} else {remaining}) {
+                    Err(mpsc::RecvTimeoutError::Timeout)=>{},
+                    _=>return,
+                }
             }
         });
         let written = (|| -> Result<(), String> {
@@ -697,13 +717,17 @@ pub(crate) fn decode_startup(value: Value) -> Result<StartupContext, String> {
     if !valid { return Err("Inconsistent startup context".into()); }
     Ok(StartupContext { state_root: fields.state_root, setup, maintenance, outcome: fields.outcome })
 }
-pub fn desktop_startup(resources: &Path, app_version: &str) -> Result<StartupContext, String> {
+#[cfg(test)]
+pub fn desktop_startup(resources: &Path, app_version: &str) -> Result<StartupContext,String> {
+    desktop_startup_cancelled(resources,app_version,Arc::new(AtomicBool::new(false)))
+}
+pub fn desktop_startup_cancelled(resources: &Path, app_version: &str, cancel: Arc<AtomicBool>) -> Result<StartupContext, String> {
     let version = semver::Version::parse(app_version).map_err(|_| "Invalid startup version")?;
     if app_version.len() > 100 || !version.pre.is_empty() || !version.build.is_empty() || version.to_string() != app_version { return Err("Invalid startup version".into()); }
     let mut command = helper_command(resources, Setup::Startup, None)?;
     command.stdin(Stdio::piped());
     let input = serde_json::to_vec(&json!({"appVersion":app_version})).map_err(|_| "Invalid startup input")?;
-    decode_startup(run_json_helper(command, HELPER_TIMEOUT, Some(input))?)
+    decode_startup(run_json_helper_cancellable(command, HELPER_TIMEOUT, Some(input),cancel)?)
 }
 pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<PathBuf, String> {
     let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
@@ -763,6 +787,9 @@ fn run_json_helper(command: Command, timeout: Duration, input: Option<Vec<u8>>) 
 fn run_json_helper_with_cancel(command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
     run_json_helper_observed(command, timeout, input, cancel_timeout, startup_diagnostics::current())
 }
+fn run_json_helper_cancellable(command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel: Arc<AtomicBool>) -> Result<Value,String> {
+    run_json_helper_observed_cancelled(command,timeout,input,BOOTSTRAP_CANCEL_TIMEOUT,startup_diagnostics::current(),Some(cancel))
+}
 fn helper_operation(command: &Command) -> Operation {
     command.get_args().find_map(|arg| match arg.to_str()? {
         "--startup" => Some(Operation::AppStartup),
@@ -771,14 +798,19 @@ fn helper_operation(command: &Command) -> Operation {
         "--prepare-update" => Some(Operation::PrepareUpdate), "--recover-update" => Some(Operation::RecoverUpdate), "--maintenance-state" => Some(Operation::MaintenanceState), _ => None,
     }).unwrap_or(Operation::Invalid)
 }
-fn run_json_helper_observed(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
+fn run_json_helper_observed(command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
+    run_json_helper_observed_cancelled(command,timeout,input,cancel_timeout,diagnostics,None)
+}
+fn cancelled(cancel: Option<&Arc<AtomicBool>>) -> bool {cancel.is_some_and(|signal|signal.load(Ordering::SeqCst))}
+fn run_json_helper_observed_cancelled(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>, cancel: Option<Arc<AtomicBool>>) -> Result<Value, String> {
     let trace = Trace::new(diagnostics.clone(), helper_operation(&command));
     trace.record(Phase::Helper, Status::Started, None); let started = Instant::now();
     let result = (|| {
+        if cancelled(cancel.as_ref()) {return Err("Desktop startup cancelled".into());}
         if input.as_ref().is_some_and(|v| v.len() > 4096) { return Err("Setup input exceeds limit".into()); }
-        wait_json_helper_observed(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout, diagnostics)
+        wait_json_helper_observed_cancelled(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout, diagnostics,cancel)
     })();
-    trace.record(Phase::Helper, match &result { Ok(_) => Status::Completed, Err(error) if error.contains("timed out") => Status::TimedOut, Err(_) => Status::Failed }, Some(started.elapsed()));
+    trace.record(Phase::Helper, match &result { Ok(_) => Status::Completed, Err(error) if error.contains("timed out") => Status::TimedOut, Err(error) if error.contains("cancelled") => Status::Cancelled, Err(_) => Status::Failed }, Some(started.elapsed()));
     result
 }
 /// Drain arbitrary stderr without retaining raw output or incomplete/oversized records.
@@ -803,7 +835,22 @@ fn forward_helper_stderr(reader: &mut impl BufRead, diagnostics: Option<&Diagnos
 fn wait_json_helper(child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
     wait_json_helper_observed(child, timeout, input, cancel_timeout, None)
 }
-fn wait_json_helper_observed(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
+fn wait_json_helper_observed(child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
+    wait_json_helper_observed_cancelled(child,timeout,input,cancel_timeout,diagnostics,None)
+}
+fn receive_before<T>(receiver: &mpsc::Receiver<T>, deadline: Instant, cancel: Option<&Arc<AtomicBool>>, timeout_error: &str) -> Result<T,String> {
+    loop {
+        if cancelled(cancel) {return Err("Desktop startup cancelled".into());}
+        let remaining=deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {return Err(timeout_error.into());}
+        match receiver.recv_timeout(if cancel.is_some() {remaining.min(Duration::from_millis(10))} else {remaining}) {
+            Ok(value)=>return Ok(value),
+            Err(mpsc::RecvTimeoutError::Timeout)=>{},
+            Err(mpsc::RecvTimeoutError::Disconnected)=>return Err(timeout_error.into()),
+        }
+    }
+}
+fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>, cancel: Option<Arc<AtomicBool>>) -> Result<Value, String> {
     let stdout = child.stdout.take().ok_or("Missing helper stdout")?;
     let stderr = child.stderr.take().ok_or("Missing helper stderr")?;
     let (send, receive) = mpsc::channel();
@@ -830,22 +877,23 @@ fn wait_json_helper_observed(mut child: std::process::Child, timeout: Duration, 
     });
     let deadline = Instant::now() + timeout;
     let result = (|| -> Result<Value, String> {
-        if writer.is_some() { written.recv_timeout(Duration::from_secs(5).min(timeout)).map_err(|_| "Setup input timed out")?.map_err(|_| "Setup input failed")?; }
+        if writer.is_some() {receive_before(&written,deadline.min(Instant::now()+Duration::from_secs(5)),cancel.as_ref(),"Setup input timed out")?.map_err(|_|"Setup input failed")?;}
         let status = loop {
+            if cancelled(cancel.as_ref()) {return Err("Desktop startup cancelled".into());}
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? { break status; }
             if Instant::now() >= deadline { return Err("Agent setup timed out".into()); }
             thread::sleep(Duration::from_millis(10));
         };
         if !status.success() { return Err(format!("Agent setup failed: {status}")); }
-        let value = receive.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| "Agent setup output timed out")??;
-        drained.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| "Agent setup diagnostics timed out")?;
+        let value=receive_before(&receive,deadline,cancel.as_ref(),"Agent setup output timed out")??;
+        receive_before(&drained,deadline,cancel.as_ref(),"Agent setup diagnostics timed out")?;
         Ok(value)
     })();
     if result.is_err() {
-        // Bootstrap's signal handler cancels and joins its detached Git group before cleanup.
-        // Other lifecycle helpers retain their existing immediate termination contract.
+        // Cancel-aware helpers finalize their detached children before the bounded escalation.
+        // Explicit legacy lifecycle helpers keep their existing termination contract.
         if !cancel_timeout.is_zero() && child.try_wait().ok().flatten().is_none() {
-            unsafe { libc::kill(child.id() as i32, libc::SIGTERM); }
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM); }
             let cancel_deadline = Instant::now() + cancel_timeout;
             while Instant::now() < cancel_deadline {
                 if child.try_wait().ok().flatten().is_some() { break; }
@@ -1283,6 +1331,19 @@ mod helper_tests {
         json!({"stateRoot":"/tmp/login-state","setup":{"needsSetup":outcome=="needs_setup","repo":if outcome=="needs_setup" {Value::Null} else {json!("/tmp/checkout")},"gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"},"maintenance":if pending {json!({"pending":true,"phase":"awaiting-health","fromVersion":"0.1.1","toVersion":"0.1.2","backupPath":"/tmp/backup","diagnostic":null})} else {json!({"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null})},"outcome":outcome})
     }
     #[test]
+    fn startup_close_interrupts_authenticated_readiness_without_stopping_service() {
+        let (entered,held)=mpsc::channel();
+        let fixture=fixtures::Fixture::new(move |mut wire| {wire.next().unwrap();entered.send(()).unwrap();wire.discard_until_close();});
+        let root=fixture.root.clone();let cancel=Arc::new(AtomicBool::new(false));let signal=cancel.clone();
+        let child=thread::spawn(move || Agent::connect_ready_cancelled(&root,Arc::new(|_|{}),Operation::AppStartup,Some(cancel)));
+        held.recv_timeout(Duration::from_secs(1)).unwrap();
+        let start=Instant::now();signal.store(true,Ordering::SeqCst);
+        let result=child.join().unwrap();
+        let elapsed=start.elapsed();fixture.finish();
+        assert!(result.is_err());
+        assert!(elapsed<Duration::from_millis(500),"Cancellation must interrupt hello wait: {elapsed:?}");
+    }
+    #[test]
     fn startup_context_rejects_malformed_and_inconsistent_records() {
         for outcome in ["needs_setup","ready","recovered","ensure_failed","recovery_failed"] {
             assert!(decode_startup(startup_record(outcome)).is_ok(), "{outcome}");
@@ -1527,6 +1588,22 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         let pid = std::fs::read_to_string(root.join("pid")).unwrap().parse::<i32>().unwrap();
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn startup_close_gracefully_joins_owned_helper_and_pipe_children() {
+        let root=resources("trap 'printf cancelled > cancelled; exit 0' TERM\n/bin/sleep 30 &\nprintf '%s' \"$$\" > pid\nwait");
+        let command=helper_command(&root,Setup::Startup,None).unwrap();
+        let cancelled=Arc::new(AtomicBool::new(false)); let signal=cancelled.clone();let path=root.clone();
+        let trigger=thread::spawn(move || {let deadline=Instant::now()+Duration::from_secs(2);while !path.join("pid").exists() && Instant::now()<deadline {thread::sleep(Duration::from_millis(5));} signal.store(true,Ordering::SeqCst);});
+        let began=Instant::now();
+        let error=run_json_helper_cancellable(command,Duration::from_millis(600),None,cancelled).unwrap_err();
+        trigger.join().unwrap();
+        let pid=std::fs::read_to_string(root.join("pid")).unwrap().parse::<i32>().unwrap();
+        assert_eq!(unsafe {libc::kill(pid,0)},-1);
+        assert!(began.elapsed()<Duration::from_secs(2));
+        let graceful=root.join("cancelled").exists();std::fs::remove_dir_all(root).unwrap();
+        assert!(graceful,"Startup close must permit SIGTERM finalization");
+        assert!(error.contains("cancelled"));
     }
     #[test]
     fn isolated_helper_removes_config_and_runtime_overrides() {

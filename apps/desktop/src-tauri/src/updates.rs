@@ -51,7 +51,13 @@ impl Coordinator {
     }
     pub fn snapshot(&self) -> Snapshot { self.inner.lock().unwrap().snapshot.clone() }
     pub fn recovery(&self, detail: &str) { let mut i=self.inner.lock().unwrap(); i.snapshot.phase="recovery".into(); i.snapshot.diagnostic=Some(bounded(detail,512)); }
-    pub fn recovered(&self) { let mut i=self.inner.lock().unwrap(); i.snapshot.phase="idle".into(); i.snapshot.diagnostic=Some("Interrupted update recovery completed; machine state was preserved.".into()); }
+    pub fn recovered(&self) {
+        let mut i=self.inner.lock().unwrap();
+        if i.snapshot.phase=="recovery" {
+            i.snapshot.phase="idle".into();
+            i.snapshot.diagnostic=Some("Interrupted update recovery completed; machine state was preserved.".into());
+        }
+    }
     fn save(&self, i: &Inner) -> Result<(),String> {
         let Some(path)=&self.preferences else { return Ok(()); };
         let parent=path.parent().ok_or("Invalid update settings path")?;
@@ -228,6 +234,34 @@ mod tests {
         fn check(&self)->FutureResult<'_,Option<Arc<dyn Artifact>>> {
             Box::pin(async move {self.events.lock().unwrap().push("check"); if self.checking {std::future::pending().await} else {Ok(Some(Arc::new(Waiting {events:self.events.clone(),entered:self.entered.clone(),checking:false}) as Arc<dyn Artifact>))} })
         }
+    }
+    #[tokio::test]
+    async fn recovery_completion_keeps_available_and_verified_update_intent() {
+        let (c,events)=coordinator(false);
+        c.recovery("Pending health"); c.recovered();
+        assert_eq!(c.snapshot().phase,"idle");
+        assert_eq!(c.check(false,1).await.phase,"available");
+        c.recovered(); assert_eq!(c.snapshot().phase,"available");
+        assert_eq!(c.download().await.phase,"verified");
+        c.recovered(); assert_eq!(c.snapshot().phase,"verified");
+        assert_eq!(c.install().phase,"restarting");
+        assert_eq!(*events.lock().unwrap(),vec!["check","download","prepare","begin","install","commit"]);
+    }
+    #[tokio::test]
+    async fn recovery_completion_preserves_active_download_progress_and_cancellation() {
+        let events=Arc::new(Mutex::new(Vec::new())); let entered=Arc::new(Notify::new());
+        let source=Arc::new(Waiting {events:events.clone(),entered:entered.clone(),checking:false});
+        let service=Arc::new(Fake {events:events.clone(),fail:false});
+        let c=Arc::new(Coordinator::new("0.1.0",Some(source),service,None));
+        c.recovery("Pending health"); c.check(false,1).await;
+        let downloading=c.clone();let job=tokio::spawn(async move {downloading.download().await});
+        entered.notified().await;
+        c.recovered();
+        assert_eq!(c.snapshot().phase,"downloading","Health completion must not replace an active operation");
+        assert_eq!(c.snapshot().downloaded_bytes,3);
+        c.cancel();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1),job).await.unwrap().unwrap().phase,"error");
+        assert_eq!(*events.lock().unwrap(),vec!["check","download"]);
     }
     #[tokio::test]
     async fn cancel_discards_partial_bytes_and_fences_concurrent_commands() {

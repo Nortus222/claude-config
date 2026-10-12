@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod startup;
 mod startup_diagnostics;
 mod updates;
 mod update_payload;
@@ -30,7 +31,7 @@ struct Owner {
     resources: PathBuf,
     app: tauri::AppHandle,
     review: Arc<notifications::ReviewRoute>,
-    updates: Arc<updates::Coordinator>,
+    startup: Arc<startup::Startup>,
 }
 impl Owner {
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<(Agent, bool), String> {
@@ -38,22 +39,28 @@ impl Owner {
         let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
         let state_root = if recovered {
             let result=update_service::recover(&self.resources,&self.app.package_info().version.to_string());
-            if result.is_err() {self.updates.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
+            if result.is_err() {self.startup.coordinator()?.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
             result?
         } else {host::setup_agent(&self.resources, setup)?};
         self.connect_from_root(generation, &state_root, setup.operation()).map(|agent| (agent, recovered))
     }
     fn connect_from_root(self: &Arc<Self>, generation: u64, state_root: &std::path::Path, operation: Operation) -> Result<Agent, String> {
+        self.connect_from_root_cancelled(generation,state_root,operation,None)
+    }
+    fn connect_from_root_cancelled(self: &Arc<Self>, generation: u64, state_root: &std::path::Path, operation: Operation, cancel: Option<Arc<std::sync::atomic::AtomicBool>>) -> Result<Agent, String> {
         let app = self.app.clone();
         let (send, receive) = std::sync::mpsc::channel();
-        let agent = connect_runtime(&self.resources, state_root, Arc::new(move |mut event| {
+        let live=Arc::downgrade(self);
+        let agent = connect_runtime_cancelled(&self.resources, state_root, Arc::new(move |mut event| {
+            let Some(owner)=live.upgrade() else {return;};
+            {let current=owner.session.lock().unwrap();if current.closed || current.generation!=generation {return;}}
             if event["event"] == "notification" {
                 if let Ok(delivery) = notifications::Delivery::decode(event) { let _ = send.send(delivery); }
                 return;
             }
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
-        }), operation)?;
+        }), operation, cancel)?;
         let owner = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Ok(delivery) = receive.recv() {
@@ -64,8 +71,12 @@ impl Owner {
         Ok(agent)
     }
 }
+#[cfg(test)]
 fn connect_runtime(resources: &std::path::Path, state_root: &std::path::Path, emit: host::Emit, operation: Operation) -> Result<Agent, String> {
-    let agent = Agent::connect_ready(state_root, emit, operation)?;
+    connect_runtime_cancelled(resources,state_root,emit,operation,None)
+}
+fn connect_runtime_cancelled(resources: &std::path::Path, state_root: &std::path::Path, emit: host::Emit, operation: Operation, cancel: Option<Arc<std::sync::atomic::AtomicBool>>) -> Result<Agent, String> {
+    let agent = match cancel {Some(cancel)=>Agent::connect_ready_cancelled(state_root,emit,operation,Some(cancel)),None=>Agent::connect_ready(state_root,emit,operation)}?;
     if let Err(error) = startup_diagnostics::trace(operation).measure(Phase::RuntimeIdentity, || runtime_identity(resources, agent.hello["agentVersion"].as_str())) {
         agent.disconnect(); return Err(error);
     }
@@ -175,6 +186,52 @@ fn initial_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, context: 
     if !current.closed && current.generation==expected {current.initial_setup=context.setup.clone();}
     result
 }
+/// Ordinary checks need only trusted context; recovered startup publishes its final health result.
+fn startup_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, startup: &startup::Startup,
+    context: Result<host::StartupContext,String>, coordinator: Arc<updates::Coordinator>,
+    connect: impl FnOnce(u64,&std::path::Path) -> Result<Agent,String>) -> Result<Option<Value>,String> {
+    let recovered=context.as_ref().is_ok_and(|context|context.outcome==host::StartupOutcome::Recovered);
+    {
+        let current=session.lock().unwrap();
+        if current.closed || current.generation!=1 {return Err("Superseded startup".into());}
+        if !recovered {startup.publish(coordinator.clone())?;}
+    }
+    let result=match context {
+        Ok(context)=>initial_connection(session,lifecycle,&context,connect,||coordinator.recovered()),
+        Err(_)=>Err("Desktop startup helper failed; existing setup is retained. Restart explicitly".into()),
+    };
+    if recovered {
+        let current=session.lock().unwrap();
+        if current.closed || current.generation!=2 {return Err("Superseded startup".into());}
+        startup.publish(coordinator)?;
+    }
+    result
+}
+/// Resolves the single trusted startup context outside the event loop.
+fn run_startup(owner: Arc<Owner>, source: Result<Option<Arc<dyn updates::UpdateSource>>,String>) {
+    let trace=startup_diagnostics::trace(Operation::AppStartup);
+    let _=trace.measure(Phase::StartupWorker, || -> Result<(),String> {
+        let cancel=owner.startup.cancellation();
+        let context=trace.measure(Phase::Lifecycle, ||host::desktop_startup_cancelled(&owner.resources,&owner.app.package_info().version.to_string(),cancel.clone()));
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {return Err("App connection closed".into());}
+        let preferences=startup_preferences(&context);
+        let coordinator=Arc::new(updates::Coordinator::new(&owner.app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone).filter(|_|context.is_ok()),Arc::new(update_service::NativeHelper::new(owner.resources.clone())),preferences));
+        if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
+        match &context {
+            Err(_)=>coordinator.recovery("Startup state root could not be validated; signed updates are disabled. Existing setup is retained; retry startup recovery."),
+            Ok(context) if context.maintenance.as_ref().is_some_and(|state|state.pending)=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
+            Ok(context) if matches!(context.outcome,host::StartupOutcome::SetupFailed|host::StartupOutcome::RuntimeFailed|host::StartupOutcome::MaintenanceFailed)=>coordinator.recovery("Startup validation failed. Existing setup is retained; retry startup recovery."),
+            _=>{},
+        }
+        let connected=startup_connection(&owner.session,&owner.lifecycle,&owner.startup,context,coordinator,
+            |g,root|owner.connect_from_root_cancelled(g,root,Operation::AppStartup,Some(cancel)));
+        if let Err(error)=connected {
+            let mut current=owner.session.lock().unwrap();
+            if !current.closed && current.generation<=2 {current.error=Some(error);}
+        }
+        Ok(())
+    });
+}
 fn startup_preferences(context: &Result<host::StartupContext,String>) -> Option<PathBuf> {
     context.as_ref().ok().map(|context|context.state_root.join("agent/update-settings.json"))
 }
@@ -192,11 +249,12 @@ fn close(session: &Mutex<Session>) {
 }
 async fn dispatch(owner: tauri::State<'_, Arc<Owner>>, command: Request) -> Result<Value, String> {
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || request(&owner.session, command)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?; request(&owner.session, command)}).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn agent_generation(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    generation(&owner.session)
+    let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;generation(&owner.session)}).await.map_err(|_|"Startup readiness stopped".to_string())?
 }
 #[tauri::command]
 async fn agent_status(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
@@ -217,7 +275,7 @@ async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, Stri
 #[tauri::command]
 async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || restart_with_completion(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart), ||owner.updates.recovered())).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;let updates=owner.startup.coordinator()?; restart_with_completion(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart), ||updates.recovered())}).await.map_err(|e| e.to_string())?
 }
 fn native_args<T: serde::de::DeserializeOwned>(request: tauri::ipc::Request<'_>) -> Result<T, String> {
     match request.body() {
@@ -281,17 +339,17 @@ fn mutating_helper_response(session: &Mutex<Session>, lifecycle: &Mutex<()>, act
 }
 async fn helper_dispatch(owner: tauri::State<'_, Arc<Owner>>, action: fn(&std::path::Path) -> Result<Value, String>) -> Result<Value, String> {
     let owner=owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || helper_response(&owner.session,&owner.lifecycle,||action(&owner.resources))).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;helper_response(&owner.session,&owner.lifecycle,||action(&owner.resources))}).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn desktop_setup_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; let owner=owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || setup_state_response(&owner.session,&owner.lifecycle,||host::desktop_setup_state(&owner.resources))).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;setup_state_response(&owner.session,&owner.lifecycle,||host::desktop_setup_state(&owner.resources))}).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn install_git(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; let owner=owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || mutating_helper_response(&owner.session,&owner.lifecycle,|| host::install_git(&owner.resources))).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;mutating_helper_response(&owner.session,&owner.lifecycle,|| host::install_git(&owner.resources))}).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
@@ -303,34 +361,40 @@ struct CheckUpdateArgs { automatic: bool }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields,rename_all="camelCase")]
 struct UpdatePreferencesArgs { automatic_checks: bool }
+async fn update_coordinator(owner: Arc<Owner>) -> Result<Arc<updates::Coordinator>, String> {
+    tauri::async_runtime::spawn_blocking(move || owner.startup.coordinator()).await.map_err(|_|"Update readiness stopped".to_string())?
+}
 #[tauri::command]
-fn update_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
-    let _:host::EmptyArgs=native_args(request)?;Ok(owner.updates.snapshot())
+async fn update_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;Ok(update_coordinator(owner.inner().clone()).await?.snapshot())
 }
 #[tauri::command]
 async fn check_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
-    let args:CheckUpdateArgs=native_args(request)?;let coordinator=owner.updates.clone();Ok(coordinator.check(args.automatic,updates::now_ms()).await)
+    let args:CheckUpdateArgs=native_args(request)?;let coordinator=update_coordinator(owner.inner().clone()).await?;Ok(coordinator.check(args.automatic,updates::now_ms()).await)
 }
 #[tauri::command]
 async fn download_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
-    let _:host::EmptyArgs=native_args(request)?;let coordinator=owner.updates.clone();Ok(coordinator.download().await)
+    let _:host::EmptyArgs=native_args(request)?;let coordinator=update_coordinator(owner.inner().clone()).await?;Ok(coordinator.download().await)
 }
 #[tauri::command]
-fn cancel_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
-    let _:host::EmptyArgs=native_args(request)?;Ok(owner.updates.cancel())
+async fn cancel_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let _:host::EmptyArgs=native_args(request)?;Ok(update_coordinator(owner.inner().clone()).await?.cancel())
 }
 #[tauri::command]
-fn update_preferences(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
-    let args:UpdatePreferencesArgs=native_args(request)?;Ok(owner.updates.preferences(args.automatic_checks))
+async fn update_preferences(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
+    let args:UpdatePreferencesArgs=native_args(request)?;let coordinator=update_coordinator(owner.inner().clone()).await?;
+    tauri::async_runtime::spawn_blocking(move || coordinator.preferences(args.automatic_checks)).await.map_err(|_|"Update preferences stopped".to_string())
 }
 #[tauri::command]
 async fn install_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<updates::Snapshot,String> {
     let _:host::EmptyArgs=native_args(request)?;let owner=owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        owner.startup.wait()?;
+        let coordinator=owner.startup.coordinator()?;
         let _lifecycle=owner.lifecycle.lock().unwrap();
         if owner.session.lock().unwrap().closed {return Err("App connection closed".into());}
-        let result=owner.updates.install();
-        if result.phase=="restarting" {close(&owner.session);owner.app.restart();}
+        let result=coordinator.install();
+        if result.phase=="restarting" {close(&owner.session);owner.startup.close();owner.startup.join();owner.app.restart();}
         Ok(result)
     }).await.map_err(|_|"Native update installation stopped".to_string())?
 }
@@ -344,13 +408,18 @@ async fn setup_desktop(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc:
     let args: host::SetupArgs = native_args(request)?;
     let choices = host::SetupChoices::decode(args.config_targets)?;
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || restart_with_completion(&owner.session, &owner.lifecycle,
-        |g| {host::bootstrap_desktop(&owner.resources, choices)?; owner.connect(g, Setup::Ensure)}, ||owner.updates.recovered())).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;let coordinator=owner.startup.coordinator()?;restart_with_completion(&owner.session, &owner.lifecycle,
+        |g| {host::bootstrap_desktop(&owner.resources, choices)?; owner.connect(g, Setup::Ensure)}, ||coordinator.recovered())}).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-fn take_review_request(owner: tauri::State<'_, Arc<Owner>>) -> Value {
-    let current = owner.session.lock().unwrap();
-    json!({"generation":current.generation,"data":{"requested":owner.review.take()}})
+async fn take_review_request(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value,String> {
+    let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        owner.startup.wait()?;
+        let current=owner.session.lock().unwrap();
+        if current.closed {return Err("App connection closed".into());}
+        Ok(json!({"generation":current.generation,"data":{"requested":owner.review.take()}}))
+    }).await.map_err(|_|"Review readiness stopped".to_string())?
 }
 fn show_review(app: tauri::AppHandle) {
     let dispatch = app.clone();
@@ -454,7 +523,9 @@ fn main() {
         click_review.request();
         if let Some(app) = click_handle.lock().unwrap().clone() { show_review(app); }
     }));
-    tauri::Builder::default()
+    let startup=Arc::new(startup::Startup::default());
+    let setup_startup=startup.clone();
+    let exit_code=tauri::Builder::default()
         .setup(move |app| {
             if let Ok(directory) = app.path().app_log_dir() { startup_diagnostics::initialize(&directory); }
             let trace = startup_diagnostics::trace(Operation::AppStartup);
@@ -464,40 +535,30 @@ fn main() {
                 #[cfg(debug_assertions)]
                 let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
                 let source=trace.measure(Phase::UpdaterSource, || updater_transport::source(app.handle()));
-                let context=trace.measure(Phase::Lifecycle, ||host::desktop_startup(&resources,&app.package_info().version.to_string()));
-                let preferences=startup_preferences(&context);
-                let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone).filter(|_|context.is_ok()),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
-                if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
-                match &context {
-                    Err(_)=>coordinator.recovery("Startup state root could not be validated; signed updates are disabled. Existing setup is retained; retry startup recovery."),
-                    Ok(context) if context.maintenance.as_ref().is_some_and(|state|state.pending)=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
-                    Ok(context) if matches!(context.outcome,host::StartupOutcome::SetupFailed|host::StartupOutcome::RuntimeFailed|host::StartupOutcome::MaintenanceFailed)=>coordinator.recovery("Startup validation failed. Existing setup is retained; retry startup recovery."),
-                    _=>{},
-                }
                 let owner = Arc::new(Owner {
-                    session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false, initial_setup: None }),
-                    lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),updates:coordinator,
+                    session: Mutex::new(Session { agent: None, generation: 1, error: Some("Checking local setup state".into()), closed: false, initial_setup: None }),
+                    lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),startup:setup_startup.clone(),
                 });
                 app.manage(owner.clone());
                 trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
-                let connected=match context {
-                    Ok(context)=>initial_connection(&owner.session,&owner.lifecycle,&context,
-                        |g,root|owner.connect_from_root(g,root,Operation::AppStartup),||owner.updates.recovered()),
-                    Err(_)=>Err("Desktop startup helper failed; existing setup is retained. Restart explicitly".into()),
-                };
-                if let Err(error)=connected {owner.session.lock().unwrap().error=Some(error);}
+                setup_startup.start(move || run_startup(owner, source))?;
                 Ok(())
             })
         })
         .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
-        .run(|app, event| {
+        .run_return(|app, event| {
+            if matches!(event,tauri::RunEvent::Ready) {startup_diagnostics::trace(Operation::AppStartup).record(Phase::RuntimeReady,startup_diagnostics::Status::Completed,None);}
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 if let Some(owner) = app.try_state::<Arc<Owner>>() {
                     close(&owner.session);
+                    owner.startup.close();
                 }
             }
         });
+    startup.close();
+    startup.join();
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]
@@ -570,6 +631,89 @@ mod tests {
         initial_connection(&session,&lifecycle,&context,|_,_| panic!("No ensure"),||{}).unwrap();
         assert!(restart(&session,&lifecycle,|_| Err("offline".into())).is_err());
         assert_eq!(setup_state_response(&session,&lifecycle,|| Ok(json!({"fresh":true}))).unwrap()["data"],json!({"fresh":true}));
+    }
+    struct StartupSource;
+    impl updates::UpdateSource for StartupSource {
+        fn check(&self) -> updates::FutureResult<'_,Option<Arc<dyn updates::Artifact>>> {Box::pin(async {Ok(None)})}
+    }
+    struct StartupService;
+    impl updates::Maintenance for StartupService {
+        fn prepare(&self,_: &str,_: &str,_: Arc<std::sync::atomic::AtomicBool>) -> Result<Box<dyn updates::Handoff>,String> {panic!("No service maintenance in startup check test")}
+    }
+    fn recovery_coordinator(root: &std::path::Path) -> Arc<updates::Coordinator> {
+        let coordinator=Arc::new(updates::Coordinator::new("0.1.4",Some(Arc::new(StartupSource)),Arc::new(StartupService),Some(root.join("agent/update-settings.json"))));
+        coordinator.recovery("An interrupted update is pending.");coordinator
+    }
+    #[tokio::test]
+    async fn first_recovered_update_snapshot_waits_for_native_health_then_permits_automatic_checks() {
+        let fixture=Fixture::new(|mut wire| {wire.handshake();wire.discard_until_close();});
+        std::fs::write(fixture.root.join("runtime.json"),r#"{"agentVersion":"fake-v1"}"#).unwrap();
+        let mut context=startup_context("recovered");context.state_root=fixture.root.clone();
+        let coordinator=recovery_coordinator(&fixture.root);
+        let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));let startup=Arc::new(startup::Startup::default());
+        let s=session.clone();let l=lifecycle.clone();let ready=startup.clone();let resources=fixture.root.clone();
+        let (entered,entry)=mpsc::channel();let(release,held)=mpsc::channel();let(done,finished)=mpsc::channel();
+        startup.start(move || {
+            let result=startup_connection(&s,&l,&ready,Ok(context),coordinator,|_,root| {
+                entered.send(()).unwrap();held.recv().unwrap();connect_runtime(&resources,root,Arc::new(|_|{}),Operation::AppStartup)
+            });done.send(result).unwrap();
+        }).unwrap();
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();
+        let waiter=startup.clone();let(observed,first)=mpsc::channel();
+        let read=thread::spawn(move || {observed.send(waiter.coordinator()).unwrap();});
+        let before_health=first.recv_timeout(Duration::from_millis(50));
+        release.send(()).unwrap();
+        let was_deferred=before_health.is_err();
+        let coordinator=before_health.unwrap_or_else(|_|first.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap();
+        read.join().unwrap();assert!(finished.recv_timeout(Duration::from_secs(1)).unwrap().is_ok());startup.join();
+        let first_phase=coordinator.snapshot().phase;
+        let automatic=coordinator.check(true,100).await.phase;
+        let explicit=coordinator.check(false,101).await.phase;
+        close(&session);fixture.finish();
+        assert!(was_deferred,"The first renderer snapshot must not observe transient recovery while native health is held");
+        assert_eq!(first_phase,"idle");assert_eq!(automatic,"current");assert_eq!(explicit,"current");
+    }
+    #[tokio::test]
+    async fn ordinary_startup_checks_remain_independent_of_held_agent_health() {
+        let (agent,fixture)=idle_agent();let coordinator=Arc::new(updates::Coordinator::new("0.1.4",Some(Arc::new(StartupSource)),Arc::new(StartupService),Some(fixture.root.join("agent/update-settings.json"))));
+        let startup=Arc::new(startup::Startup::default());let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));
+        let ready=startup.clone();let s=session.clone();let l=lifecycle.clone();
+        let(entered,entry)=mpsc::channel();let(release,held)=mpsc::channel();
+        startup.start(move || {
+            startup_connection(&s,&l,&ready,Ok(startup_context("ready")),coordinator,|_,_|{entered.send(()).unwrap();held.recv().unwrap();Ok(agent)}).unwrap();
+        }).unwrap();
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();
+        let coordinator=startup.coordinator().unwrap();
+        let check=coordinator.check(false,100).await.phase;
+        release.send(()).unwrap();startup.wait().unwrap();startup.join();close(&session);fixture.finish();
+        assert_eq!(check,"current");assert_eq!(coordinator.snapshot().phase,"current");
+    }
+    #[tokio::test]
+    async fn failed_native_recovery_identity_publishes_retained_recovery_and_allows_manual_check() {
+        let fixture=Fixture::new(|mut wire| {wire.handshake();wire.discard_until_close();});
+        std::fs::write(fixture.root.join("runtime.json"),r#"{"agentVersion":"wrong-runtime"}"#).unwrap();
+        let mut context=startup_context("recovered");context.state_root=fixture.root.clone();
+        let coordinator=recovery_coordinator(&fixture.root);let startup=Arc::new(startup::Startup::default());
+        let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));let ready=startup.clone();let s=session.clone();let l=lifecycle.clone();let resources=fixture.root.clone();
+        let(done,finished)=mpsc::channel();startup.start(move || {
+            done.send(startup_connection(&s,&l,&ready,Ok(context),coordinator,|_,root|connect_runtime(&resources,root,Arc::new(|_|{}),Operation::AppStartup))).unwrap();
+        }).unwrap();
+        let coordinator=startup.coordinator().unwrap();assert!(finished.recv_timeout(Duration::from_secs(1)).unwrap().is_err());startup.join();
+        let first_phase=coordinator.snapshot().phase;assert!(generation(&session).is_err());
+        let manual=coordinator.check(false,100).await.phase;
+        close(&session);fixture.finish();assert_eq!(first_phase,"recovery");assert_eq!(manual,"current");
+    }
+    #[test]
+    fn close_during_recovered_health_never_publishes_a_late_coordinator_or_clears_recovery() {
+        let (agent,fixture)=idle_agent();let coordinator=recovery_coordinator(&fixture.root);let original=coordinator.clone();
+        let startup=Arc::new(startup::Startup::default());let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));let ready=startup.clone();let s=session.clone();let l=lifecycle.clone();
+        let(entered,entry)=mpsc::channel();let(release,held)=mpsc::channel();let(done,finished)=mpsc::channel();
+        startup.start(move || {
+            done.send(startup_connection(&s,&l,&ready,Ok(startup_context("recovered")),coordinator,|_,_|{entered.send(()).unwrap();held.recv().unwrap();Ok(agent)})).unwrap();
+        }).unwrap();
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();close(&session);startup.close();release.send(()).unwrap();startup.join();
+        assert!(finished.recv_timeout(Duration::from_secs(1)).unwrap().is_err());assert!(startup.coordinator().is_err());
+        assert_eq!(original.snapshot().phase,"recovery");assert!(session.lock().unwrap().initial_setup.is_none());fixture.finish();
     }
     #[test]
     fn recovery_is_cleared_only_after_successful_current_connection_publication() {
