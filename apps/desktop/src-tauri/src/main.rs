@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod startup_diagnostics;
 mod updates;
 mod update_payload;
 mod update_service;
@@ -7,6 +8,7 @@ mod updater_transport;
 mod display_name_categories;
 mod notifications;
 use host::{Agent, Request, Setup};
+use startup_diagnostics::{Operation, Phase};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
@@ -31,7 +33,8 @@ struct Owner {
 }
 impl Owner {
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<Agent, String> {
-        let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && update_service::maintenance_state(&self.resources)?.pending;
+        let trace = startup_diagnostics::trace(setup.operation());
+        let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
         let state_root = if recovered {
             let result=update_service::recover(&self.resources,&self.app.package_info().version.to_string());
             if result.is_err() {self.updates.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
@@ -46,10 +49,9 @@ impl Owner {
             }
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
-        }))?;
-        let metadata:Value=serde_json::from_slice(&std::fs::read(self.resources.join("runtime.json")).map_err(|_|"Cannot read installed agent identity")?).map_err(|_|"Invalid installed agent identity")?;
-        if metadata["agentVersion"].as_str()!=agent.hello["agentVersion"].as_str() {
-            agent.disconnect();return Err("Connected agent does not match the installed app runtime".into());
+        }), setup.operation())?;
+        if let Err(error) = trace.measure(Phase::RuntimeIdentity, || runtime_identity(&self.resources, agent.hello["agentVersion"].as_str())) {
+            agent.disconnect(); return Err(error);
         }
         if recovered {self.updates.recovered();}
         let owner = Arc::downgrade(self);
@@ -61,6 +63,11 @@ impl Owner {
         });
         Ok(agent)
     }
+}
+fn runtime_identity(resources: &std::path::Path, agent_version: Option<&str>) -> Result<(), String> {
+    let metadata: Value = serde_json::from_slice(&std::fs::read(resources.join("runtime.json")).map_err(|_| "Cannot read installed agent identity")?).map_err(|_| "Invalid installed agent identity")?;
+    if metadata["agentVersion"].as_str() != agent_version { return Err("Connected agent does not match the installed app runtime".into()); }
+    Ok(())
 }
 /// Startup events wait for publication; posting and ACK never run on the socket reader.
 fn deliver_current(session: &Mutex<Session>, lifecycle: &Mutex<()>, mine: u64, delivery: notifications::Delivery, post: &notifications::Poster<'_>) -> Result<bool, String> {
@@ -398,29 +405,34 @@ fn main() {
     }));
     tauri::Builder::default()
         .setup(move |app| {
-            *handle.lock().unwrap() = Some(app.handle().clone());
-            let resources = app.path().resource_dir()?.join("agent-runtime");
-            #[cfg(debug_assertions)]
-            let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
-            let source=updater_transport::source(app.handle());
-            let preferences=host::setup_agent(&resources,Setup::Paths).ok().map(|root|root.join("agent/update-settings.json"));
-            let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
-            if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
-            match update_service::maintenance_state(&resources) {
-                Ok(state) if state.pending=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
-                Err(_)=>coordinator.recovery("Maintenance state could not be read. Existing setup is retained; retry startup recovery."),
-                _=>{},
-            }
-            let owner = Arc::new(Owner {
-                session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false }),
-                lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),updates:coordinator,
-            });
-            app.manage(owner.clone());
-            notifications::request_permission();
-            if let Err(error) = initial_connection(&owner.session, &owner.lifecycle, || host::desktop_setup_state(&owner.resources), |g| owner.connect(g, Setup::Ensure)) {
-                owner.session.lock().unwrap().error = Some(error);
-            }
-            Ok(())
+            if let Ok(directory) = app.path().app_log_dir() { startup_diagnostics::initialize(&directory); }
+            let trace = startup_diagnostics::trace(Operation::AppStartup);
+            trace.measure(Phase::AppSetup, || {
+                *handle.lock().unwrap() = Some(app.handle().clone());
+                let resources = trace.measure(Phase::Paths, || app.path().resource_dir())?.join("agent-runtime");
+                #[cfg(debug_assertions)]
+                let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
+                let source=trace.measure(Phase::UpdaterSource, || updater_transport::source(app.handle()));
+                let preferences=trace.measure(Phase::PreferencesPaths, || host::setup_agent(&resources,Setup::Paths)).ok().map(|root|root.join("agent/update-settings.json"));
+                let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
+                if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
+                match trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&resources)) {
+                    Ok(state) if state.pending=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
+                    Err(_)=>coordinator.recovery("Maintenance state could not be read. Existing setup is retained; retry startup recovery."),
+                    _=>{},
+                }
+                let owner = Arc::new(Owner {
+                    session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false }),
+                    lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),updates:coordinator,
+                });
+                app.manage(owner.clone());
+                trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
+                if let Err(error) = trace.measure(Phase::Lifecycle, || initial_connection(&owner.session, &owner.lifecycle,
+                    || trace.measure(Phase::SetupState, || host::desktop_setup_state(&owner.resources)), |g| owner.connect(g, Setup::Ensure))) {
+                    owner.session.lock().unwrap().error = Some(error);
+                }
+                Ok(())
+            })
         })
         .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
