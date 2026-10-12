@@ -31,6 +31,19 @@ export function ShellView({ screen, navigate, children }: { screen: Screen; navi
 
 const picks = [['both', 'Claude and Codex'], ['claude', 'Claude only'], ['codex', 'Codex only'], ['neither', 'Neither']] as const;
 export function SetupView({ state, controller }: { state: SetupViewState; controller: SetupController }) {
+  if (state.phase === 'checking' || state.phase === 'error') return (
+    <main className="onboarding startup-view">
+      <p className="eyebrow">CLAUDE CONFIG</p>
+      <h1>{state.phase === 'error' ? 'Local setup needs attention' : 'Opening Claude Config'}</h1>
+      <section className="form-section">
+        <p role={state.phase === 'error' ? 'alert' : 'status'}>{state.detail}</p>
+        {state.phase === 'error' ? <>
+          <p className="muted">Your existing setup has been retained. Recheck it before continuing.</p>
+          <button disabled={state.pending} onClick={() => void controller.check()}>Recheck setup</button>
+        </> : null}
+      </section>
+    </main>
+  );
   const disabled = state.phase === 'browser' || state.pending;
   const value = state.configTargets.length === 2 ? 'both' : state.configTargets[0] ?? 'neither';
   return (
@@ -41,7 +54,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
       <section className="form-section">
         <h2>Setup repository</h2>
         <p><code>{DEFAULT_REPO_URL}</code></p>
-        <fieldset disabled={disabled || state.phase === 'error'}>
+        <fieldset disabled={disabled}>
           <legend>Configurations to manage</legend>
           {picks.map(([key, label]) => (
             <label key={key} className="choice">
@@ -62,7 +75,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
           </div>
         ) : null}
         <div className="form-actions">
-          <button className="primary" disabled={disabled || !state.setup?.gitAvailable || state.phase === 'error'} onClick={() => void controller.bootstrap()}>Use this repository and set up</button>
+          <button className="primary" disabled={disabled || !state.setup?.gitAvailable} onClick={() => void controller.bootstrap()}>Use this repository and set up</button>
           <button disabled={disabled} onClick={() => void controller.check()}>Recheck setup</button>
         </div>
       </section>
@@ -70,7 +83,32 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
   );
 }
 
-export function OverviewView({ state, navigate }: { state: ViewState; navigate: (screen: Screen) => void }) {
+function MachineStartupView({ state, controller }: { state: ViewState; controller?: MachineController }) {
+  return <section className="form-section startup-view">
+    <h2>{state.waitingForReport ? 'Waiting for the first inspection' : state.connection === 'connected' ? 'Reading local inspection' : 'Starting local agent'}</h2>
+    <p role="status">{state.detail}</p>
+    {state.waitingForReport ? <>
+      <p className="muted">The agent is connected and preparing its first report.</p>
+      {controller ? <button disabled={state.pending} onClick={() => void controller.inspect()}>Recheck agent status</button> : null}
+    </> : null}
+  </section>;
+}
+
+export function StartupBoundary({ setup, setupController, machine, machineController, updates, children }: {
+  setup: SetupViewState; setupController: SetupController; machine: ViewState; machineController: MachineController;
+  updates: ReactNode; children: ReactNode;
+}) {
+  let startup: ReactNode;
+  if (setup.phase !== 'ready' && setup.phase !== 'browser') startup = <SetupView state={setup} controller={setupController} />;
+  else if (machine.initialReadPending || machine.waitingForReport) startup = <main className="onboarding startup-view">
+    <p className="eyebrow">CLAUDE CONFIG</p><h1>Opening Claude Config</h1>
+    <MachineStartupView state={machine} controller={machineController} />
+  </main>;
+  else return <>{children}</>;
+  return <>{startup}<div className="onboarding first-run-updates">{updates}</div></>;
+}
+
+export function OverviewView({ state, navigate, controller }: { state: ViewState; navigate: (screen: Screen) => void; controller?: MachineController }) {
   const status = state.status;
   return (
     <>
@@ -78,6 +116,11 @@ export function OverviewView({ state, navigate }: { state: ViewState; navigate: 
         <div><p className="eyebrow">THIS MACHINE</p><h1>Overview</h1><p className="intro">Current local agent inspection.</p></div>
         <span className={`connection ${state.connection}`}>{state.connection === 'browser' ? 'Browser preview' : state.connection}</span>
       </header>
+      {state.initialReadError ? <section className="form-section">
+        <p role="alert">{state.initialReadError}</p>
+        {state.connection === 'connected' && controller ? <button disabled={state.pending || state.status?.applying === true} onClick={() => void controller.inspect()}>Recheck inspection</button>
+          : <p className="muted">Open Settings to restart or reinstall the local agent.</p>}
+      </section> : null}
       {status ? (
         <>
           <div className="metrics">
@@ -96,7 +139,8 @@ export function OverviewView({ state, navigate }: { state: ViewState; navigate: 
             <p>{status.conflicts.length} conflicts</p>
           </section>
         </>
-      ) : <section className="form-section"><p>{state.detail}</p></section>}
+      ) : state.initialReadPending || state.waitingForReport ? <MachineStartupView state={state} />
+        : state.initialReadError ? null : <section className="form-section"><p role={state.connection === 'disconnected' ? 'alert' : 'status'}>{state.detail}</p></section>}
       <div className="form-actions">
         <button onClick={() => navigate('review')}>Review &amp; apply</button>
         <button onClick={() => navigate('settings')}>Open Settings</button>

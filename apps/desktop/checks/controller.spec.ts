@@ -194,6 +194,8 @@ test('a disconnect that arrives before connect learns its generation wins and sk
   assert.equal(c.state.connection, 'disconnected');
   assert.equal(c.state.detail, 'Backend exited; restart explicitly');
   assert.equal(c.state.pending, false);
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.waitingForReport, false);
   assert.equal(f.calls.some(([n]) => n === 'inspect_machine'), false);
 });
 
@@ -213,6 +215,8 @@ test('a disconnect that arrives before restart learns its generation wins and sk
   await c.restart();
   assert.equal(c.state.connection, 'disconnected');
   assert.equal(c.state.detail, 'Fresh backend exited');
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.waitingForReport, false);
   assert.equal(c.state.pending, false);
   assert.equal(f.calls.filter(([n]) => n === 'inspect_machine').length, 1);
 });
@@ -296,11 +300,155 @@ test('startup NO_REPORT keeps the connection and a later status recovers inspect
   await c.connect();
   assert.equal(c.state.connection, 'connected');
   assert.equal(c.state.inspection, null);
-  assert.match(c.state.detail, /starting/i);
+  assert.match(c.state.detail, /first inspection/i);
+  assert.equal(c.state.waitingForReport, true);
   f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(c.snapshot().inspection?.items.length, 1);
   assert.equal(c.state.status?.policy, 'notify');
+});
+test('first-report recheck is read-only and becomes ready from an actual report', async () => {
+  let reportReady = false;
+  const f = fake({ agent_status: () => { if (!reportReady) throw new Error('NO_REPORT: starting'); return status(); }, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.waitingForReport, true);
+  await c.inspect();
+  assert.equal(c.state.waitingForReport, true);
+  reportReady = true;
+  await c.inspect();
+  assert.equal(c.state.waitingForReport, false);
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.inspection?.items[0]?.key, 'config:a');
+  assert.deepEqual(f.calls.filter(([name]) => !['subscribe', 'agent_generation', 'take_review_request', 'agent_status', 'inspect_machine'].includes(name)), []);
+});
+test('early initial apply or failed status exposes real operation state while an optional read is held', async () => {
+  for (const fields of [{ applying: true }, { error: 'JOB_FAILED', detail: 'fixture failure' }]) {
+    const held = deferred<unknown>();
+    const called = deferred<void>();
+    const f = fake({
+      agent_generation: () => { f.emit({ generation: 1, version: 3, event: 'status', status: status(fields) } as HostEvent); return null; },
+      take_review_request: () => { called.resolve(); return held.promise; },
+      agent_status: () => { throw new Error('NO_REPORT: obsolete response'); },
+      inspect_machine: () => inspection(['config:a']), cancel_apply: () => ({ cancelled: true }),
+    });
+    const c = new MachineController(f.bridge);
+    const connecting = c.connect();
+    await called.promise;
+    const pending = c.state.initialReadPending;
+    if (fields.applying) await c.cancel();
+    held.resolve(null); await connecting;
+    assert.equal(pending, false, JSON.stringify(fields));
+    assert.equal(c.state.waitingForReport, false);
+    assert.doesNotMatch(c.state.detail, /obsolete response/);
+    if (fields.applying) assert.ok(f.calls.some(([name]) => name === 'cancel_apply'));
+  }
+});
+test('terminal startup failures and disposal clear startup waiting instead of hiding recovery', async () => {
+  for (const failure of ['UNAUTHORIZED: bad token', 'MALFORMED: incompatible response', 'TIMEOUT: no response']) {
+    const f = fake({ agent_status: () => { throw new Error(failure); } });
+    const c = new MachineController(f.bridge);
+    await c.connect();
+    assert.equal(c.state.waitingForReport, false);
+    assert.equal(c.state.initialReadPending, false);
+    assert.equal(c.state.detail, failure);
+  }
+  const held = deferred<unknown>();
+  const f = fake({ agent_generation: () => held.promise });
+  const c = new MachineController(f.bridge);
+  const connecting = c.connect();
+  c.dispose(); held.resolve(null); await connecting;
+  assert.equal(c.state.connection, 'disconnected');
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.waitingForReport, false);
+});
+test('a current failure during initial inspection is not replaced by its older successful reply', async () => {
+  const held = deferred<unknown>();
+  const called = deferred<void>();
+  const f = fake({ inspect_machine: () => { called.resolve(); return held.promise; } });
+  const c = new MachineController(f.bridge);
+  const connecting = c.connect();
+  await called.promise;
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ error: 'JOB_FAILED', detail: 'current failure' }) } as HostEvent);
+  assert.equal(c.state.initialReadPending, false);
+  held.resolve(inspection(['config:a'])); await connecting;
+  assert.equal(c.state.status?.error, 'JOB_FAILED');
+  assert.match(c.state.detail, /current failure/);
+  assert.equal(c.state.waitingForReport, false);
+});
+test('a held initial status reply cannot replace a newer current apply or failed event', async () => {
+  for (const fields of [{ applying: true }, { error: 'JOB_FAILED', detail: 'newer failure' }]) {
+    const held = deferred<unknown>(); const called = deferred<void>();
+    const f = fake({ agent_status: () => { called.resolve(); return held.promise; }, inspect_machine: () => inspection(['config:a']) });
+    const c = new MachineController(f.bridge);
+    const connecting = c.connect(); await called.promise;
+    f.emit({ generation: 1, version: 3, event: 'status', status: status(fields) } as HostEvent);
+    held.resolve(status()); await connecting;
+    assert.equal(c.state.status?.applying, fields.applying);
+    assert.equal(c.state.status?.error, fields.error);
+    assert.equal(c.state.initialReadPending, false);
+    assert.equal(c.state.waitingForReport, false);
+    assert.equal(f.calls.some(([name]) => name === 'inspect_machine'), false);
+  }
+});
+test('restart waits for fresh initialization and old status or disposed replies cannot restore startup', async () => {
+  let first = true;
+  const restarting = deferred<unknown>(); const restarted = deferred<void>();
+  const f = fake({
+    agent_status: () => { if (first) throw new Error('NO_REPORT: starting'); return status(); },
+    restart_agent: () => { restarted.resolve(); return restarting.promise; },
+    inspect_machine: () => inspection(['config:a']),
+  });
+  let generation = 1;
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
+  const c = new MachineController(bridge); await c.connect();
+  assert.equal(c.state.waitingForReport, true);
+  const restart = c.restart(); await restarted.promise;
+  assert.equal(c.state.initialReadPending, true);
+  assert.equal(c.state.waitingForReport, false);
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
+  generation = 2; first = false; restarting.resolve(null); await restart;
+  assert.equal(c.state.status?.applying, undefined);
+  assert.equal(c.state.initialReadPending, false);
+  assert.equal(c.state.waitingForReport, false);
+  c.dispose();
+  f.emit({ generation: 2, version: 3, event: 'status', status: status() } as HostEvent);
+  assert.equal(c.state.connection, 'disconnected');
+  assert.equal(c.state.initialReadPending, false);
+});
+test('explicit inspection recovers an initial failed report after the local problem is repaired', async () => {
+  const f = fake({ agent_status: () => status({ error: 'JOB_FAILED', detail: 'configuration invalid' }), inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge); await c.connect();
+  assert.equal(c.state.status?.error, 'JOB_FAILED');
+  assert.equal(c.state.initialReadPending, false);
+  await c.inspect();
+  assert.equal(c.state.inspection?.items[0]?.key, 'config:a');
+  assert.equal(c.state.status?.error, undefined);
+});
+test('reconnect to a new generation never presents the previous session report as current', async () => {
+  let generation = 1;
+  const f = fake({ agent_status: () => { if (generation === 2) throw new Error('NO_REPORT: starting'); return status(); }, inspect_machine: () => inspection(['config:a']) });
+  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
+  const c = new MachineController(bridge); await c.connect();
+  assert.equal(c.state.inspection?.items.length, 1);
+  generation = 2; await c.connect();
+  assert.equal(c.state.status, null);
+  assert.equal(c.state.inspection, null);
+  assert.equal(c.state.waitingForReport, true);
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent);
+  assert.equal(c.state.status, null);
+  assert.equal(c.state.waitingForReport, true);
+});
+test('NO_REPORT after a completed inspection is a visible refusal without a first-report wait', async () => {
+  let noReport = false;
+  const f = fake({ agent_status: () => { if (noReport) throw new Error('NO_REPORT: report unavailable'); return status(); }, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge); await c.connect();
+  noReport = true; await c.inspect();
+  assert.equal(c.state.waitingForReport, false);
+  assert.equal(c.state.initialReadPending, false);
+  assert.match(c.state.detail, /NO_REPORT: report unavailable/);
+  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
 });
 
 test('status events show pauses and errors and ignore old generations', async () => {
