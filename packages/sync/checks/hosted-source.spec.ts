@@ -24,7 +24,7 @@ const fixture = (base: Readonly<Record<string, string>> = initial) => {
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   repo.git('remote', 'add', 'origin', origin);
   repo.git('push', '-q', 'origin', 'main');
-  execFileSync('git', ['clone', '-q', origin, checkout]);
+  execFileSync('git', ['clone', '-q', '--no-local', origin, checkout]);
   execFileSync('git', ['-C', checkout, 'remote', 'set-url', 'origin', URL]);
   const paths: MachinePathsValue = { repo: checkout, stateRoot: join(repo.root, 'state'), backups: join(repo.root, 'backups'), claude: join(repo.root, 'claude'), codex: join(repo.root, 'codex'), codexOpenRouter: join(repo.root, 'glm'), agentsSkills: join(repo.root, 'skills') };
   const write = (path: string, text: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); };
