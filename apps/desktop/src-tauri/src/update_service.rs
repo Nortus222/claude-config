@@ -86,18 +86,29 @@ impl Handoff for NativeHandoff {
 
 pub fn maintenance_state(resources: &Path) -> Result<MaintenanceState, String> {
     let value = one_shot(resources, Setup::MaintenanceState, None, Duration::from_secs(10))?;
+    validate_maintenance_state(value)
+}
+pub(crate) fn validate_maintenance_state(value: Value) -> Result<MaintenanceState, String> {
     let keys = ["pending","phase","fromVersion","toVersion","backupPath","diagnostic"];
     if value.as_object().is_none_or(|o| o.len() != keys.len() || keys.iter().any(|k| !o.contains_key(*k))) {
         return Err("Invalid maintenance state".into());
     }
-    let mut state: MaintenanceState = serde_json::from_value(value).map_err(|_| "Invalid maintenance state")?;
+    let state: MaintenanceState = serde_json::from_value(value).map_err(|_| "Invalid maintenance state")?;
     if state.phase.as_deref().is_some_and(|p| !["prepared","installing","awaiting-health"].contains(&p))
         || state.backup_path.as_ref().is_some_and(|p| !absolute(p))
         || state.from_version.as_ref().is_some_and(|v| version(v).is_err())
         || state.to_version.as_ref().is_some_and(|v| version(v).is_err()) {
         return Err("Invalid maintenance state".into());
     }
-    state.diagnostic = state.diagnostic.map(|v| crate::updates::bounded(&v,512));
+    let empty = state.phase.is_none() && state.from_version.is_none() && state.to_version.is_none() && state.backup_path.is_none();
+    let increasing = match (&state.from_version, &state.to_version) {
+        (Some(from), Some(to)) => version(from)? < version(to)?,
+        _ => false,
+    };
+    let valid = if !state.pending { empty && state.diagnostic.is_none() }
+        else if state.diagnostic.is_some() { empty && state.diagnostic.as_deref() == Some("Pending update journal is invalid; manual recovery is required.") }
+        else { state.phase.is_some() && state.backup_path.is_some() && increasing };
+    if !valid { return Err("Inconsistent maintenance state".into()); }
     Ok(state)
 }
 pub fn recover(resources: &Path, compiled_version: &str) -> Result<PathBuf, String> {

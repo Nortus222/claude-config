@@ -573,6 +573,7 @@ impl Drop for Agent {
 
 #[derive(Clone, Copy)]
 pub enum Setup {
+    Startup,
     Ensure,
     Restart,
     Paths,
@@ -586,6 +587,7 @@ pub enum Setup {
 impl Setup {
     pub fn operation(self) -> Operation {
         match self {
+            Self::Startup => Operation::AppStartup,
             Self::Ensure => Operation::Ensure, Self::Restart => Operation::Restart, Self::Paths => Operation::Paths,
             Self::State => Operation::SetupState, Self::Bootstrap => Operation::Bootstrap, Self::InstallGit => Operation::InstallGit,
             Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState,
@@ -593,6 +595,7 @@ impl Setup {
     }
     fn argument(self) -> &'static str {
         match self {
+            Self::Startup => "--startup",
             Self::Ensure => "--ensure",
             Self::Restart => "--restart",
             Self::Paths => "--paths",
@@ -617,7 +620,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if matches!(setup, Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -633,7 +636,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
-    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(3) } else { HELPER_TIMEOUT })
+    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(10) } else { HELPER_TIMEOUT })
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -652,11 +655,55 @@ fn validate_setup_state(value: Value) -> Result<Value, String> {
     // Option alone accepts a missing key; every field is required by the helper contract.
     if value.as_object().is_none_or(|o| o.len() != 5 || !o.contains_key("repo")) { return Err("Invalid setup state".into()); }
     let state: DesktopSetupState = serde_json::from_value(value).map_err(|_| "Invalid setup state")?;
-    if state.default_repo_url != "https://github.com/Nortus222/claude-config.git" { return Err("Invalid setup repository".into()); }
+    if state.default_repo_url != "https://github.com/Nortus222/claude-config.git"
+        || (state.needs_setup && state.repo.is_some())
+        || (!state.needs_setup && state.repo.as_ref().is_none_or(|repo| !absolute_path(Path::new(repo)))) { return Err("Invalid setup repository".into()); }
     serde_json::to_value(state).map_err(|_| "Invalid setup state".into())
 }
 pub fn desktop_setup_state(resources: &Path) -> Result<Value, String> {
     validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Duration::from_secs(10), None)?)
+}
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupOutcome { NeedsSetup, Ready, Recovered, SetupFailed, RuntimeFailed, MaintenanceFailed, EnsureFailed, RecoveryFailed }
+pub struct StartupContext {
+    pub state_root: PathBuf,
+    pub setup: Option<Value>,
+    pub maintenance: Option<crate::update_service::MaintenanceState>,
+    pub outcome: StartupOutcome,
+}
+fn absolute_path(path: &Path) -> bool {
+    path.is_absolute() && path.to_str().is_some_and(|value| !value.chars().any(char::is_control))
+}
+pub(crate) fn decode_startup(value: Value) -> Result<StartupContext, String> {
+    let keys = ["stateRoot", "setup", "maintenance", "outcome"];
+    if value.as_object().is_none_or(|object| object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key))) { return Err("Invalid startup context".into()); }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Fields { state_root: PathBuf, setup: Value, maintenance: Value, outcome: StartupOutcome }
+    let fields: Fields = serde_json::from_value(value).map_err(|_| "Invalid startup context")?;
+    if !absolute_path(&fields.state_root) { return Err("Invalid startup state root".into()); }
+    let setup = if fields.setup.is_null() { None } else { Some(validate_setup_state(fields.setup)?) };
+    let maintenance = if fields.maintenance.is_null() { None } else { Some(crate::update_service::validate_maintenance_state(fields.maintenance)?) };
+    let needs_setup = setup.as_ref().and_then(|state| state["needsSetup"].as_bool());
+    let pending = maintenance.as_ref().map(|state| state.pending);
+    let valid = match fields.outcome {
+        StartupOutcome::SetupFailed => setup.is_none() && maintenance.is_none(),
+        StartupOutcome::RuntimeFailed | StartupOutcome::MaintenanceFailed => setup.is_some() && maintenance.is_none(),
+        StartupOutcome::NeedsSetup => needs_setup == Some(true) && maintenance.is_some(),
+        StartupOutcome::Ready | StartupOutcome::EnsureFailed => needs_setup == Some(false) && pending == Some(false),
+        StartupOutcome::Recovered | StartupOutcome::RecoveryFailed => needs_setup == Some(false) && pending == Some(true),
+    };
+    if !valid { return Err("Inconsistent startup context".into()); }
+    Ok(StartupContext { state_root: fields.state_root, setup, maintenance, outcome: fields.outcome })
+}
+pub fn desktop_startup(resources: &Path, app_version: &str) -> Result<StartupContext, String> {
+    let version = semver::Version::parse(app_version).map_err(|_| "Invalid startup version")?;
+    if app_version.len() > 100 || !version.pre.is_empty() || !version.build.is_empty() || version.to_string() != app_version { return Err("Invalid startup version".into()); }
+    let mut command = helper_command(resources, Setup::Startup, None)?;
+    command.stdin(Stdio::piped());
+    let input = serde_json::to_vec(&json!({"appVersion":app_version})).map_err(|_| "Invalid startup input")?;
+    decode_startup(run_json_helper(command, HELPER_TIMEOUT, Some(input))?)
 }
 pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<PathBuf, String> {
     let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
@@ -718,6 +765,7 @@ fn run_json_helper_with_cancel(command: Command, timeout: Duration, input: Optio
 }
 fn helper_operation(command: &Command) -> Operation {
     command.get_args().find_map(|arg| match arg.to_str()? {
+        "--startup" => Some(Operation::AppStartup),
         "--ensure" => Some(Operation::Ensure), "--restart" => Some(Operation::Restart), "--paths" => Some(Operation::Paths),
         "--setup-state" => Some(Operation::SetupState), "--bootstrap" => Some(Operation::Bootstrap), "--install-git" => Some(Operation::InstallGit),
         "--prepare-update" => Some(Operation::PrepareUpdate), "--recover-update" => Some(Operation::RecoverUpdate), "--maintenance-state" => Some(Operation::MaintenanceState), _ => None,
@@ -1230,6 +1278,52 @@ mod helper_tests {
         std::fs::set_permissions(root.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
         root
     }
+    fn startup_record(outcome: &str) -> Value {
+        let pending = matches!(outcome, "recovered" | "recovery_failed");
+        json!({"stateRoot":"/tmp/login-state","setup":{"needsSetup":outcome=="needs_setup","repo":if outcome=="needs_setup" {Value::Null} else {json!("/tmp/checkout")},"gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"},"maintenance":if pending {json!({"pending":true,"phase":"awaiting-health","fromVersion":"0.1.1","toVersion":"0.1.2","backupPath":"/tmp/backup","diagnostic":null})} else {json!({"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null})},"outcome":outcome})
+    }
+    #[test]
+    fn startup_context_rejects_malformed_and_inconsistent_records() {
+        for outcome in ["needs_setup","ready","recovered","ensure_failed","recovery_failed"] {
+            assert!(decode_startup(startup_record(outcome)).is_ok(), "{outcome}");
+        }
+        for outcome in ["runtime_failed","maintenance_failed","setup_failed"] {
+            let mut record = startup_record(outcome); record["maintenance"]=Value::Null;
+            if outcome=="setup_failed" {record["setup"]=Value::Null;}
+            assert!(decode_startup(record).is_ok(), "{outcome}");
+        }
+        let ready = startup_record("ready");
+        let mut invalid = vec![Value::Null, json!([])];
+        for key in ["stateRoot","setup","maintenance","outcome"] {
+            let mut missing=ready.clone(); missing.as_object_mut().unwrap().remove(key); invalid.push(missing);
+            let mut wrong=ready.clone(); wrong[key]=json!(42); invalid.push(wrong);
+        }
+        for root in ["relative","/tmp/control\n", ""] {let mut record=ready.clone();record["stateRoot"]=json!(root);invalid.push(record);}
+        for outcome in ["needs_setup","recovered","recovery_failed","setup_failed","unexpected"] {let mut record=ready.clone();record["outcome"]=json!(outcome);invalid.push(record);}
+        let mut extra=ready.clone();extra["environment"]=json!({"TOKEN":"secret"});invalid.push(extra);
+        let mut missingrepo=ready.clone();missingrepo["setup"].as_object_mut().unwrap().remove("repo");invalid.push(missingrepo);
+        let mut nullrepo=ready.clone();nullrepo["setup"]["repo"]=Value::Null;invalid.push(nullrepo);
+        let mut fields=ready.clone();fields["maintenance"]["phase"]=json!("installing");invalid.push(fields);
+        let mut diagnostic=ready.clone();diagnostic["maintenance"]["diagnostic"]=json!("arbitrary error");invalid.push(diagnostic);
+        for record in invalid {assert!(decode_startup(record.clone()).is_err(), "accepted {record}");}
+    }
+    #[test]
+    fn startup_helper_uses_only_fixed_native_argv_and_version_input() {
+        let record=startup_record("ensure_failed");
+        let source=format!(r#"[ "$2" = --startup ] && [ "$3" = --app ] && [ "$#" = 4 ] || exit 8
+read input
+[ "$input" = '{{"appVersion":"0.1.2"}}' ] || exit 9
+printf '%s\n' '{}'
+printf '%s\n' called >> calls"#,record);
+        let root=resources(&source);
+        let context=desktop_startup(&root,"0.1.2").unwrap();
+        assert_eq!(context.state_root,PathBuf::from("/tmp/login-state"));
+        assert_eq!(context.outcome, StartupOutcome::EnsureFailed);
+        assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap(),"called\n");
+        assert!(desktop_startup(&root,"0.1.2+invalid").is_err());
+        assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap(),"called\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn helper_diagnostics_forward_only_safe_records_and_preserve_stdout_on_failure_or_timeout() {
         use crate::startup_diagnostics::{Diagnostics, Operation, Phase, Status};
@@ -1385,6 +1479,15 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn paths_caller_allows_a_slow_valid_login_probe_to_finish() {
+        let root = resources(r#"[ "$2" = --paths ] || exit 8
+sleep 3.2
+printf '%s\n' '{"stateRoot":"/tmp/slow-login-state"}'"#);
+        let result = setup_agent(&root, Setup::Paths);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap(), PathBuf::from("/tmp/slow-login-state"));
     }
     #[test]
     fn paths_helper_has_no_registration_arguments() {

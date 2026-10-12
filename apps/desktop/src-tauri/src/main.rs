@@ -22,6 +22,7 @@ struct Session {
     generation: u64,
     error: Option<String>,
     closed: bool,
+    initial_setup: Option<Value>,
 }
 struct Owner {
     session: Mutex<Session>,
@@ -32,7 +33,7 @@ struct Owner {
     updates: Arc<updates::Coordinator>,
 }
 impl Owner {
-    fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<Agent, String> {
+    fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<(Agent, bool), String> {
         let trace = startup_diagnostics::trace(setup.operation());
         let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
         let state_root = if recovered {
@@ -40,20 +41,19 @@ impl Owner {
             if result.is_err() {self.updates.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
             result?
         } else {host::setup_agent(&self.resources, setup)?};
+        self.connect_from_root(generation, &state_root, setup.operation()).map(|agent| (agent, recovered))
+    }
+    fn connect_from_root(self: &Arc<Self>, generation: u64, state_root: &std::path::Path, operation: Operation) -> Result<Agent, String> {
         let app = self.app.clone();
         let (send, receive) = std::sync::mpsc::channel();
-        let agent = Agent::connect_ready(&state_root, Arc::new(move |mut event| {
+        let agent = connect_runtime(&self.resources, state_root, Arc::new(move |mut event| {
             if event["event"] == "notification" {
                 if let Ok(delivery) = notifications::Delivery::decode(event) { let _ = send.send(delivery); }
                 return;
             }
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
-        }), setup.operation())?;
-        if let Err(error) = trace.measure(Phase::RuntimeIdentity, || runtime_identity(&self.resources, agent.hello["agentVersion"].as_str())) {
-            agent.disconnect(); return Err(error);
-        }
-        if recovered {self.updates.recovered();}
+        }), operation)?;
         let owner = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Ok(delivery) = receive.recv() {
@@ -63,6 +63,13 @@ impl Owner {
         });
         Ok(agent)
     }
+}
+fn connect_runtime(resources: &std::path::Path, state_root: &std::path::Path, emit: host::Emit, operation: Operation) -> Result<Agent, String> {
+    let agent = Agent::connect_ready(state_root, emit, operation)?;
+    if let Err(error) = startup_diagnostics::trace(operation).measure(Phase::RuntimeIdentity, || runtime_identity(resources, agent.hello["agentVersion"].as_str())) {
+        agent.disconnect(); return Err(error);
+    }
+    Ok(agent)
 }
 fn runtime_identity(resources: &std::path::Path, agent_version: Option<&str>) -> Result<(), String> {
     let metadata: Value = serde_json::from_slice(&std::fs::read(resources.join("runtime.json")).map_err(|_| "Cannot read installed agent identity")?).map_err(|_| "Invalid installed agent identity")?;
@@ -99,11 +106,16 @@ fn generation(session: &Mutex<Session>) -> Result<Value, String> {
     Ok(json!({"generation":session.generation,"data":{"hello":agent.hello}}))
 }
 /// Serializes lifecycle helpers and skips any waiting operation superseded by a newer generation.
+#[cfg(test)]
 fn restart(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
+    restart_with_completion(session, lifecycle, |g| connect(g).map(|agent| (agent, false)), || {})
+}
+fn restart_with_completion(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce(u64) -> Result<(Agent, bool), String>, recovered: impl FnOnce()) -> Result<Value, String> {
     let (old, mine) = {
         let mut session = session.lock().unwrap();
         if session.closed { return Err("App connection closed".into()); }
         session.generation += 1;
+        session.initial_setup = None;
         session.error = Some("Connecting to the local agent".into());
         (session.agent.take(), session.generation)
     };
@@ -118,16 +130,17 @@ fn restart(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce
     let mut current = session.lock().unwrap();
     if current.generation != mine {
         drop(current);
-        if let Ok(agent) = result {
+        if let Ok((agent, _)) = result {
             agent.disconnect();
         }
         return Err("Superseded by a newer restart".into());
     }
     match result {
-        Ok(agent) => {
+        Ok((agent, did_recover)) => {
             let data = json!({"hello":agent.hello});
             current.agent = Some(Arc::new(agent));
             current.error = None;
+            if did_recover { recovered(); }
             Ok(json!({"generation":mine,"data":data}))
         }
         Err(error) => {
@@ -136,18 +149,40 @@ fn restart(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce
         }
     }
 }
-/// A first-run machine waits for consent before the normal lifecycle helper can run.
-fn initial_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, state: impl FnOnce() -> Result<Value, String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Option<Value>, String> {
-    match state()?["needsSetup"].as_bool() {
-        Some(true) => Ok(None),
-        Some(false) => restart(session, lifecycle, connect).map(Some),
-        None => Err("Invalid setup state".into()),
-    }
+/// The fixed helper already performed the eligible lifecycle action; startup only connects.
+fn initial_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, context: &host::StartupContext, connect: impl FnOnce(u64, &std::path::Path) -> Result<Agent, String>, recovered: impl FnOnce()) -> Result<Option<Value>, String> {
+    use host::StartupOutcome;
+    let mine = { let current=session.lock().unwrap(); if current.closed {return Err("App connection closed".into());} current.generation };
+    let should_connect = matches!(context.outcome, StartupOutcome::Ready | StartupOutcome::Recovered);
+    let result = if should_connect {
+        restart_with_completion(session, lifecycle, |g| connect(g, &context.state_root).map(|agent| (agent, context.outcome==StartupOutcome::Recovered)), recovered).map(Some)
+    } else {
+        let _lifecycle=lifecycle.lock().unwrap();
+        let current=session.lock().unwrap();
+        if current.closed || current.generation!=mine {return Err("Superseded by a newer restart".into());}
+        match context.outcome {
+            StartupOutcome::NeedsSetup => Ok(None),
+            StartupOutcome::SetupFailed => Err("Existing setup could not be read; it has been retained".into()),
+            StartupOutcome::RuntimeFailed => Err("Installed agent runtime could not be validated".into()),
+            StartupOutcome::MaintenanceFailed => Err("Maintenance state could not be read; existing setup is retained".into()),
+            StartupOutcome::EnsureFailed => Err("Agent startup failed; restart explicitly".into()),
+            StartupOutcome::RecoveryFailed => Err("Interrupted app update needs recovery; existing setup and backup are retained".into()),
+            _ => unreachable!(),
+        }
+    };
+    let expected=mine+u64::from(should_connect);
+    let mut current=session.lock().unwrap();
+    if !current.closed && current.generation==expected {current.initial_setup=context.setup.clone();}
+    result
+}
+fn startup_preferences(context: &Result<host::StartupContext,String>) -> Option<PathBuf> {
+    context.as_ref().ok().map(|context|context.state_root.join("agent/update-settings.json"))
 }
 fn close(session: &Mutex<Session>) {
     let agent = {
         let mut session = session.lock().unwrap();
         session.closed = true;
+        session.initial_setup = None;
         session.generation += 1;
         session.agent.take()
     };
@@ -182,7 +217,7 @@ async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, Stri
 #[tauri::command]
 async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || restart(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart))).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || restart_with_completion(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart), ||owner.updates.recovered())).await.map_err(|e| e.to_string())?
 }
 fn native_args<T: serde::de::DeserializeOwned>(request: tauri::ipc::Request<'_>) -> Result<T, String> {
     match request.body() {
@@ -223,25 +258,40 @@ async fn set_policy(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Re
 async fn resume_agent(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::Resume).await
 }
+fn helper_response(session: &Mutex<Session>, lifecycle: &Mutex<()>, action: impl FnOnce() -> Result<Value,String>) -> Result<Value,String> {
+    let mine = { let current=session.lock().unwrap(); if current.closed {return Err("App connection closed".into());} current.generation };
+    let _lifecycle=lifecycle.lock().unwrap();
+    {let current=session.lock().unwrap();if current.closed || current.generation!=mine {return Err("Superseded by a newer restart".into());}}
+    let data=action()?;
+    let current=session.lock().unwrap();
+    if current.closed || current.generation!=mine {return Err("Superseded by a newer restart".into());}
+    Ok(json!({"generation":mine,"data":data}))
+}
+fn setup_state_response(session: &Mutex<Session>, lifecycle: &Mutex<()>, fresh: impl FnOnce() -> Result<Value,String>) -> Result<Value,String> {
+    helper_response(session,lifecycle,||{
+        let snapshot=session.lock().unwrap().initial_setup.take();
+        match snapshot {Some(value)=>Ok(value),None=>fresh()}
+    })
+}
+fn mutating_helper_response(session: &Mutex<Session>, lifecycle: &Mutex<()>, action: impl FnOnce() -> Result<Value,String>) -> Result<Value,String> {
+    helper_response(session,lifecycle,||{
+        session.lock().unwrap().initial_setup=None;
+        action()
+    })
+}
 async fn helper_dispatch(owner: tauri::State<'_, Arc<Owner>>, action: fn(&std::path::Path) -> Result<Value, String>) -> Result<Value, String> {
-    let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mine = { let current = owner.session.lock().unwrap(); if current.closed { return Err("App connection closed".into()); } current.generation };
-        let _lifecycle = owner.lifecycle.lock().unwrap();
-        if owner.session.lock().unwrap().generation != mine { return Err("Superseded by a newer restart".into()); }
-        let data = action(&owner.resources)?;
-        let current = owner.session.lock().unwrap();
-        if current.closed || current.generation != mine { return Err("Superseded by a newer restart".into()); }
-        Ok(json!({"generation":mine,"data":data}))
-    }).await.map_err(|e|e.to_string())?
+    let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || helper_response(&owner.session,&owner.lifecycle,||action(&owner.resources))).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn desktop_setup_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
-    let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, host::desktop_setup_state).await
+    let _: host::EmptyArgs = native_args(request)?; let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || setup_state_response(&owner.session,&owner.lifecycle,||host::desktop_setup_state(&owner.resources))).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn install_git(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
-    let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, host::install_git).await
+    let _: host::EmptyArgs = native_args(request)?; let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mutating_helper_response(&owner.session,&owner.lifecycle,|| host::install_git(&owner.resources))).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
@@ -285,6 +335,7 @@ async fn install_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc
     }).await.map_err(|_|"Native update installation stopped".to_string())?
 }
 /// Bootstrap and ensure share one lifecycle reservation without recursively taking its mutex.
+#[cfg(test)]
 fn setup_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, bootstrap: impl FnOnce() -> Result<(), String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
     restart(session, lifecycle, |g| { bootstrap()?; connect(g) })
 }
@@ -293,8 +344,8 @@ async fn setup_desktop(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc:
     let args: host::SetupArgs = native_args(request)?;
     let choices = host::SetupChoices::decode(args.config_targets)?;
     let owner = owner.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || setup_connection(&owner.session, &owner.lifecycle,
-        || host::bootstrap_desktop(&owner.resources, choices).map(|_|()), |g| owner.connect(g, Setup::Ensure))).await.map_err(|e|e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || restart_with_completion(&owner.session, &owner.lifecycle,
+        |g| {host::bootstrap_desktop(&owner.resources, choices)?; owner.connect(g, Setup::Ensure)}, ||owner.updates.recovered())).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
 fn take_review_request(owner: tauri::State<'_, Arc<Owner>>) -> Value {
@@ -413,24 +464,28 @@ fn main() {
                 #[cfg(debug_assertions)]
                 let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
                 let source=trace.measure(Phase::UpdaterSource, || updater_transport::source(app.handle()));
-                let preferences=trace.measure(Phase::PreferencesPaths, || host::setup_agent(&resources,Setup::Paths)).ok().map(|root|root.join("agent/update-settings.json"));
-                let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
+                let context=trace.measure(Phase::Lifecycle, ||host::desktop_startup(&resources,&app.package_info().version.to_string()));
+                let preferences=startup_preferences(&context);
+                let coordinator=Arc::new(updates::Coordinator::new(&app.package_info().version.to_string(),source.as_ref().ok().and_then(Clone::clone).filter(|_|context.is_ok()),Arc::new(update_service::NativeHelper::new(resources.clone())),preferences));
                 if source.is_err() {coordinator.recovery("Updater release configuration is invalid; signed updates are disabled.");}
-                match trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&resources)) {
-                    Ok(state) if state.pending=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
-                    Err(_)=>coordinator.recovery("Maintenance state could not be read. Existing setup is retained; retry startup recovery."),
+                match &context {
+                    Err(_)=>coordinator.recovery("Startup state root could not be validated; signed updates are disabled. Existing setup is retained; retry startup recovery."),
+                    Ok(context) if context.maintenance.as_ref().is_some_and(|state|state.pending)=>coordinator.recovery("An interrupted update is pending. Existing setup validation and agent health must succeed before applying."),
+                    Ok(context) if matches!(context.outcome,host::StartupOutcome::SetupFailed|host::StartupOutcome::RuntimeFailed|host::StartupOutcome::MaintenanceFailed)=>coordinator.recovery("Startup validation failed. Existing setup is retained; retry startup recovery."),
                     _=>{},
                 }
                 let owner = Arc::new(Owner {
-                    session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false }),
+                    session: Mutex::new(Session { agent: None, generation: 1, error: Some("Setup required".into()), closed: false, initial_setup: None }),
                     lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),updates:coordinator,
                 });
                 app.manage(owner.clone());
                 trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
-                if let Err(error) = trace.measure(Phase::Lifecycle, || initial_connection(&owner.session, &owner.lifecycle,
-                    || trace.measure(Phase::SetupState, || host::desktop_setup_state(&owner.resources)), |g| owner.connect(g, Setup::Ensure))) {
-                    owner.session.lock().unwrap().error = Some(error);
-                }
+                let connected=match context {
+                    Ok(context)=>initial_connection(&owner.session,&owner.lifecycle,&context,
+                        |g,root|owner.connect_from_root(g,root,Operation::AppStartup),||owner.updates.recovered()),
+                    Err(_)=>Err("Desktop startup helper failed; existing setup is retained. Restart explicitly".into()),
+                };
+                if let Err(error)=connected {owner.session.lock().unwrap().error=Some(error);}
                 Ok(())
             })
         })
@@ -450,7 +505,7 @@ mod tests {
     use super::*;
     use host::fixtures::{idle_agent, Fixture};
     use std::{sync::mpsc, thread, time::{Duration, Instant}};
-    fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false }) }
+    fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false, initial_setup: None }) }
     #[test]
     fn update_commands_accept_only_fixed_intent_arguments() {
         assert!(host::decode_args::<CheckUpdateArgs>(json!({"automatic":false})).is_ok());
@@ -461,15 +516,75 @@ mod tests {
             assert!(host::decode_args::<host::EmptyArgs>(json!({field:"arbitrary renderer value"})).is_err());
         }
     }
+    fn startup_context(outcome: &str) -> host::StartupContext {
+        host::decode_startup(json!({"stateRoot":"/tmp/login-derived-state","setup":if outcome=="setup_failed" {Value::Null} else {json!({"needsSetup":outcome=="needs_setup","repo":if outcome=="needs_setup" {Value::Null} else {json!("/tmp/repo")},"gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"})},"maintenance":if outcome=="setup_failed" {Value::Null} else if matches!(outcome,"recovered"|"recovery_failed") {json!({"pending":true,"phase":"awaiting-health","fromVersion":"0.1.1","toVersion":"0.1.2","backupPath":"/tmp/backup","diagnostic":null})} else {json!({"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null})},"outcome":outcome})).unwrap()
+    }
     #[test]
     fn initial_startup_never_ensures_a_missing_or_corrupt_setup() {
         let session = session(1); let lifecycle = Mutex::new(());
-        assert!(initial_connection(&session,&lifecycle,|| Ok(json!({"needsSetup":true})), |_| panic!("New machine must await consent")).unwrap().is_none());
-        assert!(initial_connection(&session,&lifecycle,|| Err("Corrupt metadata".into()), |_| panic!("Corrupt setup must not be replaced")).is_err());
+        assert!(initial_connection(&session,&lifecycle,&startup_context("needs_setup"), |_,_| panic!("New machine must await consent"),|| panic!("Not recovered")).unwrap().is_none());
+        assert!(initial_connection(&session,&lifecycle,&startup_context("setup_failed"), |_,_| panic!("Corrupt setup must not be replaced"),|| panic!("Not recovered")).is_err());
         assert_eq!(session.lock().unwrap().generation,1);
         let (agent,fixture) = idle_agent();
-        assert_eq!(initial_connection(&session,&lifecycle,|| Ok(json!({"needsSetup":false})), |_| Ok(agent)).unwrap().unwrap()["generation"],2);
+        assert_eq!(initial_connection(&session,&lifecycle,&startup_context("ready"), |_,root| {assert_eq!(root, std::path::Path::new("/tmp/login-derived-state"));Ok(agent)},|| panic!("Not recovered")).unwrap().unwrap()["generation"],2);
         close(&session); fixture.finish();
+    }
+    #[test]
+    fn failed_startup_keeps_update_preferences_root_without_another_lifecycle_helper() {
+        let context=Ok(startup_context("ensure_failed"));
+        assert_eq!(startup_preferences(&context),Some(PathBuf::from("/tmp/login-derived-state/agent/update-settings.json")));
+        let session=session(1);let lifecycle=Mutex::new(());
+        assert!(initial_connection(&session,&lifecycle,context.as_ref().unwrap(),|_,_| panic!("No second ensure"),|| panic!("No recovery")).is_err());
+        assert_eq!(session.lock().unwrap().generation,1);
+        assert_eq!(startup_preferences(&Err("Invalid startup root".into())),None);
+    }
+    #[test]
+    fn startup_connects_directly_after_one_helper_and_validates_installed_identity() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        for matching in [true,false] {
+            let fixture=Fixture::new(|mut wire|{wire.handshake();wire.discard_until_close();});
+            fs::write(fixture.root.join("agent.mjs"),"fake helper").unwrap();
+            fs::write(fixture.root.join("runtime.json"),json!({"agentVersion":if matching {"fake-v1"} else {"wrong-identity"}}).to_string()).unwrap();
+            let mut context=json!({"stateRoot":fixture.root,"setup":{"needsSetup":false,"repo":"/tmp/repo","gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"},"maintenance":{"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null},"outcome":"ready"});
+            context["stateRoot"]=json!(fixture.root);
+            fs::write(fixture.root.join("bun"),format!("#!/bin/sh\n[ \"$2\" = --startup ] && [ \"$3\" = --app ] && [ \"$#\" = 4 ] || exit 8\nread input\nprintf '%s\\n' '{}'\nprintf '%s\\n' startup >> calls\n",context)).unwrap();
+            fs::set_permissions(fixture.root.join("bun"),fs::Permissions::from_mode(0o700)).unwrap();
+            let context=host::desktop_startup(&fixture.root,"0.1.2").unwrap();let session=session(1);let lifecycle=Mutex::new(());
+            let result=initial_connection(&session,&lifecycle,&context,|_,root|connect_runtime(&fixture.root,root,Arc::new(|_|{}),Operation::AppStartup),||panic!("No recovery"));
+            assert_eq!(fs::read_to_string(fixture.root.join("calls")).unwrap(),"startup\n");
+            if matching {assert!(result.is_ok());assert!(generation(&session).is_ok());}
+            else {assert!(result.unwrap_err().contains("installed app runtime"));assert!(generation(&session).is_err());}
+            close(&session);fixture.finish();
+        }
+    }
+    #[test]
+    fn initial_setup_snapshot_is_consumed_once_and_restart_invalidates_it() {
+        let session=session(1);let lifecycle=Mutex::new(());let context=startup_context("needs_setup");
+        initial_connection(&session,&lifecycle,&context,|_,_| panic!("No ensure"),||{}).unwrap();
+        let first=setup_state_response(&session,&lifecycle,|| panic!("Startup snapshot must avoid probing again")).unwrap();
+        assert_eq!(first["data"]["needsSetup"],true);
+        assert_eq!(setup_state_response(&session,&lifecycle,|| Ok(json!({"fresh":true}))).unwrap()["data"],json!({"fresh":true}));
+        initial_connection(&session,&lifecycle,&context,|_,_| panic!("No ensure"),||{}).unwrap();
+        assert!(mutating_helper_response(&session,&lifecycle,|| Err("Git installer failed".into())).is_err());
+        assert_eq!(setup_state_response(&session,&lifecycle,|| Ok(json!({"freshAfterGit":true}))).unwrap()["data"],json!({"freshAfterGit":true}));
+        initial_connection(&session,&lifecycle,&context,|_,_| panic!("No ensure"),||{}).unwrap();
+        assert!(restart(&session,&lifecycle,|_| Err("offline".into())).is_err());
+        assert_eq!(setup_state_response(&session,&lifecycle,|| Ok(json!({"fresh":true}))).unwrap()["data"],json!({"fresh":true}));
+    }
+    #[test]
+    fn recovery_is_cleared_only_after_successful_current_connection_publication() {
+        let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));let recovered=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let context=startup_context("recovered");
+        assert!(initial_connection(&session,&lifecycle,&context,|_,_| Err("Wrong native runtime identity".into()),|| recovered.store(true,std::sync::atomic::Ordering::SeqCst)).is_err());
+        assert!(!recovered.load(std::sync::atomic::Ordering::SeqCst));
+        let (agent,fixture)=idle_agent();let (entered,received)=mpsc::channel();let(release,held)=mpsc::channel();let s=session.clone();let l=lifecycle.clone();let r=recovered.clone();
+        let job=thread::spawn(move || initial_connection(&s,&l,&context,|_,_|{entered.send(()).unwrap();held.recv().unwrap();Ok(agent)},||r.store(true,std::sync::atomic::Ordering::SeqCst)));
+        received.recv_timeout(Duration::from_secs(1)).unwrap();close(&session);release.send(()).unwrap();
+        assert!(job.join().unwrap().is_err());assert!(!recovered.load(std::sync::atomic::Ordering::SeqCst));fixture.finish();
+        assert!(setup_state_response(&session,&lifecycle,||panic!("Closed session must refuse before helper")).is_err());
+        let live=self::session(1);let (agent,fixture)=idle_agent();
+        initial_connection(&live,&lifecycle,&startup_context("recovered"),|_,_|Ok(agent),||recovered.store(true,std::sync::atomic::Ordering::SeqCst)).unwrap();
+        assert!(recovered.load(std::sync::atomic::Ordering::SeqCst));close(&live);fixture.finish();
     }
     #[test]
     fn bootstrap_then_ensure_uses_one_reservation_and_preserves_failure_for_retry() {
