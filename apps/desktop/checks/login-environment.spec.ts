@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { missingTools, probeLoginEnvironment } from '../agent/login-environment.ts';
+import type { StartupPhase, StartupStatus } from '../agent/startup-diagnostics.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'nortuscc-login-env-'));
 const unixShell = { skip: process.platform === 'win32' ? 'requires POSIX shell scripts and process groups' : false };
@@ -45,6 +46,23 @@ test('a hanging shell times out and falls back to the inherited PATH', unixShell
   assert.match(result.error!, /timed out/);
 });
 
+test('probe timing distinguishes shell readiness from a stalled runtime and joins cleanup once', unixShell, async () => {
+  const shell = script('timed-shell', 'exec /bin/sh -c "$2"');
+  const runtime = script('timed-runtime', '/bin/sleep 30');
+  const events: Array<[StartupPhase, StartupStatus]> = [];
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' }, runtime, timeoutMs: 1000,
+    onProgress: (phase, status) => events.push([phase, status]) });
+  assert.match(result.error!, /timed out/);
+  assert.equal(result.env.PATH, '/inherited');
+  const until = Date.now() + 1000;
+  while (!events.some(([phase, status]) => phase === 'probe_cleanup' && status === 'completed') && Date.now() < until) {
+    await new Promise(done => setTimeout(done, 10));
+  }
+  assert.deepEqual(events.filter(([phase]) => phase === 'shell_ready'), [['shell_ready', 'started'], ['shell_ready', 'completed']]);
+  assert.deepEqual(events.filter(([phase]) => phase === 'environment_ready'), [['environment_ready', 'started'], ['environment_ready', 'timed_out']]);
+  assert.deepEqual(events.filter(([phase]) => phase === 'probe_cleanup'), [['probe_cleanup', 'started'], ['probe_cleanup', 'completed']]);
+});
+
 test('a background process holding stdout does not delay the PATH or outlive the probe', unixShell, async () => {
   // An rc file that starts a background job leaves stdout open after the probe script prints.
   const pidFile = join(dir, 'background.pid');
@@ -74,6 +92,25 @@ test('a missing shell falls back with a probe error', async () => {
   const result = await probeLoginEnvironment({ env: { SHELL: join(dir, 'absent-shell'), PATH: '/inherited' } });
   assert.equal(result.env.PATH, '/inherited');
   assert.match(result.error!, /absent-shell/);
+});
+
+test('excessive shell output is bounded and never becomes diagnostic content', unixShell, async () => {
+  const shell = script('excessive-output', "printf '__NORTUSCC_ENV__'; /usr/bin/head -c 1048577 /dev/zero");
+  const events: Array<[StartupPhase, StartupStatus]> = [];
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' }, timeoutMs: 1000,
+    onProgress: (phase, status) => events.push([phase, status]) });
+  assert.match(result.error!, /output exceeds limit/);
+  assert.equal(result.env.PATH, '/inherited');
+  assert.ok(events.some(([phase, status]) => phase === 'environment_ready' && status === 'failed'));
+  assert.ok(JSON.stringify(events).length < 2048);
+});
+
+test('throwing progress observers cannot prevent captured login environment', unixShell, async () => {
+  const shell = script('observer-error', 'OBSERVED=yes\nexport OBSERVED\nexec /bin/sh -c "$2"');
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' },
+    onProgress: () => { throw new Error('secret-observer-error'); } });
+  assert.equal(result.error, undefined);
+  assert.equal(result.env.OBSERVED, 'yes');
 });
 
 test('a shell that prints no environment falls back to the inherited one', unixShell, async () => {

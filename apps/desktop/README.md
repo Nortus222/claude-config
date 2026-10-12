@@ -71,6 +71,45 @@ The agent resolves configuration from HOME, machine overrides and `state.json`'s
 
 On a disposable machine, verify inspect, selection, preview, apply, cancellation, offline recovery and Restart agent. Close the window during apply and reconnect to the continuing service. Check relocation and an upgrade while a run is active. Real launchd behavior, notifications and GUI interaction need manual verification; socket fixtures and fake Processes do not exercise the OS service manager.
 
+## Startup diagnostics
+
+Normal macOS GUI startup writes local timings to
+`~/Library/Logs/com.nortuscc.desktop/startup.log`. The foreground login service writes its
+timings to the existing `<stateRoot>/agent/agent.log`, normally
+`~/.config/nortuscc/agent/agent.log`. Fixed helper timings go to stderr; the native host
+persists only recognized structured records from its setup, paths, ensure and restart helpers.
+Maintenance-session stderr is still discarded; native `maintenance_state` timings cover the
+total duration of that startup step. Release verification, hidden notification and packaged
+smoke modes do not initialize the native log.
+
+Lines beginning `[nortuscc-startup] ` contain schema version 1, a component, operation,
+PID, run start timestamp, sequence, fixed phase/status names and monotonic milliseconds.
+Group a process run by `(pid, startedAt)`. `elapsedMs` is time since that run's diagnostic
+start; terminal phase records also include `durationMs` when the phase has a start record.
+Native timings cover GUI setup, helper execution, maintenance checks, authenticated IPC
+readiness and runtime identity. They measure native setup through agent connection, not
+renderer paint or time before Tauri setup begins.
+
+For a slow login probe, `shell_ready` measures reaching the first fixed marker after shell
+startup; `environment_ready` measures the bundled runtime's environment capture after that
+marker. `timed_out` followed by `login_probe: fallback` records the existing five-second
+fallback. Captured shell output is limited to one MiB and is never logged. Agent phases
+include lock acquisition, log rotation, service construction, scheduler/session creation,
+IPC readiness and shutdown. `shutdown: started` followed by `ipc_closed: completed` without
+`stopped` distinguishes a cleanup wait after IPC removal from never reaching IPC readiness.
+IPC closure is reported only after successful initialization. No startup timeout is shortened
+and these records do not establish the cause of an intermittent reboot failure.
+
+Structured records accept only fixed enums and safe integers, excluding environment values,
+tokens, paths, URLs and arbitrary error text. Existing unstructured agent diagnostics retain
+their prior behavior; review them for credentials before sharing. Native logging uses a
+bounded nonblocking queue, private directory/file permissions, and a nonblocking exclusive
+file lock. Unsafe or unwritable storage, a full queue, or another GUI writer can drop records
+without blocking startup. The native active file stays within one MiB and retains three
+backups before truncation; the agent retains its existing one-MiB periodic rotation and
+three archives, which can grow beyond the threshold between checks. Abrupt termination can
+lose queued records. No logs are uploaded automatically.
+
 ## Agent notifications
 
 The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the existing Review & apply view. A pending review request survives renderer startup; clicks refresh and focus that view without previewing or applying automatically.

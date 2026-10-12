@@ -1,3 +1,4 @@
+use crate::startup_diagnostics::{self, Diagnostics, Operation, Phase, Status, Trace};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -457,12 +458,18 @@ impl Agent {
     pub fn connect_notification(state_root: &Path, deadline: Instant) -> Result<Self, String> {
         Self::connect_deadline(state_root, Arc::new(|_| {}), HELLO_TIMEOUT, Some(deadline), false)
     }
-    pub fn connect_ready(state_root: &Path, emit: Emit) -> Result<Self, String> {
-        Self::connect_ready_timeout(state_root, emit, READY_TIMEOUT)
+    pub fn connect_ready(state_root: &Path, emit: Emit, operation: Operation) -> Result<Self, String> {
+        Self::connect_ready_observed(state_root, emit, READY_TIMEOUT, startup_diagnostics::current(), operation)
     }
+    #[cfg(test)]
     fn connect_ready_timeout(state_root: &Path, emit: Emit, timeout: Duration) -> Result<Self, String> {
-        let deadline = Instant::now() + timeout;
-        loop {
+        Self::connect_ready_observed(state_root, emit, timeout, None, Operation::Ensure)
+    }
+    fn connect_ready_observed(state_root: &Path, emit: Emit, timeout: Duration, diagnostics: Option<Diagnostics>, operation: Operation) -> Result<Self, String> {
+        let trace = Trace::new(diagnostics, operation);
+        trace.record(Phase::ReadyWait, Status::Started, None);
+        let started = Instant::now(); let deadline = started + timeout;
+        let result = (|| { loop {
             match Self::connect_deadline(state_root, emit.clone(), HELLO_TIMEOUT, Some(deadline), true) {
                 Ok(agent) => return Ok(agent),
                 Err(error) if error.starts_with("UNREACHABLE:") => {
@@ -471,7 +478,9 @@ impl Agent {
                 }
                 Err(error) => return Err(error),
             }
-        }
+        } })();
+        trace.record(Phase::ReadyWait, if result.is_ok() { Status::Completed } else if Instant::now() >= deadline { Status::TimedOut } else { Status::Failed }, Some(started.elapsed()));
+        result
     }
     pub fn request_before(&self, request: Request, deadline: Instant) -> Result<Value, String> {
         self.request_timeout(request, deadline.saturating_duration_since(Instant::now()))
@@ -575,6 +584,13 @@ pub enum Setup {
     MaintenanceState,
 }
 impl Setup {
+    pub fn operation(self) -> Operation {
+        match self {
+            Self::Ensure => Operation::Ensure, Self::Restart => Operation::Restart, Self::Paths => Operation::Paths,
+            Self::State => Operation::SetupState, Self::Bootstrap => Operation::Bootstrap, Self::InstallGit => Operation::InstallGit,
+            Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState,
+        }
+    }
     fn argument(self) -> &'static str {
         match self {
             Self::Ensure => "--ensure",
@@ -697,11 +713,49 @@ fn run_helper(command: Command, timeout: Duration) -> Result<PathBuf, String> {
 fn run_json_helper(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<Value, String> {
     run_json_helper_with_cancel(command, timeout, input, Duration::ZERO)
 }
-fn run_json_helper_with_cancel(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
-    if input.as_ref().is_some_and(|v| v.len() > 4096) { return Err("Setup input exceeds limit".into()); }
-    wait_json_helper(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout)
+fn run_json_helper_with_cancel(command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
+    run_json_helper_observed(command, timeout, input, cancel_timeout, startup_diagnostics::current())
 }
-fn wait_json_helper(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
+fn helper_operation(command: &Command) -> Operation {
+    command.get_args().find_map(|arg| match arg.to_str()? {
+        "--ensure" => Some(Operation::Ensure), "--restart" => Some(Operation::Restart), "--paths" => Some(Operation::Paths),
+        "--setup-state" => Some(Operation::SetupState), "--bootstrap" => Some(Operation::Bootstrap), "--install-git" => Some(Operation::InstallGit),
+        "--prepare-update" => Some(Operation::PrepareUpdate), "--recover-update" => Some(Operation::RecoverUpdate), "--maintenance-state" => Some(Operation::MaintenanceState), _ => None,
+    }).unwrap_or(Operation::Invalid)
+}
+fn run_json_helper_observed(mut command: Command, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
+    let trace = Trace::new(diagnostics.clone(), helper_operation(&command));
+    trace.record(Phase::Helper, Status::Started, None); let started = Instant::now();
+    let result = (|| {
+        if input.as_ref().is_some_and(|v| v.len() > 4096) { return Err("Setup input exceeds limit".into()); }
+        wait_json_helper_observed(command.spawn().map_err(|e| e.to_string())?, timeout, input, cancel_timeout, diagnostics)
+    })();
+    trace.record(Phase::Helper, match &result { Ok(_) => Status::Completed, Err(error) if error.contains("timed out") => Status::TimedOut, Err(_) => Status::Failed }, Some(started.elapsed()));
+    result
+}
+/// Drain arbitrary stderr without retaining raw output or incomplete/oversized records.
+fn forward_helper_stderr(reader: &mut impl BufRead, diagnostics: Option<&Diagnostics>) {
+    let mut line = Vec::new(); let mut oversized = false;
+    loop {
+        let Ok(bytes) = reader.fill_buf() else { return; }; if bytes.is_empty() { return; }
+        let length = bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |i| i + 1);
+        let complete = bytes[length - 1] == b'\n';
+        if !oversized {
+            if line.len() + length > 2048 { line.clear(); oversized = true; }
+            else { line.extend_from_slice(&bytes[..length]); }
+        }
+        reader.consume(length);
+        if complete {
+            if !oversized { if let Some(diagnostics) = diagnostics { diagnostics.forward(&line[..line.len() - 1]); } }
+            line.clear(); oversized = false;
+        }
+    }
+}
+#[cfg(test)]
+fn wait_json_helper(child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
+    wait_json_helper_observed(child, timeout, input, cancel_timeout, None)
+}
+fn wait_json_helper_observed(mut child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration, diagnostics: Option<Diagnostics>) -> Result<Value, String> {
     let stdout = child.stdout.take().ok_or("Missing helper stdout")?;
     let stderr = child.stderr.take().ok_or("Missing helper stderr")?;
     let (send, receive) = mpsc::channel();
@@ -718,7 +772,7 @@ fn wait_json_helper(mut child: std::process::Child, timeout: Duration, input: Op
     let (done, drained) = mpsc::channel();
     let errors = thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        while let Ok(Some(_)) = bounded_line(&mut reader) {} // Diagnostics never enter renderer or token-bearing logs.
+        forward_helper_stderr(&mut reader, diagnostics.as_ref()); // Persist only reconstructed closed records; stdout and renderer errors are unchanged.
         let _ = done.send(());
     });
     let (sent, written) = mpsc::channel();
@@ -1114,6 +1168,21 @@ mod socket_tests {
         drop(agent); fixture.finish();
     }
     #[test]
+    fn readiness_diagnostics_distinguish_authenticated_success_from_timeout() {
+        use crate::startup_diagnostics::{Diagnostics, Operation, Status};
+        let records = Arc::new(Mutex::new(Vec::new())); let captured = records.clone();
+        let diagnostics = Diagnostics::new(move |record| captured.lock().unwrap().push(serde_json::to_value(record).unwrap()));
+        let fixture = Fixture::new(|mut wire| { wire.handshake(); wire.discard_until_close(); });
+        let agent = Agent::connect_ready_observed(&fixture.root, Arc::new(|_| {}), Duration::from_secs(1), Some(diagnostics.clone()), Operation::Ensure).unwrap();
+        agent.disconnect(); fixture.finish();
+        let root = scratch();
+        assert!(Agent::connect_ready_observed(&root, Arc::new(|_| {}), Duration::from_millis(20), Some(diagnostics), Operation::Restart).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        let records = records.lock().unwrap(); assert_eq!(records.len(), 4);
+        assert_eq!(records[1]["status"], json!(Status::Completed)); assert_eq!(records[3]["status"], json!(Status::TimedOut));
+        assert_eq!(records[3]["operation"], json!(Operation::Restart)); assert!(records[3]["durationMs"].as_u64().unwrap() >= 20);
+    }
+    #[test]
     fn readiness_waits_for_a_delayed_token_and_socket_boundedly() {
         let root = scratch(); let dir = root.join("agent"); std::fs::create_dir(&dir).unwrap(); let delayed = dir.clone();
         let worker = thread::spawn(move || {
@@ -1160,6 +1229,38 @@ mod helper_tests {
         std::fs::write(root.join("bun"), format!("#!/bin/sh\n{source}\n")).unwrap();
         std::fs::set_permissions(root.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
         root
+    }
+    #[test]
+    fn helper_diagnostics_forward_only_safe_records_and_preserve_stdout_on_failure_or_timeout() {
+        use crate::startup_diagnostics::{Diagnostics, Operation, Phase, Status};
+        for (source, outcome) in [
+            (r#"printf '%s\n' '[nortuscc-startup] {"v":1,"component":"helper","pid":7,"startedAt":11,"seq":1,"elapsedMs":2,"phase":"login_probe","status":"completed","operation":"ensure"}' >&2
+printf '%s\n' 'token SECRET' '[nortuscc-startup] {"secret":"SECRET"}' >&2
+printf '{"stateRoot":"/tmp/fake-state"}\n'"#, Status::Completed),
+            ("printf 'token SECRET\\n' >&2; exit 9", Status::Failed),
+            ("printf 'token SECRET\\n' >&2; sleep 2", Status::TimedOut),
+        ] {
+            let root = resources(source); let records = Arc::new(Mutex::new(Vec::new())); let captured = records.clone();
+            let diagnostics = Diagnostics::new(move |record| captured.lock().unwrap().push(serde_json::to_value(record).unwrap()));
+            let result = run_json_helper_observed(helper_command(&root, Setup::Ensure, None).unwrap(), Duration::from_millis(100), None, Duration::ZERO, Some(diagnostics));
+            if outcome == Status::Completed { assert_eq!(result.unwrap(), json!({"stateRoot":"/tmp/fake-state"})); } else { assert!(result.is_err()); }
+            let records = records.lock().unwrap(); let native: Vec<_> = records.iter().filter(|r| r["component"] == "native").collect();
+            assert_eq!(native.len(), 2); assert_eq!(native[0]["operation"], json!(Operation::Ensure));
+            assert_eq!(native[0]["phase"], json!(Phase::Helper)); assert_eq!(native[1]["status"], json!(outcome)); assert!(native[1]["durationMs"].is_u64());
+            assert!(!serde_json::to_string(&*records).unwrap().contains("SECRET"));
+            if outcome == Status::Completed { assert_eq!(records.iter().filter(|r| r["component"] == "helper").count(), 1); }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn helper_diagnostics_drop_oversized_and_incomplete_lines_but_drain_following_records() {
+        use crate::startup_diagnostics::Diagnostics;
+        let records = Arc::new(Mutex::new(Vec::new())); let captured = records.clone();
+        let diagnostics = Diagnostics::new(move |record| captured.lock().unwrap().push(serde_json::to_value(record).unwrap()));
+        let good = r#"[nortuscc-startup] {"v":1,"component":"helper","pid":7,"startedAt":11,"seq":1,"elapsedMs":2,"phase":"entry","status":"started","operation":"ensure"}"#;
+        let input = format!("{}\n{good}\n{good}", "SECRET".repeat(200_000));
+        forward_helper_stderr(&mut std::io::Cursor::new(input.into_bytes()), Some(&diagnostics));
+        assert_eq!(records.lock().unwrap().len(), 1);
     }
     #[test]
     fn bootstrap_outer_timeout_joins_detached_git_and_removes_only_its_owned_directory_and_lock() {

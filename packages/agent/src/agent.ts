@@ -165,12 +165,17 @@ const untilAborted = (signal: AbortSignal): Effect.Effect<void> =>
     return Effect.sync(() => signal.removeEventListener('abort', onAbort));
   });
 
+export type AgentLifecyclePhase = 'lock' | 'log_rotation' | 'services' | 'scheduler' | 'session' | 'ipc' | 'running' | 'shutdown' | 'ipc_closed' | 'stopped';
+export type AgentLifecycleStatus = 'started' | 'completed' | 'failed' | 'cancelled';
+
 // The service's entry point (#79 runs it): builds every service from `paths` and runs until
 // interrupted, `signal` aborts or, with `ipc`, a client sends `shutdown`; each closes the agent,
 // cancelling an in-flight auto-apply. A pid lock makes it the only agent per state root: a second
 // fails LockHeld before touching state, logs or the socket. The caller builds the per-job `domains`
 // factory and `source` at the same boundary as `paths`, and decides `ipc` (default off). Optional
 // `logOutput` captures both streams after the lock; `onStarted` runs once logging is ready.
+// `onLifecycle` observes fixed phase boundaries best effort; a thrown observer never changes the
+// result. `stopped` runs after scoped cleanup, including IPC closure and pid-lock release.
 export const runAgent = (input: {
   readonly paths: MachinePathsValue;
   readonly domains: AgentDomains;
@@ -183,35 +188,58 @@ export const runAgent = (input: {
   readonly notifications?: { readonly platform: string; readonly timeoutMs?: number };
   readonly logOutput?: AgentLogOutput;
   readonly onStarted?: () => void;
+  readonly onLifecycle?: (phase: AgentLifecyclePhase, status: AgentLifecycleStatus) => void;
   readonly signal?: AbortSignal;
-}) =>
-  Effect.scoped(Effect.gen(function* () {
+}) => {
+  const observe = (phase: AgentLifecyclePhase, status: AgentLifecycleStatus) => Effect.sync(() => {
+    try { input.onLifecycle?.(phase, status); } catch {}
+  });
+  const outcome = (exit: Exit.Exit<unknown, unknown>): AgentLifecycleStatus => Exit.isSuccess(exit) ? 'completed'
+    : Cause.hasInterruptsOnly(exit.cause) ? 'cancelled' : 'failed';
+  const phase = <A, E, R>(name: AgentLifecyclePhase, effect: Effect.Effect<A, E, R>) =>
+    observe(name, 'started').pipe(Effect.andThen(effect), Effect.onExit((exit) => observe(name, outcome(exit))));
+  return Effect.scoped(Effect.gen(function* () {
     // The lock comes first: logs and leftover sockets may only be changed by their owning agent.
-    yield* acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock'));
+    yield* phase('lock', acquirePidLock(join(input.paths.stateRoot, 'agent', 'agent.lock')));
     const logPath = join(input.paths.stateRoot, 'agent', 'agent.log');
-    if (input.logOutput) {
-      const output = input.logOutput;
-      yield* captureAgentOutput(logPath, output);
-      // This finalizer runs before stream restoration, so a fatal exit remains in the log.
-      yield* Effect.addFinalizer((exit) => Effect.sync(() => {
-        if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
-          try { output.stderr.write(`Agent failed: ${describe(exit.cause)}\n`); } catch {}
-        }
-      }));
-    }
-    yield* startAgentLogRotation(logPath);
+    yield* phase('log_rotation', Effect.gen(function* () {
+      if (input.logOutput) {
+        const output = input.logOutput;
+        yield* captureAgentOutput(logPath, output);
+        // This finalizer runs before stream restoration, so a fatal exit remains in the log.
+        yield* Effect.addFinalizer((exit) => Effect.sync(() => {
+          if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
+            try { output.stderr.write(`Agent failed: ${describe(exit.cause)}\n`); } catch {}
+          }
+        }));
+      }
+      yield* startAgentLogRotation(logPath);
+    }));
     if (input.onStarted) yield* Effect.sync(input.onStarted);
     const shutdown = new AbortController();
     const signal = input.signal ? AbortSignal.any([input.signal, shutdown.signal]) : shutdown.signal;
-    const notifier = input.notifications ? yield* makeNotifier(input.notifications) : undefined;
-    const hosted = input.hosted ? yield* configuredHostedRuntime(input.paths, input.hosted, {
-      domains: input.domains, signal, os: input.hosted.platform === 'darwin' ? 'macos' : input.hosted.platform === 'win32' ? 'windows' : 'linux',
-    }) : undefined;
-    const handle = yield* startAgent(input.domains, { signal, hosted, deferStart: true, onStatus: notifier?.notify });
+    const { notifier, hosted } = yield* phase('services', Effect.gen(function* () {
+      const notifier = input.notifications ? yield* makeNotifier(input.notifications) : undefined;
+      const hosted = input.hosted ? yield* configuredHostedRuntime(input.paths, input.hosted, {
+        domains: input.domains, signal, os: input.hosted.platform === 'darwin' ? 'macos' : input.hosted.platform === 'win32' ? 'windows' : 'linux',
+      }) : undefined;
+      return { notifier, hosted };
+    }));
+    const handle = yield* phase('scheduler', startAgent(input.domains, { signal, hosted, deferStart: true, onStatus: notifier?.notify }));
     if (input.ipc) {
-      const session = yield* makeSession(handle, { signal, domains: input.domains });
-      yield* serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, notifier, onShutdown: () => shutdown.abort() });
+      const session = yield* phase('session', makeSession(handle, { signal, domains: input.domains }));
+      let ipcReady = false;
+      // IPC finalizers register later and therefore finish before this observation; the scheduler
+      // and pid lock close afterward. A failed initialization may never register file cleanup.
+      yield* Effect.addFinalizer(() => ipcReady ? observe('ipc_closed', 'completed') : Effect.void);
+      yield* phase('ipc', serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, notifier, onShutdown: () => shutdown.abort() }));
+      ipcReady = true;
     }
     yield* Effect.forkScoped(handle.request('start'));
+    yield* observe('running', 'started');
     yield* untilAborted(signal);
-  })).pipe(Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, clock: input.clock }), input.source)));
+  }).pipe(Effect.onExit(() => observe('shutdown', 'started')))).pipe(
+    Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, clock: input.clock }), input.source)),
+    Effect.onExit((exit) => observe('stopped', outcome(exit))),
+  );
+};

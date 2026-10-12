@@ -8,6 +8,8 @@ import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '
 import { HostedFailure, HostedTransport } from '@nortuscc/hosted-client';
 import { AgentError, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
 import { runDesktopEntry } from '../agent/main.ts';
+import { STARTUP_PREFIX } from '../agent/startup-diagnostics.ts';
+import { probeLoginEnvironment } from '../agent/login-environment.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
   const home = mkdtempSync(join(tmpdir(), 'nae-'));
@@ -47,11 +49,29 @@ const fixture = (t: { after: (f: () => void) => void }) => {
   return { input, home, repo, stateRoot, paths, stdout, stderr, commands, probes: () => probes };
 };
 
+const startupRecords = (lines: ReadonlyArray<string>) => lines.filter(line => line.startsWith(STARTUP_PREFIX)).map(line => JSON.parse(line.slice(STARTUP_PREFIX.length)));
+
+test('paths helper emits safe phase timings while keeping its one-record stdout contract', async (t) => {
+  const f = fixture(t);
+  const secret = 'never-log-this-credential';
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--paths'],
+    probe: async () => ({ env: { HOME: f.home, PATH: '/fake', NORTUSCC_STATE_DIR: f.stateRoot, API_TOKEN: secret } }) }), 0);
+  assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
+  const records = startupRecords(f.stderr);
+  assert.ok(records.some(r => r.phase === 'login_probe' && r.status === 'completed'));
+  assert.ok(records.some(r => r.phase === 'paths' && r.status === 'completed'));
+  assert.ok(records.some(r => r.phase === 'entry' && r.status === 'completed'));
+  assert.ok(records.every(r => r.component === 'helper' && r.operation === 'paths' && Number.isSafeInteger(r.elapsedMs)));
+  assert.equal(f.stderr.join('').includes(secret), false);
+  assert.equal(f.stderr.join('').includes(f.home), false, 'structured diagnostics contain no paths');
+  assert.deepEqual(f.commands, [], 'read-only helper does not register services');
+});
+
 test('the ensure helper resolves recorded checkout from login environment and prints exactly one result', async (t) => {
   const f = fixture(t);
   assert.equal(await runDesktopEntry(f.input), 0);
   assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
-  assert.deepEqual(f.stderr, []);
+  assert.deepEqual(f.stderr.filter(line => !line.startsWith(STARTUP_PREFIX)), []);
   assert.equal(f.probes(), 1);
   assert.ok(f.commands.some((c) => c.cmd === 'launchctl'));
   assert.equal(JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8')).agentVersion, 'bundle-hash');
@@ -109,6 +129,40 @@ test('foreground resource agent serves app hello and survives disconnect until s
     assert.ok(f.commands.every((c) => c.cmd !== 'launchctl'), 'foreground does not register a service');
     assert.equal(f.probes(), 1);
   } finally { second.close(); }
+});
+
+test('a real login timeout reports fallback and still reaches IPC readiness and scoped shutdown', {
+  skip: process.platform === 'win32' ? 'requires Unix IPC and process groups' : false, timeout: 10000,
+}, async t => {
+  const f = fixture(t);
+  const shell = join(f.home, 'slow-login-shell');
+  writeFileSync(shell, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(shell, 0o755);
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
+    env: { ...f.input.env, SHELL: shell, API_TOKEN: 'secret-never-in-trace' },
+    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100 }) });
+  let conn: AgentConnection | undefined;
+  try {
+    const until = Date.now() + 3000;
+    while (!conn && Date.now() < until) {
+      try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); }
+      catch { await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.ok(conn, f.stderr.join(''));
+    const ready = startupRecords(f.stderr);
+    assert.ok(ready.some(r => r.phase === 'shell_ready' && r.status === 'timed_out'));
+    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs >= 80));
+    assert.ok(ready.some(r => r.phase === 'ipc' && r.status === 'completed'));
+    assert.equal(f.stderr.join('').includes('secret-never-in-trace'), false);
+    await conn.request({ command: 'shutdown' });
+    assert.equal(await running, 0);
+    const stopped = startupRecords(f.stderr);
+    assert.ok(stopped.some(r => r.phase === 'shutdown' && r.status === 'started'));
+    assert.ok(stopped.some(r => r.phase === 'ipc_closed' && r.status === 'completed'));
+    assert.ok(stopped.some(r => r.phase === 'stopped' && r.status === 'completed'));
+    assert.deepEqual(f.stdout, []);
+    assert.ok(f.commands.every(c => c.cmd === 'git'), 'no real service/keychain/notification command');
+  } finally { conn?.close(); controller.abort(); await running; }
 });
 
 test('registered service hands selected SHELL and startup directory to its foreground probe', async (t) => {
@@ -371,4 +425,20 @@ test('cancelled maintenance helper returns bounded failure without an unhandled 
   const stdin = async function* () { yield '{"fromVersion":"1.0.0","toVersion":"1.1.0"}\n'; };
   assert.equal(await runDesktopEntry({ ...f.input, args: ['--prepare-update', '--app', f.input.args[2]!], stdin: stdin(), signal: controller.signal }), 1);
   assert.deepEqual(f.commands, []);
+});
+
+test('signal cancellation of a promise-based helper is logged as cancellation at both boundaries', { timeout: 5000 }, async t => {
+  const f = fixture(t);
+  const controller = new AbortController(); t.after(() => controller.abort());
+  let entered!: () => void;
+  const invoked = new Promise<void>(done => { entered = done; });
+  const processes = Layer.succeed(Processes, { run: () => Effect.sync(entered).pipe(Effect.andThen(Effect.never)) });
+  const running = runDesktopEntry({ ...f.input, args: ['--install-git'], processes, signal: controller.signal });
+  await invoked;
+  controller.abort();
+  assert.equal(await running, 1);
+  const records = startupRecords(f.stderr);
+  assert.ok(records.some(r => r.phase === 'lifecycle' && r.status === 'cancelled'));
+  assert.equal(records.some(r => r.phase === 'lifecycle' && r.status === 'failed'), false);
+  assert.ok(records.some(r => r.phase === 'entry' && r.status === 'cancelled'));
 });
