@@ -7,7 +7,7 @@ import { UpdateController } from './update-controller.ts';
 import { UpdateView } from './update-view.tsx';
 import { nativeAvailable, nativeBridge, nativeUpdateBridge } from './bridge.ts';
 import { ReviewView } from './review-view.tsx';
-import { OverviewView, ResolvedView, SettingsView, StartupBoundary, ShellView, screenForReview, type Screen } from './views.tsx';
+import { OverviewView, ResolvedView, SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, type Screen } from './views.tsx';
 import './style.css';
 
 function App() {
@@ -48,7 +48,7 @@ function App() {
   }, [screen, state.reviewRequested, setupState.phase, state.initialReadPending, state.waitingForReport]);
 
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
-    updates={<UpdateView state={updateState} controller={updates} />}>
+    updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
     <ShellView screen={screen} navigate={setScreen}>
       {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
       {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}

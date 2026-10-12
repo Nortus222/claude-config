@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SetupView, StartupBoundary, SettingsView, OverviewView, ResolvedView, ShellView, screenForReview } from '../src/views.tsx';
+import { SetupView, StartupBoundary, updateAttention, SettingsView, OverviewView, ResolvedView, ShellView, screenForReview } from '../src/views.tsx';
+import { UpdateController } from '../src/update-controller.ts';
+import { UpdateView } from '../src/update-view.tsx';
 import { ReviewView } from '../src/review-view.tsx';
 import { SetupController } from '../src/setup-controller.ts';
 import { AccountController } from '../src/account-controller.ts';
@@ -63,13 +65,21 @@ test('an existing installation waiting for native setup does not flash first-run
   await check;
   try {
     assert.match(waiting, /Checking local setup/);
+    assert.match(waiting, /aria-busy="true"/);
+    assert.match(waiting, /role="status" aria-live="polite"/);
+    assert.match(waiting, /aria-current="step"[^>]*>.*?Local setup/);
+    assert.doesNotMatch(waiting, /Local setup[^<]*<[^>]*>Complete|Agent connection[^<]*<[^>]*>Complete|[0-9]+%/);
     assert.match(waiting, /Updates remain available/);
     assert.doesNotMatch(waiting, /FIRST RUN|Set up this Mac|Configurations to manage|Use this repository and set up/);
     assert.match(connecting, /Connecting to the local agent/);
+    assert.match(connecting, /Local setup<\/span><span[^>]*>Complete/);
+    assert.match(connecting, /aria-current="step"[^>]*>.*?Agent connection/);
     assert.match(connecting, /Updates remain available/);
     assert.doesNotMatch(connecting, /role="alert"|Last inspection:|<strong>/);
     for (const markup of [readingStatus, inspecting]) {
-      assert.match(markup, /Reading local inspection/);
+      assert.match(markup, /Loading your configuration/);
+      assert.match(markup, /Agent connection<\/span><span[^>]*>Complete/);
+      assert.match(markup, /aria-current="step"[^>]*>.*?Local inspection/);
       assert.match(markup, /Updates remain available/);
       assert.doesNotMatch(markup, /FIRST RUN|role="alert"|Last inspection:|<strong>/);
     }
@@ -112,6 +122,8 @@ test('setup failure renders retained setup recovery and Updates without first-ru
     updates: createElement('p', null, 'Updates remain available'), children: createElement('p', null, 'Operational view') }));
   assert.match(markup, /role="alert"|Recheck setup|existing setup has been retained|Updates remain available/);
   assert.doesNotMatch(markup, /FIRST RUN|Configurations to manage|Use this repository and set up|fixture private error|Operational view/);
+  assert.match(markup, /aria-busy="false"/);
+  assert.doesNotMatch(markup, /startup-activity|aria-current="step"/);
   setup.dispose(); c.dispose();
 });
 test('initial NO_REPORT shows startup progress until real status and inspection arrive', async () => {
@@ -223,4 +235,37 @@ test('Review remains usable locally with selection, preview and external activit
 test('new notification requests route every screen to Review without previewing or applying', () => {
   for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2), 'review');
   assert.equal(screenForReview('settings', 2, 2), 'settings');
+});
+
+test('startup updates stay compact until a real update needs attention or a failed read needs retry', async () => {
+  const bridge: Bridge = { subscribe: async () => () => {}, invoke: async () => ({ generation: 1, data: null }) };
+  const c = new MachineController(bridge); const setup = new SetupController(bridge, c);
+  const render = (updates: UpdateController) => renderToStaticMarkup(createElement(StartupBoundary, {
+    setup: setup.state, setupController: setup, machine: c.state, machineController: c, updatesAttention: updateAttention(updates.state),
+    updates: createElement(UpdateView, { state: updates.state, controller: updates }), children: null,
+  }));
+  try {
+    for (const phase of ['idle', 'available', 'downloading', 'verified', 'error'] as const) {
+      const updates = new UpdateController({ invoke: async () => ({ installedVersion: '0.1.5', enabled: true, automaticChecks: false, phase, availableVersion: phase === 'idle' ? null : '0.1.6', notes: null, downloadedBytes: 0, totalBytes: null, diagnostic: phase === 'error' ? 'Download failed.' : null }) }, () => () => {});
+      await updates.start();
+      const markup = render(updates);
+      assert.match(markup, phase === 'idle' ? /<details class="startup-update-panel"><summary>/ : /<details class="startup-update-panel" open=""><summary>/);
+      assert.match(markup, /Installed version: 0.1.5/);
+      if (phase === 'available') { assert.match(markup, /Download update/); updates.defer(); assert.equal(updateAttention(updates.state), null); }
+      if (phase === 'downloading') {
+        assert.match(markup, /Total size is unknown/);
+        assert.match(markup, /<progress aria-label="Update download"><\/progress>/);
+        assert.match(markup, /<button>Cancel<\/button>/);
+      }
+      if (phase === 'verified') assert.match(markup, /Install and restart/);
+      if (phase === 'error') assert.match(markup, /role="alert"[^>]*>Download failed/);
+      updates.dispose();
+    }
+    const failed = new UpdateController({ invoke: async () => { throw new Error('private transport detail'); } }, () => () => {});
+    await failed.start();
+    assert.match(render(failed), /<details class="startup-update-panel" open=""><summary>/);
+    assert.match(render(failed), /Retry check/);
+    assert.doesNotMatch(render(failed), /private transport detail/);
+    failed.dispose();
+  } finally { setup.dispose(); c.dispose(); }
 });

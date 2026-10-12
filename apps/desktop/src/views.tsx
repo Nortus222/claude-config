@@ -1,9 +1,10 @@
-import React, { useState, type ReactNode } from 'react';
+import React, { useEffect, useState, type ReactNode } from 'react';
 import type { WireHostedState } from '@nortuscc/agent/ipc/protocol';
 import type { Policy } from '@nortuscc/hosted-protocol';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import type { SetupController, SetupViewState } from './setup-controller.ts';
 import type { AccountController, AccountViewState } from './account-controller.ts';
+import type { UpdateViewState } from './update-controller.ts';
 import type { MachineController, ViewState } from './controller.ts';
 
 export type Screen = 'overview' | 'review' | 'resolved' | 'settings';
@@ -31,19 +32,14 @@ export function ShellView({ screen, navigate, children }: { screen: Screen; navi
 
 const picks = [['both', 'Claude and Codex'], ['claude', 'Claude only'], ['codex', 'Codex only'], ['neither', 'Neither']] as const;
 export function SetupView({ state, controller }: { state: SetupViewState; controller: SetupController }) {
-  if (state.phase === 'checking' || state.phase === 'error') return (
-    <main className="onboarding startup-view">
-      <p className="eyebrow">CLAUDE CONFIG</p>
-      <h1>{state.phase === 'error' ? 'Local setup needs attention' : 'Opening Claude Config'}</h1>
-      <section className="form-section">
-        <p role={state.phase === 'error' ? 'alert' : 'status'}>{state.detail}</p>
-        {state.phase === 'error' ? <>
-          <p className="muted">Your existing setup has been retained. Recheck it before continuing.</p>
-          <button disabled={state.pending} onClick={() => void controller.check()}>Recheck setup</button>
-        </> : null}
-      </section>
-    </main>
-  );
+  if (state.phase === 'checking' || state.phase === 'error') return <StartupCard
+    stage={0} title={state.phase === 'error' ? 'Local setup needs attention' : 'Opening Claude Config'}
+    detail={state.detail} error={state.phase === 'error'}>
+    {state.phase === 'error' ? <>
+      <p className="muted">Your existing setup has been retained. Recheck it before continuing.</p>
+      <button disabled={state.pending} onClick={() => void controller.check()}>Recheck setup</button>
+    </> : null}
+  </StartupCard>;
   const disabled = state.phase === 'browser' || state.pending;
   const value = state.configTargets.length === 2 ? 'both' : state.configTargets[0] ?? 'neither';
   return (
@@ -83,29 +79,70 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
   );
 }
 
-function MachineStartupView({ state, controller }: { state: ViewState; controller?: MachineController }) {
-  return <section className="form-section startup-view">
-    <h2>{state.waitingForReport ? 'Waiting for the first inspection' : state.connection === 'connected' ? 'Reading local inspection' : 'Starting local agent'}</h2>
-    <p role="status">{state.detail}</p>
-    {state.waitingForReport ? <>
-      <p className="muted">The agent is connected and preparing its first report.</p>
-      {controller ? <button disabled={state.pending} onClick={() => void controller.inspect()}>Recheck agent status</button> : null}
-    </> : null}
-  </section>;
+function StartupCard({ stage, title, detail, error = false, children }: {
+  stage: number; title: string; detail: string; error?: boolean; children?: ReactNode;
+}) {
+  return <>
+    {!error ? <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{`${title}. ${detail}`}</p> : null}
+    <section className={`startup-card${error ? ' startup-attention' : ''}`} aria-busy={!error} aria-labelledby="startup-heading">
+    <div className="startup-brand"><span className="startup-mark" aria-hidden="true">C</span><p className="eyebrow">CLAUDE CONFIG / THIS MAC</p></div>
+    <div className="startup-message">
+      <span className={error ? 'startup-attention-mark' : 'startup-activity'} aria-hidden="true">{error ? '!' : null}</span>
+      <div><h1 id="startup-heading">{title}</h1><p role={error ? 'alert' : undefined}>{detail}</p></div>
+    </div>
+    <ol className="startup-milestones" aria-label="Startup readiness">
+      {['Local setup', 'Agent connection', 'Local inspection'].map((label, index) => <li key={label}
+        aria-current={!error && index === stage ? 'step' : undefined} className={index < stage ? 'complete' : index === stage ? 'current' : ''}>
+        <span className="startup-step-mark" aria-hidden="true">{index < stage ? '✓' : index + 1}</span>
+        <span>{label}</span><span className="startup-step-state">{index < stage ? 'Complete' : index === stage ? error ? 'Needs attention' : 'In progress' : 'Waiting'}</span>
+      </li>)}
+    </ol>
+    <div className="startup-next">{children ?? <p className="muted">Your configuration will be ready to review when the local inspection finishes.</p>}</div>
+    </section>
+  </>;
 }
 
-export function StartupBoundary({ setup, setupController, machine, machineController, updates, children }: {
+function MachineStartupView({ state, controller }: { state: ViewState; controller?: MachineController }) {
+  return <StartupCard stage={state.connection === 'connected' ? 2 : 1}
+    title={state.connection === 'connected' ? 'Loading your configuration' : 'Starting local agent'}
+    detail={state.waitingForReport ? 'Reading your local setup and checking for changes.' : state.detail}>
+    {state.waitingForReport ? <>
+      <p className="muted">You can review the results when the inspection finishes.</p>
+      {controller ? <button disabled={state.pending} onClick={() => void controller.inspect()}>Recheck agent status</button> : null}
+    </> : null}
+  </StartupCard>;
+}
+
+// A new phase opens update activity; byte progress alone preserves the user's disclosure choice.
+export function updateAttention(state: UpdateViewState): string | null {
+  if (state.retry) return `retry:${state.retry}`;
+  const update = state.update;
+  if (update?.diagnostic) return `${update.phase}:diagnostic`;
+  if (update && update.phase !== 'idle' && update.phase !== 'current'
+    && !(state.deferred && (update.phase === 'available' || update.phase === 'verified'))) return update.phase;
+  return state.pending && update ? 'pending' : null;
+}
+
+export function StartupBoundary({ setup, setupController, machine, machineController, updates, updatesAttention = null, children }: {
   setup: SetupViewState; setupController: SetupController; machine: ViewState; machineController: MachineController;
-  updates: ReactNode; children: ReactNode;
+  updates: ReactNode; updatesAttention?: string | null; children: ReactNode;
 }) {
+  const [updatesOpen, setUpdatesOpen] = useState(Boolean(updatesAttention));
+  useEffect(() => { if (updatesAttention) setUpdatesOpen(true); }, [updatesAttention]);
   let startup: ReactNode;
   if (setup.phase !== 'ready' && setup.phase !== 'browser') startup = <SetupView state={setup} controller={setupController} />;
-  else if (machine.initialReadPending || machine.waitingForReport) startup = <main className="onboarding startup-view">
-    <p className="eyebrow">CLAUDE CONFIG</p><h1>Opening Claude Config</h1>
-    <MachineStartupView state={machine} controller={machineController} />
-  </main>;
+  else if (machine.initialReadPending || machine.waitingForReport) startup = <MachineStartupView state={machine} controller={machineController} />;
   else return <>{children}</>;
-  return <>{startup}<div className="onboarding first-run-updates">{updates}</div></>;
+  const focused = setup.phase === 'checking' || setup.phase === 'error' || setup.phase === 'ready';
+  return <div className={focused ? 'startup-layout' : undefined}>
+    {focused ? <main className="startup-main">{startup}</main> : startup}
+    <div className={focused ? 'startup-updates' : 'onboarding first-run-updates'}>
+      <details className="startup-update-panel" open={updatesOpen} onToggle={(event) => setUpdatesOpen(event.currentTarget.open)}>
+        <summary><span>App updates</span><span className="muted">{updatesAttention ? 'Update activity' : 'Available while the local agent starts'}</span></summary>
+        {updates}
+      </details>
+    </div>
+  </div>;
 }
 
 export function OverviewView({ state, navigate, controller }: { state: ViewState; navigate: (screen: Screen) => void; controller?: MachineController }) {
