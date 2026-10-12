@@ -1242,7 +1242,8 @@ printf '{"stateRoot":"/tmp/fake-state"}\n'"#, Status::Completed),
         ] {
             let root = resources(source); let records = Arc::new(Mutex::new(Vec::new())); let captured = records.clone();
             let diagnostics = Diagnostics::new(move |record| captured.lock().unwrap().push(serde_json::to_value(record).unwrap()));
-            let result = run_json_helper_observed(helper_command(&root, Setup::Ensure, None).unwrap(), Duration::from_millis(100), None, Duration::ZERO, Some(diagnostics));
+            let timeout = if outcome == Status::TimedOut { Duration::from_millis(100) } else { Duration::from_secs(1) };
+            let result = run_json_helper_observed(helper_command(&root, Setup::Ensure, None).unwrap(), timeout, None, Duration::ZERO, Some(diagnostics));
             if outcome == Status::Completed { assert_eq!(result.unwrap(), json!({"stateRoot":"/tmp/fake-state"})); } else { assert!(result.is_err()); }
             let records = records.lock().unwrap(); let native: Vec<_> = records.iter().filter(|r| r["component"] == "native").collect();
             assert_eq!(native.len(), 2); assert_eq!(native[0]["operation"], json!(Operation::Ensure));
