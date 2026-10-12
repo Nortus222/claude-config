@@ -20,7 +20,7 @@ macro_rules! closed_enum {
 }
 closed_enum!(Component { Native, Helper, Agent });
 closed_enum!(Operation { AppStartup, Foreground, Ensure, Restart, Paths, SetupState, Bootstrap, InstallGit, PrepareUpdate, RecoverUpdate, MaintenanceState, Invalid });
-closed_enum!(Phase { Entry, RuntimeMetadata, LoginProbe, ShellSpawn, ShellReady, EnvironmentReady, ProbeCleanup, Paths, Lifecycle, Lock, LogRotation, Services, Scheduler, Session, Ipc, Running, Shutdown, IpcClosed, Stopped, AppSetup, UpdaterSource, PreferencesPaths, MaintenanceState, SetupState, Helper, ReadyWait, RuntimeIdentity });
+closed_enum!(Phase { ModuleLoad, Entry, RuntimeMetadata, LoginProbe, ShellSpawn, ShellReady, EnvironmentReady, ProbeCleanup, Paths, Lifecycle, Lock, LogRotation, Services, Scheduler, Session, Ipc, Running, Shutdown, IpcClosed, Stopped, AppSetup, UpdaterSource, PreferencesPaths, MaintenanceState, SetupState, Helper, ReadyWait, RuntimeIdentity });
 closed_enum!(Status { Started, Completed, Failed, TimedOut, Fallback, Cancelled });
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
