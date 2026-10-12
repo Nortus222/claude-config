@@ -123,8 +123,8 @@ test('runAgent builds its services from paths and runs until interrupted', async
 const MODEL = 'setting:claude:settings.json#model';
 
 // A trusted auto-apply machine with two accepted inert keys, so a run has two steps.
-const autoApplyMachine = async () => {
-  const m = agentMachine();
+const autoApplyMachine = async (base?: string) => {
+  const m = agentMachine(base);
   const fixture = setupFixture(join(m.root, 'setup'), {
     headFiles: { 'claude/settings.keys.json': JSON.stringify({ theme: 'dark', effortLevel: 'high', model: 'opus' }) + '\n' },
   });
@@ -323,6 +323,149 @@ test('with ipc, runAgent serves the socket, and a shutdown request ends it like 
     assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'the agent kept running after shutdown');
     for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
   } finally {
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  }
+});
+
+test('runAgent observes readiness, IPC cleanup and final lock release without leaking state', { skip: process.platform === 'win32' }, async (t) => {
+  const m = agentMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const dir = join(m.paths.stateRoot, 'agent');
+  const events: Array<{ phase: string; status: string; socket: boolean; token: boolean; lock: boolean }> = [];
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true,
+    onLifecycle: (phase, status) => events.push({ phase, status, socket: existsSync(join(dir, 'agent.sock')), token: existsSync(join(dir, 'agent.token')), lock: existsSync(lockPath(m)) }),
+  }));
+  try {
+    for (let i = 0; i < 200 && !events.some((e) => e.phase === 'running'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(events.filter((e) => e.status === 'completed').map((e) => e.phase), ['lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc']);
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    await converse(join(dir, 'agent.sock'), [
+      { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
+      { version: 3, id: 's', command: 'shutdown' },
+    ]);
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value));
+    assert.deepEqual(events.filter((e) => ['running', 'shutdown', 'ipc_closed', 'stopped'].includes(e.phase)), [
+      { phase: 'running', status: 'started', socket: true, token: true, lock: true },
+      { phase: 'shutdown', status: 'started', socket: true, token: true, lock: true },
+      { phase: 'ipc_closed', status: 'completed', socket: false, token: false, lock: true },
+      { phase: 'stopped', status: 'completed', socket: false, token: false, lock: false },
+    ]);
+  } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
+});
+
+test('runAgent observes a failed log setup and still releases its acquired lock', async (t) => {
+  const m = agentMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  mkdirSync(join(m.paths.stateRoot, 'agent', 'agent.log'), { recursive: true });
+  const output = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const events: string[] = [];
+  const exit = await Effect.runPromiseExit(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test',
+    logOutput: { stdout: output, stderr: output }, onLifecycle: (phase, status) => { events.push(`${phase}:${status}`); },
+  }));
+  assert.ok(Exit.isFailure(exit));
+  assert.deepEqual(events, ['lock:started', 'lock:completed', 'log_rotation:started', 'log_rotation:failed', 'shutdown:started', 'stopped:failed']);
+  assert.equal(existsSync(lockPath(m)), false);
+});
+
+test('failed IPC initialization does not report stale files as closed', { skip: process.platform === 'win32' }, async (t) => {
+  const m = agentMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const paths = { ...m.paths, stateRoot: join(m.root, 'long-state-root-'.repeat(10)) };
+  const tokenPath = join(paths.stateRoot, 'agent', 'agent.token');
+  m.write(tokenPath, 'stale token');
+  const events: string[] = [];
+  const exit = await Effect.runPromiseExit(runAgent({ paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true,
+    onLifecycle: (phase, status) => { events.push(`${phase}:${status}`); },
+  }));
+  assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('ServeFailed'));
+  assert.ok(events.includes('ipc:failed'));
+  assert.equal(events.includes('ipc_closed:completed'), false, 'IPC never initialized or registered its file cleanup');
+  assert.equal(events.at(-1), 'stopped:failed');
+  assert.equal(readFileSync(tokenPath, 'utf8'), 'stale token');
+  assert.equal(existsSync(join(paths.stateRoot, 'agent', 'agent.lock')), false);
+});
+
+test('throwing lifecycle observers cannot prevent authenticated IPC or shutdown', { skip: process.platform === 'win32' }, async (t) => {
+  const m = agentMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const dir = join(m.paths.stateRoot, 'agent');
+  const events: string[] = [];
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true,
+    onLifecycle: (phase, status) => { events.push(`${phase}:${status}`); throw new Error('observer failed'); },
+  }));
+  try {
+    for (let i = 0; i < 200 && !events.includes('running:started'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    const token = readFileSync(join(dir, 'agent.token'), 'utf8');
+    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+      { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
+      { version: 3, id: 's', command: 'shutdown' },
+    ]);
+    assert.equal(hello?.ok, true);
+    assert.equal(shutdown?.ok, true);
+    const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
+    assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value));
+    assert.ok(events.includes('ipc_closed:completed'));
+    assert.equal(events.at(-1), 'stopped:completed');
+    assert.equal(existsSync(lockPath(m)), false);
+  } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
+});
+
+test('runAgent reports cancellation after IPC cleanup and releases the lock', { skip: process.platform === 'win32' }, async (t) => {
+  const m = agentMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const fixture = setupFixture(join(m.root, 'setup'));
+  const events: string[] = [];
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true,
+    onLifecycle: (phase, status) => { events.push(`${phase}:${status}`); },
+  }));
+  try {
+    for (let i = 0; i < 200 && !events.includes('running:started'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(events.includes('running:started'));
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    assert.ok(Exit.isFailure(await Effect.runPromise(Fiber.await(fiber))));
+    assert.deepEqual(events.slice(-3), ['shutdown:started', 'ipc_closed:completed', 'stopped:cancelled']);
+    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(m.paths.stateRoot, 'agent', name)), false, name);
+  } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
+});
+
+test('IPC cleanup is observed while shutdown is still waiting for a running apply', { skip: process.platform === 'win32' }, async (t) => {
+  const { m, fixture } = await autoApplyMachine('/tmp');
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const entered = Deferred.makeUnsafe<void>();
+  const release = Deferred.makeUnsafe<void>();
+  const controller = new AbortController();
+  const events: string[] = [];
+  const gated: AgentDomain = { ...configDomain,
+    run: (step, report) => Deferred.succeed(entered, undefined).pipe(
+      Effect.andThen(Effect.uninterruptible(Deferred.await(release))), Effect.andThen(configDomain.run(step, report)),
+    ),
+  };
+  const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => [gated, m.domains[1]!], source: fixture.source, agentVersion: 'test', ipc: true, signal: controller.signal,
+    onLifecycle: (phase, status) => { events.push(`${phase}:${status}`); },
+  }));
+  try {
+    const started = await Effect.runPromise(Deferred.await(entered).pipe(Effect.timeoutOption('5 seconds')));
+    assert.equal(started._tag, 'Some');
+    controller.abort();
+    for (let i = 0; i < 200 && !events.includes('ipc_closed:completed'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(events.includes('ipc_closed:completed'), 'IPC cleanup was hidden behind the running apply');
+    assert.equal(events.includes('stopped:completed'), false);
+    assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.sock')), false);
+    assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.token')), false);
+    assert.equal(existsSync(lockPath(m)), true);
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const stopped = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
+    assert.ok(stopped._tag === 'Some' && Exit.isSuccess(stopped.value));
+    assert.equal(events.at(-1), 'stopped:completed');
+    assert.equal(existsSync(lockPath(m)), false);
+  } finally {
+    controller.abort();
+    await Effect.runPromise(Deferred.succeed(release, undefined));
     await Effect.runPromise(Fiber.interrupt(fiber));
   }
 });
