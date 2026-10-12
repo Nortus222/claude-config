@@ -32,16 +32,20 @@ test('cancelling a held login capture joins its detached shell and runtime befor
     const pids: number[] = [];
     try {
       const held = stage === 'shell' ? shellPid : runtimePid;
+      const heldPhase = stage === 'shell' ? 'shell_ready' : 'environment_ready';
+      const phaseStarted = () => events.some(([phase, status]) => phase === heldPhase && status === 'started');
       const until = Date.now() + 3000;
-      while (!readable(held) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+      // The PID file can precede delivery of the shell's readiness marker to the parent.
+      while ((!readable(held) || !phaseStarted()) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
       assert.ok(readable(held), 'owned probe reaches the held process');
+      assert.ok(phaseStarted(), 'probe observes the held phase before cancellation');
       pids.push(Number(readFileSync(shellPid, 'utf8')));
       if (stage === 'runtime') pids.push(Number(readFileSync(runtimePid, 'utf8')));
       controller.abort();
       await rejected;
       for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} was joined before probe return`);
       assert.deepEqual(events.filter(([phase]) => phase === 'probe_cleanup'), [['probe_cleanup', 'started'], ['probe_cleanup', 'completed']]);
-      assert.ok(events.some(([phase, status]) => phase === (stage === 'shell' ? 'shell_ready' : 'environment_ready') && status === 'cancelled'));
+      assert.ok(events.some(([phase, status]) => phase === heldPhase && status === 'cancelled'));
       assert.equal(JSON.stringify(events).includes('private-fixture-token'), false);
     } finally {
       controller.abort();
