@@ -16,6 +16,43 @@ const script = (name: string, body: string) => {
   return path;
 };
 
+test('cancelling a held login capture joins its detached shell and runtime before rejecting', { ...unixShell, timeout: 10000 }, async () => {
+  for (const stage of ['shell', 'runtime']) {
+    const owned = mkdtempSync(join(dir, 'cancel-'));
+    const shellPid = join(owned, 'shell.pid');
+    const runtimePid = join(owned, 'runtime.pid');
+    const shell = script(`cancel-${stage}-shell`, `echo $$ > '${shellPid}'\n${stage === 'shell' ? 'exec /bin/sleep 30' : 'exec /bin/sh -c "$2"'}`);
+    const runtime = script(`cancel-${stage}-runtime`, `echo $$ > '${runtimePid}'\nexec /bin/sleep 30`);
+    const controller = new AbortController();
+    const events: Array<[StartupPhase, StartupStatus]> = [];
+    const input = { env: { HOME: owned, SHELL: shell, PATH: '/inherited', API_TOKEN: 'private-fixture-token' }, runtime,
+      timeoutMs: 1000, signal: controller.signal, onProgress: (phase: StartupPhase, status: StartupStatus) => events.push([phase, status]) };
+    const running = probeLoginEnvironment(input);
+    const rejected = assert.rejects(running, { name: 'AbortError' });
+    const pids: number[] = [];
+    try {
+      const held = stage === 'shell' ? shellPid : runtimePid;
+      const until = Date.now() + 3000;
+      while (!readable(held) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+      assert.ok(readable(held), 'owned probe reaches the held process');
+      pids.push(Number(readFileSync(shellPid, 'utf8')));
+      if (stage === 'runtime') pids.push(Number(readFileSync(runtimePid, 'utf8')));
+      controller.abort();
+      await rejected;
+      for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} was joined before probe return`);
+      assert.deepEqual(events.filter(([phase]) => phase === 'probe_cleanup'), [['probe_cleanup', 'started'], ['probe_cleanup', 'completed']]);
+      assert.ok(events.some(([phase, status]) => phase === (stage === 'shell' ? 'shell_ready' : 'environment_ready') && status === 'cancelled'));
+      assert.equal(JSON.stringify(events).includes('private-fixture-token'), false);
+    } finally {
+      controller.abort();
+      await running.catch(() => {});
+      for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    }
+  }
+});
+
+const readable = (path: string) => { try { return readFileSync(path, 'utf8').trim() !== ''; } catch { return false; } };
+
 test('reads the login environment despite login banners', unixShell, async () => {
   // Runs the probe's own script ($2) after an rc file that sets PATH and a secret an MCP server needs.
   const shell = script('noisy', 'echo "Welcome to your shell"\nPATH=/opt/tools/bin:/usr/bin\nAPI_TOKEN=secret\nMULTI="a\nb"\nexport PATH API_TOKEN MULTI\n/bin/sh -c "$2"\necho "bye"');

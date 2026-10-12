@@ -453,6 +453,42 @@ const startupResult = (f: ReturnType<typeof fixture>) => {
   return JSON.parse(f.stdout[0]!);
 };
 
+test('startup cancellation joins a real held login capture before returning without setup or service actions', {
+  skip: process.platform === 'win32' ? 'requires detached POSIX process groups' : false, timeout: 10000,
+}, async t => {
+  const f = fixture(t);
+  const shell = join(f.home, 'held-login-shell');
+  const runtime = join(f.home, 'held-capture-runtime');
+  const shellPid = join(f.home, 'shell.pid');
+  const runtimePid = join(f.home, 'runtime.pid');
+  writeFileSync(shell, `#!/bin/sh\necho $$ > '${shellPid}'\nexec /bin/sh -c "$2"\n`); chmodSync(shell, 0o755);
+  writeFileSync(runtime, `#!/bin/sh\necho $$ > '${runtimePid}'\nexec /bin/sleep 30\n`); chmodSync(runtime, 0o755);
+  const controller = new AbortController();
+  const running = runDesktopEntry({ ...startupInput(f), signal: controller.signal,
+    env: { ...f.input.env, SHELL: shell, API_TOKEN: 'private-capture-token' },
+    probe: input => probeLoginEnvironment({ ...input, runtime, timeoutMs: 1000 }) });
+  const pids: number[] = [];
+  try {
+    const until = Date.now() + 3000;
+    while (!existsSync(runtimePid) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+    assert.ok(existsSync(runtimePid), 'probe reached the held capture');
+    pids.push(Number(readFileSync(shellPid, 'utf8')), Number(readFileSync(runtimePid, 'utf8')));
+    controller.abort();
+    assert.equal(await running, 1);
+    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} must be joined before helper return`);
+    assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
+    const records = startupRecords(f.stderr);
+    assert.ok(records.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
+    assert.ok(records.some(r => r.phase === 'login_probe' && r.status === 'cancelled'));
+    assert.equal(records.some(r => r.phase === 'login_probe' && r.status === 'fallback'), false);
+    assert.equal(records.some(r => r.phase === 'paths' || r.phase === 'setup_state' || r.phase === 'lifecycle'), false);
+    assert.equal(f.stderr.join('').includes('private-capture-token'), false);
+  } finally {
+    controller.abort(); await running;
+    for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  }
+});
+
 test('startup resolves one private login identity and refuses lifecycle for missing setup', async t => {
   const f = fixture(t);
   rmSync(join(f.stateRoot, 'state.json'));

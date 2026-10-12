@@ -41,16 +41,20 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     Effect.sync(() => trace.record(name, 'started')).pipe(Effect.andThen(effect), Effect.onExit(exit => Effect.sync(() =>
       trace.record(name, Exit.isSuccess(exit) ? 'completed'
         : controller.signal.aborted || input.signal?.aborted || Cause.hasInterruptsOnly(exit.cause) ? 'cancelled' : 'failed'))));
+  // The probe owns detached children; interruption must wait for its abort-aware cleanup to join.
   const probe = () => Effect.tryPromise({ try: async () => {
     trace.record('login_probe', 'started');
     try {
-      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, onProgress: trace.record });
+      signal.throwIfAborted();
+      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, onProgress: trace.record, signal });
+      signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
       return result;
-    } catch (error) { trace.record('login_probe', 'failed'); throw error; }
-  }, catch: error => error });
+    } catch (error) { trace.record('login_probe', signal.aborted ? 'cancelled' : 'failed'); throw error; }
+  }, catch: error => error }).pipe(Effect.uninterruptible);
   trace.record('entry', 'started');
   const controller = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal;
   const stop = () => controller.abort();
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
@@ -67,7 +71,6 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       }
       if (arg === '--startup') {
         const versions = yield* Effect.tryPromise({ try: () => readStartupInput(input.stdin ?? process.stdin), catch: error => error }).pipe(Effect.timeout(5000));
-        const signal = input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal;
         signal.throwIfAborted();
         const login = yield* probe();
         signal.throwIfAborted();
@@ -137,7 +140,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         // First-run helpers need no existing checkout or bundled runtime metadata.
         const login = yield* probe();
         if (login.error) stderr(`nortuscc agent: ${login.error}\n`);
-        const helperInput = { env: login.env, home: login.env.HOME ?? input.env.HOME ?? homedir(), platform: input.platform ?? process.platform, processes: input.processes, signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal };
+        const helperInput = { env: login.env, home: login.env.HOME ?? input.env.HOME ?? homedir(), platform: input.platform ?? process.platform, processes: input.processes, signal };
         helperInput.signal.throwIfAborted();
         if (arg === '--setup-state') {
           stdout(JSON.stringify(yield* phase('setup_state', Effect.tryPromise({ try: () => setupState(helperInput), catch: (error) => error }))) + '\n');
@@ -207,19 +210,21 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
         paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
-        signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal,
+        signal,
         onLifecycle: trace.record,
       });
       return 0;
     }).pipe(Effect.catchCause((cause) => Effect.sync(() => {
+      if (input.args.length === 0 && signal.aborted) return 0;
       const error = Cause.squash(cause);
       stderr(`nortuscc agent: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
-    }))), ['--startup', '--prepare-update', '--recover-update'].includes(input.args[0] ?? '') ? { signal: input.signal ? AbortSignal.any([input.signal, controller.signal]) : controller.signal } : undefined);
-    trace.record('entry', code === 0 ? 'completed' : controller.signal.aborted || input.signal?.aborted ? 'cancelled' : 'failed');
+    }))), ['--startup', '--prepare-update', '--recover-update'].includes(input.args[0] ?? '') ? { signal } : undefined);
+    trace.record('entry', signal.aborted ? 'cancelled' : code === 0 ? 'completed' : 'failed');
     return code;
   } catch (error) {
     trace.record('entry', controller.signal.aborted || input.signal?.aborted ? 'cancelled' : 'failed');
+    if (input.args.length === 0 && signal.aborted) return 0;
     stderr(`nortuscc agent: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   } finally {
