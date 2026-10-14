@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { MachineController } from './controller.ts';
 import { AccountController } from './account-controller.ts';
 import { SetupController } from './setup-controller.ts';
+import { ConnectionsController } from './mcp-connections-controller.ts';
+import { ConnectionsView } from './mcp-connections-view.tsx';
 import { UpdateController } from './update-controller.ts';
 import { UpdateView } from './update-view.tsx';
 import { nativeAvailable, nativeBridge, nativeUpdateBridge } from './bridge.ts';
@@ -14,10 +16,11 @@ function App() {
   const [controllers] = useState(() => {
     const bridge = nativeAvailable() ? nativeBridge : null;
     const machine = new MachineController(bridge);
-    return { machine, account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates: new UpdateController(bridge ? nativeUpdateBridge : null) };
+    return { machine, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates: new UpdateController(bridge ? nativeUpdateBridge : null) };
   });
-  const { machine, account, setup, updates } = controllers;
+  const { machine, account, setup, updates, connections } = controllers;
   const state = useSyncExternalStore(machine.subscribe, machine.snapshot);
+  const connectionsState = useSyncExternalStore(connections.subscribe, connections.snapshot);
   const accountState = useSyncExternalStore(account.subscribe, account.snapshot);
   const setupState = useSyncExternalStore(setup.subscribe, setup.snapshot);
   const updateState = useSyncExternalStore(updates.subscribe, updates.snapshot);
@@ -28,11 +31,11 @@ function App() {
   useEffect(() => {
     void updates.start();
     void setup.check();
-    return () => { account.dispose(); setup.dispose(); machine.dispose(); updates.dispose(); };
-  }, [machine, account, setup, updates]);
+    return () => { account.dispose(); setup.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
+  }, [machine, account, setup, updates, connections]);
   useEffect(() => {
-    if (state.connection === 'connected') void account.refresh();
-  }, [account, state.connection, state.session]);
+    if (state.connection === 'connected') { void account.refresh(); void connections.refresh(); }
+  }, [account, connections, state.connection, state.session]);
   useEffect(() => {
     if (state.reviewRequested <= reviewSeen.current) return;
     const previous = reviewSeen.current;
@@ -55,6 +58,7 @@ function App() {
       {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
       {screen === 'settings' ? <>
         <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />
+        <ConnectionsView state={connectionsState} controller={connections} />
         <UpdateView state={updateState} controller={updates} />
       </> : null}
     </ShellView>

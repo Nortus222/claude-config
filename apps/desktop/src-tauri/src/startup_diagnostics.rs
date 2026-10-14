@@ -19,7 +19,7 @@ macro_rules! closed_enum {
     };
 }
 closed_enum!(Component { Native, Helper, Agent });
-closed_enum!(Operation { AppStartup, Foreground, Ensure, Restart, Paths, SetupState, Bootstrap, InstallGit, PrepareUpdate, RecoverUpdate, MaintenanceState, Invalid });
+closed_enum!(Operation { AppStartup, Foreground, Ensure, Restart, Paths, SetupState, Bootstrap, InstallGit, PrepareUpdate, RecoverUpdate, MaintenanceState, McpConnections, Invalid });
 closed_enum!(Phase { ModuleLoad, Entry, RuntimeMetadata, LoginProbe, ShellSpawn, ShellReady, EnvironmentReady, ProbeCleanup, Paths, Lifecycle, Lock, LogRotation, Services, Scheduler, Session, Ipc, FirstJob, Running, Shutdown, IpcClosed, Stopped, AppSetup, StartupWorker, RuntimeReady, UpdaterSource, PreferencesPaths, MaintenanceState, SetupState, Helper, ReadyWait, RuntimeIdentity });
 closed_enum!(Status { Started, Completed, Failed, TimedOut, Fallback, Cancelled });
 

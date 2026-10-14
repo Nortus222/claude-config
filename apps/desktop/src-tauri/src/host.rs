@@ -618,6 +618,7 @@ pub enum Setup {
     PrepareUpdate,
     RecoverUpdate,
     MaintenanceState,
+    McpConnections,
 }
 impl Setup {
     pub fn operation(self) -> Operation {
@@ -625,7 +626,7 @@ impl Setup {
             Self::Startup => Operation::AppStartup,
             Self::Ensure => Operation::Ensure, Self::Restart => Operation::Restart, Self::Paths => Operation::Paths,
             Self::State => Operation::SetupState, Self::Bootstrap => Operation::Bootstrap, Self::InstallGit => Operation::InstallGit,
-            Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState,
+            Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState, Self::McpConnections => Operation::McpConnections,
         }
     }
     fn argument(self) -> &'static str {
@@ -640,6 +641,7 @@ impl Setup {
             Self::PrepareUpdate => "--prepare-update",
             Self::RecoverUpdate => "--recover-update",
             Self::MaintenanceState => "--maintenance-state",
+            Self::McpConnections => "--mcp-connections",
         }
     }
 }
@@ -655,7 +657,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState | Setup::McpConnections) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1743,5 +1745,76 @@ mod onboarding_bridge_tests {
         let command = device_login_command();
         assert_eq!(command.get_program(), "/usr/bin/open");
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["https://github.com/login/device"]);
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionTarget { Codex, Claude }
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ConnectionAction { Inspect {}, Connect { target: ConnectionTarget }, Disconnect { target: ConnectionTarget } }
+pub fn mcp_connections(resources: &Path, action: ConnectionAction) -> Result<Value, String> {
+    let input = serde_json::to_string(&action).map_err(|_| "Invalid connection action")?;
+    let value = run_json_helper(helper_command(resources, Setup::McpConnections, None)?, HELPER_TIMEOUT, Some(input.into_bytes()))?;
+    // Host registration/configuration output stays private; only the bounded public schema crosses IPC.
+    validate_connections(value)
+}
+fn validate_connections(value: Value) -> Result<Value, String> {
+    let Some(outer) = value.as_object() else { return Err("Invalid connections".into()); };
+    let Some(items) = value["connections"].as_array() else { return Err("Invalid connections".into()); };
+    if outer.len() != 1 || items.len() > 2 { return Err("Invalid connections".into()); }
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let keys = ["target", "registration", "routing", "session", "reload", "observation", "note"];
+        if item.as_object().is_none_or(|v| v.len()!=keys.len() || keys.iter().any(|k| !v.contains_key(*k)))
+            || !["codex","claude"].contains(&item["target"].as_str().unwrap_or(""))
+            || !seen.insert(item["target"].as_str().unwrap_or(""))
+            || !["configured","absent","repair-needed","conflict","unavailable"].contains(&item["registration"].as_str().unwrap_or(""))
+            || item["session"] != "unobserved" || item["observation"] != "local-registration"
+            || !["recommended","unknown"].contains(&item["reload"].as_str().unwrap_or(""))
+            || item["note"].as_str().is_none_or(|v| v.len()>500) { return Err("Invalid connection".into()); }
+        let route = &item["routing"];
+        if route.as_object().is_none_or(|v| v.len()!=4 || ["status","intent","blockStatus","offeredText"].iter().any(|k| !v.contains_key(*k)))
+            || !["installed","missing","released","absent","unmanaged","conflict","unavailable"].contains(&route["status"].as_str().unwrap_or(""))
+            || !["active","released","unowned","invalid","unknown"].contains(&route["intent"].as_str().unwrap_or(""))
+            || !["present","absent","conflict","unknown"].contains(&route["blockStatus"].as_str().unwrap_or(""))
+            || route["offeredText"].as_str().is_none_or(|v| v.len()>8192) { return Err("Invalid connection routing".into()); }
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn connection_actions_reject_paths_commands_and_unknown_targets() {
+        for value in [json!({"action":"connect","target":"codex","appPath":"/foreign"}),
+            json!({"action":"inspect","command":"shell"}), json!({"action":"connect","target":"other"})] {
+            assert!(serde_json::from_value::<ConnectionAction>(value).is_err());
+        }
+        assert!(serde_json::from_value::<ConnectionAction>(json!({"action":"disconnect","target":"claude"})).is_ok());
+    }
+    #[test]
+    fn connection_helper_derives_current_executable_and_has_no_renderer_argv() {
+        let root = std::env::temp_dir().join(format!("nortuscc-connection-command-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("bun"), "fixture").unwrap();
+        std::fs::write(root.join("agent.mjs"), "fixture").unwrap();
+        let command = helper_command(&root, Setup::McpConnections, None).unwrap();
+        let args: Vec<_> = command.get_args().map(|arg|arg.to_os_string()).collect();
+        assert_eq!(args, vec![root.join("agent.mjs").into_os_string(), "--mcp-connections".into(), "--app".into(), std::env::current_exe().unwrap().into_os_string()]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn public_connections_reject_secrets_and_unproven_sessions() {
+        let entry = json!({"target":"codex","registration":"configured","routing":{"status":"installed","intent":"active","blockStatus":"present","offeredText":"fixed guidance"},
+            "session":"unobserved","reload":"recommended","observation":"local-registration","note":""});
+        assert!(validate_connections(json!({"connections":[entry.clone()]})).is_ok());
+        let mut secret = entry.clone(); secret["env"] = json!({"TOKEN":"private"});
+        assert!(validate_connections(json!({"connections":[secret]})).is_err());
+        let mut connected = entry.clone(); connected["session"] = json!("connected");
+        assert!(validate_connections(json!({"connections":[connected]})).is_err());
+        assert!(validate_connections(json!({"connections":[entry.clone(),entry]})).is_err());
     }
 }
