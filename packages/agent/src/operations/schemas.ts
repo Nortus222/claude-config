@@ -1,20 +1,37 @@
 import { Effect, Schema } from 'effect';
 import { POLICIES } from '../policy-values.ts';
-import { IdSchema, KeySchema, CountSchema, PlanSchema, InspectResultSchema, HistoryCursorSchema, MAX_EXCLUDED, MAX_HISTORY } from './wire.ts';
+import { CountSchema, PlanSchema, InspectResultSchema, MAX_EXCLUDED, MAX_HISTORY, MAX_KEY_LENGTH } from './wire.ts';
+
+// Operation string limits count Unicode code points, as JSON Schema does.
+export const OperationIdSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(100));
+export const OperationKeySchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(MAX_KEY_LENGTH));
+const IdSchema = OperationIdSchema;
+const KeySchema = OperationKeySchema;
+const YEAR = '[0-9]{4}';
+const LEAP_YEAR = '(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)';
+const DATE = `(?:${YEAR}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|${LEAP_YEAR}-02-29)`;
+// Calendar dates, hours 00–23, and offsets 00:00–23:59. The end assertion rejects a trailing newline.
+export const OperationTimeSchema = Schema.String.check(Schema.isPattern(new RegExp(
+  String.raw`^${DATE}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])`, 'u',
+)));
+export const OperationHistoryCursorSchema = Schema.Struct({
+  at: OperationTimeSchema,
+  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+});
 
 export const OperationScopeSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('machine') }),
   Schema.Struct({ kind: Schema.Literal('user') }),
   Schema.Struct({ kind: Schema.Literal('profile'), profileId: IdSchema }),
 ]);
-export const CapabilityStateSchema = Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isBetweenLength(1, 500))) });
+export const CapabilityStateSchema = Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(500))) });
 export const ReconcileChangeSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), only: Schema.Array(KeySchema).check(Schema.isMaxLength(MAX_EXCLUDED)) });
 export const NextActionSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('share_with_my_machines'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('user'), destinationId: Schema.optionalKey(IdSchema) }),
   Schema.Struct({ kind: Schema.Literal('promote_to_profile'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('profile'), destinationId: Schema.optionalKey(IdSchema) }),
 ]);
-const Text = Schema.String.check(Schema.isMaxLength(500));
-const Version = Schema.String.check(Schema.isBetweenLength(1, 100));
+const Text = Schema.String.check(Schema.isMaxCodePoints(500));
+const Version = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(100));
 const Protocol = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }));
 const list = <S extends Schema.Constraint>(schema: S) => Schema.Array(schema).check(Schema.isMaxLength(MAX_EXCLUDED));
 const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
@@ -67,7 +84,7 @@ export const OperationHistoryEventSchema = Schema.Struct({
   requestId: Schema.optionalKey(IdSchema), runId: Schema.optionalKey(IdSchema),
   keys: Schema.optionalKey(list(KeySchema)), steps: Schema.optionalKey(list(StepOutcomeSchema)), message: Schema.optionalKey(Text),
 });
-export const OperationHistoryResultSchema = Schema.Struct({ events: Schema.Array(OperationHistoryEventSchema).check(Schema.isMaxLength(MAX_HISTORY)), nextBefore: Schema.NullOr(HistoryCursorSchema) });
+export const OperationHistoryResultSchema = Schema.Struct({ events: Schema.Array(OperationHistoryEventSchema).check(Schema.isMaxLength(MAX_HISTORY)), nextBefore: Schema.NullOr(OperationHistoryCursorSchema) });
 const scope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ kind: 'machine' } as const)));
 const limit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_HISTORY }));
 export const GetContextInputSchema = Schema.Struct({ scope });
@@ -77,7 +94,7 @@ export const ApplyChangeInputSchema = Schema.Struct({ scope, planId: IdSchema, r
 export const GetRunInputSchema = Schema.Struct({ scope, runId: IdSchema });
 export const ListRunsInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(IdSchema), limit });
 export const CancelRunInputSchema = Schema.Struct({ scope, runId: IdSchema });
-export const HistoryInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(HistoryCursorSchema), limit });
+export const HistoryInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(OperationHistoryCursorSchema), limit });
 export { InspectResultSchema };
 const strict = { onExcessProperty: 'error' } as const;
 export const decodeOperationScope = Schema.decodeUnknownSync(OperationScopeSchema, strict);

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Schema } from 'effect';
+import { JsonSchema, Schema, SchemaRepresentation } from 'effect';
 import {
   operationDefinitions, operationJsonSchemas, decodeOperationInput, decodeOperationOutput,
   decodeOperationScope, decodeContextResult, decodeRunView, projectContext, capabilityInventory,
 } from '../src/operations/index.ts';
-import { InspectResultSchema, PreviewResultSchema, decodeInspectResult, decodePreviewResult, decodeMessage } from '../src/ipc/protocol.ts';
+import { InspectResultSchema, PreviewResultSchema, decodeInspectResult, decodePreviewResult, decodeMessage, decodeRequest } from '../src/ipc/protocol.ts';
 
 const change = { kind: 'reconcile', only: ['skill:x'] } as const;
 const preview = { planId: 'p', scope: { kind: 'machine' }, change, generation: 'g', plan: { kind: 'apply', steps: [], skipped: [] }, nextActions: [] };
@@ -145,4 +145,77 @@ test('operation contracts have a public package entry point independent of execu
   assert.equal(operations.operationDefinitions, operationDefinitions);
   assert.equal('AgentSession' in operations, false);
   assert.equal('runAgent' in operations, false);
+});
+
+const acceptsOperation = (name: keyof typeof operationDefinitions, input: unknown): boolean => {
+  try { decodeOperationInput(name, input); return true; } catch (error) {
+    if (Schema.isSchemaError(error)) return false;
+    throw error;
+  }
+};
+const acceptsJsonInput = (name: keyof typeof operationDefinitions, input: unknown): boolean => {
+  const schema = SchemaRepresentation.fromJsonSchemaDocument(
+    JsonSchema.fromSchemaDraft2020_12(operationJsonSchemas[name].input), { patterns: 'apply' },
+  );
+  return Schema.decodeUnknownResult(Schema.toType(schema), { onExcessProperty: 'error' })(input)._tag === 'Success';
+};
+
+test('exported JSON Schema and operation decoding agree on Unicode ID and key bounds', () => {
+  const cases = [
+    { name: 'inspect', input: { scope: { kind: 'profile', profileId: '😀'.repeat(51) } }, valid: true },
+    { name: 'inspect', input: { scope: { kind: 'profile', profileId: '😀'.repeat(100) } }, valid: true },
+    { name: 'inspect', input: { scope: { kind: 'profile', profileId: '😀'.repeat(101) } }, valid: false },
+    { name: 'applyChange', input: { planId: '😀'.repeat(51), requestId: 'q' }, valid: true },
+    { name: 'getRun', input: { runId: '😀'.repeat(101) }, valid: false },
+    { name: 'previewChange', input: { change: { kind: 'reconcile', only: ['😀'.repeat(500)] } }, valid: true },
+    { name: 'previewChange', input: { change: { kind: 'reconcile', only: ['😀'.repeat(501)] } }, valid: false },
+    { name: 'inspect', input: { scope: { kind: 'profile', profileId: '' } }, valid: false },
+    { name: 'inspect', input: { scope: { kind: 'profile', profileId: '😀', extra: true } }, valid: false },
+  ] as const;
+  for (const { name, input, valid } of cases) {
+    assert.equal(acceptsJsonInput(name, input), valid, `${name} JSON Schema`);
+    assert.equal(acceptsOperation(name, input), valid, `${name} operation decoder`);
+  }
+});
+
+test('exported history JSON Schema and operation decoding agree on calendar and clock boundaries', () => {
+  const cases = [
+    ['2026-10-14T25:00:00Z', false],
+    ['2026-10-14T23:59:59Z', true],
+    ['2026-10-14T00:00:00.123456+23:59', true],
+    ['2026-10-14T00:00:00-23:59', true],
+    ['2026-10-14T00:00:00+24:00', false],
+    ['2026-10-14T00:00:00+00:60', false],
+    ['2026-10-14T24:00:00Z', false],
+    ['2026-10-14T23:60:00Z', false],
+    ['2026-10-14T23:59:60Z', false],
+    ['2026-02-29T00:00:00Z', false],
+    ['2024-02-29T00:00:00Z', true],
+    ['2000-02-29T00:00:00Z', true],
+    ['1900-02-29T00:00:00Z', false],
+    ['0000-02-29T00:00:00Z', true],
+    ['2026-04-31T00:00:00Z', false],
+    ['2026-04-30T00:00:00Z', true],
+    ['2026-12-31T00:00:00Z', true],
+    ['2026-13-01T00:00:00Z', false],
+    ['2026-10-00T00:00:00Z', false],
+    ['2026-10-14T00:00:00Z\n', false],
+    ['yesterday', false],
+  ] as const;
+  for (const [at, valid] of cases) {
+    const input = { limit: 1, before: { at, seq: 0 } };
+    assert.equal(acceptsJsonInput('history', input), valid, `${at} JSON Schema`);
+    assert.equal(acceptsOperation('history', input), valid, `${at} operation decoder`);
+  }
+});
+
+test('representable operation constraints preserve the separate legacy IPC validators', () => {
+  const head = { version: 3, id: 'r' };
+  for (const at of ['2026-10-14T24:00:00Z', '2026-04-31T00:00:00Z']) {
+    assert.deepEqual(decodeRequest({ ...head, command: 'history', limit: 1, before: { at, seq: 0 } }).version, 3);
+    assert.equal(acceptsOperation('history', { limit: 1, before: { at, seq: 0 } }), false);
+  }
+  assert.throws(() => decodeRequest({ ...head, command: 'apply', planId: '😀'.repeat(51) }));
+  assert.equal(acceptsOperation('applyChange', { planId: '😀'.repeat(51), requestId: 'q' }), true);
+  assert.throws(() => decodeRequest({ ...head, command: 'history', limit: 1, before: { at: '2026-10-14T25:00:00Z', seq: 0 } }));
 });
