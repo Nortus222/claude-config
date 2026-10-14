@@ -82,3 +82,15 @@ test('reading History marks an apply whose backup folder was pruned', async () =
   assert.equal(second.backup, '/b/nortuscc-2');
   assert.equal(second.prunedFolder, undefined);
 });
+
+test('MCP operation attribution round-trips beside legacy History events', async () => {
+  const { run } = setup();
+  await run(h => h.append(HELD));
+  await run(h => h.append({ kind: 'apply-started', actor: 'mcp', runId: 'run-1', automatic: false, keys: ['config:a'],
+    operation: 'applyChange', scope: { kind: 'machine' }, requestId: 'request-1' }));
+  const events = await run(h => h.read);
+  assert.equal(events[0]?.actor, 'agent');
+  assert.equal(events[0]?.operation, undefined);
+  assert.deepEqual(events[1], { v: 1, at: '2026-10-06T12:00:00.000Z', kind: 'apply-started', actor: 'mcp', runId: 'run-1',
+    automatic: false, keys: ['config:a'], operation: 'applyChange', scope: { kind: 'machine' }, requestId: 'request-1' });
+});

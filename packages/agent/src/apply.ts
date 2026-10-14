@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Stream } from 'effect';
 import {
   acquireApplyLock, execute, HistoryStore, plan, pruneBackups, selectAll,
-  type Actor, type MachineReport, type Plan, type Progress, type StepRecord,
+  type Actor, type OperationMetadata, type MachineReport, type Plan, type Progress, type StepRecord,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
@@ -29,30 +29,32 @@ export type RunRecord = { readonly steps: ReadonlyArray<StepRecord>; readonly re
 // Runs `planned` with apply.lock already held, bracketed in History by apply-started and
 // apply-finished, so a crash between the two reads as interrupted. `onProgress` sees every event.
 // Callers make it uninterruptible: `signal` stops it, and it still records how it ended.
-export const recordedRun = (
+export const recordedRun = <E = never>(
   planned: Plan,
   report: MachineReport,
   domains: ReadonlyArray<AgentDomain>,
   options: {
     readonly runId: string; readonly actor: Actor; readonly automatic: boolean; readonly signal?: AbortSignal;
     readonly onProgress?: (progress: Progress) => Effect.Effect<void>;
+    readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E>;
+    readonly operation?: OperationMetadata;
   },
 ) =>
   Effect.gen(function* () {
     const history = yield* HistoryStore;
     const { runId, actor } = options;
-    yield* history.append({ kind: 'apply-started', actor, runId, automatic: options.automatic, keys: planned.steps.map((s) => s.key) });
+    yield* history.append({ kind: 'apply-started', actor, runId, automatic: options.automatic, ...options.operation, keys: planned.steps.map((s) => s.key) });
     const steps: StepRecord[] = [];
     let result: RunRecord['result'] = 'done';
     let backup: string | null = null;
-    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true }), (event) =>
+    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true, checkpoint: options.checkpoint }), (event) =>
       Effect.andThen(Effect.sync(() => {
         if (event.type === 'finished') steps.push({ key: event.key, outcome: event.outcome, note: event.note });
         if (event.type === 'cancelled') result = 'cancelled';
         if (event.type === 'cancelled' || event.type === 'done') backup = event.backups ?? null;
       }), options.onProgress?.(event) ?? Effect.void));
     const ran: RunRecord = { steps, result, backup };
-    yield* history.append({ kind: 'apply-finished', actor, runId, ...ran });
+    yield* history.append({ kind: 'apply-finished', actor, runId, ...options.operation, ...ran });
     return ran;
   });
 

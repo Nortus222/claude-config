@@ -83,13 +83,17 @@ export const samePlan = (a: Plan, b: Plan): boolean =>
 // The only executor. Holds the apply lock, runs steps in order, passing each `run` the report the
 // plan came from, and stops cleanly when the signal fires. A caller that already holds apply.lock
 // for this run passes `lockHeld`; the run then neither takes nor releases it.
-export const execute = <const D extends ReadonlyArray<Domain<any>>>(
+export const execute = <const D extends ReadonlyArray<Domain<any>>, E = never, R = never>(
   plan: Plan,
   report: MachineReport,
   domains: D,
-  options: { readonly signal?: AbortSignal; readonly lockHeld?: boolean } = {},
-): Stream.Stream<Progress, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups> =>
-  Stream.callback<Progress, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups>((queue) =>
+  options: {
+    readonly signal?: AbortSignal; readonly lockHeld?: boolean;
+    // Awaited before the side effect and after its outcome, before starting another step.
+    readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E, R>;
+  } = {},
+): Stream.Stream<Progress, LockHeld | MaintenancePending | E, DomainServices<D> | MachinePaths | Backups | R> =>
+  Stream.callback<Progress, LockHeld | MaintenancePending | E, DomainServices<D> | MachinePaths | Backups | R>((queue) =>
     Effect.gen(function* () {
       if (!options.lockHeld) yield* acquireApplyLock;
       const backups = yield* Backups;
@@ -103,7 +107,13 @@ export const execute = <const D extends ReadonlyArray<Domain<any>>>(
           yield* Queue.offer(queue, { type: 'cancelled', remaining: plan.steps.slice(index).map((s) => s.key), backups: yield* backups.dir });
           return yield* Queue.end(queue);
         }
-        yield* Queue.offer(queue, { type: 'started', index, total, step });
+        const started = { type: 'started' as const, index, total, step };
+        yield* options.checkpoint?.(started) ?? Effect.void;
+        if (signal.aborted) {
+          yield* Queue.offer(queue, { type: 'cancelled', remaining: plan.steps.slice(index).map((s) => s.key), backups: yield* backups.dir });
+          return yield* Queue.end(queue);
+        }
+        yield* Queue.offer(queue, started);
         const domain: Domain<DomainServices<D>> | undefined = domains.find((d) => d.name === step.domain);
         const body: Effect.Effect<StepResult, unknown, DomainServices<D>> = domain
           ? Effect.suspend(() => domain.run(step, report))
@@ -113,7 +123,9 @@ export const execute = <const D extends ReadonlyArray<Domain<any>>>(
           : settle(yield* Effect.exit(Effect.uninterruptible(body)));
         if (result.outcome === 'ok') ok++;
         else if (result.outcome === 'failed') failed++;
-        yield* Queue.offer(queue, { type: 'finished', index, total, key: step.key, ...result });
+        const finished = { type: 'finished' as const, index, total, key: step.key, ...result };
+        yield* options.checkpoint?.(finished) ?? Effect.void;
+        yield* Queue.offer(queue, finished);
         if (result.outcome === 'cancelled') {
           yield* Queue.offer(queue, { type: 'cancelled', remaining: plan.steps.slice(index + 1).map((s) => s.key), backups: yield* backups.dir });
           return yield* Queue.end(queue);

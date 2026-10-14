@@ -5,7 +5,7 @@ import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
 // Who acted. `sync` marks another of the user's machines, whose event also carries its machineId.
-export type Actor = 'agent' | 'cli' | 'app' | 'sync';
+export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp';
 export type ItemReason = { readonly itemId: string; readonly reason: string };
 export type StepRecord = { readonly key: string; readonly outcome: 'ok' | 'failed' | 'cancelled'; readonly note: string };
 
@@ -32,7 +32,12 @@ export type HistoryEventBody =
   | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> }
   | { readonly kind: 'outbox-dropped'; readonly accountId: string; readonly count: number; readonly code: 'invalid' };
 
-export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string };
+export type OperationMetadata = {
+  readonly operation: 'applyChange';
+  readonly scope: { readonly kind: 'machine' };
+  readonly requestId: string;
+};
+export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string } & Partial<OperationMetadata>;
 export type HistoryEvent = HistoryInput & { readonly v: 1; readonly at: string };
 
 // Append-only History, shared by the agent and the CLI.
