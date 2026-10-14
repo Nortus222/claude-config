@@ -48,7 +48,7 @@ function open(runtime: string, stateRoot: string, modern = false) {
     pending.set(requestId, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params: { ...params, ...(modern ? { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } : {}) } }) + '\n');
   });
-  return { records, ask, call: (operation: OperationName, args: object = {}) => ask('tools/call', { name: names[operation], arguments: args }),
+  return { records, diagnostics: () => stderr, ask, call: (operation: OperationName, args: object = {}) => ask('tools/call', { name: names[operation], arguments: args }),
     initialize: async () => {
       if (modern) return ask('tools/list');
       const result = await ask('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } });
@@ -136,13 +136,14 @@ test('CLI-owned agent exposes context diagnostics but cannot execute shared oper
   const refused = await client.call('inspect'); assert.equal(refused.result.structuredContent.error.code, 'APP_UNAVAILABLE');
 });
 
-test('malformed replies are redacted and an identical-runtime app relocation refuses the old MCP process', async t => {
+test('malformed replies and private failure codes are redacted and an identical-runtime app relocation refuses the old MCP process', async t => {
   const root = mkdtempSync('/tmp/mcp-'); t.after(() => rmSync(root, { recursive: true, force: true }));
   const { mkdirSync } = await import('node:fs'); mkdirSync(join(root, 'agent'));
   writeFileSync(join(root, 'agent/agent.token'), 'fixture-secret-token');
   const registration = { version: 1, installedBy: 'app', agentVersion: '9.9.9', appPath: expectedApp };
   writeFileSync(join(root, 'agent/agent.json'), JSON.stringify(registration));
   let operations = 0;
+  let privateFailure = false;
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket));
@@ -153,7 +154,10 @@ test('malformed replies are redacted and an identical-runtime app relocation ref
         if (request.command === 'hello') { assert.equal(request.client, 'mcp'); assert.equal(request.runtimeId, '9.9.9'); assert.equal(request.token, 'fixture-secret-token'); }
         if (request.command === 'operation') operations++;
         const result = request.command === 'hello' ? { agentVersion: '9.9.9', protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, app: { ownership: 'app', version: '0.1.6', runtimeId: '9.9.9' }, operations: { available: true } } : { rawSecret: 'fixture-private-path-token' };
-        socket.write(JSON.stringify({ version: 3, id: request.id, ok: true, result }) + '\n');
+        const reply = request.command === 'operation' && privateFailure
+          ? { version: 3, id: request.id, ok: false, error: { code: 'PRIVATE_SECRET_VALUE', message: 'fixture-private-failure-message' } }
+          : { version: 3, id: request.id, ok: true, result };
+        socket.write(JSON.stringify(reply) + '\n');
       }
     });
   });
@@ -164,10 +168,19 @@ test('malformed replies are redacted and an identical-runtime app relocation ref
   assert.equal(reply.result.isError, true); assert.equal(reply.result.structuredContent.error.code, 'MALFORMED');
   assert.ok(!JSON.stringify(client.records).includes('fixture-private-path-token'));
   assert.ok(!JSON.stringify(client.records).includes('fixture-secret-token'));
+  privateFailure = true;
+  const failure = await client.call('getRun', { runId: 'r' });
+  assert.equal(failure.result.isError, true);
+  assert.equal(failure.result.structuredContent.error.code, 'OPERATION_FAILED');
+  assert.deepEqual(JSON.parse(failure.result.content[0].text), failure.result.structuredContent);
+  for (const secret of ['PRIVATE_SECRET_VALUE', 'fixture-private-failure-message']) {
+    assert.ok(!JSON.stringify(client.records).includes(secret));
+    assert.ok(!client.diagnostics().includes(secret));
+  }
   writeFileSync(join(root, 'agent/agent.json'), JSON.stringify({ ...registration, appPath: '/tmp/Relocated.app/Contents/MacOS/Test' }));
   const relocated = await client.call('getContext');
   assert.equal(relocated.result.structuredContent.error.code, 'APP_UNAVAILABLE');
-  assert.equal(operations, 1, 'the old MCP process must not reach an identical-version relocated agent');
+  assert.equal(operations, 2, 'the old MCP process must not reach an identical-version relocated agent');
   assert.ok(!JSON.stringify(client.records).includes(expectedApp));
   assert.ok(!JSON.stringify(client.records).includes('Relocated.app'));
 });

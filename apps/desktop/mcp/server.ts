@@ -37,7 +37,6 @@ function schema(name: OperationName, side: 'input' | 'output'): StandardSchemaWi
 function safeError(error: unknown) {
   if (error instanceof AgentUnavailable) return { code: 'APP_UNAVAILABLE', message: 'The app-owned agent is unavailable. Open Nortuscc and finish setup or repair its agent, then reconnect. If acceptance was uncertain, retry with the same requestId.' };
   if (error instanceof AgentError) {
-    const code = /^[A-Z_]{1,40}$/.test(error.code) ? error.code : 'OPERATION_FAILED';
     const messages: Record<string, string> = {
       APP_UNAVAILABLE: 'Open Nortuscc and finish setup or repair its app-owned agent, then reconnect.',
       MALFORMED: 'The agent returned an invalid reply. Open Nortuscc to check runtime compatibility, then reconnect.',
@@ -51,6 +50,7 @@ function safeError(error: unknown) {
       TIMEOUT: 'The agent did not answer in time. Acceptance may be uncertain. Query runs or retry with the same requestId.',
       CLOSED: 'The agent connection closed. Acceptance may be uncertain. Query runs or retry with the same requestId.',
     };
+    const code = Object.hasOwn(messages, error.code) ? error.code : 'OPERATION_FAILED';
     return { code, message: messages[code] ?? 'The agent refused this operation. Inspect context and current runs in Nortuscc before retrying.' };
   }
   return { code: 'OPERATION_FAILED', message: 'The operation failed. Check Nortuscc and reconnect. If acceptance was uncertain, query runs or retry with the same requestId.' };
