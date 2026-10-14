@@ -894,3 +894,13 @@ test('malformed inspection and plan replies never expose rejected values', async
     assert.match(c.state.detail, /incompatible agent response/, command);
   }
 });
+
+test('a shared operation started by another client appears in app activity and refreshes on completion', async () => {
+  const f = fake({inspect_machine: () => inspection(['config:a'])}); const c = new MachineController(f.bridge); await c.connect();
+  f.emit(event('mcp-run', {type:'started',index:0,total:1,step:step('config:a')}));
+  assert.equal(c.state.run?.runId, 'mcp-run'); assert.equal(c.state.run?.steps[0]?.status, 'running'); assert.equal(canCancel(c.state), true);
+  f.emit(event('mcp-run', {type:'finished',index:0,total:1,key:'config:a',outcome:'ok',note:'applied'}));
+  assert.equal(c.state.run?.steps[0]?.note, 'applied');
+  f.emit(event('mcp-run', {type:'done',ok:1,failed:0})); await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(c.state.run?.outcome, 'done'); assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 2);
+});

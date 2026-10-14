@@ -519,7 +519,7 @@ test('a leftover socket is replaced', unixOnly, async () => {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'agent.sock'), 'stale');
   await m.run(Effect.scoped(Effect.gen(function* () {
-    yield* serveIpc({ paths: m.paths, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, handle, session: {onProgress: () => () => {}} as never, agentVersion: '0', onShutdown: () => {} });
     assert.equal(statSync(join(dir, 'agent.sock')).isSocket(), true);
   })));
 });

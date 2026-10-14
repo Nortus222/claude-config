@@ -48,8 +48,11 @@ export function advance(run: RunView, progress: RunProgress): RunView {
   const mark = (index: number, status: StepStatus, note = '') =>
     run.steps.map((s, i) => (i === index ? { ...s, status, note } : s));
   switch (progress.type) {
-    case 'started':
-      return { ...run, steps: mark(progress.index, 'running'), summary: progress.step.summary };
+    case 'started': {
+      const steps = [...run.steps];
+      steps[progress.index] = { key: progress.step.key, summary: progress.step.summary, status: 'running', note: '' };
+      return { ...run, steps, summary: progress.step.summary };
+    }
     case 'finished':
       return { ...run, steps: mark(progress.index, progress.outcome, progress.note) };
     case 'done':
@@ -437,7 +440,11 @@ export class MachineController {
       if (this.early.length < MAX_EARLY_EVENTS) this.early.push(event);
       return;
     }
-    const run = this.state.run;
+    let run = this.state.run;
+    if (event.progress.type === 'started' && run?.outcome !== 'running') {
+      run = { runId: event.runId, steps: [], outcome: 'running', summary: 'Applying machine changes' };
+      this.update({ preview: null, status: this.state.status ? { ...this.state.status, applying: true } : null });
+    }
     if (!run || run.runId !== event.runId || run.outcome !== 'running') return;
     const next = advance(run, event.progress);
     if (next.outcome === 'running') {

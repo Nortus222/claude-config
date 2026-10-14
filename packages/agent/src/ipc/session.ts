@@ -28,11 +28,12 @@ export class SessionError extends Error {
   }
 }
 
-type Client = 'app' | 'cli';
+type Client = 'app' | 'cli' | 'mcp';
 
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
   readonly runs: AgentRuns;
+  readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
   // Runs a job now and answers what it inspected, with its status. Clears any preview.
   readonly inspect: (actor: Client) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
   readonly preview: (exclude: ReadonlyArray<string>) => Effect.Effect<PreviewResult, SessionError>;
@@ -295,8 +296,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         if (!shutdown.aborted) yield* Effect.forkIn(handle.request('inspect'), runs);
       }).pipe(Effect.provideContext(context));
 
+    const progressListeners = new Set<(runId: string, progress: RunProgress) => void>();
+    yield* Effect.addFinalizer(() => Effect.sync(() => progressListeners.clear()));
     const agentRuns = yield* makeAgentRuns({
-      start: (input, lifecycle) => apply(input.planId, input.actor, () => {}, lifecycle).pipe(Effect.map(result =>
+      start: (input, lifecycle) => apply(input.planId, input.actor, (runId, progress) => {
+        for (const listener of progressListeners) { try { listener(runId, progress); } catch {} }
+      }, lifecycle).pipe(Effect.map(result =>
         result.status === 'stale' ? { status: 'stale' as const, preview: result.preview } : result)),
       cancel: runId => Effect.suspend(() => {
         const current = active;
@@ -307,6 +312,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     });
     const session: AgentSession = {
       runs: agentRuns,
+      onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,
       previewChange,

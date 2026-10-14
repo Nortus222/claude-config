@@ -6,6 +6,7 @@ import {
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
 import { agentLayer, type AgentDomains } from './layer.ts';
+import type { AppRuntime } from './ipc/protocol.ts';
 import { serveIpc } from './ipc/server.ts';
 import { SessionError, makeSession } from './ipc/session.ts';
 import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from './log.ts';
@@ -181,6 +182,7 @@ export const runAgent = (input: {
   readonly domains: AgentDomains;
   readonly source: Layer.Layer<SetupSource>;
   readonly agentVersion: string;
+  readonly appRuntime?: AppRuntime;
   readonly hosted?: HostedOptions;
   readonly clock?: Layer.Layer<AgentClock>;
   readonly processes?: Layer.Layer<Processes>;
@@ -232,7 +234,7 @@ export const runAgent = (input: {
       // IPC finalizers register later and therefore finish before this observation; the scheduler
       // and pid lock close afterward. A failed initialization may never register file cleanup.
       yield* Effect.addFinalizer(() => ipcReady ? observe('ipc_closed', 'completed') : Effect.void);
-      yield* phase('ipc', serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, notifier, onShutdown: () => shutdown.abort() }));
+      yield* phase('ipc', serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, appRuntime: input.appRuntime, notifier, onShutdown: () => shutdown.abort() }));
       ipcReady = true;
     }
     yield* Effect.forkScoped(observe('first_job', 'started').pipe(Effect.andThen(handle.request('start')),

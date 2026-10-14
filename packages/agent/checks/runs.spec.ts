@@ -247,3 +247,17 @@ test('stale replacements carry the session-owned normalized change and captured 
     assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
   }));
 });
+
+test('an old unsubscribe cannot remove a newer subscriber set', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session); const run = yield* session.runs.submit(inputFor(planned.planId));
+    const disposeA = session.runs.subscribe(run.runId, () => {}); disposeA();
+    let terminalSeen = false;
+    const disposeB = session.runs.subscribe(run.runId, view => { if (view.result) terminalSeen = true; });
+    disposeA();
+    yield* Deferred.succeed(f.release, undefined);
+    while ((yield* session.runs.get(run.runId)).result === null) yield* Effect.sleep('1 millis');
+    assert.equal(terminalSeen, true); disposeB();
+  }));
+});

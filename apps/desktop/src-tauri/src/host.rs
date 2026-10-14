@@ -223,11 +223,26 @@ struct HelloResult {
     protocol: u8,
     policy: Policy,
     paused: Value,
+    #[serde(default)] operations_protocol: Option<u8>,
+    #[serde(default)] app: Option<AppIdentity>,
+    #[serde(default)] operations: Option<OperationCapability>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AppIdentity { ownership: Value, version: Value, runtime_id: Value }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationCapability { available: bool, #[serde(default)] reason: Option<String> }
 fn validate_hello(value: &Value) -> Result<(), String> {
     let hello: HelloResult = serde_json::from_value(value.clone()).map_err(|_| "Invalid agent hello")?;
     if hello.protocol != 3 { return Err("Incompatible agent protocol; restart explicitly".into()); }
     validate_paused(&hello.paused)?;
+    if hello.operations_protocol.is_some_and(|version|version != 1) { return Err("Incompatible shared operations protocol".into()); }
+    if let Some(app) = &hello.app {
+        if !(app.ownership.is_null() || matches!(app.ownership.as_str(),Some("app"|"cli"))) || !(app.version.is_null() || app.version.as_str().is_some_and(valid_id)) || !(app.runtime_id.is_null() || app.runtime_id.as_str().is_some_and(valid_id)) { return Err("Invalid app identity".into()); }
+    }
+    if let Some(capability) = &hello.operations { if capability.reason.as_deref().is_some_and(|reason|reason.encode_utf16().count()>500) { return Err("Invalid operation capability".into()); } let _=capability.available; }
+
     let _ = (hello.agent_version, hello.policy);
     Ok(())
 }
@@ -1009,6 +1024,20 @@ mod socket_tests {
             json!({"agentVersion":"v","protocol":3,"policy":"invalid","paused":null}),
             json!({"agentVersion":"v","protocol":3,"policy":"manual","paused":{"reason":"x","at":"now","extra":1}}),
         ] { assert!(validate_hello(&value).is_err(), "{value}"); }
+        assert!(validate_hello(&hello_result()).is_ok());
+    }
+    #[test]
+    fn shared_operation_hello_extension_is_strict_and_legacy_hello_still_works() {
+        let mut hello=hello_result();
+        hello["operationsProtocol"]=json!(1);
+        hello["app"]=json!({"ownership":"app","version":"0.1.6","runtimeId":"fake-v1"});
+        hello["operations"]=json!({"available":true});
+        assert!(validate_hello(&hello).is_ok());
+        hello["app"]["extra"]=json!(true); assert!(validate_hello(&hello).is_err());
+        hello["app"].as_object_mut().unwrap().remove("extra");
+        hello["app"].as_object_mut().unwrap().remove("runtimeId"); assert!(validate_hello(&hello).is_err());
+        hello["app"]["runtimeId"]=json!("fake-v1");
+        hello["operationsProtocol"]=json!(2); assert!(validate_hello(&hello).is_err());
         assert!(validate_hello(&hello_result()).is_ok());
     }
     #[test]

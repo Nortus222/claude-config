@@ -695,3 +695,28 @@ test('startup refuses an unsafe recorded checkout before service commands or sta
   const records = startupRecords(f.stderr);
   assert.equal(records.some(r => r.phase === 'runtime_metadata' || r.phase === 'maintenance_state' || r.phase === 'lifecycle'), false);
 });
+
+test('the installed app service advertises real runtime metadata and machine target choices to MCP', {skip:process.platform === 'win32', timeout:10000}, async t => {
+  const f=fixture(t); const controller=new AbortController(); t.after(() => controller.abort());
+  const resources=join(f.home,'Nortuscc.app/Contents/Resources/agent-runtime'); mkdirSync(resources,{recursive:true});
+  writeFileSync(join(resources,'runtime.json'),JSON.stringify({agentVersion:'bundle-hash',appVersion:'0.1.6',target:'darwin-arm64'}));
+  mkdirSync(join(f.stateRoot,'agent'),{recursive:true});
+  writeFileSync(join(f.stateRoot,'agent/agent.json'),JSON.stringify({version:1,policy:'manual',policySource:'person',paused:null,installedBy:'app',agentVersion:'bundle-hash',appPath:f.input.args[2]}));
+  writeFileSync(join(f.stateRoot,'overrides.json'),JSON.stringify({version:1,configTargets:['codex']}));
+  const running=runDesktopEntry({...f.input,args:[],resources,signal:controller.signal});
+  let conn: AgentConnection | undefined; const until=Date.now()+5000;
+  while(!conn && Date.now()<until) {
+    try {conn=await connectAgent(f.paths,{client:'mcp',runtimeId:'bundle-hash',timeoutMs:100});} catch {await new Promise(resolve=>setTimeout(resolve,10));}
+  }
+  try {
+    assert.ok(conn,f.stderr.join('')); assert.deepEqual(conn.hello.app,{ownership:'app',version:'0.1.6',runtimeId:'bundle-hash'});
+    assert.deepEqual(conn.hello.operations,{available:true}); assert.equal(conn.hello.operationsProtocol,1);
+    const context=await conn.request<any>({command:'operation',operation:'getContext',input:{}});
+    assert.deepEqual(context.targets,['codex']); assert.equal(context.policy,'manual');
+    assert.deepEqual(context.profiles,{state:'unavailable',reason:'Profile discovery is not available in the machine reconciliation workflow.'});
+    assert.equal(context.account.state,'unavailable');
+    writeFileSync(join(f.stateRoot,'agent/agent.json'),JSON.stringify({version:1,policy:'manual',policySource:'person',paused:null,installedBy:'cli',agentVersion:'bundle-hash'}));
+    await assert.rejects(conn.request({command:'operation',operation:'inspect',input:{}}),error => error instanceof AgentError && error.code==='APP_UNAVAILABLE');
+    assert.ok(f.commands.every(command=>command.cmd!=='launchctl'));
+  } finally {conn?.close();controller.abort();assert.equal(await running,0);}
+});

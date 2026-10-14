@@ -2,13 +2,15 @@ import { IdSchema as Id, KeySchema as Key, MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HIS
 export { MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HISTORY, HistoryCursorSchema, WirePausedSchema, ObservedSchema, IssueSchema, ProfileSchema, StepSchema, PlanSchema, PreviewResultSchema, ApplyResultSchema, ProgressSchema, WireStatusSchema, InspectResultSchema } from '../operations/wire.ts';
 import { DeviceStartResponseSchema, DisplayNameSchema, IdSchema as HostedId, ItemIdSchema as HostedItemId, RevisionNumberSchema, SyncSetupSchema, SyncMachineSchema, MachinePatchSchema, IsoTimeSchema as HostedTime } from '@nortuscc/hosted-protocol';
 import { HOSTED_FAILURE_CODES } from '@nortuscc/hosted-client/transport';
+import { operationDefinitions, type OperationName } from '../operations/index.ts';
 import { Schema } from 'effect';
 import type { HistoryEvent } from '@nortuscc/machine';
 import type { AgentStatus } from '../job.ts';
 import { POLICIES } from '../policy-values.ts';
 
 // Protocol v3: JSON lines on the agent's socket. It is protocol v2 from the desktop backend,
-// unchanged, plus the `hello` handshake, the agent's own commands and status events. Every
+// unchanged, plus hello, agent commands and status events. Shared operations use an additive
+// envelope with operationsProtocol 1; legacy requests and replies retain their v3 shapes. Every
 // argument is an opaque key, id or enum, never a path, command line or URL.
 export const PROTOCOL_VERSION = 3;
 export const MAX_RECORD_BYTES = 1_048_576;
@@ -17,7 +19,7 @@ export const MAX_DECISIONS = 1000;
 export type ErrorCode =
   | 'INVALID_REQUEST' | 'MALFORMED' | 'OVERSIZED' | 'SHUTDOWN' | 'BUSY' | 'LOCKED' | 'NO_REPORT' | 'UNKNOWN_KEY'
   | 'UNKNOWN_PLAN' | 'PROFILE_INVALID' | 'REPO_NOT_FOUND' | 'INSPECT_FAILED' | 'INTERNAL'
-  | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
+  | 'APP_UNAVAILABLE' | 'UNSUPPORTED_SCOPE' | 'UNKNOWN_RUN' | 'REQUEST_CONFLICT' | 'RUN_FAILED' | 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
 
 const Version = Schema.Literal(PROTOCOL_VERSION);
 const ItemId = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
@@ -29,6 +31,12 @@ export const NotificationSchema = Schema.Struct({ id: NotificationId, title: Sch
 export const NotificationEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('notification'), notification: NotificationSchema, receipt: Receipt });
 export const NotificationResultSchema = Schema.Struct({ notification: Schema.NullOr(NotificationSchema), receipt: Schema.NullOr(Receipt) });
 const Client = Schema.Literals(['app', 'cli']);
+export const OPERATIONS_PROTOCOL_VERSION = 1;
+export type AppRuntime = { readonly version: string; readonly runtimeId: string; readonly appPath: string; readonly platform: string; readonly target: string; readonly metadataPath: string };
+const AppIdentitySchema = Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Id), runtimeId: Schema.NullOr(Id) });
+const OperationRequestSchema = Schema.Union(Object.entries(operationDefinitions).map(([operation, definition]) => Schema.Struct({
+  version: Version, id: Id, command: Schema.Literal('operation'), operation: Schema.Literal(operation as OperationName), input: definition.input,
+})));
 const Policy = Schema.Literals(POLICIES);
 
 const LocalDecisionSchema = Schema.Struct({
@@ -41,6 +49,8 @@ const LocalDecisionSchema = Schema.Struct({
 const DecisionSchema = Schema.Union([LocalDecisionSchema, Schema.Struct({ setupId: HostedId, id: HostedItemId, revision: RevisionNumberSchema, decision: Schema.Literals(['accept', 'skip']) })]);
 
 export const RequestSchema = Schema.Union([
+  OperationRequestSchema,
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Schema.Literal('mcp'), runtimeId: Id }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['hostedState', 'signOut', 'syncNow']) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema), reportStatus: Schema.optionalKey(Schema.Boolean) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('trustSetup'), setupId: HostedId }),
@@ -61,6 +71,9 @@ export const RequestSchema = Schema.Union([
 ]);
 
 export const HelloResultSchema = Schema.Struct({
+  operationsProtocol: Schema.optionalKey(Schema.Literal(OPERATIONS_PROTOCOL_VERSION)),
+  app: Schema.optionalKey(AppIdentitySchema),
+  operations: Schema.optionalKey(Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(500))) })),
   agentVersion: Schema.String,
   protocol: Version,
   policy: Policy,
@@ -90,7 +103,8 @@ export const HostedStateSchema = Schema.Struct({
 export const decodeSignInResult = Schema.decodeUnknownSync(SignInResultSchema, strict);
 export const decodeHostedState = Schema.decodeUnknownSync(HostedStateSchema, strict);
 export type WireHostedState = typeof HostedStateSchema.Type;
-export const decodeRequest = Schema.decodeUnknownSync(RequestSchema, strict);
+const decodeRequestSchema = Schema.decodeUnknownSync(RequestSchema, strict);
+export const decodeRequest = (input: unknown): Request => decodeRequestSchema(input) as Request;
 export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
 export const decodeHelloResult = Schema.decodeUnknownSync(HelloResultSchema, strict);
 export const decodeInspectResult = Schema.decodeUnknownSync(InspectResultSchema, strict);
@@ -102,7 +116,8 @@ export type HistoryResult = {
   readonly events: ReadonlyArray<HistoryEvent>;
   readonly nextBefore: HistoryCursor | null;
 };
-export type Request = typeof RequestSchema.Type;
+export type OperationRequest = { [N in OperationName]: { readonly version: typeof PROTOCOL_VERSION; readonly id: string; readonly command: 'operation'; readonly operation: N; readonly input: import('../operations/index.ts').OperationInput<N> } }[OperationName];
+export type Request = Exclude<typeof RequestSchema.Type, { readonly command: 'operation' }> | OperationRequest;
 export type WireDecision = typeof DecisionSchema.Type;
 export type HelloResult = typeof HelloResultSchema.Type;
 export type WireObserved = typeof ObservedSchema.Type;

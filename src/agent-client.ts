@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
+import { decodeOperationOutput, type OperationName } from '@nortuscc/agent/operations';
 import type { MachinePathsValue } from '@nortuscc/machine';
 import { decodeWireStatus, decodeHostedState, decodeSignInResult, decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
 
@@ -40,16 +41,16 @@ export const CONNECT_TIMEOUT_MS = 2000;
 export const REQUEST_TIMEOUT_MS = 30_000;
 // inspect runs a job, and apply re-inspects before it answers.
 export const INSPECT_TIMEOUT_MS = 120_000;
-const LONG_COMMANDS = new Set(['inspect', 'apply']);
+const LONG_COMMANDS = new Set(['inspect', 'apply', 'operation']);
 
-type Pending = { readonly command?: string; readonly resolve: (result: unknown) => void; readonly reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
+type Pending = { readonly command?: string; readonly operation?: OperationName; readonly resolve: (result: unknown) => void; readonly reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
 
 // Connects to <stateRoot>/agent/agent.sock with a token read fresh from agent.token and says hello.
 // Connecting and the hello together must finish within `timeoutMs` (2 s by default). Later requests
-// time out after `requestTimeoutMs` (30 s), or `inspectTimeoutMs` (120 s) for inspect and apply.
+// time out after `requestTimeoutMs` (30 s), or `inspectTimeoutMs` (120 s) for inspect, apply and shared operations.
 export const connectAgent = async (
   paths: MachinePathsValue,
-  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' } = {},
+  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' | 'mcp'; runtimeId?: string } = {},
 ): Promise<AgentConnection> => {
   const dir = join(paths.stateRoot, 'agent');
   let token: string;
@@ -102,10 +103,10 @@ export const connectAgent = async (
     clearTimeout(p.timer);
     if (message.ok) {
       try {
-        const result = p.command === 'decide' ? decodeWireStatus(message.result) : p.command === 'signIn' ? decodeSignInResult(message.result)
+        const result = p.command === 'operation' && p.operation ? decodeOperationOutput(p.operation, message.result) : p.command === 'decide' ? decodeWireStatus(message.result) : p.command === 'signIn' ? decodeSignInResult(message.result)
           : ['hostedState', 'signOut', 'syncNow', 'trustSetup', 'machineSettings'].includes(p.command ?? '') ? decodeHostedState(message.result) : message.result;
         p.resolve(result);
-      } catch { p.reject(new AgentError('MALFORMED', 'the hosted result is outside protocol v3')); }
+      } catch { p.reject(new AgentError('MALFORMED', 'the agent result is outside protocol v3')); }
     }
     else p.reject(new AgentError(message.error.code, message.error.message));
   };
@@ -144,7 +145,7 @@ export const connectAgent = async (
       const id = String(++next);
       const line = JSON.stringify({ ...command, version: PROTOCOL_VERSION, id }) + '\n';
       if (Buffer.byteLength(line) > MAX_RECORD_BYTES) return reject(new AgentError('OVERSIZED', 'the request exceeds the record limit'));
-      const entry: Pending = { command: (command as { command?: string }).command, resolve: resolve as (result: unknown) => void, reject };
+      const entry: Pending = { command: (command as { command?: string }).command, operation: (command as { operation?: OperationName }).operation, resolve: resolve as (result: unknown) => void, reject };
       const name = (command as { command?: unknown }).command;
       const timeout = opts.timeoutMs
         ?? (typeof name === 'string' && LONG_COMMANDS.has(name) ? options.inspectTimeoutMs ?? INSPECT_TIMEOUT_MS : options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
@@ -159,7 +160,7 @@ export const connectAgent = async (
   const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;
   let hello: HelloResult;
   try {
-    const result = await request({ command: 'hello', token, client: options.client ?? 'cli' }, { timeoutMs });
+    const result = await request({ command: 'hello', token, client: options.client ?? 'cli', ...(options.client === 'mcp' ? {runtimeId: options.runtimeId} : {}) }, { timeoutMs });
     try {
       hello = decodeHelloResult(result);
     } catch {

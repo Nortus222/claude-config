@@ -5,16 +5,20 @@ import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Cause, Data, Effect, FiberSet } from 'effect';
-import { HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
+import { Fs, HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
 import type { Notifier, Notification } from '../notifier.ts';
 import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
+import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
+import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
+import { operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext } from '../operations/index.ts';
+import { operationDigest, RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
 import {
   decodeHostedState, decodeSignInResult, decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
-  type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
+  type AppRuntime, type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
 } from './protocol.ts';
 import { SessionError, type AgentSession } from './session.ts';
 
@@ -36,11 +40,12 @@ const SHUTDOWN_MS = 1000;
 // sun_path holds 104 bytes on macOS and the BSDs and 108 on Linux, including the terminating NUL.
 const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103;
 
-type Client = 'app' | 'cli';
+type Client = 'app' | 'cli' | 'mcp';
 type Connection = {
   readonly socket: Socket;
   client: Client | undefined;
   subscribed: boolean;
+  runtimeId?: string;
   receipts: Map<string, string>;
   pendingNotification?: { id: string; receipt: string; deadline: number; finish: (delivered: boolean) => void };
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -78,6 +83,7 @@ export const serveIpc = (input: {
   readonly handle: AgentHandle;
   readonly session: AgentSession;
   readonly agentVersion: string;
+  readonly appRuntime?: AppRuntime;
   readonly onShutdown: () => void;
   readonly handshakeMs?: number;
   readonly notifier?: Notifier;
@@ -166,14 +172,17 @@ export const serveIpc = (input: {
 
     // Run events go to the client that applied and to every subscriber. Domains may put captured
     // installer output in a note; capping it keeps every event within the record limit.
-    const fanOut = (origin: Connection, runId: string, progress: RunProgress) => {
+    const fanOut = (origin: Connection | undefined, runId: string, progress: RunProgress) => {
       const capped =
         progress.type === 'finished' ? { ...progress, note: truncate(progress.note, MAX_NOTE_LENGTH) }
         : progress.type === 'failed' ? { ...progress, message: truncate(progress.message, MAX_NOTE_LENGTH) }
         : progress;
       const message = { version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped };
-      for (const conn of new Set([origin, ...subscribers()])) event(conn, message);
+      for (const conn of new Set([...(origin ? [origin] : []), ...subscribers()])) event(conn, message);
     };
+
+    const disposeProgress = session.onProgress((runId, progress) => fanOut(undefined, runId, progress));
+    yield* Effect.addFinalizer(() => Effect.sync(disposeProgress));
 
     const liveStatus = (status: AgentStatus) =>
       Effect.map(session.running, (running) => ({
@@ -222,15 +231,58 @@ export const serveIpc = (input: {
     input.notifier?.setConnected(deliverNotification);
     yield* Effect.addFinalizer(() => Effect.sync(() => input.notifier?.setConnected(undefined)));
 
-    const hello = Effect.gen(function* () {
+    const identity = (expectedRuntimeId?: string) => Effect.gen(function* () {
       const state = yield* (yield* AgentStateStore).read;
+      const runtime = input.appRuntime;
+      let reason: string | undefined;
+      if (!runtime || state.installedBy !== 'app') reason = 'Open the installed desktop app to configure its background agent.';
+      else if (runtime.platform !== 'darwin' || runtime.target !== 'darwin-arm64') reason = 'MCP requires the supported macOS arm64 desktop runtime.';
+      else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath !== runtime.appPath) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
+      else if (expectedRuntimeId !== undefined && expectedRuntimeId !== runtime.runtimeId) reason = 'The client runtime does not match the app; reconnect through the installed desktop app.';
+      else {
+        const fs = yield* Fs;
+        const text = yield* fs.readText(runtime.metadataPath);
+        try {
+          const metadata = JSON.parse(text ?? 'null');
+          if (!metadata || metadata.agentVersion !== runtime.runtimeId || metadata.appVersion !== runtime.version || metadata.target !== runtime.target) reason = 'The installed app changed; reopen it before using MCP.';
+        } catch { reason = 'Installed app metadata is unavailable; reopen or repair the desktop app.'; }
+      }
+      return { state, app: { ownership: state.installedBy ?? null, version: runtime?.version ?? null, runtimeId: runtime?.runtimeId ?? null },
+        operations: reason ? { available: false, reason } : { available: true } };
+    });
+    const hello = (client: Client, expectedRuntimeId?: string) => Effect.gen(function* () {
+      const { state, app, operations } = yield* identity(expectedRuntimeId);
       const result: HelloResult = {
-        agentVersion: input.agentVersion,
-        protocol: PROTOCOL_VERSION,
-        policy: state.policy,
+        agentVersion: input.agentVersion, protocol: PROTOCOL_VERSION, policy: state.policy,
         paused: state.paused === null ? null : { reason: state.paused.reason, at: state.paused.at },
+        ...(input.appRuntime || client === 'mcp' ? { operationsProtocol: 1 as const, app, operations } : {}),
       };
       return result;
+    });
+    const context = (expectedRuntimeId?: string) => Effect.gen(function* () {
+      const { state, app, operations } = yield* identity(expectedRuntimeId);
+      const inspection = yield* handle.inspection;
+      const hosted = handle.hosted ? yield* handle.hosted.state : undefined;
+      const trustedSetups = yield* (yield* SetupsStore).read;
+      const fs = yield* Fs;
+      const overrideText = yield* fs.readText(join(input.paths.stateRoot, 'overrides.json'));
+      const choices = overrideText === undefined
+        ? overridesFromLegacyState(yield* fs.readText(join(input.paths.stateRoot, 'state.json')))
+        : decodeOverrides((() => { try { return JSON.parse(overrideText); } catch { return null; } })(), 'overrides.json');
+      const pending = yield* fs.exists(join(input.paths.stateRoot, 'agent/pending-update.json'));
+      const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
+      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; inspect and repair the overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
+      return projectContext({ app, agent: { version: input.agentVersion, protocol: PROTOCOL_VERSION },
+        targets: choices.issues.length ? [] : (choices.value.manageConfig === false ? [] : choices.value.configTargets ?? (inspection ? TARGETS : [])),
+        setups: hosted?.enabled ? { state: 'available', items: hosted.setups.map(s => ({setupId:s.setupId, trusted: trustedSetups?.some(t => t.setupId === s.setupId && t.accountId === hosted.accountId) ?? false, revision:s.latestRevision})) }
+          : inspection ? {state:'available',items:[{setupId: inspection.revision ? revisionSetupId(inspection.revision) : 'local', trusted:inspection.trusted, revision: inspection.revision ? revisionCommit(inspection.revision) : null}]}
+          : {state:'unknown',reason:'The agent has no setup inspection yet.'},
+        profiles: {state:'unavailable',reason:'Profile discovery is not available in the machine reconciliation workflow.'},
+        account: hosted?.enabled ? hosted.auth === 'signed-in' && hosted.accountId ? {state:'signed-in',accountId:hosted.accountId} : {state:hosted.auth === 'unauthenticated' ? 'unauthenticated' : 'signed-out'} : {state:'unavailable',reason:'Hosted mode is not configured.'},
+        policy:state.policy, paused:state.paused === null ? null : {reason:state.paused.reason,at:state.paused.at},
+        scopes:{machine:operations,user:{available:false,reason:'User mutations are not supported.'},profile:{available:false,reason:'Profile mutations are not supported.'}},
+        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name === 'applyChange' || name === 'cancelRun' ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
+      });
     });
     // Until the start job finishes there is no status; answering at once beats making a client wait for a job.
     const latest = Effect.flatMap(handle.status, (status) =>
@@ -238,12 +290,81 @@ export const serveIpc = (input: {
     const wire = <R>(effect: Effect.Effect<AgentStatus, unknown, R>): Effect.Effect<Handled, unknown, R> =>
       Effect.flatMap(effect, (status) => Effect.map(liveStatus(status), (result) => ({ result })));
 
+    const historyPage = (request: { readonly before?: HistoryResult['nextBefore']; readonly limit: number }) => Effect.gen(function* () {
+      const events = yield* (yield* HistoryStore).read;
+      // Per-instant append order stays stable when a clock rollback adds an older month.
+      const sequences = new Map<number, number>();
+      const ordered = events.flatMap((event) => {
+        const at = Date.parse(event.at);
+        if (!Number.isFinite(at)) return [];
+        const seq = sequences.get(at) ?? 0;
+        sequences.set(at, seq + 1);
+        return [{ event, at, seq }];
+      }).sort((a, b) => b.at - a.at || b.seq - a.seq);
+      const before = request.before ?? undefined;
+      const beforeAt = before === undefined ? Infinity : Date.parse(before.at);
+      const matching = ordered.filter((e) =>
+        e.at < beforeAt || (e.at === beforeAt && before !== undefined && e.seq < before.seq));
+      const kept = matching.slice(0, request.limit);
+      const last = kept.at(-1);
+      const result: HistoryResult = {
+        events: kept.map((e) => e.event),
+        nextBefore: matching.length > kept.length && last !== undefined
+          ? { at: new Date(last.at).toISOString(), seq: last.seq } : null,
+      };
+      return result;
+    });
+
     const dispatch = (conn: Connection, request: Request, client: Client): Effect.Effect<Handled, unknown, AgentServices> => {
+      if (client === 'mcp' && !['hello', 'operation'].includes(request.command)) return Effect.fail(new SessionError('UNAUTHORIZED', 'MCP connections use shared operations only; open the app for consent and service management.'));
       const hosted = handle.hosted;
       const hostedResult = (effect: Effect.Effect<unknown, unknown>) => Effect.andThen(effect,
         Effect.map(hosted?.state ?? Effect.succeed(disabledHostedState), (s) => ({ result: decodeHostedState(s) })));
       const unavailable = Effect.fail(new SessionError('NOT_SIGNED_IN', 'Hosted mode is not configured'));
       switch (request.command) {
+        case 'operation': return Effect.gen(function* () {
+          const name = request.operation;
+          const args = request.input;
+          if (args.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'This operation supports machine scope only; use the owning app workflow for user or profile changes.'));
+          if (name !== 'getContext' && client === 'mcp') {
+            const current = yield* identity(conn.runtimeId);
+            if (!current.operations.available || conn.runtimeId !== input.appRuntime?.runtimeId) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', current.operations.reason ?? 'The connected app runtime changed; reconnect through the installed desktop app.'));
+          }
+          let result: unknown;
+          switch (request.operation) {
+            case 'getContext': result = yield* context(conn.runtimeId); break;
+            case 'inspect': result = yield* session.inspect(client); break;
+            case 'previewChange': result = yield* session.previewChange(request.input.change); break;
+            case 'applyChange': {
+              const apply = request.input;
+              result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor: client }).pipe(
+                Effect.map(run => ({status:'started',run})),
+                Effect.catch(error => error.code === 'STALE_PLAN' && error.preview ? Effect.succeed({status:'stale',preview:error.preview}) : Effect.fail(error)),
+              ); break;
+            }
+            case 'getRun': result = yield* session.runs.get(request.input.runId); break;
+            case 'listRuns': result = yield* session.runs.list(request.input); break;
+            case 'cancelRun': {
+              const fs = yield* Fs;
+              const path = join(input.paths.stateRoot, 'agent/pending-update.json');
+              const pending = yield* fs.readText(path).pipe(Effect.mapError(() => new SessionError('LOCKED', 'Desktop maintenance state is unavailable; open or repair the app.')));
+              if (pending !== undefined || (yield* fs.exists(path))) return yield* Effect.fail(new SessionError('LOCKED', 'Desktop update recovery is pending; open the app before changing the machine.'));
+              result = yield* session.runs.cancel(request.input.runId); break;
+            }
+            case 'history': {
+              const history = request.input;
+              const legacy = yield* historyPage(history);
+              result = { ...legacy, events:legacy.events.map(event => ({ kind:event.kind, at:event.at, actor:event.actor,
+                ...('operation' in event ? {operation:event.operation,scope:event.scope,requestId:event.requestId} : {}),
+                ...('runId' in event ? {runId:event.runId} : {}),
+                ...('keys' in event ? {keys:event.keys} : {}),
+                ...('steps' in event ? {steps:event.steps.map(step => ({...step,note:[...step.note].slice(0,500).join('')}))} : {}),
+                ...('message' in event ? {message:[...String(event.message)].slice(0,500).join('')} : {}),
+              })) }; break;
+            }
+          }
+          return { result: decodeOperationOutput(name, result) };
+        });
         case 'hostedState': return hostedResult(Effect.void);
         case 'signIn': return hosted ? Effect.map(hosted.signIn(request.name, request.reportStatus), (s) => ({ result: decodeSignInResult(s) })) : unavailable;
         case 'signOut': return hosted ? hostedResult(hosted.signOut()) : unavailable;
@@ -278,7 +399,7 @@ export const serveIpc = (input: {
             return { result: { accepted } };
           });
         case 'hello':
-          return Effect.map(hello, (result) => ({ result }));
+          return Effect.map(hello(client, conn.runtimeId), (result) => ({ result }));
         case 'status':
           return wire(latest);
         case 'inspect':
@@ -319,31 +440,7 @@ export const serveIpc = (input: {
           return wire(handle.setPolicy(request.policy, client));
         case 'resume':
           return wire(handle.resume(client));
-        case 'history':
-          return Effect.gen(function* () {
-            const events = yield* (yield* HistoryStore).read;
-            // Per-instant append order stays stable when a clock rollback adds an older month.
-            const sequences = new Map<number, number>();
-            const ordered = events.flatMap((event) => {
-              const at = Date.parse(event.at);
-              if (!Number.isFinite(at)) return [];
-              const seq = sequences.get(at) ?? 0;
-              sequences.set(at, seq + 1);
-              return [{ event, at, seq }];
-            }).sort((a, b) => b.at - a.at || b.seq - a.seq);
-            const before = request.before;
-            const beforeAt = before === undefined ? Infinity : Date.parse(before.at);
-            const matching = ordered.filter((e) =>
-              e.at < beforeAt || (e.at === beforeAt && before !== undefined && e.seq < before.seq));
-            const kept = matching.slice(0, request.limit);
-            const last = kept.at(-1);
-            const result: HistoryResult = {
-              events: kept.map((e) => e.event),
-              nextBefore: matching.length > kept.length && last !== undefined
-                ? { at: new Date(last.at).toISOString(), seq: last.seq } : null,
-            };
-            return { result };
-          });
+        case 'history': return Effect.map(historyPage(request), result => ({result}));
         case 'subscribe':
           return Effect.sync(() => {
             conn.subscribed = true;
@@ -370,6 +467,7 @@ export const serveIpc = (input: {
             if (Cause.hasInterruptsOnly(cause)) return reject(conn, request.id, 'SHUTDOWN', 'The agent is shutting down');
             const error = Cause.squash(cause);
             if (error instanceof HostedFailure) reject(conn, request.id, error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', error.message);
+            else if (error instanceof RunError) reject(conn, request.id, error.code as ErrorCode, error.message);
             else if (error instanceof SessionError) reject(conn, request.id, error.code, error.message);
             else reject(conn, request.id, 'INTERNAL', describe(error));
           },
@@ -399,6 +497,7 @@ export const serveIpc = (input: {
       if (conn.client === undefined || request?.command === 'hello') {
         if (request?.command !== 'hello' || !timingSafeEqual(digest(request.token), expected)) return refuse(conn, request?.id ?? idOf(raw));
         conn.client ??= request.client;
+        if (request.client === 'mcp' && conn.client === 'mcp') conn.runtimeId ??= request.runtimeId;
       }
       if (record === undefined) return reject(conn, 'invalid', 'OVERSIZED', `Record exceeds ${MAX_RECORD_BYTES} bytes`);
       if (!parsed) return reject(conn, 'invalid', 'MALFORMED', 'Expected a JSON record');

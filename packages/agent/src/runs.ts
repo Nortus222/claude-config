@@ -168,7 +168,12 @@ export const makeAgentRuns = (driver: {
       listeners.set(runId, set); set.add(listener);
       const receipt = receipts.get(runId);
       if (receipt) { try { listener(copy(receipt.view)); } catch {} }
-      return () => { set.delete(listener); if (set.size === 0) listeners.delete(runId); };
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true; set.delete(listener);
+        if (set.size === 0 && listeners.get(runId) === set) listeners.delete(runId);
+      };
     },
   };
   return runs;
