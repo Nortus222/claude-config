@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 
 test('MCP resource bundling records its own hash and every new bundled dependency notice', async () => {
@@ -19,5 +20,29 @@ test('MCP resource bundling records its own hash and every new bundled dependenc
     assert.match(await readFile(join(resources, 'ZOD-LICENSE'), 'utf8'), /Colin McDonnell/);
     assert.match(await readFile(join(resources, 'CONTENT-TYPE-LICENSE'), 'utf8'), /2015 Douglas Christopher Wilson/);
     assert.match(await readFile(join(resources, 'CONTENT-TYPE-LICENSE'), 'utf8'), /Permission is hereby granted/);
+  } finally { await rm(resources, { recursive: true, force: true }); }
+});
+
+
+test('post-signing Bun hash refresh updates only the Bun fingerprint after bytes change', async () => {
+  const resources = await mkdtemp(join(tmpdir(), 'mcp-signing-'));
+  try {
+    const { refreshBunHash } = await import('../scripts/refresh-bun-hash.mjs');
+    const metadata = { target: 'darwin-arm64', appVersion: '0.1.6', bun: '1.3.14', executable: 'bun', bunSha256: createHash('sha256').update('runtime with its original signature').digest('hex'), agentVersion: 'agent-identity', mcp: { protocol: 1, executable: 'mcp.mjs', sdk: '2.3.1', sha256: 'mcp-identity' }, privateFutureField: { keep: true } };
+    await writeFile(join(resources, 'runtime.json'), JSON.stringify(metadata));
+    await writeFile(join(resources, 'bun'), 'runtime with its original signature');
+    await writeFile(join(resources, 'bun'), 'runtime with a changed signature');
+    execFileSync(process.execPath, [fileURLToPath(new URL('../scripts/refresh-bun-hash.mjs', import.meta.url)), resources], { env: { HOME: resources, PATH: '' }, timeout: 5000 });
+    const changed = JSON.parse(await readFile(join(resources, 'runtime.json'), 'utf8'));
+    assert.equal(changed.bunSha256, createHash('sha256').update('runtime with a changed signature').digest('hex'));
+    const { bunSha256: _before, ...before } = metadata, { bunSha256: _after, ...after } = changed;
+    assert.deepEqual(after, before);
+    await writeFile(join(resources, 'agent.mjs'), 'tampered agent');
+    await writeFile(join(resources, 'mcp.mjs'), 'tampered MCP');
+    await refreshBunHash(resources);
+    assert.deepEqual(JSON.parse(await readFile(join(resources, 'runtime.json'), 'utf8')), changed, 'the signing step must never replace agent or MCP identities');
+    await writeFile(join(resources, 'runtime.json'), JSON.stringify({ ...metadata, executable: '../external-bun' }));
+    await assert.rejects(() => refreshBunHash(resources));
+    assert.equal(JSON.parse(await readFile(join(resources, 'runtime.json'), 'utf8')).bunSha256, metadata.bunSha256);
   } finally { await rm(resources, { recursive: true, force: true }); }
 });

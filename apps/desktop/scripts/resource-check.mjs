@@ -38,9 +38,9 @@ try {
   const agentVersion = createHash('sha256').update(await readFile(join(resources, 'agent.mjs'))).digest('hex');
   await writeFile(join(resources, 'runtime.json'), JSON.stringify({
     target: `${process.platform}-${process.arch}`, appVersion: JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version,
-    maintenanceProtocol: 1, mcp, bun: bunVersion, executable, agentVersion,
+    maintenanceProtocol: 1, mcp, bun: bunVersion, bunSha256: createHash('sha256').update(await readFile(join(resources, executable))).digest('hex'), executable, agentVersion,
   }, null, 2));
-  execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts'], {
+  execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts', 'checks/mcp-launch.spec.ts'], {
     cwd: root, env: { ...process.env, DESKTOP_AGENT_RESOURCES: resources },
     stdio: 'inherit', windowsHide: true,
   });

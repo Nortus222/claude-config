@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod mcp;
 mod startup;
 mod startup_diagnostics;
 mod updates;
@@ -487,6 +488,17 @@ fn smoke(home: PathBuf) -> Result<(), String> {
 }
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--mcp") {
+        let result = (|| {
+            if args.len() != 1 { return Err("Usage: --mcp".to_string()); }
+            let executable = std::env::current_exe().map_err(|_| "Installed MCP executable is unavailable")?;
+            mcp::run_mcp(&mcp::installed_resources(&executable)?)
+        })();
+        match result {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        }
+    }
     // Release preparation verifies files without creating a window, service or OS integration.
     if args.first().map(String::as_str)==Some("--verify-update-release") {
         let result=(|| {

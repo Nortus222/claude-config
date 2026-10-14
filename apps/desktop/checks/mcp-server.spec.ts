@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { before, after, test } from 'node:test';
@@ -14,20 +14,31 @@ import { decodeOperationOutput, operationJsonSchemas, type OperationName } from 
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
 
-const bundle = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
-const expectedApp = resolve(bundle, '../../MacOS/Test');
+const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
+const bundle = join(fixtureRoot, 'Test.app/Contents/Resources/agent-runtime');
+const expectedApp = join(fixtureRoot, 'Test.app/Contents/MacOS/Test');
+const nativeRuntime = process.env.DESKTOP_MCP_NATIVE_RUNTIME;
+const packagedResources = process.env.DESKTOP_AGENT_RESOURCES;
+const expectedRuntime = nativeRuntime && packagedResources ? JSON.parse(readFileSync(join(packagedResources, 'runtime.json'), 'utf8')).agentVersion : '9.9.9';
+const shell = join(fixtureRoot, 'shell');
 before(async () => {
-  await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', outfile: join(bundle, 'mcp.mjs') });
-  writeFileSync(join(bundle, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', appVersion: '0.1.6', agentVersion: '9.9.9', mcp: { protocol: 1, executable: 'mcp.mjs' } }));
+  mkdirSync(bundle, { recursive: true }); mkdirSync(dirname(expectedApp), { recursive: true });
+  writeFileSync(shell, '#!/bin/sh\nexec /bin/sh -c "$2"\n'); chmodSync(shell, 0o755);
+  if (nativeRuntime && packagedResources) {
+    cpSync(packagedResources, bundle, { recursive: true }); copyFileSync(nativeRuntime, expectedApp); chmodSync(expectedApp, 0o755);
+  } else {
+    await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', outfile: join(bundle, 'mcp.mjs') });
+    writeFileSync(join(bundle, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', appVersion: '0.1.6', agentVersion: expectedRuntime, mcp: { protocol: 1, executable: 'mcp.mjs' } }));
+  }
 });
-after(() => rmSync(bundle, { recursive: true, force: true }));
+after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 const names: Record<OperationName, string> = { getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
-  const child = spawn(runtime, [join(bundle, 'mcp.mjs'), '--app', expectedApp], { env: { HOME: bundle, NORTUSCC_STATE_DIR: stateRoot, PATH: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(runtime, runtime === expectedApp ? ['--mcp'] : [join(bundle, 'mcp.mjs'), '--app', expectedApp], { cwd: '/', env: { HOME: fixtureRoot, SHELL: shell, NORTUSCC_STATE_DIR: stateRoot, PATH: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
   const records: any[] = [];
-  let buffer = '', stderr = '', id = 0;
+  let buffer = '', stderr = '', id = 0, terminated = false;
   const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   child.stderr.on('data', chunk => { stderr += chunk; });
   child.stdout.on('data', chunk => {
@@ -55,10 +66,10 @@ function open(runtime: string, stateRoot: string, modern = false) {
       assert.equal(result.result.protocolVersion, '2025-11-25');
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
       return ask('tools/list');
-    }, close: async () => {
+    }, terminate: async () => { terminated = true; child.kill('SIGKILL'); await exited; assert.equal(child.signalCode, 'SIGKILL'); assert.throws(() => process.kill(child.pid!, 0)); }, close: async () => {
       child.stdin.end(); const kill = setTimeout(() => child.kill('SIGKILL'), 1500);
       await exited; clearTimeout(kill);
-      assert.equal(child.exitCode, 0, stderr);
+      if (terminated) assert.equal(child.signalCode, 'SIGKILL'); else assert.equal(child.exitCode, 0, stderr);
       assert.equal(buffer, '');
       for (const record of records) assert.equal(record.jsonrpc, '2.0');
     } };
@@ -76,8 +87,8 @@ async function agent(identity: 'app' | 'cli' = 'app') {
   m.write(join(m.paths.claude, 'settings.json'), '{"theme":"dark"}\n');
   await m.trust();
   await m.run(DecisionsStore.use(s => s.record(accept(EFFORT))));
-  await m.run(AgentStateStore.use(s => s.update(state => ({ ...state, installedBy: identity, agentVersion: '9.9.9', appPath: expectedApp }))));
-  m.write(join(m.root, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', agentVersion: '9.9.9', appVersion: '0.1.6' }));
+  await m.run(AgentStateStore.use(s => s.update(state => ({ ...state, installedBy: identity, agentVersion: expectedRuntime, appPath: expectedApp }))));
+  m.write(join(m.root, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', agentVersion: expectedRuntime, appVersion: '0.1.6' }));
   const started = Deferred.makeUnsafe<void>(), release = Deferred.makeUnsafe<void>();
   const config: AgentDomain = { ...configDomain, run: (step, report) => Effect.gen(function* () { yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return yield* configDomain.run(step, report); }) };
   const domains = (paths: typeof m.paths) => [config, integrationsDomain({ paths, env: {} })];
@@ -85,13 +96,13 @@ async function agent(identity: 'app' | 'cli' = 'app') {
   await m.run(Effect.gen(function* () {
     const handle = yield* startAgent(domains);
     const session = yield* makeSession(handle, { signal: new AbortController().signal, domains });
-    yield* serveIpc({ paths: m.paths, handle, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), fixture.source);
   return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); } };
 }
 
-const runtimes = [process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
+const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
   test(`${runtime}: ${modern ? 'modern 2026' : 'legacy 2025'} opening, shared tools and reconnectable agent runs`, { timeout: 30_000 }, async t => {
     const s = await agent(); t.after(s.close);
@@ -115,7 +126,7 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     assert.equal(applied.status, 'started');
     await Effect.runPromise(Deferred.await(s.started));
     assert.equal(output('getRun', await client.call('getRun', { runId: applied.run.runId })).result, null);
-    await client.close();
+    if (runtime === expectedApp && modern) await client.terminate(); else await client.close();
     const next = open(runtime, s.m.paths.stateRoot, modern); t.after(next.close); await next.initialize();
     assert.equal(output('getRun', await next.call('getRun', { runId: applied.run.runId })).intent.requestId, 'caller-owned-intent');
     assert.equal(output('applyChange', await next.call('applyChange', { planId: preview.planId, requestId: 'caller-owned-intent' })).run.runId, applied.run.runId);
@@ -129,9 +140,9 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
   });
 }
 
-test('CLI-owned agent exposes context diagnostics but cannot execute shared operations', async t => {
+for (const runtime of [process.execPath, ...(nativeRuntime && packagedResources ? [expectedApp] : [])]) test(`${runtime}: CLI-owned agent exposes context diagnostics but cannot execute shared operations`, async t => {
   const s = await agent('cli'); t.after(s.close);
-  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const client = open(runtime, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
   assert.ok(output('getContext', await client.call('getContext')).diagnostics.length > 0);
   const refused = await client.call('inspect'); assert.equal(refused.result.structuredContent.error.code, 'APP_UNAVAILABLE');
 });
@@ -140,7 +151,7 @@ test('malformed replies and private failure codes are redacted and an identical-
   const root = mkdtempSync('/tmp/mcp-'); t.after(() => rmSync(root, { recursive: true, force: true }));
   const { mkdirSync } = await import('node:fs'); mkdirSync(join(root, 'agent'));
   writeFileSync(join(root, 'agent/agent.token'), 'fixture-secret-token');
-  const registration = { version: 1, installedBy: 'app', agentVersion: '9.9.9', appPath: expectedApp };
+  const registration = { version: 1, installedBy: 'app', agentVersion: expectedRuntime, appPath: expectedApp };
   writeFileSync(join(root, 'agent/agent.json'), JSON.stringify(registration));
   let operations = 0;
   let privateFailure = false;
@@ -151,9 +162,9 @@ test('malformed replies and private failure codes are redacted and an identical-
       buffer += chunk; let newline;
       while ((newline = buffer.indexOf('\n')) >= 0) {
         const request = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
-        if (request.command === 'hello') { assert.equal(request.client, 'mcp'); assert.equal(request.runtimeId, '9.9.9'); assert.equal(request.token, 'fixture-secret-token'); }
+        if (request.command === 'hello') { assert.equal(request.client, 'mcp'); assert.equal(request.runtimeId, expectedRuntime); assert.equal(request.token, 'fixture-secret-token'); }
         if (request.command === 'operation') operations++;
-        const result = request.command === 'hello' ? { agentVersion: '9.9.9', protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, app: { ownership: 'app', version: '0.1.6', runtimeId: '9.9.9' }, operations: { available: true } } : { rawSecret: 'fixture-private-path-token' };
+        const result = request.command === 'hello' ? { agentVersion: expectedRuntime, protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, app: { ownership: 'app', version: '0.1.6', runtimeId: expectedRuntime }, operations: { available: true } } : { rawSecret: 'fixture-private-path-token' };
         const reply = request.command === 'operation' && privateFailure
           ? { version: 3, id: request.id, ok: false, error: { code: 'PRIVATE_SECRET_VALUE', message: 'fixture-private-failure-message' } }
           : { version: 3, id: request.id, ok: true, result };

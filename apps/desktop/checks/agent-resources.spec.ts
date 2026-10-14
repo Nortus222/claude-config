@@ -16,6 +16,7 @@ test('resources contain only the agent runtime, hashed version and bundled licen
   const metadata = JSON.parse(readFileSync(join(resources!, 'runtime.json'), 'utf8'));
   const executable = process.platform === 'win32' ? 'bun.exe' : 'bun';
   assert.deepEqual(readdirSync(resources!).sort(), ['BUN-LICENSE.md', 'CONTENT-TYPE-LICENSE', 'EFFECT-LICENSE', 'MCP-CORE-LICENSE', 'MCP-SERVER-LICENSE', 'ZOD-LICENSE', 'agent.mjs', executable, 'mcp.mjs', 'runtime.json'].sort());
+  assert.equal(metadata.bunSha256, createHash('sha256').update(readFileSync(join(resources!, executable))).digest('hex'));
   assert.equal(metadata.agentVersion, createHash('sha256').update(readFileSync(join(resources!, 'agent.mjs'))).digest('hex'));
   assert.equal(metadata.mcp.executable, 'mcp.mjs');
   assert.equal(metadata.mcp.protocol, 1);

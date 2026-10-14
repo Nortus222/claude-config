@@ -121,6 +121,7 @@ jobs:
           test "$(lipo -archs "$bun")" = arm64
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$keychain" --entitlements apps/desktop/release/bun-entitlements.plist "$bun"
           codesign --verify --strict --verbose=2 "$bun"
+          node apps/desktop/scripts/refresh-bun-hash.mjs "$(dirname "$bun")"
           npm run tauri -w apps/desktop -- bundle --config "$RELEASE_OVERLAY" --bundles app,dmg
           app="$PWD/apps/desktop/src-tauri/target/release/bundle/macos/Nortuscc.app"
           dmg="$PWD/apps/desktop/src-tauri/target/release/bundle/dmg/Nortuscc_${RELEASE_VERSION}_aarch64.dmg"
