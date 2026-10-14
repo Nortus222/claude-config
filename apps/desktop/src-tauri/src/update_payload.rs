@@ -30,7 +30,23 @@ pub fn validate_bundle(bytes: &[u8], version: &str) -> Result<(), String> {
         if path.components().any(|c|!matches!(c,std::path::Component::Normal(_) | std::path::Component::CurDir)) || !path.starts_with("Nortuscc.app") { return Err("Unexpected app archive path".into()); }
         total = total.checked_add(entry.size()).ok_or("App archive is too large")?;
         if total > 1_073_741_824 { return Err("App archive is too large".into()); }
-        let name = path.to_str().ok_or("Invalid archive path")?;
+        let raw_name = path.to_str().ok_or("Invalid archive path")?;
+        // Extraction collapses dots/separators and default macOS volumes ignore ASCII case.
+        let kind = entry.header().entry_type();
+        let name = if kind.is_dir() { raw_name.strip_suffix('/').unwrap_or(raw_name) } else { raw_name };
+        if name.split('/').any(|part| part.is_empty() || part == ".") { return Err("Noncanonical app archive path".into()); }
+        const DIRECTORIES: [&str; 5] = [
+            "Nortuscc.app", "Nortuscc.app/Contents", "Nortuscc.app/Contents/Resources",
+            "Nortuscc.app/Contents/Resources/agent-runtime", "Nortuscc.app/Contents/MacOS",
+        ];
+        const FILES: [&str; 6] = [
+            "Nortuscc.app/Contents/Resources/agent-runtime/runtime.json", "Nortuscc.app/Contents/Info.plist",
+            "Nortuscc.app/Contents/MacOS/nortuscc-desktop-validation", "Nortuscc.app/Contents/Resources/agent-runtime/bun",
+            "Nortuscc.app/Contents/Resources/agent-runtime/agent.mjs", "Nortuscc.app/Contents/Resources/agent-runtime/mcp.mjs",
+        ];
+        if let Some(expected) = FILES.iter().chain(DIRECTORIES.iter()).copied().find(|expected| name.eq_ignore_ascii_case(expected)) {
+            if name != expected || (DIRECTORIES.contains(&expected) && !kind.is_dir()) { return Err("Invalid protected app archive member".into()); }
+        }
         if name == "Nortuscc.app/Contents/Resources/agent-runtime/runtime.json" || name == "Nortuscc.app/Contents/Info.plist" {
             if !entry.header().entry_type().is_file() || entry.size() > 16_384 { return Err("Invalid app metadata".into()); }
             let mut data = Vec::new(); entry.read_to_end(&mut data).map_err(|_| "Invalid app metadata")?;
@@ -115,6 +131,82 @@ mod tests {
         assert!(validate_bundle(&bundle_with_bytes("darwin-arm64","0.2.0",1,0x100000c,false,false),"0.2.0").is_ok());
         assert!(validate_bundle(&bundle_with_bytes("darwin-arm64","0.2.0",1,0x100000c,true,false),"0.2.0").is_err(), "Bun bytes changed after fingerprinting");
         assert!(validate_bundle(&bundle_with_bytes("darwin-arm64","0.2.0",1,0x100000c,false,true),"0.2.0").is_err(), "MCP bytes changed independently of agent");
+    }
+    fn append_member(bytes: &[u8], path: &str, kind: tar::EntryType) -> Vec<u8> {
+        let mut source = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(),flate2::Compression::fast()));
+        for entry in source.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let header = entry.header().clone();
+            builder.append(&header, &mut entry).unwrap();
+        }
+        let data = if kind.is_file() { b"altered later member".as_slice() } else { b"".as_slice() };
+        let mut header = tar::Header::new_gnu();
+        // Preserve the alias spelling; set_path would normalize some dot components.
+        assert!(path.len() < 100);
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+        header.set_size(data.len() as u64); header.set_mode(0o755); header.set_entry_type(kind);
+        if kind.is_symlink() || kind.is_hard_link() { header.set_link_name("Nortuscc.app/Contents/Resources/agent-runtime/agent.mjs").unwrap(); }
+        header.set_cksum();
+        builder.append(&header, data).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+    #[test]
+    fn updater_payload_rejects_filesystem_equivalent_member_aliases() {
+        let baseline = bundle("darwin-arm64","0.2.0",1,0x100000c);
+        assert!(validate_bundle(&baseline,"0.2.0").is_ok());
+        for path in [
+            "Nortuscc.app/Contents/Resources/agent-runtime/mcp.mjs",
+            "Nortuscc.app/Contents/Resources/agent-runtime/runtime.json",
+            "Nortuscc.app/Contents/Resources/agent-runtime/bun",
+            "Nortuscc.app/Contents/Resources/agent-runtime/agent.mjs",
+            "Nortuscc.app/Contents/MacOS/nortuscc-desktop-validation",
+            "Nortuscc.app/Contents/Info.plist",
+        ] {
+            let (parent, file) = path.rsplit_once('/').unwrap();
+            for alias in [
+                format!("{parent}/./{file}"), format!("{parent}//{file}"), format!("./{path}"),
+                format!("{parent}/{}",file.to_ascii_uppercase()), path.replace("/Contents/", "/cOnTeNtS/"),
+                path.replace("/Resources/", "/rEsOuRcEs/"), path.replace("/agent-runtime/", "/AgEnT-RuNtImE/"),
+            ] {
+                for kind in [tar::EntryType::Regular, tar::EntryType::Directory, tar::EntryType::Symlink, tar::EntryType::Link] {
+                    assert!(validate_bundle(&append_member(&baseline, &alias, kind),"0.2.0").is_err(), "Accepted alias {alias:?}, type {kind:?}");
+                }
+            }
+            assert!(validate_bundle(&append_member(&baseline, path, tar::EntryType::Regular),"0.2.0").is_err(), "Accepted exact duplicate {path}");
+            assert!(validate_bundle(&append_member(&baseline, &format!("{path}/"), tar::EntryType::Directory),"0.2.0").is_err(), "Accepted directory at protected file {path}");
+        }
+    }
+    #[test]
+    fn updater_payload_rejects_case_aliases_on_default_macos_filesystems() {
+        let baseline = bundle("darwin-arm64","0.2.0",1,0x100000c);
+        for alias in [
+            "Nortuscc.app/Contents/Resources/agent-runtime/BUN",
+            "Nortuscc.app/Contents/Resources/agent-runtime/MCP.mjs",
+            "Nortuscc.app/cOnTeNtS/Resources/agent-runtime/mcp.mjs",
+            "Nortuscc.app/Contents/rEsOuRcEs/agent-runtime/mcp.mjs",
+            "Nortuscc.app/Contents/Resources/AgEnT-RuNtImE/mcp.mjs",
+            "Nortuscc.app/Contents/mAcOs/nortuscc-desktop-validation",
+        ] {
+            assert!(validate_bundle(&append_member(&baseline,alias,tar::EntryType::Regular),"0.2.0").is_err(), "Accepted case alias {alias}");
+        }
+    }
+    #[test]
+    fn updater_payload_allows_canonical_directories_but_rejects_parent_aliases_and_types() {
+        let baseline = bundle("darwin-arm64","0.2.0",1,0x100000c);
+        let mut normal = baseline.clone();
+        for directory in ["Nortuscc.app", "Nortuscc.app/Contents", "Nortuscc.app/Contents/Resources", "Nortuscc.app/Contents/Resources/agent-runtime", "Nortuscc.app/Contents/MacOS"] {
+            for spelling in [directory.to_string(), format!("{directory}/")] {
+                normal = append_member(&normal,&spelling,tar::EntryType::Directory);
+                assert!(validate_bundle(&normal,"0.2.0").is_ok(), "Rejected canonical directory {spelling}");
+            }
+            for kind in [tar::EntryType::Regular, tar::EntryType::Symlink, tar::EntryType::Link] {
+                assert!(validate_bundle(&append_member(&baseline,directory,kind),"0.2.0").is_err(), "Accepted protected parent with type {kind:?}: {directory}");
+            }
+            let (parent, file) = directory.rsplit_once('/').unwrap_or(("",directory));
+            let alias = if parent.is_empty() { file.to_ascii_uppercase() } else { format!("{parent}/{}",file.to_ascii_uppercase()) };
+            assert!(validate_bundle(&append_member(&baseline,&alias,tar::EntryType::Directory),"0.2.0").is_err(), "Accepted case-aliased directory {alias}");
+        }
     }
     #[test]
     fn signed_payload_must_match_apple_silicon_version_and_maintenance_contract() {
