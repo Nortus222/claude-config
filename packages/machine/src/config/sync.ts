@@ -1,12 +1,13 @@
+import { join } from 'node:path';
 import { Effect } from 'effect';
 import { parseSettingsKeys, type DesiredConfig, type ResolvedFile } from '@nortuscc/profile-engine';
 import { Backups } from '../backups.ts';
 import { Fs } from '../fs.ts';
-import type { MachineReport, Step, StepResult } from '../model.ts';
+import type { MachineReport, Observed, Step, StepResult } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
 import { StateStore, withBaseline, withoutBaseline, type MachineState } from '../state.ts';
 import { hashValue } from './file-state.ts';
-import { configFileId, contentHash, filePaths, parseDocument, readCopy, readMerge, settingsKeyOf } from './observe.ts';
+import { configFileId, contentHash, filePaths, parseDocument, readCopy, readMerge, sameCopyEvidence, settingsKeyOf } from './observe.ts';
 import { outcomeNote } from './outcome.ts';
 import { splitProjectTrust } from './project-trust.ts';
 
@@ -15,32 +16,49 @@ const IN_SYNC: StepResult = { ok: true, note: 'in sync' };
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
 
 // One copied file, either direction. Converged: only the baseline moves.
-const syncCopy = (step: Step, file: ResolvedFile, expected: string) =>
+const syncCopy = (step: Step, file: ResolvedFile, expected: Observed) =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const backups = yield* Backups;
     const store = yield* StateStore;
-    const { src, dest } = filePaths(yield* MachinePaths, file);
-    const now = yield* readCopy(file, (yield* store.read).files);
-    if (now.state !== expected) return MOVED;
-    if (now.state === 'clean') {
-      yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localText)!));
+    const paths = yield* MachinePaths;
+    const { src, dest } = filePaths(paths, file);
+    const state = yield* store.read;
+    const now = yield* readCopy(file, state.files, state.mcpRouting);
+    if (now.state === 'routing-conflict') return { ok: false, note: now.note! };
+    if (now.state !== expected.state || !sameCopyEvidence(expected.facts, now)) return MOVED;
+    const retiring = now.facts.includes('routing-retiring');
+    if (now.state === 'clean' && !retiring) {
+      yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localBody)!));
       return IN_SYNC;
     }
+    const fresh = Effect.gen(function* () {
+      const s = yield* store.read;
+      const read = yield* readCopy(file, s.files, s.mcpRouting);
+      return read.state !== 'routing-conflict' && sameCopyEvidence(now.facts, read);
+    });
     if (step.action === 'capture-file') {
-      if (now.localText === undefined) return { ok: true, note: 'nothing to capture' };
-      // The repo file is a working-tree file: an uncommitted edit is not recoverable from git.
+      if (now.localBody === undefined) return { ok: true, note: 'nothing to capture' };
+      if (now.routing?.receipt) {
+        yield* backups.preserve(dest, join('capture', file.dest), file.target);
+        yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+      }
+      if (!(yield* fresh)) return MOVED;
       const backedUp = yield* backups.moveAside(src, `${file.dest}.repo`, file.target);
-      yield* fs.writeTextAtomic(src, now.localText);
-      yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localText)!));
+      yield* fs.writeTextAtomic(src, now.localBody);
+      yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localBody)!));
       return { ok: true, note: outcomeNote('copied', backedUp) };
     }
     if (now.repoText === undefined) return { ok: false, note: 'missing from the repo' };
-    const projects = file.preserveProjects && now.localText !== undefined ? splitProjectTrust(now.localText).projects : '';
-    const text = file.preserveProjects ? splitProjectTrust(now.repoText).managed + (projects ? `\n${projects}` : '') : now.repoText;
+    const projects = file.preserveProjects && now.localBody !== undefined ? splitProjectTrust(now.localBody).projects : '';
+    const body = file.preserveProjects ? splitProjectTrust(now.repoText).managed + (projects ? `\n${projects}` : '') : now.repoText;
+    // Missing active blocks are repaired only by explicit connection intent, never inferred from a baseline.
+    const text = body + (now.routing?.status === 'owned' && now.routing.receipt?.state === 'active' ? now.routing.receipt.bytes : '');
+    if (now.routing?.receipt) yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+    if (!(yield* fresh)) return MOVED;
     const backedUp = yield* backups.moveAside(dest, file.dest, file.target);
     yield* fs.writeTextAtomic(dest, text);
-    yield* store.update((s) => withBaseline(s, file.id, contentHash(file, text)!));
+    yield* store.update((s) => withBaseline(s, file.id, contentHash(file, body)!));
     return { ok: true, note: outcomeNote('copied', backedUp) };
   });
 
@@ -93,5 +111,5 @@ export const syncFile = (step: Step, report: MachineReport) => {
   const item = report.items.find((i) => i.key === step.key);
   const file = report.desired.files.find((f) => f.id === configFileId(step.key));
   if (!item || !file) return Effect.succeed<StepResult>({ ok: false, note: 'not in the inspected report' });
-  return file.mode === 'copy' ? syncCopy(step, file, item.state) : syncKey(step, file, report.desired, item.state);
+  return file.mode === 'copy' ? syncCopy(step, file, item) : syncKey(step, file, report.desired, item.state);
 };

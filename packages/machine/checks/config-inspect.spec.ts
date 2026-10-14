@@ -7,13 +7,15 @@ import { hashValue } from '../src/config/file-state.ts';
 import { splitProjectTrust } from '../src/config/project-trust.ts';
 import { configMachine, REPO_FILES } from './config-machine.ts';
 
+const semanticFacts = (facts: ReadonlyArray<string> | undefined) => facts?.filter(f => !f.startsWith('copy-evidence:'));
+
 const find = <T extends { key: string }>(items: ReadonlyArray<T>, key: string): T => items.find((i) => i.key === key)!;
 
 test('a fresh machine reports every managed file and settings key as unmanaged, to apply', async () => {
   const m = configMachine();
   const { items, probeErrors } = await m.observe();
   assert.deepEqual(probeErrors, []);
-  assert.deepEqual(items.map((i) => [i.key, i.state, i.disposition, i.facts]), [
+  assert.deepEqual(items.map((i) => [i.key, i.state, i.disposition, semanticFacts(i.facts)]), [
     ['config:claude:CLAUDE.md', 'unmanaged', 'apply', ['local-absent']],
     ['config:codex:AGENTS.md', 'unmanaged', 'apply', ['local-absent']],
     ['config:codex:models-static.json', 'unmanaged', 'apply', ['local-absent']],
@@ -37,7 +39,7 @@ test('recorded files: clean, converged with a stale baseline, edited locally, de
     'codex:config.toml': hashText(REPO_FILES['codex/openrouter-glm/config.toml']!),
   });
   const { items } = await m.observe();
-  const view = (key: string) => { const i = find(items, key); return [i.state, i.disposition, i.facts]; };
+  const view = (key: string) => { const i = find(items, key); return [i.state, i.disposition, semanticFacts(i.facts)]; };
   assert.deepEqual(view('config:claude:CLAUDE.md'), ['clean', 'in-sync', ['recorded']]);
   assert.deepEqual(view('config:codex:AGENTS.md'), ['clean', 'in-sync', ['recorded', 'local-changed', 'baseline-stale']]);
   assert.deepEqual(view('config:codex:models-static.json'), ['local-ahead', 'capture', ['recorded', 'local-changed']]);
@@ -59,7 +61,7 @@ test('settings keys: an edited key is local-ahead, and keys the repo does not na
   m.baselines({ 'claude:settings.json#theme': hashValue('dark')!, 'claude:settings.json#model': hashValue('opus')! });
   const { items } = await m.observe();
   const settings = items.filter((i) => i.key.startsWith('config:claude:settings.json'));
-  assert.deepEqual(settings.map((i) => [i.key, i.state, i.disposition, i.facts]), [
+  assert.deepEqual(settings.map((i) => [i.key, i.state, i.disposition, semanticFacts(i.facts)]), [
     ['config:claude:settings.json#theme', 'local-ahead', 'capture', ['recorded', 'local-changed']],
     ['config:claude:settings.json#model', 'clean', 'in-sync', ['recorded']],
   ]);

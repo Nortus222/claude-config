@@ -4,7 +4,7 @@ import { Effect, Layer } from 'effect';
 import { loadProfile, nodeFiles, requireValid } from '@nortuscc/profile-engine';
 import {
   acquirePidLock, Backups, backupsForRun, Fs, isGitCheckout, machinePaths, nodeFs, nodeProcesses,
-  OverridesStore, overridesStore, parseState, pathsFromEnvironment, Processes, StateStore, stateStore,
+  OverridesStore, overridesStore, parseState, pathsFromEnvironment, Processes, StateStore, stateStore, validMcpRouting,
 } from '@nortuscc/machine';
 
 import { decodeSetupChoices, DEFAULT_REPO_URL, type SetupChoices, type SetupState } from '../shared/setup-protocol.ts';
@@ -54,6 +54,7 @@ const validSetupRecord = (text: string): boolean => {
   if (Object.hasOwn(value, 'skillsOnly') && typeof value.skillsOnly !== 'boolean') return false;
   if (Object.hasOwn(value, 'configTargets') && (!Array.isArray(value.configTargets)
     || !value.configTargets.every((target) => target === 'claude' || target === 'codex'))) return false;
+  if (Object.hasOwn(value, 'mcpRouting') && !validMcpRouting(value.mcpRouting)) return false;
   return true;
 };
 const inspectSetup = (input: OnboardingInput) => Effect.gen(function* () {

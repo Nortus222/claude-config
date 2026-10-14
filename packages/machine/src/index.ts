@@ -31,3 +31,5 @@ export { configFileId, contentHash } from './config/observe.ts';
 export { canonical } from './config/file-state.ts';
 export * from './skills/index.ts';
 export * from './undeclared/probe.ts';
+
+export { inspectMcpRouting, setMcpRouting, type McpRoutingStatus, type McpRoutingResult } from './config/mcp-routing.ts';

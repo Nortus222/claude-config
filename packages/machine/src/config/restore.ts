@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Effect } from 'effect';
 import type { ResolvedFile } from '@nortuscc/profile-engine';
 import { Backups } from '../backups.ts';
@@ -6,7 +6,8 @@ import { Fs } from '../fs.ts';
 import type { MachineReport, Step, StepResult } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
 import { StateStore, withoutBaseline } from '../state.ts';
-import { configFileId, filePaths, parseDocument } from './observe.ts';
+import { configFileId, filePaths, parseDocument, readCopy, sameCopyEvidence } from './observe.ts';
+import { releasedRouting, routingFile, splitMcpRouting } from './mcp-routing.ts';
 import { outcomeNote } from './outcome.ts';
 import { splitProjectTrust } from './project-trust.ts';
 
@@ -103,11 +104,69 @@ export const restoreFile = (step: Step, report: MachineReport) =>
     const file = report.desired.files.find((f) => f.id === configFileId(step.key));
     if (!file) return { ok: false, note: 'not in the inspected report' } satisfies StepResult;
     const store = yield* StateStore;
-    const recorded = Object.keys((yield* store.read).files).filter((k) => k === file.id || k.startsWith(`${file.id}#`));
-    if (recorded.length === 0) return { ok: true, note: 'nothing recorded' } satisfies StepResult;
-    const { origin, older } = yield* originalBackup(file);
+    const state = yield* store.read;
+    const current = file.mode === 'copy' ? yield* readCopy(file, state.files, state.mcpRouting) : undefined;
+    const expected = report.items.find(i => i.key === step.key);
+    if (current?.state === 'routing-conflict') return { ok: false, note: current.note! } satisfies StepResult;
+    if (current && !sameCopyEvidence(expected?.facts, current)) return { ok: false, note: 'changed since it was inspected; inspect again' } satisfies StepResult;
+    const recorded = Object.keys(state.files).filter((k) => k === file.id || k.startsWith(`${file.id}#`));
+    if (recorded.length === 0 && !current?.routing?.receipt) return { ok: true, note: 'nothing recorded' } satisfies StepResult;
+    const { origin, older } = recorded.length > 0 ? yield* originalBackup(file) : {};
     const { dest } = filePaths(yield* MachinePaths, file);
     const relative = join('uninstall', file.dest);
+    const fs = yield* Fs;
+    const originalLink = origin && routingFile(file) && (yield* fs.stat(origin))?.kind === 'symlink'
+      ? yield* fs.readLink(origin) : undefined;
+    const originalPath = originalLink !== undefined ? resolve(dirname(dest), originalLink) : origin;
+    const originalText = originalPath && routingFile(file) ? yield* fs.readText(originalPath) : undefined;
+    const sameOriginal = Effect.gen(function* () {
+      if (!origin || !routingFile(file)) return true;
+      const kind = (yield* fs.stat(origin))?.kind;
+      if (originalLink !== undefined && (kind !== 'symlink' || (yield* fs.readLink(origin)) !== originalLink)) return false;
+      if (originalLink === undefined && kind === 'symlink') return false;
+      return (yield* fs.readText(originalPath!)) === originalText;
+    });
+    if (origin && routingFile(file) && splitMcpRouting(originalText, file.id, state.mcpRouting).status === 'conflict') {
+      return { ok: false, note: 'Original backup has a routing conflict; repair it before restoration' } satisfies StepResult;
+    }
+    if (current?.routing?.receipt) {
+      const backups = yield* Backups;
+      const paths = yield* MachinePaths;
+      // A routing-only receipt owns a span, not the rest of a never-applied document.
+      const original = recorded.length === 0 ? current.localBody : originalText;
+      const split = splitMcpRouting(original, file.id, state.mcpRouting);
+      if (originalLink !== undefined && split.status === 'owned') return { ok: false, note: 'Original backup is a link containing routing; repair its target before restoration' } satisfies StepResult;
+      if (split.status === 'conflict') return { ok: false, note: `Original backup has a routing conflict: ${split.note}` } satisfies StepResult;
+      yield* backups.preserve(dest, relative, file.target);
+      yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+      const freshState = yield* store.read;
+      const fresh = yield* readCopy(file, freshState.files, freshState.mcpRouting);
+      if (!sameCopyEvidence(current.facts, fresh) || fresh.state === 'routing-conflict'
+        || !(yield* sameOriginal)) {
+        return { ok: false, note: 'changed since it was inspected; inspect again' } satisfies StepResult;
+      }
+      // Release first. A crash must not authorize later reconciliation to recreate guidance.
+      yield* store.update(s => releasedRouting(s, file.id));
+      const persisted = yield* store.read;
+      if ((yield* fs.readText(dest)) !== current.localText
+        || JSON.stringify(persisted.mcpRouting) !== JSON.stringify(releasedRouting(freshState, file.id).mcpRouting)
+        || !(yield* sameOriginal)) {
+        return { ok: false, note: 'changed before restoration; inspect again' } satisfies StepResult;
+      }
+      const backedUp = yield* backups.moveAside(dest, relative, file.target);
+      if (originalLink !== undefined && origin && recorded.length > 0) yield* putBack(origin, dest);
+      else if (split.body !== undefined) yield* fs.writeTextAtomic(dest, split.body);
+      yield* store.update(s => recorded.reduce(withoutBaseline, s));
+      return { ok: true, note: outcomeNote(recorded.length === 0 ? 'preserved' : origin ? 'restored' : 'removed', backedUp, older) } satisfies StepResult;
+    }
+    if (current) {
+      const freshState = yield* store.read;
+      const fresh = yield* readCopy(file, freshState.files, freshState.mcpRouting);
+      if (!sameCopyEvidence(current.facts, fresh) || fresh.state === 'routing-conflict'
+        || !(yield* sameOriginal)) {
+        return { ok: false, note: 'changed since it was inspected; inspect again' } satisfies StepResult;
+      }
+    }
     const result = file.mode === 'merge-keys' ? yield* restoreMerged(file, dest, origin, recorded, relative)
       : file.preserveProjects ? yield* restoreProjects(file, dest, origin, relative)
       : yield* restoreCopy(file, dest, origin, relative);

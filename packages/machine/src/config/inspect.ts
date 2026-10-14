@@ -8,6 +8,7 @@ import { StateStore } from '../state.ts';
 import { readCopy, readMerge, type Reading } from './observe.ts';
 
 const disposition = (file: ResolvedFile, state: string): Disposition => {
+  if (state === 'routing-conflict') return 'blocked';
   if (!file.managed) return 'excluded';
   if (state === 'clean') return 'in-sync';
   if (state === 'repo-ahead' || state === 'unmanaged') return 'apply';
@@ -31,7 +32,7 @@ export const inspectConfig = (desired: DesiredConfig) =>
 
     for (const file of desired.files) {
       const read: Effect.Effect<ReadonlyArray<Reading>, FsFailed, Fs | MachinePaths> = file.mode === 'copy'
-        ? Effect.map(readCopy(file, state.value.files), (reading) => [reading])
+        ? Effect.map(readCopy(file, state.value.files, state.value.mcpRouting), (reading) => [reading])
         : Effect.map(readMerge(file, desired, state.value.files), (document) => document.readings);
       const result = yield* Effect.exit(read);
       if (Exit.isFailure(result)) {

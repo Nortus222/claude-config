@@ -5,7 +5,7 @@ import {
   trustOwnSetup, unitPath, LAUNCH_AGENT_LABEL, POLICIES, type ServiceProgram, type ServiceTarget,
 } from '@nortuscc/agent';
 import { decodeWireStatus } from '@nortuscc/agent/ipc/protocol';
-import { acquirePidLock, Backups, Fs, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
+import { acquirePidLock, Backups, Fs, liveLockHolder, validMcpRouting, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../../../src/agent-client.ts';
 import { loginShell, SHELL_STARTUP_VARIABLES } from './login-environment.ts';
 
@@ -83,6 +83,7 @@ export const validateExistingAuthority = (input: LifecycleInput) => Effect.gen(f
       || (raw.version !== undefined && raw.version !== 1) || !raw.files || typeof raw.files !== 'object' || Array.isArray(raw.files)
       || !Object.values(raw.files).every(value => value !== null && typeof value === 'object' && typeof (value as Record<string, unknown>).hash === 'string'
         && typeof (value as Record<string, unknown>).appliedAt === 'string')
+      || (Object.hasOwn(raw, 'mcpRouting') && !validMcpRouting(raw.mcpRouting))
       || (raw.skillsOnly !== undefined && typeof raw.skillsOnly !== 'boolean')
       || (raw.configTargets !== undefined && (!Array.isArray(raw.configTargets) || !raw.configTargets.every(value => value === 'claude' || value === 'codex')))) throw new Error('setup authority is invalid; repair it before installing');
     break;

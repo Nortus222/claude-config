@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  emptyState, hashText, machinePaths, nodeFs, parseState, StateStore, stateStore, withApplied, withBaseline, withoutBaseline,
+  emptyState, hashText, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, validMcpRouting, machinePaths, nodeFs, parseState, StateStore, stateStore, withApplied, withBaseline, withoutBaseline,
 } from '../src/index.ts';
 
 const machine = () => {
@@ -148,4 +148,39 @@ test('a malformed applied record is dropped and the rest of the state kept', () 
 test('a SHA-256 applied commit is accepted', () => {
   const applied = { commit: 'd'.repeat(64), at: '2026-10-07T00:00:00.000Z' };
   assert.deepEqual(parseState(JSON.stringify({ version: 1, repo: null, files: {}, applied }))?.applied, applied);
+});
+
+
+test('routing metadata is bounded to two fixed receipts; malformed values survive baseline writes', async () => {
+  const receipt = { fileId: 'claude:CLAUDE.md', blockId: MCP_ROUTING_BLOCK_ID, bytes: MCP_ROUTING_BYTES, state: 'released' };
+  assert.equal(validMcpRouting({ version: 1, files: { 'claude:CLAUDE.md': receipt } }), true);
+  for (const value of [null, [], { version: 1, files: { foreign: receipt } },
+    { version: 1, files: { 'codex:AGENTS.md': receipt } },
+    { version: 1, files: { 'claude:CLAUDE.md': { ...receipt, bytes: MCP_ROUTING_BYTES + 'extra' } } },
+    { version: 1, files: { 'claude:CLAUDE.md': { ...receipt, extra: true } } },
+  ]) {
+    assert.equal(validMcpRouting(value), false);
+    const { paths, run } = machine();
+    mkdirSync(paths.stateRoot, { recursive: true });
+    writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: null, files: {}, mcpRouting: value }));
+    await run(s => s.update(state => withBaseline(state, 'claude:CLAUDE.md', 'hash')));
+    assert.deepEqual(readJson(join(paths.stateRoot, 'state.json')).mcpRouting, value);
+  }
+});
+
+test('legacy migration retains invalid ownership as a fail-closed record', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.claude, { recursive: true });
+  writeFileSync(join(paths.claude, '.nortuscc-lock.json'), JSON.stringify({ repo: '/r', files: {}, mcpRouting: { invalid: true } }));
+  const state = await run(s => s.read);
+  assert.deepEqual(state.mcpRouting, { invalid: true });
+  assert.deepEqual(readJson(join(paths.stateRoot, 'state.json')).mcpRouting, { invalid: true });
+});
+
+test('broken JSON with routing ownership is retained as invalid rather than normalized away', () => {
+  const text = '{"files":{},"mcpRouting":{"version":1';
+  const state = parseState(text)!;
+  assert.ok(state);
+  assert.equal(validMcpRouting(state.mcpRouting), false);
+  assert.deepEqual(state.mcpRouting, { invalid: text });
 });
