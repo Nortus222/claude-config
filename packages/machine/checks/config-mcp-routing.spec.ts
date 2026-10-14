@@ -206,7 +206,7 @@ test('an edit during backup is detected before ownership or live instructions ch
   const status = await Effect.runPromise(inspectMcpRouting(desired, id).pipe(Effect.provide(m.layer())));
   const layer = faultLayer(m, fs => ({ ...fs, copy: (from, to, options) => Effect.gen(function* () {
     yield* fs.copy(from, to, options);
-    if (from === join(m.paths.stateRoot, 'state.json')) yield* fs.writeTextAtomic(local(m), 'concurrent edit\r\n');
+    if (from === local(m)) yield* fs.writeTextAtomic(local(m), 'concurrent edit\r\n');
   }) }));
   const result = await Effect.runPromise(setMcpRouting(desired, id, true, status.evidence).pipe(Effect.provide(layer)));
   assert.equal(result.outcome, 'conflict');

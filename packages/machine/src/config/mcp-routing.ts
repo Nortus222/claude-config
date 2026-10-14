@@ -122,7 +122,7 @@ export const setMcpRouting = (
   const backups = yield* Backups;
   // Routing backups are not config originals: uninstall must not restore an earlier managed body.
   yield* backups.preserve(now.dest, join('mcp-routing', fileId.replace(':', '/')));
-  yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+  yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
   const fresh = yield* readRouting(desired, fileId);
   if (fresh.status.evidence !== expectedEvidence) return result('conflict', 'Instructions or ownership changed before writing; inspect again');
   yield* (yield* StateStore).write(next);

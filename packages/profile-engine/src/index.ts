@@ -9,4 +9,4 @@ export { SKILLS_SOURCE, parseSkillsManifest } from './skills.ts';
 export { PINS_SOURCE, isCommitSha, parsePins } from './pins.ts';
 export { INTEGRATIONS_SOURCE, parseIntegrations, referencedFiles } from './integrations.ts';
 export { parseSettingsKeys } from './settings.ts';
-export { LEGACY_STATE_SOURCE, decodeOverrides, overridesFromLegacyState } from './overrides.ts';
+export { LEGACY_STATE_SOURCE, decodeOverrides, serializeOverrides, normalizeSkillSource, isSkillAdditionName, overridesFromLegacyState } from './overrides.ts';

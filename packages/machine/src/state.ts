@@ -1,9 +1,10 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
-import { overridesFromLegacyState } from '@nortuscc/profile-engine';
-import type { FsFailed } from './errors.ts';
+import { serializeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
+import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
+import { Backups } from './backups.ts';
 
 export type Baseline = { readonly hash: string; readonly appliedAt: string };
 // The setup commit this machine last applied in full, recorded by `nortuscc sync` (#43).
@@ -102,8 +103,8 @@ export class StateStore extends Context.Service<
   StateStore,
   {
     readonly read: Effect.Effect<MachineState, FsFailed>;
-    readonly write: (state: MachineState) => Effect.Effect<void, FsFailed>;
-    readonly update: (f: (state: MachineState) => MachineState) => Effect.Effect<MachineState, FsFailed>;
+    readonly write: (state: MachineState) => Effect.Effect<void, FsFailed, Backups>;
+    readonly update: (f: (state: MachineState) => MachineState) => Effect.Effect<MachineState, FsFailed, Backups>;
   }
 >()('machine/StateStore') {}
 
@@ -118,18 +119,27 @@ export const stateStore = Layer.effect(
     const overridesPath = join(paths.stateRoot, 'overrides.json');
     const legacyPath = join(paths.claude, '.nortuscc-lock.json');
 
-    // The first state write migrates the legacy machine choices from the on-disk state.json into
-    // overrides.json, unless that file already exists; reads never write it. state.json is then
-    // written without them.
+    const saveState = (state: MachineState) => {
+      const { version, repo, files, applied } = state;
+      return fs.writeTextAtomic(statePath, JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}), ...(Object.hasOwn(state, 'mcpRouting') ? { mcpRouting: state.mcpRouting } : {}) }, null, 2) + '\n');
+    };
+
+    // Migrate choices only into an absent document. Preserve the old state before dropping them.
     const write = (state: MachineState) => Effect.gen(function* () {
-      if ((yield* fs.readText(overridesPath)) === undefined) {
-        const legacy = overridesFromLegacyState(yield* fs.readText(statePath)).value;
-        if (Object.keys(legacy).length > 0) {
-          yield* fs.writeTextAtomic(overridesPath, JSON.stringify({ version: 1, ...legacy }, null, 2) + '\n');
+      const before = yield* fs.readText(statePath);
+      const legacy = overridesFromLegacyState(before).value;
+      if (Object.keys(legacy).length > 0) {
+        yield* (yield* Backups).preserve(statePath, 'state.json', undefined, { private: true });
+        if ((yield* fs.readText(statePath)) !== before) return yield* Effect.fail(new FsFailed({
+          op: 'migrate choices', path: statePath, reason: 'state changed before migration',
+        }));
+        if ((yield* fs.readText(overridesPath)) === undefined) {
+          const serialized = serializeOverrides(legacy, undefined, overridesPath);
+          if (!serialized.ok) return yield* Effect.fail(new FsFailed({ op: 'migrate choices', path: overridesPath, reason: 'legacy choices are invalid' }));
+          yield* fs.writeTextAtomic(overridesPath, serialized.text);
         }
       }
-      const { version, repo, files, applied } = state;
-      yield* fs.writeTextAtomic(statePath, JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}), ...(Object.hasOwn(state, 'mcpRouting') ? { mcpRouting: state.mcpRouting } : {}) }, null, 2) + '\n');
+      yield* saveState(state);
     });
 
     // Migrates the pre-Codex lock only when no state file exists; the old lock is left untouched.
@@ -145,7 +155,7 @@ export const stateStore = Layer.effect(
       }
       const migrated: MachineState = { ...emptyState, repo: legacy.repo, files,
         ...(Object.hasOwn(legacy, 'mcpRouting') ? { mcpRouting: legacy.mcpRouting } : {}) };
-      yield* write(migrated);
+      yield* saveState(migrated);
       return migrated;
     });
 

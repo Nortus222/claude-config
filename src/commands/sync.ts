@@ -173,7 +173,7 @@ const record = (input: {
     if (canonical(next) !== canonical(input.holds)) yield* (yield* SyncStore).write(next);
     if (input.chosen.takeTheirs.size === 0) return;
     const backups = yield* Backups;
-    yield* backups.preserve(join(input.stateRoot, 'overrides.json'), 'overrides.json');
+    yield* backups.preserve(join(input.stateRoot, 'overrides.json'), 'overrides.json', undefined, { private: true });
     let value = input.overrides;
     for (const itemId of input.chosen.takeTheirs) value = withoutOverride(value, itemId);
     yield* (yield* OverridesStore).write(value);

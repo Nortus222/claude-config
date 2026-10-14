@@ -129,7 +129,7 @@ export const bootstrapSetup = async (input: OnboardingInput, rawChoices: SetupCh
     yield* fs.move(temp, repo);
     promoted = true;
     const backups = yield* Backups;
-    for (const name of ['state.json', 'overrides.json']) yield* backups.preserve(join(paths.stateRoot, name), name);
+    for (const name of ['state.json', 'overrides.json']) yield* backups.preserve(join(paths.stateRoot, name), name, undefined, { private: true });
     yield* backups.preserve(join(paths.stateRoot, 'agent', 'agent.json'), 'agent.json', 'agent');
     // Explicit current or legacy target choices win; unrelated overrides do not answer the picker.
     if (overrides.value.manageConfig === undefined && overrides.value.configTargets === undefined) {

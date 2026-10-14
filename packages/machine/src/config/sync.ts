@@ -41,7 +41,7 @@ const syncCopy = (step: Step, file: ResolvedFile, expected: Observed) =>
       if (now.localBody === undefined) return { ok: true, note: 'nothing to capture' };
       if (now.routing?.receipt) {
         yield* backups.preserve(dest, join('capture', file.dest), file.target);
-        yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+        yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
       }
       if (!(yield* fresh)) return MOVED;
       const backedUp = yield* backups.moveAside(src, `${file.dest}.repo`, file.target);
@@ -54,7 +54,7 @@ const syncCopy = (step: Step, file: ResolvedFile, expected: Observed) =>
     const body = file.preserveProjects ? splitProjectTrust(now.repoText).managed + (projects ? `\n${projects}` : '') : now.repoText;
     // Missing active blocks are repaired only by explicit connection intent, never inferred from a baseline.
     const text = body + (now.routing?.status === 'owned' && now.routing.receipt?.state === 'active' ? now.routing.receipt.bytes : '');
-    if (now.routing?.receipt) yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+    if (now.routing?.receipt) yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
     if (!(yield* fresh)) return MOVED;
     const backedUp = yield* backups.moveAside(dest, file.dest, file.target);
     yield* fs.writeTextAtomic(dest, text);

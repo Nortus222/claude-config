@@ -138,7 +138,7 @@ export const restoreFile = (step: Step, report: MachineReport) =>
       if (originalLink !== undefined && split.status === 'owned') return { ok: false, note: 'Original backup is a link containing routing; repair its target before restoration' } satisfies StepResult;
       if (split.status === 'conflict') return { ok: false, note: `Original backup has a routing conflict: ${split.note}` } satisfies StepResult;
       yield* backups.preserve(dest, relative, file.target);
-      yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json');
+      yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
       const freshState = yield* store.read;
       const fresh = yield* readCopy(file, freshState.files, freshState.mcpRouting);
       if (!sameCopyEvidence(current.facts, fresh) || fresh.state === 'routing-conflict'

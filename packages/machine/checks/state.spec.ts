@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  emptyState, hashText, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, validMcpRouting, machinePaths, nodeFs, parseState, StateStore, stateStore, withApplied, withBaseline, withoutBaseline,
+  Backups, backupsForRun, emptyState, hashText, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, validMcpRouting, machinePaths, nodeFs, parseState, StateStore, stateStore, withApplied, withBaseline, withoutBaseline,
 } from '../src/index.ts';
 
 const machine = () => {
@@ -15,8 +15,8 @@ const machine = () => {
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
     stateRoot: join(home, 'state'), backups: join(home, 'state', 'backups'),
   };
-  const layer = stateStore.pipe(Layer.provide(Layer.mergeAll(machinePaths(paths), nodeFs)));
-  const run = <A, E>(f: (store: StateStore['Service']) => Effect.Effect<A, E>) =>
+  const layer = Layer.mergeAll(stateStore, backupsForRun()).pipe(Layer.provide(Layer.mergeAll(machinePaths(paths), nodeFs)));
+  const run = <A, E>(f: (store: StateStore['Service']) => Effect.Effect<A, E, Backups>) =>
     Effect.runPromise(StateStore.use(f).pipe(Effect.provide(layer)));
   return { paths, run };
 };
@@ -150,7 +150,6 @@ test('a SHA-256 applied commit is accepted', () => {
   assert.deepEqual(parseState(JSON.stringify({ version: 1, repo: null, files: {}, applied }))?.applied, applied);
 });
 
-
 test('routing metadata is bounded to two fixed receipts; malformed values survive baseline writes', async () => {
   const receipt = { fileId: 'claude:CLAUDE.md', blockId: MCP_ROUTING_BLOCK_ID, bytes: MCP_ROUTING_BYTES, state: 'released' };
   assert.equal(validMcpRouting({ version: 1, files: { 'claude:CLAUDE.md': receipt } }), true);
@@ -183,4 +182,42 @@ test('broken JSON with routing ownership is retained as invalid rather than norm
   assert.ok(state);
   assert.equal(validMcpRouting(state.mcpRouting), false);
   assert.deepEqual(state.mcpRouting, { invalid: text });
+});
+
+test('legacy choices are privately backed up before state migration removes them', async () => {
+  const { paths, run } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  const original = JSON.stringify(legacyState);
+  writeFileSync(join(paths.stateRoot, 'state.json'), original);
+  await run(s => s.update(state => state));
+  const backup = join(paths.backups, readdirSync(paths.backups)[0]!, 'state.json');
+  assert.equal(readFileSync(backup, 'utf8'), original);
+  assert.equal(statSync(backup).mode & 0o777, 0o600);
+});
+
+test('legacy migration leaves an existing malformed or future overrides document untouched', async () => {
+  for (const original of ['{broken', '{"version":2,"future":{"kept":true},"skillAdditions":[]}']) {
+    const { paths, run } = machine();
+    mkdirSync(paths.stateRoot, { recursive: true });
+    writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify(legacyState));
+    writeFileSync(join(paths.stateRoot, 'overrides.json'), original);
+    await run(s => s.update(state => state));
+    assert.equal(readFileSync(join(paths.stateRoot, 'overrides.json'), 'utf8'), original);
+  }
+});
+
+test('legacy migration respects an overrides document created during backup', async () => {
+  const { paths } = machine();
+  mkdirSync(paths.stateRoot, { recursive: true });
+  writeFileSync(join(paths.stateRoot, 'state.json'), JSON.stringify(legacyState));
+  const appeared = '{"version":2,"future":true}';
+  const services = Layer.mergeAll(machinePaths(paths), nodeFs);
+  const backup = Layer.succeed(Backups, {
+    dir: Effect.succeed(undefined), moveAside: () => Effect.succeed(undefined),
+    preserve: () => Effect.sync(() => { writeFileSync(join(paths.stateRoot, 'overrides.json'), appeared); return undefined; }),
+  });
+  await Effect.runPromise(StateStore.use(s => s.update(state => state)).pipe(
+    Effect.provide(Layer.mergeAll(stateStore, backup).pipe(Layer.provide(services))),
+  ));
+  assert.equal(readFileSync(join(paths.stateRoot, 'overrides.json'), 'utf8'), appeared);
 });
