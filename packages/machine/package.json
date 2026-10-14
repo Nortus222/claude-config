@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Inspects a machine, plans changes against a resolved profile, and executes them with backups, progress and cancellation",
-  "exports": { ".": "./src/index.ts" },
+  "exports": { ".": "./src/index.ts", "./paths": "./src/paths.ts" },
   "scripts": {
     "test": "node --test --test-concurrency=2 \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit"

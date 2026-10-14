@@ -49,7 +49,7 @@ type Pending = { readonly command?: string; readonly operation?: OperationName; 
 // Connecting and the hello together must finish within `timeoutMs` (2 s by default). Later requests
 // time out after `requestTimeoutMs` (30 s), or `inspectTimeoutMs` (120 s) for inspect, apply and shared operations.
 export const connectAgent = async (
-  paths: MachinePathsValue,
+  paths: Pick<MachinePathsValue, 'stateRoot'>,
   options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' | 'mcp'; runtimeId?: string } = {},
 ): Promise<AgentConnection> => {
   const dir = join(paths.stateRoot, 'agent');

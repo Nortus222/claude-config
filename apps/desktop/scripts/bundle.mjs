@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { bundleMcp } from './bundle-mcp.mjs';
 import { mkdir, copyFile, chmod, writeFile, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -21,6 +22,7 @@ await build({
   target: 'esnext',
   outfile: resolve(resources, 'agent.mjs'),
 });
+const mcp = await bundleMcp({ root, resources });
 const sourceRuntime =
   process.env.DESKTOP_BUN_RUNTIME ||
   execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim();
@@ -52,6 +54,6 @@ const effectRoot = dirname(createRequire(import.meta.url).resolve('effect/packag
 await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
 await writeFile(
   resolve(resources, 'runtime.json'),
-  JSON.stringify({ target, appVersion: JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version, maintenanceProtocol: 1, bun: bunVersion, executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
+  JSON.stringify({ target, appVersion: JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version, maintenanceProtocol: 1, mcp, bun: bunVersion, executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
 );
-console.log(`Bundled agent and Bun ${bunVersion} for ${target}`);
+console.log(`Bundled agent, MCP and Bun ${bunVersion} for ${target}`);

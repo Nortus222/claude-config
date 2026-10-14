@@ -1,0 +1,173 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Socket } from 'node:net';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { before, after, test } from 'node:test';
+import { build } from 'esbuild';
+import { Deferred, Effect, Exit, Scope } from 'effect';
+import { AgentStateStore, makeSession, serveIpc, startAgent, type AgentDomain } from '@nortuscc/agent';
+import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
+import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
+import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
+import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
+
+const bundle = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
+const expectedApp = resolve(bundle, '../../MacOS/Test');
+before(async () => {
+  await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', outfile: join(bundle, 'mcp.mjs') });
+  writeFileSync(join(bundle, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', appVersion: '0.1.6', agentVersion: '9.9.9', mcp: { protocol: 1, executable: 'mcp.mjs' } }));
+});
+after(() => rmSync(bundle, { recursive: true, force: true }));
+const names: Record<OperationName, string> = { getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+
+// Real newline-delimited MCP over the packaged entry, with every stdout record captured.
+function open(runtime: string, stateRoot: string, modern = false) {
+  const child = spawn(runtime, [join(bundle, 'mcp.mjs'), '--app', expectedApp], { env: { HOME: bundle, NORTUSCC_STATE_DIR: stateRoot, PATH: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const records: any[] = [];
+  let buffer = '', stderr = '', id = 0;
+  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdout.on('data', chunk => {
+    buffer += chunk;
+    let newline;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+      try {
+        const record = JSON.parse(line); records.push(record);
+        const p = pending.get(record.id); if (p) { clearTimeout(p.timer); pending.delete(record.id); p.resolve(record); }
+      } catch { for (const p of pending.values()) p.reject(new Error(`non-MCP stdout: ${line}`)); }
+    }
+  });
+  const exited = new Promise<void>(done => child.once('close', () => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`MCP exited: ${stderr}`)); } done(); }));
+  const ask = (method: string, params: object = {}) => new Promise<any>((resolve, reject) => {
+    const requestId = ++id;
+    const timer = setTimeout(() => { pending.delete(requestId); reject(new Error(`MCP timeout: ${stderr}`)); }, 10_000);
+    pending.set(requestId, { resolve, reject, timer });
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params: { ...params, ...(modern ? { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } : {}) } }) + '\n');
+  });
+  return { records, ask, call: (operation: OperationName, args: object = {}) => ask('tools/call', { name: names[operation], arguments: args }),
+    initialize: async () => {
+      if (modern) return ask('tools/list');
+      const result = await ask('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } });
+      assert.equal(result.result.protocolVersion, '2025-11-25');
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+      return ask('tools/list');
+    }, close: async () => {
+      child.stdin.end(); const kill = setTimeout(() => child.kill('SIGKILL'), 1500);
+      await exited; clearTimeout(kill);
+      assert.equal(child.exitCode, 0, stderr);
+      assert.equal(buffer, '');
+      for (const record of records) assert.equal(record.jsonrpc, '2.0');
+    } };
+}
+
+function output(operation: OperationName, reply: any) {
+  assert.equal(reply.error, undefined, JSON.stringify(reply));
+  assert.notEqual(reply.result.isError, true, JSON.stringify(reply));
+  assert.deepEqual(JSON.parse(reply.result.content[0].text), reply.result.structuredContent);
+  return decodeOperationOutput(operation, reply.result.structuredContent) as any;
+}
+async function agent(identity: 'app' | 'cli' = 'app') {
+  const m = agentMachine('/tmp');
+  const fixture = setupFixture(join(m.root, 'setup'));
+  m.write(join(m.paths.claude, 'settings.json'), '{"theme":"dark"}\n');
+  await m.trust();
+  await m.run(DecisionsStore.use(s => s.record(accept(EFFORT))));
+  await m.run(AgentStateStore.use(s => s.update(state => ({ ...state, installedBy: identity, agentVersion: '9.9.9', appPath: expectedApp }))));
+  m.write(join(m.root, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', agentVersion: '9.9.9', appVersion: '0.1.6' }));
+  const started = Deferred.makeUnsafe<void>(), release = Deferred.makeUnsafe<void>();
+  const config: AgentDomain = { ...configDomain, run: (step, report) => Effect.gen(function* () { yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return yield* configDomain.run(step, report); }) };
+  const domains = (paths: typeof m.paths) => [config, integrationsDomain({ paths, env: {} })];
+  const scope = Scope.makeUnsafe();
+  await m.run(Effect.gen(function* () {
+    const handle = yield* startAgent(domains);
+    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains });
+    yield* serveIpc({ paths: m.paths, handle, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
+    while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
+  }).pipe(Scope.provide(scope)), fixture.source);
+  return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); } };
+}
+
+const runtimes = [process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
+for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern 2026' : 'legacy 2025'} opening, shared tools and reconnectable agent runs`, { timeout: 30_000 }, async t => {
+    const s = await agent(); t.after(s.close);
+    const client = open(runtime, s.m.paths.stateRoot, modern); t.after(client.close);
+    const listed = await client.initialize();
+    assert.equal(listed.error, undefined, JSON.stringify(listed));
+    assert.deepEqual(listed.result.tools.map((tool: any) => tool.name).sort(), Object.values(names).sort());
+    for (const [operation, name] of Object.entries(names)) {
+      const tool = listed.result.tools.find((tool: any) => tool.name === name);
+      assert.deepEqual(tool.inputSchema, operationJsonSchemas[operation as OperationName].input);
+      assert.deepEqual(tool.outputSchema, { type: 'object', ...operationJsonSchemas[operation as OperationName].output });
+    }
+    assert.equal(output('getContext', await client.call('getContext')).app.ownership, 'app');
+    output('inspect', await client.call('inspect'));
+    const invalid = await client.call('previewChange', { change: { kind: 'reconcile', only: [], force: true } });
+    assert.equal(invalid.result.isError, true); assert.ok(invalid.result.content[0].text.length < 600);
+    const refused = await client.call('inspect', { scope: { kind: 'user' } });
+    assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'UNSUPPORTED_SCOPE');
+    const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'reconcile', only: ['config:claude:settings.json#effortLevel'] } }));
+    const applied = output('applyChange', await client.call('applyChange', { planId: preview.planId, requestId: 'caller-owned-intent' }));
+    assert.equal(applied.status, 'started');
+    await Effect.runPromise(Deferred.await(s.started));
+    assert.equal(output('getRun', await client.call('getRun', { runId: applied.run.runId })).result, null);
+    await client.close();
+    const next = open(runtime, s.m.paths.stateRoot, modern); t.after(next.close); await next.initialize();
+    assert.equal(output('getRun', await next.call('getRun', { runId: applied.run.runId })).intent.requestId, 'caller-owned-intent');
+    assert.equal(output('applyChange', await next.call('applyChange', { planId: preview.planId, requestId: 'caller-owned-intent' })).run.runId, applied.run.runId);
+    assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 1);
+    Deferred.doneUnsafe(s.release, Effect.void);
+    let run = output('getRun', await next.call('getRun', { runId: applied.run.runId }));
+    while (run.result === null) run = output('getRun', await next.call('getRun', { runId: applied.run.runId }));
+    assert.equal(output('cancelRun', await next.call('cancelRun', { runId: applied.run.runId })).state, 'succeeded');
+    const history = output('history', await next.call('history', { limit: 100 }));
+    assert.ok(history.events.some((event: any) => event.actor === 'mcp' && event.requestId === 'caller-owned-intent'));
+  });
+}
+
+test('CLI-owned agent exposes context diagnostics but cannot execute shared operations', async t => {
+  const s = await agent('cli'); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  assert.ok(output('getContext', await client.call('getContext')).diagnostics.length > 0);
+  const refused = await client.call('inspect'); assert.equal(refused.result.structuredContent.error.code, 'APP_UNAVAILABLE');
+});
+
+test('malformed replies are redacted and an identical-runtime app relocation refuses the old MCP process', async t => {
+  const root = mkdtempSync('/tmp/mcp-'); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { mkdirSync } = await import('node:fs'); mkdirSync(join(root, 'agent'));
+  writeFileSync(join(root, 'agent/agent.token'), 'fixture-secret-token');
+  const registration = { version: 1, installedBy: 'app', agentVersion: '9.9.9', appPath: expectedApp };
+  writeFileSync(join(root, 'agent/agent.json'), JSON.stringify(registration));
+  let operations = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer(socket => {
+    sockets.add(socket); socket.on('close', () => sockets.delete(socket));
+    let buffer = ''; socket.on('data', chunk => {
+      buffer += chunk; let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const request = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
+        if (request.command === 'hello') { assert.equal(request.client, 'mcp'); assert.equal(request.runtimeId, '9.9.9'); assert.equal(request.token, 'fixture-secret-token'); }
+        if (request.command === 'operation') operations++;
+        const result = request.command === 'hello' ? { agentVersion: '9.9.9', protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, app: { ownership: 'app', version: '0.1.6', runtimeId: '9.9.9' }, operations: { available: true } } : { rawSecret: 'fixture-private-path-token' };
+        socket.write(JSON.stringify({ version: 3, id: request.id, ok: true, result }) + '\n');
+      }
+    });
+  });
+  await new Promise<void>(done => server.listen(join(root, 'agent/agent.sock'), done));
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(done => server.close(() => done())); });
+  const client = open(process.execPath, root); t.after(client.close); await client.initialize();
+  const reply = await client.call('getRun', { runId: 'r' });
+  assert.equal(reply.result.isError, true); assert.equal(reply.result.structuredContent.error.code, 'MALFORMED');
+  assert.ok(!JSON.stringify(client.records).includes('fixture-private-path-token'));
+  assert.ok(!JSON.stringify(client.records).includes('fixture-secret-token'));
+  writeFileSync(join(root, 'agent/agent.json'), JSON.stringify({ ...registration, appPath: '/tmp/Relocated.app/Contents/MacOS/Test' }));
+  const relocated = await client.call('getContext');
+  assert.equal(relocated.result.structuredContent.error.code, 'APP_UNAVAILABLE');
+  assert.equal(operations, 1, 'the old MCP process must not reach an identical-version relocated agent');
+  assert.ok(!JSON.stringify(client.records).includes(expectedApp));
+  assert.ok(!JSON.stringify(client.records).includes('Relocated.app'));
+});

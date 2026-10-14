@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { bundleMcp } from './bundle-mcp.mjs';
 
 // Portable test resources are independent of the macOS release bundler.
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -16,6 +17,7 @@ try {
     entryPoints: [join(root, 'agent/main.ts')], bundle: true, platform: 'node',
     format: 'esm', target: 'esnext', outfile: join(resources, 'agent.mjs'),
   });
+  const mcp = await bundleMcp({ root, resources });
   const sourceRuntime = process.env.DESKTOP_BUN_RUNTIME || execFileSync('bun', ['-e', 'console.log(process.execPath)'], {
     cwd: resources, encoding: 'utf8', timeout: 5000, windowsHide: true,
   }).trim();
@@ -36,7 +38,7 @@ try {
   const agentVersion = createHash('sha256').update(await readFile(join(resources, 'agent.mjs'))).digest('hex');
   await writeFile(join(resources, 'runtime.json'), JSON.stringify({
     target: `${process.platform}-${process.arch}`, appVersion: JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version,
-    maintenanceProtocol: 1, bun: bunVersion, executable, agentVersion,
+    maintenanceProtocol: 1, mcp, bun: bunVersion, executable, agentVersion,
   }, null, 2));
   execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts'], {
     cwd: root, env: { ...process.env, DESKTOP_AGENT_RESOURCES: resources },
