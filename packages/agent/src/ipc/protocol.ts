@@ -1,8 +1,10 @@
+import { IdSchema as Id, KeySchema as Key, MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HISTORY, HistoryCursorSchema, WirePausedSchema, ObservedSchema, IssueSchema, ProfileSchema, StepSchema, PlanSchema, PreviewResultSchema, ApplyResultSchema, ProgressSchema, WireStatusSchema, InspectResultSchema } from '../operations/wire.ts';
+export { MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HISTORY, HistoryCursorSchema, WirePausedSchema, ObservedSchema, IssueSchema, ProfileSchema, StepSchema, PlanSchema, PreviewResultSchema, ApplyResultSchema, ProgressSchema, WireStatusSchema, InspectResultSchema } from '../operations/wire.ts';
 import { DeviceStartResponseSchema, DisplayNameSchema, IdSchema as HostedId, ItemIdSchema as HostedItemId, RevisionNumberSchema, SyncSetupSchema, SyncMachineSchema, MachinePatchSchema, IsoTimeSchema as HostedTime } from '@nortuscc/hosted-protocol';
 import { HOSTED_FAILURE_CODES } from '@nortuscc/hosted-client/transport';
 import { Schema } from 'effect';
 import type { HistoryEvent } from '@nortuscc/machine';
-import type { AgentStatus, StatusError } from '../job.ts';
+import type { AgentStatus } from '../job.ts';
 import { POLICIES } from '../policy-values.ts';
 
 // Protocol v3: JSON lines on the agent's socket. It is protocol v2 from the desktop backend,
@@ -10,10 +12,7 @@ import { POLICIES } from '../policy-values.ts';
 // argument is an opaque key, id or enum, never a path, command line or URL.
 export const PROTOCOL_VERSION = 3;
 export const MAX_RECORD_BYTES = 1_048_576;
-export const MAX_EXCLUDED = 10_000;
-export const MAX_KEY_LENGTH = 500;
 export const MAX_DECISIONS = 1000;
-export const MAX_HISTORY = 500;
 
 export type ErrorCode =
   | 'INVALID_REQUEST' | 'MALFORMED' | 'OVERSIZED' | 'SHUTDOWN' | 'BUSY' | 'LOCKED' | 'NO_REPORT' | 'UNKNOWN_KEY'
@@ -21,18 +20,9 @@ export type ErrorCode =
   | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
 
 const Version = Schema.Literal(PROTOCOL_VERSION);
-const Id = Schema.String.check(Schema.isBetweenLength(1, 100));
-const Key = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
 const ItemId = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
-const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 // A full SHA-1 or SHA-256 commit, lower-case hex.
 const Sha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}([0-9a-f]{24})?$/));
-const IsoTime = Schema.String.check(Schema.makeFilter((s: string) =>
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(s) && !Number.isNaN(Date.parse(s))));
-export const HistoryCursorSchema = Schema.Struct({
-  at: IsoTime,
-  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
-});
 const NotificationId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const Receipt = Schema.String.check(Schema.isBetweenLength(1, 200));
 export const NotificationSchema = Schema.Struct({ id: NotificationId, title: Schema.String.check(Schema.isMaxLength(100)), body: Schema.String.check(Schema.isMaxLength(500)) });
@@ -40,7 +30,6 @@ export const NotificationEventSchema = Schema.Struct({ version: Version, event: 
 export const NotificationResultSchema = Schema.Struct({ notification: Schema.NullOr(NotificationSchema), receipt: Schema.NullOr(Receipt) });
 const Client = Schema.Literals(['app', 'cli']);
 const Policy = Schema.Literals(POLICIES);
-const STATUS_ERRORS = ['PROFILE_INVALID', 'DECISIONS_INVALID', 'REVISION_UNAVAILABLE', 'JOB_FAILED'] as const satisfies ReadonlyArray<StatusError>;
 
 const LocalDecisionSchema = Schema.Struct({
   setupId: Schema.Literal('local'),
@@ -71,8 +60,6 @@ export const RequestSchema = Schema.Union([
   }),
 ]);
 
-const WirePausedSchema = Schema.NullOr(Schema.Struct({ reason: Schema.String, at: Schema.String }));
-
 export const HelloResultSchema = Schema.Struct({
   agentVersion: Schema.String,
   protocol: Version,
@@ -80,76 +67,8 @@ export const HelloResultSchema = Schema.Struct({
   paused: WirePausedSchema,
 });
 
-const Domain = Schema.Literals(['config', 'integrations', 'skills']);
-const Origin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String });
-
-export const ObservedSchema = Schema.Struct({
-  key: Schema.String,
-  domain: Domain,
-  // Absent for an agent-neutral item (a shared skill).
-  target: Schema.optional(Schema.Literals(['claude', 'codex'])),
-  label: Schema.String,
-  group: Schema.String,
-  state: Schema.String,
-  disposition: Schema.Literals(['in-sync', 'apply', 'capture', 'blocked', 'excluded', 'undeclared']),
-  note: Schema.optional(Schema.String),
-  from: Schema.optional(Origin),
-});
-const IssueSchema = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String });
-const ProfileSchema = Schema.Struct({ repo: Schema.String, revision: Schema.NullOr(Schema.String), overrides: Schema.String, issues: Schema.Array(IssueSchema) });
-
-const StepSchema = Schema.Struct({
-  key: Schema.String,
-  domain: Domain,
-  action: Schema.Literals(['write-file', 'merge-keys', 'restore', 'remove', 'capture-file', 'write-manifest', 'install-integration', 'install-skills', 'update-skills']),
-  summary: Schema.String,
-  touches: Schema.Array(Schema.String),
-  interruptible: Schema.Boolean,
-  targets: Schema.optional(Schema.Array(Schema.Literals(['claude', 'codex']))),
-});
-const PlanSchema = Schema.Struct({
-  kind: Schema.Literals(['apply', 'uninstall', 'capture', 'update']),
-  steps: Schema.Array(StepSchema),
-  skipped: Schema.Array(Schema.Struct({ key: Schema.String, reason: Schema.String })),
-});
-export const PreviewResultSchema = Schema.Struct({ planId: Id, plan: PlanSchema });
-export const ApplyResultSchema = Schema.Union([
-  Schema.Struct({ status: Schema.Literal('started'), runId: Id }),
-  // The machine changed since the preview: nothing ran, and this is the new preview.
-  Schema.Struct({ status: Schema.Literal('stale'), planId: Id, plan: PlanSchema }),
-]);
-
-// @nortuscc/machine's Progress, plus `failed`: the run could not start or stopped on a defect.
-const ProgressSchema = Schema.Union([
-  Schema.Struct({ type: Schema.Literal('started'), index: Count, total: Count, step: StepSchema }),
-  Schema.Struct({ type: Schema.Literal('finished'), index: Count, total: Count, key: Schema.String, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Schema.String }),
-  Schema.Struct({ type: Schema.Literal('done'), ok: Count, failed: Count, backups: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal('cancelled'), remaining: Schema.Array(Schema.String), backups: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal('failed'), message: Schema.String }),
-]);
 export const RunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('progress'), runId: Id, progress: ProgressSchema });
 
-// The agent's last job status, as clients see it.
-export const WireStatusSchema = Schema.Struct({
-  at: Schema.String,
-  policy: Policy,
-  paused: WirePausedSchema,
-  trusted: Schema.Boolean,
-  applying: Schema.optionalKey(Schema.Boolean),
-  pending: Schema.Array(Schema.Struct({
-    key: Schema.String,
-    itemId: Schema.String,
-    verdict: Schema.Literals(['inert', 'held']),
-    reason: Schema.optionalKey(Schema.String),
-  })),
-  drift: Schema.Array(Schema.String),
-  conflicts: Schema.Array(Schema.String),
-  probeErrors: Schema.Array(Schema.String),
-  error: Schema.optionalKey(Schema.Literals(STATUS_ERRORS)),
-  detail: Schema.optionalKey(Schema.String),
-  counts: Schema.Struct({ pending: Count, held: Count, ready: Count, drift: Count }),
-});
-export const InspectResultSchema = Schema.Struct({ profile: ProfileSchema, items: Schema.Array(ObservedSchema), probeErrors: Schema.Array(Schema.String), status: Schema.optionalKey(WireStatusSchema) });
 export const decodeWireStatus = Schema.decodeUnknownSync(WireStatusSchema, { onExcessProperty: 'error' });
 export const StatusEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('status'), status: WireStatusSchema });
 

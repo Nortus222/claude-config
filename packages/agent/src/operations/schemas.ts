@@ -1,0 +1,87 @@
+import { Effect, Schema } from 'effect';
+import { POLICIES } from '../policy-values.ts';
+import { IdSchema, KeySchema, CountSchema, PlanSchema, InspectResultSchema, HistoryCursorSchema, MAX_EXCLUDED, MAX_HISTORY } from './wire.ts';
+
+export const OperationScopeSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('machine') }),
+  Schema.Struct({ kind: Schema.Literal('user') }),
+  Schema.Struct({ kind: Schema.Literal('profile'), profileId: IdSchema }),
+]);
+export const CapabilityStateSchema = Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isBetweenLength(1, 500))) });
+export const ReconcileChangeSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), only: Schema.Array(KeySchema).check(Schema.isMaxLength(MAX_EXCLUDED)) });
+export const NextActionSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('share_with_my_machines'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('user'), destinationId: Schema.optionalKey(IdSchema) }),
+  Schema.Struct({ kind: Schema.Literal('promote_to_profile'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('profile'), destinationId: Schema.optionalKey(IdSchema) }),
+]);
+const Text = Schema.String.check(Schema.isMaxLength(500));
+const Version = Schema.String.check(Schema.isBetweenLength(1, 100));
+const Protocol = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }));
+const list = <S extends Schema.Constraint>(schema: S) => Schema.Array(schema).check(Schema.isMaxLength(MAX_EXCLUDED));
+const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
+  Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
+  Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
+]);
+export const CAPABILITY_NAMES = ['getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
+export const ContextResultSchema = Schema.Struct({
+  app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
+  agent: Schema.Struct({ version: Version, protocol: Protocol }),
+  targets: Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2)),
+  setups: availability(Schema.Struct({ setupId: IdSchema, trusted: Schema.Boolean, revision: Schema.NullOr(Schema.Union([Version, CountSchema])) })),
+  profiles: availability(Schema.Struct({ profileId: IdSchema, name: Text, owned: Schema.Boolean })),
+  account: Schema.Union([
+    Schema.Struct({ state: Schema.Literal('signed-in'), accountId: IdSchema }),
+    Schema.Struct({ state: Schema.Literals(['signed-out', 'unauthenticated']) }),
+    Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
+  ]),
+  policy: Schema.Literals(POLICIES),
+  paused: Schema.NullOr(Schema.Struct({ reason: Text, at: Text })),
+  scopes: Schema.Struct({ machine: CapabilityStateSchema, user: CapabilityStateSchema, profile: CapabilityStateSchema }),
+  capabilities: Schema.Struct(capabilityFields), diagnostics: Schema.Array(Text).check(Schema.isMaxLength(100)),
+});
+export const ChangePreviewSchema = Schema.Struct({
+  planId: IdSchema, scope: OperationScopeSchema, change: ReconcileChangeSchema,
+  generation: IdSchema, plan: PlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
+});
+export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
+export const RunTerminalResultSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
+  Schema.Struct({ status: Schema.Literal('cancelled'), remaining: list(KeySchema) }),
+  Schema.Struct({ status: Schema.Literals(['failed', 'interrupted']), message: Text }),
+]);
+export const RunViewSchema = Schema.Struct({
+  runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
+  operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
+  intent: Schema.Struct({ requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema, change: ReconcileChangeSchema }),
+  // Reconciliation changes installed state without saving a new declaration.
+  intentSaved: Schema.Boolean, steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
+});
+export const ApplyChangeResultSchema = Schema.Union([
+  Schema.Struct({ status: Schema.Literal('started'), run: RunViewSchema }),
+  Schema.Struct({ status: Schema.Literal('stale'), preview: ChangePreviewSchema }),
+]);
+export const RunListResultSchema = Schema.Struct({ runs: Schema.Array(RunViewSchema).check(Schema.isMaxLength(MAX_HISTORY)), nextBefore: Schema.NullOr(IdSchema) });
+export const OperationHistoryEventSchema = Schema.Struct({
+  kind: Version, at: Text, actor: Schema.Literals(['agent', 'cli', 'app', 'sync', 'mcp']),
+  operation: Schema.optionalKey(Schema.Literal('applyChange')), scope: Schema.optionalKey(OperationScopeSchema),
+  requestId: Schema.optionalKey(IdSchema), runId: Schema.optionalKey(IdSchema),
+  keys: Schema.optionalKey(list(KeySchema)), steps: Schema.optionalKey(list(StepOutcomeSchema)), message: Schema.optionalKey(Text),
+});
+export const OperationHistoryResultSchema = Schema.Struct({ events: Schema.Array(OperationHistoryEventSchema).check(Schema.isMaxLength(MAX_HISTORY)), nextBefore: Schema.NullOr(HistoryCursorSchema) });
+const scope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ kind: 'machine' } as const)));
+const limit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_HISTORY }));
+export const GetContextInputSchema = Schema.Struct({ scope });
+export const InspectInputSchema = Schema.Struct({ scope });
+export const PreviewChangeInputSchema = Schema.Struct({ scope, change: ReconcileChangeSchema });
+export const ApplyChangeInputSchema = Schema.Struct({ scope, planId: IdSchema, requestId: IdSchema });
+export const GetRunInputSchema = Schema.Struct({ scope, runId: IdSchema });
+export const ListRunsInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(IdSchema), limit });
+export const CancelRunInputSchema = Schema.Struct({ scope, runId: IdSchema });
+export const HistoryInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(HistoryCursorSchema), limit });
+export { InspectResultSchema };
+const strict = { onExcessProperty: 'error' } as const;
+export const decodeOperationScope = Schema.decodeUnknownSync(OperationScopeSchema, strict);
+export const decodeContextResult = Schema.decodeUnknownSync(ContextResultSchema, strict);
+export const decodeChangePreview = Schema.decodeUnknownSync(ChangePreviewSchema, strict);
+export const decodeRunView = Schema.decodeUnknownSync(RunViewSchema, strict);
+export const decodeNextAction = Schema.decodeUnknownSync(NextActionSchema, strict);

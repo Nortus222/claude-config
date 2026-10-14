@@ -25,3 +25,5 @@ export * from './notifier.ts';
 export * from './hosted-status.ts';
 
 export * from './hosted.ts';
+
+export * from './operations/index.ts';
