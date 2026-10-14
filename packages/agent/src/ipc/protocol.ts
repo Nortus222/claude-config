@@ -32,7 +32,7 @@ export const NotificationEventSchema = Schema.Struct({ version: Version, event: 
 export const NotificationResultSchema = Schema.Struct({ notification: Schema.NullOr(NotificationSchema), receipt: Schema.NullOr(Receipt) });
 const Client = Schema.Literals(['app', 'cli']);
 export const OPERATIONS_PROTOCOL_VERSION = 1;
-export type AppRuntime = { readonly version: string; readonly runtimeId: string; readonly appPath: string; readonly platform: string; readonly target: string; readonly metadataPath: string };
+export type AppRuntime = { readonly version: string; readonly runtimeId: string; readonly appDirectory: string; readonly platform: string; readonly target: string; readonly metadataPath: string };
 const AppIdentitySchema = Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Id), runtimeId: Schema.NullOr(Id) });
 const OperationRequestSchema = Schema.Union(Object.entries(operationDefinitions).map(([operation, definition]) => Schema.Struct({
   version: Version, id: Id, command: Schema.Literal('operation'), operation: Schema.Literal(operation as OperationName), input: definition.input,

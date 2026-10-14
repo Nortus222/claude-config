@@ -5,7 +5,7 @@ import {
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'cancelled';
-export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string };
+export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string; readonly index?: number };
 export type RunView = {
   readonly runId: string;
   readonly steps: ReadonlyArray<StepView>;
@@ -46,11 +46,14 @@ const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
 // Folds one progress event into a run's view.
 export function advance(run: RunView, progress: RunProgress): RunView {
   const mark = (index: number, status: StepStatus, note = '') =>
-    run.steps.map((s, i) => (i === index ? { ...s, status, note } : s));
+    run.steps.map((s, i) => ((s.index ?? i) === index ? { ...s, status, note } : s));
   switch (progress.type) {
     case 'started': {
-      const steps = [...run.steps];
-      steps[progress.index] = { key: progress.step.key, summary: progress.step.summary, status: 'running', note: '' };
+      const current = run.steps.findIndex((step, index) => (step.index ?? index) === progress.index);
+      const started: StepView = { key: progress.step.key, summary: progress.step.summary, status: 'running', note: '' };
+      const steps = current < 0
+        ? [...run.steps, { ...started, index: progress.index }]
+        : run.steps.map((step, index) => index === current ? { ...step, ...started } : step);
       return { ...run, steps, summary: progress.step.summary };
     }
     case 'finished':

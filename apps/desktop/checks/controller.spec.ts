@@ -904,3 +904,13 @@ test('a shared operation started by another client appears in app activity and r
   f.emit(event('mcp-run', {type:'done',ok:1,failed:0})); await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(c.state.run?.outcome, 'done'); assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 2);
 });
+
+test('reconnecting during a run keeps only observed steps and renders subsequent progress safely', () => {
+  let run: RunView = {runId:'reconnected',steps:[],outcome:'running',summary:'Applying'};
+  run=advance(run,{type:'started',index:1,total:3,step:step('config:b') as any});
+  run=advance(run,{type:'finished',index:1,total:3,key:'config:b',outcome:'ok',note:'applied b'});
+  run=advance(run,{type:'started',index:2,total:3,step:step('config:c') as any});
+  assert.deepEqual(run.steps.map(step=>[step.key,step.status]),[['config:b','ok'],['config:c','running']]);
+  run=advance(run,{type:'finished',index:2,total:3,key:'config:c',outcome:'failed',note:'failed c'});
+  assert.deepEqual(run.steps.map(step=>[step.key,step.status,step.note]),[['config:b','ok','applied b'],['config:c','failed','failed c']]);
+});

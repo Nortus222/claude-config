@@ -3,7 +3,7 @@ import { disabledHostedState } from '../hosted.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Cause, Data, Effect, FiberSet } from 'effect';
 import { Fs, HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
@@ -237,7 +237,7 @@ export const serveIpc = (input: {
       let reason: string | undefined;
       if (!runtime || state.installedBy !== 'app') reason = 'Open the installed desktop app to configure its background agent.';
       else if (runtime.platform !== 'darwin' || runtime.target !== 'darwin-arm64') reason = 'MCP requires the supported macOS arm64 desktop runtime.';
-      else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath !== runtime.appPath) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
+      else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath === undefined || dirname(state.appPath) !== runtime.appDirectory) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
       else if (expectedRuntimeId !== undefined && expectedRuntimeId !== runtime.runtimeId) reason = 'The client runtime does not match the app; reconnect through the installed desktop app.';
       else {
         const fs = yield* Fs;

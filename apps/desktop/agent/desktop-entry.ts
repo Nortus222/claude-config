@@ -1,5 +1,5 @@
 import { homedir, userInfo } from 'node:os';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { Cause, Effect, Exit, Layer } from 'effect';
 import { agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
 import {
@@ -206,17 +206,11 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         stdout(JSON.stringify(result) + '\n');
         return 0;
       }
-      const registration = yield* Fs.use(fs => fs.readText(resolve(paths.stateRoot, 'agent/agent.json'))).pipe(Effect.provide(nodeFs));
-      let registeredAppPath: string | undefined;
-      try {
-        const value = JSON.parse(registration ?? 'null');
-        if (typeof value?.appPath === 'string' && dirname(value.appPath) === resolve(input.resources, '../../MacOS')) registeredAppPath = value.appPath;
-      } catch {}
       // Each job's integrations domain reads that job's snapshot and uses the login environment.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
-        ...(runtime.appVersion && runtime.target && registeredAppPath ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appPath: registeredAppPath, platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
+        ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: resolve(input.resources, '../../MacOS'), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
         paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal,
         onLifecycle: trace.record,

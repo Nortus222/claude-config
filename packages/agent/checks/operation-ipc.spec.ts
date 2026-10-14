@@ -94,7 +94,7 @@ const prepare = async (options: Options = {}) => {
   });
   m.write(join(m.paths.claude, 'settings.json'), JSON.stringify({ theme: 'dark' }) + '\n');
   await m.trust();
-  await m.run(AgentStateStore.use(s => s.update(state => ({ ...state, installedBy: options.identity === 'cli' ? 'cli' : 'app', agentVersion: options.identity === 'stale' ? 'old' : '9.9.9', appPath: '/tmp/Test.app' }))));
+  await m.run(AgentStateStore.use(s => s.update(state => ({ ...state, installedBy: options.identity === 'cli' ? 'cli' : 'app', agentVersion: options.identity === 'stale' ? 'old' : '9.9.9', appPath: '/tmp/Test.app/Contents/MacOS/Test' }))));
   for (const itemId of [EFFORT, MODEL]) await m.run(DecisionsStore.use((d) => d.record(accept(itemId))));
   const domains: AgentDomains = (paths) => [options.config ?? configDomain, integrationsDomain({ paths, env: {} })];
   const source = fixture.source;
@@ -112,7 +112,7 @@ const serverMachine = async (options: Options = {}) => {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      paths: m.paths, handle: agent, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appPath: '/tmp/Test.app', platform: 'darwin', target: 'darwin-arm64', metadataPath: join(dir,'runtime.json') }, onShutdown: () => {},
+      paths: m.paths, handle: agent, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath: join(dir,'runtime.json') }, onShutdown: () => {},
     });
     while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), source);
