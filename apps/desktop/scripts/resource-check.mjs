@@ -3,10 +3,11 @@ import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { bundleMcp } from './bundle-mcp.mjs';
+import { bundleRuntimeLicenses } from './bundle-runtime-licenses.mjs';
 
 // Portable test resources are independent of the macOS release bundler.
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -34,7 +35,7 @@ try {
     if (!license.ok) throw new Error(`Bun ${bunVersion} license download failed: ${license.status}`);
     await writeFile(join(resources, 'BUN-LICENSE.md'), await license.text());
   }
-  await copyFile(join(dirname(require.resolve('effect/package.json')), 'LICENSE'), join(resources, 'EFFECT-LICENSE'));
+  await bundleRuntimeLicenses(resources);
   const agentVersion = createHash('sha256').update(await readFile(join(resources, 'agent.mjs'))).digest('hex');
   await writeFile(join(resources, 'runtime.json'), JSON.stringify({
     target: `${process.platform}-${process.arch}`, appVersion: JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version,

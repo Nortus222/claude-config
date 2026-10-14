@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { Context, Effect, Layer } from 'effect';
 import { LaunchFailed } from './errors.ts';
 
@@ -15,6 +16,8 @@ export type Command = {
   readonly output: 'inherit' | 'capture';
   // With `output: 'capture'`, also captures stderr into Completed.stderr instead of inheriting it.
   readonly stderr?: 'capture';
+  // Opt-in raw byte bounds. Overflow stops the group, with a two-second cleanup deadline.
+  readonly captureLimit?: { readonly stdout?: number; readonly stderr?: number };
 };
 // `stderr` is present only when the command asked to capture it.
 export type Completed = { readonly code: number; readonly stdout: string; readonly stderr?: string };
@@ -89,6 +92,12 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         const [file, args] = batch === undefined ? [command.cmd, [...command.args]]
           : [lookup(env, 'COMSPEC') ?? 'cmd.exe', ['/d', '/s', '/c', `"${[batch.replace(cmdMeta, '^$1'), ...command.args.map(batchArgument)].join(' ')}"`]];
         const captureStderr = command.output === 'capture' && command.stderr === 'capture';
+        if (command.captureLimit !== undefined && (command.output !== 'capture'
+          || Object.values(command.captureLimit).some(n => !Number.isSafeInteger(n) || n < 0)
+          || (command.captureLimit.stderr !== undefined && !captureStderr))) {
+          resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'invalid capture byte limit' })));
+          return;
+        }
         const child = spawn(file, args, {
           cwd: command.cwd,
           env,
@@ -103,11 +112,62 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         let stdout = '';
         let stderr = '';
         let closed = false;
+        let exceeded = false;
+        let cleanup: Promise<boolean> | undefined;
+        let treeKillFailed = false;
+        const signalGroup = (sig: NodeJS.Signals): Promise<void> => new Promise(done => {
+          try {
+            if (child.pid === undefined) child.kill(sig);
+            else if (process.platform === 'win32') {
+              const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
+              killer.once('error', () => { treeKillFailed = true; child.kill(sig); done(); });
+              killer.once('close', code => { if (code !== 0) treeKillFailed = true; done(); });
+              return;
+            } else process.kill(-child.pid, sig);
+          } catch {
+            // Already gone.
+          }
+          done();
+        });
+        const stopCapturedGroup = async (): Promise<boolean> => {
+          const deadline = Date.now() + 2000;
+          let killCompleted = false;
+          void signalGroup('SIGKILL').then(() => { killCompleted = true; });
+          // Pipe EOF can precede a killed grandchild's reaping. Bound the whole cleanup wait.
+          while (Date.now() < deadline) {
+            if (closed && killCompleted && !treeKillFailed) {
+              if (process.platform === 'win32' || child.pid === undefined) return true;
+              try { process.kill(-child.pid, 0); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true; }
+            }
+            await new Promise<void>(done => setTimeout(done, 10));
+          }
+          child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
+          return false;
+        };
         // Decoded as one stream each, so a character split across chunks is not mangled.
-        child.stdout?.setEncoding('utf8');
-        child.stdout?.on('data', (chunk: string) => { stdout += chunk; });
-        child.stderr?.setEncoding('utf8');
-        child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+        const stdoutDecoder = new StringDecoder('utf8');
+        const stderrDecoder = new StringDecoder('utf8');
+        const capture = (stream: 'stdout' | 'stderr', decoder: StringDecoder) => {
+          let bytes = 0;
+          return (chunk: Buffer) => {
+            if (exceeded) return;
+            bytes += chunk.length;
+            const limit = command.captureLimit?.[stream];
+            if (limit !== undefined && bytes > limit) {
+              exceeded = true;
+              stdout = ''; stderr = '';
+              cleanup = stopCapturedGroup();
+              void cleanup.then(joined => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd,
+                reason: joined ? 'capture byte limit exceeded' : 'capture cleanup deadline exceeded' }))));
+              return;
+            }
+            if (stream === 'stdout') stdout += decoder.write(chunk);
+            else stderr += decoder.write(chunk);
+          };
+        };
+        child.stdout?.on('data', capture('stdout', stdoutDecoder));
+        child.stderr?.on('data', capture('stderr', stderrDecoder));
         // A closed stdin pipe reports EPIPE or EOF (Windows); the child's exit still determines success.
         child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
           if (err.code !== 'EPIPE' && err.code !== 'EOF') resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'stdin write failed' })));
@@ -116,25 +176,23 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
         child.on('close', (code, signal) => {
           closed = true;
+          if (exceeded) return;
+          stdout += stdoutDecoder.end(); stderr += stderrDecoder.end();
           const exit = code ?? (signal ? 128 : 1);
           resume(Effect.succeed(captureStderr ? { code: exit, stdout, stderr } : { code: exit, stdout }));
         });
 
         return Effect.promise(() => new Promise<void>((done) => {
+          if (cleanup !== undefined) { void cleanup.then(() => done()); return; }
           if (closed) return done();
-          const signalGroup = (sig: NodeJS.Signals) => {
-            try {
-              if (child.pid === undefined) child.kill(sig);
-              // Windows has no process groups; taskkill /T ends the tree, such as the node a shim started.
-              else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' }).on('error', () => child.kill(sig));
-              else process.kill(-child.pid, sig);
-            } catch {
-              // Already gone.
-            }
-          };
-          const force = setTimeout(() => signalGroup('SIGKILL'), 1000);
+          if (command.captureLimit !== undefined) {
+            cleanup = stopCapturedGroup();
+            void cleanup.then(() => done());
+            return;
+          }
+          const force = setTimeout(() => { void signalGroup('SIGKILL'); }, 1000);
           child.once('close', () => { clearTimeout(force); done(); });
-          signalGroup('SIGTERM');
+          void signalGroup('SIGTERM');
         }));
       }),
   });

@@ -15,7 +15,7 @@ const skip = resources === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundli
 test('resources contain only the agent runtime, hashed version and bundled license notices', { skip }, () => {
   const metadata = JSON.parse(readFileSync(join(resources!, 'runtime.json'), 'utf8'));
   const executable = process.platform === 'win32' ? 'bun.exe' : 'bun';
-  assert.deepEqual(readdirSync(resources!).sort(), ['BUN-LICENSE.md', 'CONTENT-TYPE-LICENSE', 'EFFECT-LICENSE', 'MCP-CORE-LICENSE', 'MCP-SERVER-LICENSE', 'ZOD-LICENSE', 'agent.mjs', executable, 'mcp.mjs', 'runtime.json'].sort());
+  assert.deepEqual(readdirSync(resources!).sort(), ['BUN-LICENSE.md', 'CONTENT-TYPE-LICENSE', 'EFFECT-LICENSE', 'YAML-LICENSE', 'MCP-CORE-LICENSE', 'MCP-SERVER-LICENSE', 'ZOD-LICENSE', 'agent.mjs', executable, 'mcp.mjs', 'runtime.json'].sort());
   assert.equal(metadata.bunSha256, createHash('sha256').update(readFileSync(join(resources!, executable))).digest('hex'));
   assert.equal(metadata.agentVersion, createHash('sha256').update(readFileSync(join(resources!, 'agent.mjs'))).digest('hex'));
   assert.equal(metadata.mcp.executable, 'mcp.mjs');
@@ -29,6 +29,7 @@ test('resources contain only the agent runtime, hashed version and bundled licen
   assert.equal(metadata.maintenanceProtocol, 1);
   assert.ok(readFileSync(join(resources!, 'BUN-LICENSE.md'), 'utf8').trim());
   assert.ok(readFileSync(join(resources!, 'EFFECT-LICENSE'), 'utf8').trim());
+  assert.match(readFileSync(join(resources!, 'YAML-LICENSE'), 'utf8'), /Copyright.*Eemeli Aro/);
 });
 
 test('bundled Bun runs and reports the version recorded in runtime metadata', { skip }, (t) => {

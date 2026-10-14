@@ -251,3 +251,34 @@ test('interrupting a command with piped stdin still waits for process cleanup', 
     assert.equal(pidAlive(result.pid), false);
   }).pipe(Effect.provide(nodeProcesses({ env: {} }))));
 });
+
+for (const stream of ['stdout', 'stderr'] as const) {
+  test(`captureLimit bounds raw ${stream} bytes and joins the owned process group`, { skip: process.platform === 'win32' }, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'machine-bounds-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const marker = join(directory, 'pid');
+    const script = `const c = require('node:child_process').spawn(${JSON.stringify(node)}, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'], { stdio: ['ignore', 'inherit', 'inherit'] });
+      require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(c.pid));
+      process.${stream}.write('é'.repeat(40000)); setInterval(() => {}, 1000);`;
+    const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', script], output: 'capture', stderr: 'capture', captureLimit: { stdout: 1000, stderr: 1000 } })).pipe(Effect.timeout(3000)));
+    assert.ok(Exit.isFailure(exit)); assert.match(String(exit.cause), /capture byte limit exceeded/);
+    assert.equal(pidAlive(Number(readFileSync(marker, 'utf8'))), false);
+  });
+}
+
+test('captureLimit counts UTF-8 bytes and accepts the exact bound', async () => {
+  const bounded = (n: number) => run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("é")'], output: 'capture', captureLimit: { stdout: n } })));
+  assert.ok(Exit.isFailure(await bounded(1)));
+  const exact = await bounded(2); assert.deepEqual(Exit.isSuccess(exact) && exact.value, { code: 0, stdout: 'é' });
+});
+
+test('bounded capture reports an explicit cleanup deadline if group disappearance cannot be confirmed', { skip: process.platform === 'win32' }, async t => {
+  const kill = process.kill;
+  const started = Date.now();
+  const probeUntil = started + 3500;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && Date.now() < probeUntil ? true : kill(pid, signal));
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("x".repeat(2000)); setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 } })));
+  assert.ok(Exit.isFailure(exit));
+  assert.match(String(exit.cause), /capture cleanup deadline exceeded/);
+  assert.ok(Date.now() - started >= 2000 && Date.now() - started < 3000);
+});

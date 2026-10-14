@@ -41,7 +41,7 @@ installer, and plugins live wherever Claude Code puts them.
 
 - npm-workspaces monorepo on **Node 24+**, which runs TypeScript directly: no build step.
   `bin/*.mjs` is the dependency-free launcher; everything else is erasable-syntax TypeScript
-  with `.ts` import extensions. The one runtime dependency is `effect` (pinned).
+  with `.ts` import extensions. Runtime dependencies are pinned in the workspace package manifests.
 - Machine access goes through `@nortuscc/machine`'s services (`MachinePaths`, `Fs`,
   `Processes`, stores). Nothing below `pathsFromEnvironment` reads `process.env` or the home
   directory, so tests pass temporary paths explicitly.

@@ -1,9 +1,9 @@
 import { build } from 'esbuild';
 import { bundleMcp } from './bundle-mcp.mjs';
+import { bundleRuntimeLicenses } from './bundle-runtime-licenses.mjs';
 import { mkdir, copyFile, chmod, writeFile, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -49,9 +49,7 @@ const runtime = resolve(resources, 'bun');
 await copyFile(sourceRuntime, runtime);
 await chmod(runtime, 0o755);
 await copyFile(licensePath, resolve(resources, 'BUN-LICENSE.md'));
-// Effect is hoisted to the workspace root, so find it the way Node would.
-const effectRoot = dirname(createRequire(import.meta.url).resolve('effect/package.json'));
-await copyFile(resolve(effectRoot, 'LICENSE'), resolve(resources, 'EFFECT-LICENSE'));
+await bundleRuntimeLicenses(resources);
 await writeFile(
   resolve(resources, 'runtime.json'),
   JSON.stringify({ target, appVersion: JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version, maintenanceProtocol: 1, mcp, bun: bunVersion, bunSha256: createHash('sha256').update(await readFile(runtime)).digest('hex'), executable: 'bun', agentVersion: createHash('sha256').update(await readFile(resolve(resources, 'agent.mjs'))).digest('hex') }, null, 2),
