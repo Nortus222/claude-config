@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { lstatSync, readlinkSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { acquireApplyLock, backupsForRun, Fs, FsFailed, hashText, machinePaths, nodeFs, stateStore, StateStore, validMcpRouting } from '../src/index.ts';
+import { acquireApplyLock, backupsForRun, Fs, FsFailed, hashText, MCP_ROUTING_GUIDANCE, machinePaths, nodeFs, stateStore, StateStore, validMcpRouting } from '../src/index.ts';
 import { inspectMcpRouting, setMcpRouting, MCP_ROUTING_BYTES } from '../src/config/mcp-routing.ts';
 import { configMachine } from './config-machine.ts';
 
@@ -297,4 +297,21 @@ test('restoration refuses a link target containing released routing instead of r
   assert.match(result.notes[key]!, /^failed: Original backup is a link containing routing/);
   assert.equal(m.read(local(m)), '# repo claude\n');
   assert.equal(m.read(target), 'original\r\n' + MCP_ROUTING_BYTES);
+});
+
+
+test('routing guidance recovers accepted runs and gates sharing on verified installation, request and capability', async () => {
+  const m = configMachine();
+  const offered = await routing(m, true, { source: 'overrides.json', issues: [], value: { manageConfig: false } });
+  for (const text of [MCP_ROUTING_GUIDANCE, offered.offeredText]) {
+    assert.match(text, /If a run was accepted, recover its status with nortuscc_get_run/);
+    assert.match(text, /nortuscc_list_runs if its run ID is unavailable/);
+    assert.match(text, /verify completion before reporting success/);
+    assert.match(text, /Only after verifying that a skill installation succeeded, ask exactly: "Do you want to share it with your other machines\?"/);
+    assert.match(text, /promotion to a personal or shared profile/);
+    assert.match(text, /Share or publish only after an explicit user request and only when the required capability is available/);
+    assert.ok(!text.includes('<!--'), 'offered guidance is marker-free');
+  }
+  await routing(m, true);
+  assert.ok(m.read(local(m))!.includes(MCP_ROUTING_GUIDANCE), 'managed routing carries the same guarded guidance');
 });

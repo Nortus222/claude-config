@@ -11,7 +11,7 @@ export type Applied = { readonly commit: string; readonly at: string };
 export const MCP_ROUTING_BLOCK_ID = 'nortuscc-mcp-routing-v1' as const;
 export const MCP_ROUTING_BEGIN = '<!-- nortuscc:mcp-routing:v1:begin -->';
 export const MCP_ROUTING_END = '<!-- nortuscc:mcp-routing:v1:end -->';
-export const MCP_ROUTING_GUIDANCE = 'For nortuscc configuration, skills, plugins, and MCP connections, use the nortuscc MCP tools. Inspect before making changes and preview before applying them. Changes default to this machine; publish to a personal or shared profile only when explicitly requested.';
+export const MCP_ROUTING_GUIDANCE = 'For nortuscc configuration, skills, plugins, and MCP connections, use the nortuscc MCP tools. Inspect before making changes and preview before applying them. Changes default to this machine. If a run was accepted, recover its status with nortuscc_get_run; use nortuscc_list_runs if its run ID is unavailable, and verify completion before reporting success. Only after verifying that a skill installation succeeded, ask exactly: "Do you want to share it with your other machines?" Mention promotion to a personal or shared profile as the sharing option. Share or publish only after an explicit user request and only when the required capability is available.';
 export const MCP_ROUTING_TEXT = `${MCP_ROUTING_BEGIN}\n${MCP_ROUTING_GUIDANCE}\n${MCP_ROUTING_END}`;
 // Separators belong to the receipt too; removing it never normalizes neighboring prose.
 export const MCP_ROUTING_BYTES = `\n\n${MCP_ROUTING_TEXT}\n`;
