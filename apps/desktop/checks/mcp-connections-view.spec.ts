@@ -39,3 +39,32 @@ test('late and malformed helper replies cannot repopulate settings or expose raw
   const bad = fixture(() => { throw new Error('SECRET native output'); }); await bad.machine.connect(); await bad.controller.refresh();
   assert.doesNotMatch(bad.controller.state.detail, /SECRET/);
 });
+
+for (const status of ['released', 'unmanaged'] as const) test(`absent registration with ${status} retained routing offers a fixed disconnect retry`, async () => {
+  const retained: ConnectionResult = { ...item, registration: 'absent', routing: { status, intent: 'released', blockStatus: 'present', offeredText: '' } };
+  const f = fixture(() => ({ connections: [retained] })); await f.machine.connect(); await f.controller.refresh();
+  const html = renderToStaticMarkup(createElement(ConnectionsView, { state: f.controller.state, controller: f.controller })).match(/<article>.*?<\/article>/)![0];
+  assert.match(html, /Instruction block: present/); assert.match(html, /Instruction cleanup is incomplete/);
+  assert.match(html, /<button>Retry instruction cleanup<\/button>/);
+  await f.controller.disconnect('codex');
+  assert.deepEqual(f.calls.filter(c => c[0] === 'mcp_connections').at(-1)?.[1], { action: 'disconnect', target: 'codex' });
+  assert.equal(f.calls.some(([, args]) => (args as { action?: string } | undefined)?.action === 'connect'), false);
+});
+
+test('absent registration can retire active missing guidance but completed and unowned cleanup stay idle', async () => {
+  for (const [intent, blockStatus, status, retry] of [
+    ['active', 'absent', 'missing', true], ['released', 'absent', 'released', false],
+    ['unowned', 'present', 'conflict', false], ['invalid', 'conflict', 'conflict', false],
+  ] as const) {
+    const f = fixture(() => ({ connections: [{ ...item, registration: 'absent', routing: { intent, blockStatus, status, offeredText: '' } }] }));
+    await f.machine.connect(); await f.controller.refresh();
+    const html = renderToStaticMarkup(createElement(ConnectionsView, { state: f.controller.state, controller: f.controller })).match(/<article>.*?<\/article>/)![0];
+    assert.match(html, new RegExp(`Instruction block: ${blockStatus}`));
+    if (retry) {
+      assert.match(html, /<button>Retry instruction cleanup<\/button>/);
+      await f.controller.disconnect('codex');
+      assert.deepEqual(f.calls.filter(c => c[0] === 'mcp_connections').at(-1)?.[1], { action: 'disconnect', target: 'codex' });
+    }
+    else { assert.match(html, /<button disabled="">Disconnect<\/button>/); assert.doesNotMatch(html, /Retry instruction cleanup/); }
+  }
+});

@@ -56,7 +56,7 @@ async function fixture(t: TestContext, customClaude = false, customCodex = false
   const source = Layer.succeed(SetupSource, { current: Effect.sync(() => { currentCalls++; assert.ok(existsSync(join(paths.stateRoot, 'apply.lock'))); return { desired, repo: paths.repo }; }) } as any);
   const run = <A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> => { beforeConfig = { codex: m.read(registry("codex")), claude: m.read(registry("claude")) }; const base = Layer.mergeAll(m.layer(), processes, source, machinePaths(paths), fs); const backupLayer = Layer.effect(Backups, Effect.gen(function* () { const b = yield* Backups; return { ...b, preserve: (...args: Parameters<typeof b.preserve>) => b.preserve(...args).pipe(Effect.tap(() => Effect.sync(() => mutateAfterBackup?.()))) }; })).pipe(Layer.provideMerge(base)); return Effect.runPromise(effect.pipe(Effect.provide(backupLayer)) as Effect.Effect<A, E>); };
   return { ...m, paths, input, registry, entries, calls, run, setDesired: (v: typeof desired) => { desired = v; }, currentCalls: () => currentCalls,
-    failInstructions: () => { failInstructions = true; }, afterBackup: (f: () => void) => { mutateAfterBackup = f; },
+    failInstructions: (value = true) => { failInstructions = value; }, afterBackup: (f: () => void) => { mutateAfterBackup = f; },
     failBeforeWrite: (v = true) => { failBeforeWrite = v; }, failAfterWrite: () => { failAfterWrite = true; }, beforeMutation: (f: () => void) => { beforeMutation = f; } };
 }
 
@@ -243,4 +243,34 @@ test('edited routing survives disconnect while its intent is retired and registr
   const result = await f.run(disconnectHost({ ...f.input, target: 'codex' }));
   assert.equal(result.registration, 'absent'); assert.equal(result.routing.status, 'conflict');
   assert.equal(result.routing.intent, 'released'); assert.equal(f.read(path), edited);
+});
+
+for (const unmanaged of [false, true]) test(`disconnect retries failed instruction removal with registration absent and management ${unmanaged ? 'off' : 'on'}`, async t => {
+  const f = await fixture(t); await f.run(connectHost({ ...f.input, target: 'codex' }));
+  const path = join(f.paths.codex, 'AGENTS.md'); const owned = f.read(path)!;
+  if (unmanaged) f.setDesired(await f.desired({ source: 'overrides.json', value: { manageConfig: false }, issues: [] }));
+  f.failInstructions();
+  const partial = await f.run(disconnectHost({ ...f.input, target: 'codex' }));
+  assert.equal(partial.registration, 'absent'); assert.equal(partial.routing.intent, 'released');
+  assert.equal(partial.routing.blockStatus, 'present'); assert.equal(f.read(path), owned);
+  assert.equal(partial.routing.status, unmanaged ? 'unmanaged' : 'released');
+  const mutations = f.calls.filter(c => ['add', 'remove'].includes(c.args[1]!)).length;
+  f.failInstructions(false);
+  const recovered = await f.run(disconnectHost({ ...f.input, target: 'codex' }));
+  assert.equal(recovered.registration, 'absent'); assert.equal(recovered.routing.intent, 'released');
+  assert.equal(recovered.routing.blockStatus, 'absent'); assert.equal(f.read(path), '# repo codex\n');
+  assert.equal(f.calls.filter(c => ['add', 'remove'].includes(c.args[1]!)).length, mutations, 'cleanup does not reconnect or mutate the absent registration');
+});
+
+test('disconnect retires active missing routing after registration is already absent', async t => {
+  const f = await fixture(t); await f.run(connectHost({ ...f.input, target: 'codex' }));
+  await f.run(disconnectHost({ ...f.input, target: 'codex' }));
+  const path = join(f.paths.stateRoot, 'state.json'); const state = JSON.parse(f.read(path)!);
+  state.mcpRouting.files['codex:AGENTS.md'].state = 'active'; f.write(path, JSON.stringify(state));
+  const before = (await f.run(inspectConnections(f.input))).connections.find(c => c.target === 'codex')!;
+  assert.equal(before.registration, 'absent'); assert.equal(before.routing.intent, 'active'); assert.equal(before.routing.status, 'missing');
+  const mutations = f.calls.filter(c => ['add', 'remove'].includes(c.args[1]!)).length;
+  const result = await f.run(disconnectHost({ ...f.input, target: 'codex' }));
+  assert.equal(result.registration, 'absent'); assert.equal(result.routing.intent, 'released'); assert.equal(result.routing.blockStatus, 'absent');
+  assert.equal(f.calls.filter(c => ['add', 'remove'].includes(c.args[1]!)).length, mutations);
 });
