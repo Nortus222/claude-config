@@ -14,7 +14,8 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:mcp": "node scripts/mcp-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.1",

@@ -10,6 +10,7 @@ import {
 export * from './model.ts';
 export * from './schemas.ts';
 export * from './context.ts';
+export * from './coverage.ts';
 
 const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O extends Schema.ConstraintDecoder<unknown>>(
   name: N, input: I, output: O, mutation = false,
