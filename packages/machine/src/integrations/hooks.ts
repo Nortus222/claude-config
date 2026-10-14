@@ -57,7 +57,7 @@ export const inspectHook = (claudeDir: string, d: Declaration): Effect.Effect<In
     return present && registered(read.settings, d.event!, hookCommand(claudeDir, d))
       ? { state: 'installed' as const, note: 'already registered' }
       : { state: 'missing' as const, note: '' };
-  }).pipe(Effect.catchTag('FsFailed', (err) => Effect.succeed<Inspected>({ state: 'blocked', note: err.message })));
+  }).pipe(Effect.catchTag('FsFailed', () => Effect.succeed<Inspected>({ state: 'blocked', note: 'could not inspect the hook files; check hook and settings.json access and permissions' })));
 
 // Adds only the declared registration, only when absent; never replaces the document or removes another hook.
 // An existing, different hook file is backed up before it is replaced.

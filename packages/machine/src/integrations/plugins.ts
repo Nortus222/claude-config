@@ -86,16 +86,16 @@ type Listed<A> = { readonly value: A } | { readonly error: string };
 // One `--json` list, parsed by `read`, which throws on a bad shape. A launch failure, a non-zero exit or
 // output of another shape becomes an error, never a failure.
 export const listJson = <A>(installer: Installer, noun: string, read: (parsed: unknown) => A): Effect.Effect<Listed<A>, never, Processes> =>
-  Processes.use((p) => p.run({ cmd: installer.cmd, args: installer.args, output: 'capture' })).pipe(
+  Processes.use((p) => p.run({ cmd: installer.cmd, args: installer.args, output: 'capture', stderr: 'capture' })).pipe(
     Effect.map(({ code, stdout }): Listed<A> => {
       if (code !== 0) return { error: `could not list Codex ${noun}s: exited ${code}` };
       try {
         return { value: read(JSON.parse(stdout)) };
-      } catch (err) {
-        return { error: `could not read the Codex ${noun} list: ${err instanceof Error ? err.message : String(err)}` };
+      } catch {
+        return { error: `could not read the Codex ${noun} list: invalid JSON or unexpected structure; check the Codex CLI version and retry` };
       }
     }),
-    Effect.catchTag('LaunchFailed', (err) => Effect.succeed<Listed<A>>({ error: `could not list Codex ${noun}s: ${err.message}` })),
+    Effect.catchTag('LaunchFailed', () => Effect.succeed<Listed<A>>({ error: `could not list Codex ${noun}s: could not launch codex; check its installation and executable access` })),
   );
 
 // The entries of `parsed[list]`; an absent list reads as empty.

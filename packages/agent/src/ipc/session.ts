@@ -48,7 +48,7 @@ export type AgentSession = {
   readonly running: Effect.Effect<boolean>;
 };
 
-type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly change: ReconcileChange; readonly exactSelection: boolean };
+type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string> };
 type Active = { readonly runId: string; readonly abort: AbortController; readonly done: Deferred.Deferred<void> };
 
 const describe = (error: unknown): string => {
@@ -63,6 +63,17 @@ const wireItem = (item: MachineReport['items'][number]): WireObserved => ({
   ...(item.note === undefined ? {} : { note: item.note }),
   ...(item.from === undefined ? {} : { from: { layer: item.from.layer, source: item.from.source } }),
 });
+
+// Retain only the selected instruction files' private exact-copy evidence across preview/apply.
+const instructionEvidence = (report: MachineReport, selected: readonly string[]): ReadonlyMap<string, string> => {
+  const keys = new Set(selected);
+  return new Map(report.items.flatMap(item => {
+    const evidence = item.domain === 'config' && keys.has(item.key) ? item.facts?.find(fact => fact.startsWith('copy-evidence:')) : undefined;
+    return evidence === undefined ? [] : [[item.key, evidence] as const];
+  }));
+};
+const sameInstructionEvidence = (before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): boolean =>
+  before.size === after.size && [...before].every(([key, evidence]) => after.get(key) === evidence);
 
 const wireStep = (step: Plan['steps'][number]) => ({
   key: step.key, domain: step.domain, action: step.action, summary: step.summary, touches: [...step.touches], interruptible: step.interruptible,
@@ -148,7 +159,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const selected: ReconcileChange = { kind: 'reconcile', only: change ? [...new Set(change.only)] : [...keys].filter(key => !unique.includes(key)) };
         const next: Previewed = {
           planId: randomUUID(), exclude: unique, plan: planFor(inspection, unique, change ? selected.only : undefined),
-          generation: yield* (handle.generation ?? Effect.succeed(0)), change: selected, exactSelection: change !== undefined,
+          generation: yield* (handle.generation ?? Effect.succeed(0)), change: selected, exactSelection: change !== undefined, instructionEvidence: instructionEvidence(inspection.report, selected.only),
         };
         previewed = next;
         return next;
@@ -227,8 +238,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             }
           }
           const fresh = planFor(inspection, wanted.exclude, wanted.exactSelection ? wanted.change.only : undefined);
-          if (!samePlan(wanted.plan, fresh)) {
-            const next: Previewed = { ...wanted, planId: randomUUID(), plan: fresh, generation: yield* (handle.generation ?? Effect.succeed(0)) };
+          const evidence = instructionEvidence(inspection.report, wanted.change.only);
+          if (!samePlan(wanted.plan, fresh) || !sameInstructionEvidence(wanted.instructionEvidence, evidence)) {
+            const next: Previewed = { ...wanted, planId: randomUUID(), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
             previewed = next;
             const stale = { status: 'stale' as const, planId: next.planId, plan: wirePlan(fresh), preview: operationPreview(next) };
             return stale;

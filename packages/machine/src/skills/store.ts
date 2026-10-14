@@ -67,7 +67,7 @@ export const readExposure = (targets: ReadonlyArray<Target>): Effect.Effect<
   for (const target of targets) {
     const result = yield* Effect.result(exposedSkillNames(target));
     if (result._tag === 'Success') list[target] = result.success;
-    else errors.push(`could not read the skill directory for ${SKILL_AGENTS[target]}: ${result.failure.message}`);
+    else errors.push(`could not read the skill directory for ${SKILL_AGENTS[target]}; check directory access and permissions`);
   }
   return { list, errors };
 });

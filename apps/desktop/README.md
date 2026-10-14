@@ -48,9 +48,10 @@ declarations with their current consent, pin and installer rules. It saves no ne
 stdout contains MCP JSON-RPC records only; bounded results and stderr carry diagnostics.
 
 This foundation is not the design's first usable add-skill milestone. The next workstream adds
-verified machine-local skill declarations, source identity and selected-agent isolation, followed
-by disposable installed-host acceptance of a natural-language add-skill request. Context currently
-reports `addSkill`, user sharing and profile promotion unavailable; they are not callable tools.
+verified machine-local skill declarations, source identity, verified usability for selected targets
+and disclosed shared-store visibility, followed by disposable installed-host acceptance of a
+natural-language add-skill request. Context currently reports `addSkill`, user sharing and profile
+promotion unavailable; they are not callable tools.
 The [checked engine inventory](../../packages/agent/src/operations/coverage.ts) maps every audited
 behavior to the implemented operations or its remaining workstream. Current-engine parity still
 needs capture/uninstall/update, target/category/force choices, overrides, incoming sync decisions,

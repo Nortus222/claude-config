@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit } from 'effect';
+import { Effect, Exit } from 'effect';
 import type { DesiredConfig, ResolvedFile } from '@nortuscc/profile-engine';
 import type { FsFailed } from '../errors.ts';
 import type { Fs } from '../fs.ts';
@@ -16,11 +16,6 @@ const disposition = (file: ResolvedFile, state: string): Disposition => {
   return 'blocked';
 };
 
-const problem = (cause: Cause.Cause<unknown>) => {
-  const error = Cause.squash(cause);
-  return `config: ${error instanceof Error && error.message ? error.message : String(error)}`;
-};
-
 // Every managed file's state, including files this machine does not manage: uninstall still needs
 // those. A file that cannot be read is a probe error, never a guessed state.
 export const inspectConfig = (desired: DesiredConfig) =>
@@ -28,7 +23,7 @@ export const inspectConfig = (desired: DesiredConfig) =>
     const items: Observed[] = [];
     const probeErrors: string[] = [];
     const state = yield* Effect.exit((yield* StateStore).read);
-    if (Exit.isFailure(state)) return { items, probeErrors: [problem(state.cause)] };
+    if (Exit.isFailure(state)) return { items, probeErrors: ['config: could not read machine state; check state.json access and permissions'] };
 
     for (const file of desired.files) {
       const read: Effect.Effect<ReadonlyArray<Reading>, FsFailed, Fs | MachinePaths> = file.mode === 'copy'
@@ -36,7 +31,7 @@ export const inspectConfig = (desired: DesiredConfig) =>
         : Effect.map(readMerge(file, desired, state.value.files), (document) => document.readings);
       const result = yield* Effect.exit(read);
       if (Exit.isFailure(result)) {
-        probeErrors.push(problem(result.cause));
+        probeErrors.push(`config: could not read ${file.src} or ${file.dest}; check file access and permissions`);
         continue;
       }
       for (const r of result.value) {

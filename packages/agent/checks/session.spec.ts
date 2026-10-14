@@ -8,6 +8,7 @@ import {
   AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, makeNotifier, SessionError, SetupSource, startAgent,
   type AgentStatus, type Notification, type AgentDomain, type AgentDomains, type AgentHandle, type AgentServices, type AgentSession, type RunProgress,
 } from '../src/index.ts';
+import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
 
@@ -358,5 +359,53 @@ test('hosted numeric job identity serializes inspect profile as its commit SHA',
     const result = yield* session.inspect('app');
     assert.equal(result.profile.revision, HEAD);
     assert.equal(decodeInspectResult(result).profile.revision, HEAD);
+  }));
+});
+
+for (const [target, file] of [['claude', 'CLAUDE.md'], ['codex', 'AGENTS.md']] as const) {
+  test(`${target} instruction edits with unchanged coarse state require a replacement preview before run acceptance`, async t => {
+    const approved = 'repo approved body\n';
+    const { m, within, lock } = await sessionMachine({ fixture: { headFiles: { [`${target}/${file}`]: approved } } });
+    t.after(() => rmSync(m.root, { recursive: true, force: true }));
+    const path = join(m.paths[target], file), key = `config:${target}:${file}`;
+    m.write(path, 'owner body before preview\n');
+    await within(session => Effect.gen(function* () {
+      const inspected = yield* session.inspect('mcp');
+      assert.equal(inspected.items.find(item => item.key === key)?.state, 'unmanaged');
+      const preview = yield* session.previewChange({ kind: 'reconcile', only: [key] });
+      assert.deepEqual(preview.plan.steps.map(step => step.key), [key]);
+      assert.ok(!JSON.stringify(preview).includes('copy-evidence:'));
+      m.write(path, 'owner edit AFTER preview\n');
+      const stale = yield* Effect.flip(session.runs.submit({ planId: preview.planId, requestId: 'stale-instructions', inputDigest: operationDigest(preview.planId), actor: 'mcp' }));
+      assert.equal(stale.code, 'STALE_PLAN');
+      assert.ok(stale.preview);
+      assert.notEqual(stale.preview.planId, preview.planId);
+      assert.deepEqual(stale.preview.plan, preview.plan, 'the structural plan stayed the same');
+      assert.equal(m.read(path), 'owner edit AFTER preview\n');
+      assert.equal(existsSync(lock), false);
+      assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
+      assert.ok(!(yield* Effect.promise(() => m.kinds())).includes('apply-started'));
+      const replacement = stale.preview;
+      const run = yield* session.runs.submit({ planId: replacement.planId, requestId: 'replacement-instructions', inputDigest: operationDigest(replacement.planId), actor: 'mcp' });
+      for (let i = 0; i < 200 && (yield* session.running); i++) yield* Effect.sleep('10 millis');
+      assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+      assert.equal(m.read(path), approved);
+    }));
+  });
+}
+
+test('an unselected instruction edit does not invalidate a selected settings preview', async t => {
+  const { m, within } = await sessionMachine({ fixture: { headFiles: { 'claude/CLAUDE.md': 'approved instructions\n' } } });
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const path = join(m.paths.claude, 'CLAUDE.md');
+  m.write(path, 'before preview\n');
+  await within(session => Effect.gen(function* () {
+    yield* session.inspect('mcp');
+    const preview = yield* session.previewChange({ kind: 'reconcile', only: [EFFORT_KEY] });
+    m.write(path, 'unselected owner edit\n');
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'selected-settings', inputDigest: operationDigest(preview.planId), actor: 'mcp' });
+    for (let i = 0; i < 200 && (yield* session.running); i++) yield* Effect.sleep('10 millis');
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    assert.equal(m.read(path), 'unselected owner edit\n');
   }));
 });

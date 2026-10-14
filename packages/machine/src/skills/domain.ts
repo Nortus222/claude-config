@@ -28,7 +28,7 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   const probeErrors: string[] = [];
   let installed: string[] = [];
   if (listed._tag === 'Success') installed = listed.success;
-  else probeErrors.push(`could not read ${store}: ${listed.failure.message}`);
+  else probeErrors.push(`could not read ${store}: check skill store access and permissions`);
   const present = new Set(installed);
 
   const items: Observed[] = [];

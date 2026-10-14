@@ -9,7 +9,7 @@ import { before, after, test } from 'node:test';
 import { build } from 'esbuild';
 import { Deferred, Effect, Exit, Scope } from 'effect';
 import { AgentStateStore, makeSession, serveIpc, startAgent, type AgentDomain } from '@nortuscc/agent';
-import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, integrationsDomain, Processes } from '@nortuscc/machine';
 import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
@@ -81,9 +81,16 @@ function output(operation: OperationName, reply: any) {
   assert.deepEqual(JSON.parse(reply.result.content[0].text), reply.result.structuredContent);
   return decodeOperationOutput(operation, reply.result.structuredContent) as any;
 }
-async function agent(identity: 'app' | 'cli' = 'app') {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string } = {}) {
   const m = agentMachine('/tmp');
-  const fixture = setupFixture(join(m.root, 'setup'));
+  const { nativeOutput, profileJson, pinsJson } = inputs;
+  const fixture = setupFixture(join(m.root, 'setup'), { headFiles: {
+    ...(nativeOutput === undefined ? {} : { 'integrations.json': JSON.stringify({ version: 1, integrations: [
+      { id: 'fixture-mcp', label: 'fixture MCP', target: 'codex', type: 'mcp', default: true, command: 'fixture-server' },
+    ] }) }),
+    ...(profileJson === undefined ? {} : { 'claude/settings.keys.json': profileJson }),
+    ...(pinsJson === undefined ? {} : { 'skill-pins.json': pinsJson }),
+  } });
   m.write(join(m.paths.claude, 'settings.json'), '{"theme":"dark"}\n');
   await m.trust();
   await m.run(DecisionsStore.use(s => s.record(accept(EFFORT))));
@@ -91,7 +98,15 @@ async function agent(identity: 'app' | 'cli' = 'app') {
   m.write(join(m.root, 'runtime.json'), JSON.stringify({ target: 'darwin-arm64', agentVersion: expectedRuntime, appVersion: '0.1.6' }));
   const started = Deferred.makeUnsafe<void>(), release = Deferred.makeUnsafe<void>();
   const config: AgentDomain = { ...configDomain, run: (step, report) => Effect.gen(function* () { yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return yield* configDomain.run(step, report); }) };
-  const domains = (paths: typeof m.paths) => [config, integrationsDomain({ paths, env: {} })];
+  const domains = (paths: typeof m.paths) => {
+    const integrations = integrationsDomain({ paths, env: {} });
+    return [config, nativeOutput === undefined ? integrations : {
+      ...integrations,
+      inspect: (desired: Parameters<typeof integrations.inspect>[0]) => integrations.inspect(desired).pipe(
+        Effect.provideService(Processes, { run: () => Effect.succeed({ code: 0, stdout: nativeOutput, stderr: 'FAKE_STDERR' }) }),
+      ),
+    }];
+  };
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
     const handle = yield* startAgent(domains);
@@ -194,4 +209,36 @@ test('malformed replies and private failure codes are redacted and an identical-
   assert.equal(operations, 2, 'the old MCP process must not reach an identical-version relocated agent');
   assert.ok(!JSON.stringify(client.records).includes(expectedApp));
   assert.ok(!JSON.stringify(client.records).includes('Relocated.app'));
+});
+
+for (const runtime of runtimes) test(`${runtime}: successful MCP inspect redacts malformed native listing diagnostics`, async t => {
+  const sentinel = 'FAKE_TOKEN';
+  const s = await agent('app', { nativeOutput: sentinel }); t.after(s.close);
+  const client = open(runtime, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const inspected = output('inspect', await client.call('inspect'));
+  assert.ok(inspected.probeErrors.some((note: string) => note.includes('could not read the Codex MCP server list')));
+  for (const secret of [sentinel, 'FAKE_STDERR']) {
+    assert.ok(!JSON.stringify(client.records).includes(secret));
+    assert.ok(!client.diagnostics().includes(secret));
+  }
+});
+
+for (const runtime of runtimes) test(`${runtime}: successful MCP inspect redacts malformed profile parser diagnostics`, async t => {
+  const sentinel = 'FAKE_TOKEN';
+  const s = await agent('app', { profileJson: sentinel }); t.after(s.close);
+  const client = open(runtime, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const inspected = output('inspect', await client.call('inspect'));
+  assert.ok(inspected.profile.issues.some((issue: { message: string }) => issue.message.includes('not valid JSON')));
+  assert.ok(!JSON.stringify(client.records).includes(sentinel));
+  assert.ok(!client.diagnostics().includes(sentinel));
+});
+
+for (const runtime of runtimes) test(`${runtime}: successful MCP inspect omits rejected profile schema keys`, async t => {
+  const sentinel = 'FAKE_TOKEN';
+  const s = await agent('app', { pinsJson: JSON.stringify({ version: 1, pins: {}, [sentinel]: 'private' }) }); t.after(s.close);
+  const client = open(runtime, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const inspected = output('inspect', await client.call('inspect'));
+  assert.ok(inspected.profile.issues.some((issue: { source: string }) => issue.source === 'skill-pins.json'));
+  assert.ok(!JSON.stringify(client.records).includes(sentinel));
+  assert.ok(!client.diagnostics().includes(sentinel));
 });
