@@ -394,3 +394,83 @@ test('hold persistence failure leaves the completed reset and original hold with
     f.close();
   }
 });
+
+test('local A/B/C hold remains releasable after the added item disappears', async () => {
+  const setup = tempSetup(),
+    f = fixture();
+  f.paths.repo = setup.checkout;
+  const itemId = 'setting:claude:settings.json#model';
+  const added = setup.push({
+    'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'high', model: 'test-model' }),
+  });
+  const removed = setup.push({ 'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'high' }) });
+  const holds = { [itemId]: setup.first, 'file:claude:CLAUDE.md': setup.first };
+  mkdirSync(join(f.paths.stateRoot, 'agent'), { recursive: true });
+  writeFileSync(
+    join(f.paths.stateRoot, 'agent/setups.json'),
+    json({
+      version: 1,
+      setups: [
+        {
+          setupId: null,
+          repoUrl: normalizeRepoUrl(setup.origin),
+          checkout: setup.checkout,
+          trustedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+  );
+  writeFileSync(join(f.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: added } }));
+  writeFileSync(join(f.paths.stateRoot, 'sync.json'), json({ version: 1, held: holds }));
+  try {
+    await f.run(
+      Effect.gen(function* () {
+        const source = yield* SourceService;
+        const input = {
+          source,
+          change: {
+            kind: 'syncDecision' as const,
+            setupId: 'local',
+            revision: { kind: 'local' as const, commit: removed },
+            itemId,
+            action: 'release' as const,
+          },
+          overrides: {},
+          holds,
+          decisions: [],
+          now: new Date(),
+        };
+        for (const action of ['accept', 'hold', 'takeTheirs'] as const)
+          assert.equal(
+            (yield* Effect.result(prepareSyncDecision({ ...input, change: { ...input.change, action } })))._tag,
+            'Failure',
+          );
+        assert.equal(
+          (yield* Effect.result(
+            prepareSyncDecision({ ...input, change: { ...input.change, revision: { kind: 'local', commit: added } } }),
+          ))._tag,
+          'Failure',
+        );
+        assert.equal((yield* Effect.result(prepareSyncDecision({ ...input, holds: {} })))._tag, 'Failure');
+        const prepared = yield* prepareSyncDecision(input);
+        assert.deepEqual(prepared.nextHolds, { 'file:claude:CLAUDE.md': setup.first });
+        const result = yield* persistSyncDecision(
+          prepared,
+          (decisions) =>
+            Effect.sync(() => {
+              assert.equal(decisions[0]?.commit, removed);
+              assert.equal(decisions[0]?.decision, 'accept');
+            }),
+          { pending: () => Effect.void, committed: () => Effect.void },
+        );
+        assert.equal(result.holdUpdated, true);
+        assert.equal(result.decision, 'recorded');
+        assert.deepEqual(yield* (yield* SyncStore).read, prepared.nextHolds);
+        assert.equal(setup.inCheckout('rev-parse', 'HEAD'), setup.first);
+      }).pipe(Effect.provide(setupSourceLayer(f.paths))),
+    );
+  } finally {
+    f.close();
+    rmSync(setup.root, { recursive: true, force: true });
+  }
+});

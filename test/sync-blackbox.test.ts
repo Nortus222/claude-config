@@ -218,3 +218,26 @@ test('an unknown flag is refused before the repo moves, not forwarded to apply',
   assert.equal(existsSync(join(m.state, 'state.json')), false);
   assert.equal(existsSync(join(m.state, 'decisions.json')), false);
 });
+
+test('--release removes a local A/B/C hold after its added item disappears', async () => {
+  const m = machine();
+  const itemId = 'setting:claude:settings.json#model';
+  const first = git(m.repo, 'rev-parse', 'HEAD');
+  const original = keys(m);
+  assert.equal(original.model, undefined);
+  pushUpstream(m, { 'claude/settings.keys.json': JSON.stringify({ ...original, model: 'test-model' }) });
+  const skipped = await sync(m, '--skip', itemId);
+  assert.equal(skipped.code, 0, skipped.stderr);
+  assert.equal(readJson(join(m.state, 'sync.json')).held[itemId], first);
+  const removed = pushUpstream(m, { 'claude/settings.keys.json': JSON.stringify(original) });
+  const advanced = await sync(m, '--yes');
+  assert.equal(advanced.code, 0, advanced.stderr);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), removed);
+  assert.equal(readJson(join(m.state, 'sync.json')).held[itemId], first);
+  const released = await sync(m, '--release', itemId);
+  assert.equal(released.code, 0, released.stderr);
+  assert.match(released.stdout, /released/);
+  assert.deepEqual(readJson(join(m.state, 'sync.json')).held, {});
+  assert.equal(readJson(join(m.state, 'decisions.json')).decisions.some((d: {itemId:string;commit:string;decision:string}) => d.itemId === itemId && d.commit === removed && d.decision === 'accept'), true);
+  assert.equal(git(m.repo, 'rev-parse', 'HEAD'), removed);
+});

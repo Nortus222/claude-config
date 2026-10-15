@@ -569,3 +569,75 @@ test('dedicated sync reads refuse mixed observation generations and inspection i
       }
     }
 });
+
+import { tempSetup, json } from '../../sync/checks/support/repo.ts';
+import { setupSourceLayer, normalizeRepoUrl } from '@nortuscc/sync';
+test('local A/B/C hold is discoverable through incomingChanges and releasable from its exact row', async () => {
+  const repo = tempSetup(),
+    m = agentMachine();
+  Object.assign(m.paths, { repo: repo.checkout });
+  const itemId = 'setting:claude:settings.json#model';
+  const added = repo.push({
+    'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'high', model: 'test-model' }),
+  });
+  const removed = repo.push({ 'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'high' }) });
+  m.write(
+    join(m.paths.stateRoot, 'agent/setups.json'),
+    json({
+      version: 1,
+      setups: [
+        {
+          setupId: null,
+          repoUrl: normalizeRepoUrl(repo.origin),
+          checkout: repo.checkout,
+          trustedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+  );
+  m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: added } }));
+  m.write(join(m.paths.stateRoot, 'sync.json'), json({ version: 1, held: { [itemId]: repo.first } }));
+  try {
+    await m.run(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const handle = yield* startAgent(() => [], { deferStart: true });
+          const session = yield* makeSession(handle, { domains: () => [], signal: new AbortController().signal });
+          yield* session.inspect('mcp');
+          const incoming = yield* session.incomingChanges(
+            decodeOperationInput('incomingChanges', { setupId: 'local' }),
+          );
+          const row = incoming.items.find((item) => item.itemId === itemId);
+          assert.deepEqual(row, {
+            itemId,
+            revision: { kind: 'local', commit: removed },
+            kind: 'setting',
+            change: 'unchanged',
+            held: true,
+            conflict: false,
+          });
+          const preview = yield* session.previewChange({
+            kind: 'syncDecision',
+            setupId: 'local',
+            itemId: row!.itemId,
+            revision: row!.revision,
+            action: 'release',
+          });
+          const { run } = yield* submit(session, preview.planId);
+          assert.equal(run.state, 'succeeded');
+          assert.ok(run.parity?.committedKeys.includes('sync:hold'));
+          const after = yield* session.incomingChanges(decodeOperationInput('incomingChanges', { setupId: 'local' }));
+          assert.equal(
+            after.items.some((item) => item.itemId === itemId),
+            false,
+          );
+        }),
+      ),
+      setupSourceLayer(m.paths),
+    );
+    assert.deepEqual(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held, {});
+  } finally {
+    rmSync(m.root, { recursive: true, force: true });
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+});

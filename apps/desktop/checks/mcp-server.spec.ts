@@ -159,6 +159,15 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     output('inspect', await client.call('inspect'));
     const setups=output('inspectSetups',await client.call('inspectSetups',{limit:1})); assert.equal(setups.items[0].setupId,'local'); assert.equal(setups.items[0].trusted,true);
     const incoming=output('incomingChanges',await client.call('incomingChanges',{setupId:'local',limit:1})); assert.equal(incoming.revision.kind,'local'); assert.equal(incoming.revision.commit,'b'.repeat(40)); assert.equal(incoming.items.length,1);
+    const absentHeld = 'setting:claude:settings.json#model';
+    s.m.write(join(s.m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held: { [absentHeld]: 'a'.repeat(40) } }));
+    const heldRows = output('incomingChanges', await client.call('incomingChanges', { setupId: 'local' }));
+    const heldRow = heldRows.items.find((item: any) => item.itemId === absentHeld);
+    assert.deepEqual(heldRow, { itemId: absentHeld, kind: 'setting', revision: incoming.revision, change: 'unchanged', held: true, conflict: false });
+    output('previewChange', await client.call('previewChange', { change: { kind: 'syncDecision', setupId: 'local', revision: heldRow.revision, itemId: heldRow.itemId, action: 'release' } }));
+    assert.throws(() => decodeOperationOutput('incomingChanges', { ...heldRows, items: [{ ...heldRow, held: false }] }));
+    assert.throws(() => decodeOperationOutput('incomingChanges', { ...heldRows, items: [{ ...heldRow, revision: { kind: 'hosted', number: 1, commitSha: 'b'.repeat(40) } }] }));
+    s.m.write(join(s.m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held: {} }));
     const trust=output('prepareTrustRequest',await client.call('prepareTrustRequest',{setupId:'local'})); assert.equal(trust.action,'open-app-repository-trust'); assert.equal(trust.trusted,true);
     const updates = output('inspectUpdates', await client.call('inspectUpdates', { limit: 1 }));
     assert.deepEqual(updates.items, []); assert.equal(updates.unavailable, false);

@@ -90,8 +90,11 @@ export const prepareSyncDecision = (
       return yield* Effect.fail(refused());
     const observed = yield* observeSyncSource(source, input.decisions);
     const offeredItem = observed.offers.find((item) => item.itemId === change.itemId);
-    if (!offeredItem) return yield* Effect.fail(refused());
-    const head = offeredItem.revision;
+    // An existing local hold can be released even when both snapshots omit its item.
+    const releaseLocalHold =
+      typeof observed.head === 'string' && change.action === 'release' && Object.hasOwn(input.holds, change.itemId);
+    const head = offeredItem?.revision ?? (releaseLocalHold ? observed.head : undefined);
+    if (head === undefined) return yield* Effect.fail(refused());
     yield* source.load(head);
     const local = typeof head === 'string';
     if (

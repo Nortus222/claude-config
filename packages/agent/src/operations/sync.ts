@@ -14,6 +14,7 @@ import {
 import {
   observeSyncSource,
   overrideOf,
+  parseItemId,
   persistSyncDecision,
   prepareSyncDecision,
   SyncStore,
@@ -151,6 +152,23 @@ export const readSyncOperation = <N extends ReadName>(
             conflict: overrideOf(c.itemId, overrides.value) !== undefined,
           };
         });
+        // A local hold still needs a release action when it no longer produces a delta.
+        if (revision.kind === 'local') {
+          for (const itemId of Object.keys(holds)) {
+            if (rows.some((row) => row.itemId === itemId)) continue;
+            const ref = parseItemId(itemId);
+            if (!ref) throw new Error('Held item identity is unavailable');
+            rows.push({
+              itemId,
+              revision,
+              kind: ref.kind,
+              change: 'unchanged',
+              held: true,
+              conflict: overrideOf(itemId, overrides.value) !== undefined,
+            });
+          }
+          rows.sort((a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0));
+        }
         if (rows.some((r) => !safeOwnerString(r.itemId)))
           return yield* Effect.fail(new SessionError('OVERSIZED', 'Incoming item identity is unavailable'));
         const fresh = yield* select(handle, args.setupId);

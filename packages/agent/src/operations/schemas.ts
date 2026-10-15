@@ -267,5 +267,10 @@ export const InspectSetupsInputSchema = Schema.Struct(syncPage);
 export const IncomingChangesInputSchema = Schema.Struct({...syncPage,setupId:IdSchema});
 export const PrepareTrustRequestInputSchema = Schema.Struct({scope,setupId:IdSchema});
 export const SetupInspectionResultSchema = Schema.Struct({generation:IdSchema,items:Schema.Array(Schema.Struct({setupId:IdSchema,trusted:Schema.Boolean,repository:Schema.NullOr(Text),accountId:Schema.NullOr(IdSchema)})).check(Schema.isMaxLength(100)),nextCursor:syncCursor});
-export const IncomingChangesResultSchema = Schema.Struct({generation:IdSchema,setupId:IdSchema,revision:SyncRevisionIdentitySchema,items:Schema.Array(Schema.Struct({itemId:KeySchema,revision:SyncRevisionIdentitySchema,kind:Schema.Literals(['setting','file','skill','integration']),change:Schema.Literals(['added','changed','removed']),held:Schema.Boolean,conflict:Schema.Boolean})).check(Schema.isMaxLength(100)),nextCursor:syncCursor});
+const incomingItemFields = {itemId:KeySchema,kind:Schema.Literals(['setting','file','skill','integration']),conflict:Schema.Boolean};
+const IncomingItemSchema = Schema.Union([
+  Schema.Struct({...incomingItemFields,revision:SyncRevisionIdentitySchema,change:Schema.Literals(['added','changed','removed']),held:Schema.Boolean}),
+  Schema.Struct({...incomingItemFields,revision:Schema.Struct({kind:Schema.Literal('local'),commit:SyncCommitSchema}),change:Schema.Literal('unchanged'),held:Schema.Literal(true)}),
+]);
+export const IncomingChangesResultSchema = Schema.Struct({generation:IdSchema,setupId:IdSchema,revision:SyncRevisionIdentitySchema,items:Schema.Array(IncomingItemSchema).check(Schema.isMaxLength(100)),nextCursor:syncCursor});
 export const TrustRequestResultSchema = Schema.Struct({generation:IdSchema,setupId:IdSchema,repository:Schema.NullOr(Text),trusted:Schema.Boolean,action:Schema.Literal('open-app-repository-trust')});
