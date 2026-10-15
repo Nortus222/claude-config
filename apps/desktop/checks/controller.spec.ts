@@ -1058,3 +1058,68 @@ test('a terminal lookup discovered during connect cannot cross a restart session
   assert.equal(c.state.pending, false);
   c.dispose();
 });
+
+
+for (const entry of ['connect', 'restart'] as const) for (const order of ['A then B', 'B then A'] as const)
+  for (const outcome of ['verified', 'failed', 'needsInspection'] as const)
+    test(`${entry} preserves ${outcome} discovery with two terminal events ${order}`, async () => {
+      const list = deferred<unknown>(); const listed = deferred<void>(); let discovering = entry === 'connect';
+      const completed = outcome === 'verified' ? skillRun() : skillRun({ state: outcome === 'failed' ? 'failed' : 'interrupted',
+        result: { status: outcome === 'failed' ? 'failed' : 'interrupted', message: 'Inspect retained installation' },
+        installation: { ...skillRun().installation!, state: outcome, nextActions: [] } });
+      const f = fake({ agent_generation: () => discovering ? operationHello : null,
+        restart_agent: () => { discovering = true; return operationHello; }, agent_status: () => status({ applying: discovering }),
+        inspect_machine: () => inspection([]), list_operation_runs: () => { listed.resolve(); return list.promise; },
+        get_operation_run: () => completed });
+      const c = new MachineController(f.bridge); if (entry === 'restart') await c.connect();
+      const connecting = entry === 'connect' ? c.connect() : c.restart(); await listed.promise;
+      const a = event('addition-run', { type: 'done', ok: 3, failed: 0 });
+      // A later empty reconcile can complete without ever emitting a started event.
+      const b = event('later-empty-run', { type: 'done', ok: 0, failed: 0 });
+      for (const terminal of order === 'A then B' ? [a, b] : [b, a]) f.emit(terminal);
+      list.resolve({ runs: [skillRun({ state: 'running', result: null, installation: undefined })], nextBefore: null });
+      await connecting;
+      assert.equal(c.state.run?.runId, 'addition-run');
+      assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+      assert.equal(c.state.run?.receipt?.installation?.state, outcome);
+      assert.equal(c.state.run?.receipt?.installation?.nextActions.length, outcome === 'verified' ? 2 : 0);
+      assert.deepEqual(f.calls.filter(([command]) => command === 'get_operation_run').map(([, args]) => args), [{ runId: 'addition-run' }]);
+      c.dispose();
+    });
+
+test('completion tracking retains a match at its finite bound and deduplicates repeated terminals', async () => {
+  const list = deferred<unknown>(); const listed = deferred<void>();
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying: true }),
+    list_operation_runs: () => { listed.resolve(); return list.promise; }, get_operation_run: () => skillRun() });
+  const c = new MachineController(f.bridge); const connecting = c.connect(); await listed.promise;
+  for (let i = 0; i < 10_001; i++) f.emit(event('addition-run', { type: 'done', ok: 3, failed: 0 }));
+  for (let i = 1; i < 10_000; i++) f.emit(event(`empty-${i}`, { type: 'done', ok: 0, failed: 0 }));
+  list.resolve({ runs: [skillRun({ state: 'running', result: null, installation: undefined })], nextBefore: null });
+  await connecting;
+  assert.equal(c.state.run?.outcome, 'done'); assert.equal(c.state.connection, 'connected');
+  assert.deepEqual(f.calls.filter(([command]) => command === 'get_operation_run').map(([, args]) => args), [{ runId: 'addition-run' }]);
+  c.dispose();
+});
+
+for (const entry of ['connect', 'restart'] as const) test(`${entry} completion tracking overflow discards stale discovery and permits explicit reconnect`, async () => {
+  const list = deferred<unknown>(); const listed = deferred<void>(); let reads = 0; let discovering = entry === 'connect'; let recovering = false;
+  const f = fake({ agent_generation: () => discovering ? operationHello : null,
+    restart_agent: () => { discovering = true; return operationHello; }, agent_status: () => status({ applying: discovering && !recovering }),
+    inspect_machine: () => inspection([]), get_operation_run: () => skillRun(),
+    list_operation_runs: () => { if (++reads === 1) { listed.resolve(); return list.promise; } return { runs: [skillRun()], nextBefore: null }; } });
+  const c = new MachineController(f.bridge); if (entry === 'restart') await c.connect();
+  const connecting = entry === 'connect' ? c.connect() : c.restart(); await listed.promise;
+  f.emit(event('addition-run', { type: 'done', ok: 3, failed: 0 }));
+  for (let i = 1; i <= 10_000; i++) f.emit(event(`empty-${i}`, { type: 'done', ok: 0, failed: 0 }));
+  // Overflow stays invalid even when a matching event arrives again afterward.
+  f.emit(event('addition-run', { type: 'done', ok: 3, failed: 0 }));
+  list.resolve({ runs: [skillRun({ state: 'running', result: null, installation: undefined })], nextBefore: null });
+  await connecting;
+  assert.equal(c.snapshot().run, null); assert.equal(c.state.connection, 'disconnected'); assert.equal(c.state.pending, false);
+  assert.match(c.state.initialReadError ?? '', /Run activity exceeded.*Reconnect/);
+  assert.equal(f.calls.some(([command]) => command === 'get_operation_run'), false);
+  recovering = true; await c.connect();
+  assert.equal(c.state.connection, 'connected'); assert.equal(c.state.initialReadError, null);
+  assert.equal(c.state.run?.outcome, 'done'); assert.equal(c.state.run?.receipt?.installation?.state, 'verified');
+  c.dispose();
+});

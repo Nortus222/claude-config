@@ -90,7 +90,7 @@ export class MachineController {
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
   private operationRead = 0;
-  private runDiscovery: { readonly read: number; terminalRunId?: string } | null = null;
+  private runDiscovery: { readonly read: number; readonly terminalRunIds: Set<string>; overflow: boolean } | null = null;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
@@ -182,19 +182,26 @@ export class MachineController {
     if (!this.bridge || this.state.hello?.operations?.available !== true) return;
     const token = this.sessionToken();
     const read = ++this.operationRead;
-    const discovery = runId ? null : { read, terminalRunId: undefined as string | undefined };
+    const discovery = runId ? null : { read, terminalRunIds: new Set<string>(), overflow: false };
     if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
         : await this.bridge.invoke('list_operation_runs', { limit: 1 });
       if (!this.ownsSession(token, reply) || read !== this.operationRead) return;
+      if (discovery?.overflow) {
+        if (this.state.run) return;
+        const detail = 'Run activity exceeded the discovery limit. Reconnect to read current runs.';
+        this.revision++;
+        this.update({ connection: 'disconnected', pending: false, initialReadPending: false, waitingForReport: false, initialReadError: detail, detail });
+        return;
+      }
       const receipt = runId ? checkedReply(decodeRunView, reply.data)
         : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
       if (!receipt || runId && receipt.runId !== runId) return;
       const current = this.state.run;
       if (current && current.runId !== receipt.runId) return;
       // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
-      if (discovery?.terminalRunId === receipt.runId) {
+      if (discovery?.terminalRunIds.has(receipt.runId)) {
         await this.refreshRun(receipt.runId, true);
         return;
       }
@@ -490,7 +497,13 @@ export class MachineController {
     let run = this.state.run;
     if (!run && this.runDiscovery?.read === this.operationRead
       && (event.progress.type === 'done' || event.progress.type === 'failed' || event.progress.type === 'cancelled')) {
-      this.runDiscovery.terminalRunId = event.runId;
+      const discovery = this.runDiscovery;
+      if (!discovery.overflow && !discovery.terminalRunIds.has(event.runId)) {
+        if (discovery.terminalRunIds.size === MAX_EARLY_EVENTS) {
+          discovery.overflow = true;
+          discovery.terminalRunIds.clear();
+        } else discovery.terminalRunIds.add(event.runId);
+      }
       return;
     }
     const discoversRun = event.progress.type === 'started' && run?.outcome !== 'running';
