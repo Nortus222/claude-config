@@ -17,6 +17,8 @@ const OverridesDocument = Schema.Struct({ version: Schema.Literal(1), ...fields 
 export function normalizeSkillSource(source: string): string | undefined {
   const match = /^(?:https:\/\/github\.com\/)?([a-zA-Z0-9][a-zA-Z0-9-]{0,38})\/([a-zA-Z0-9_.-]{1,100}?)(?:\.git)?\/?$/.exec(source);
   if (!match || match[2] === '.' || match[2] === '..') return undefined;
+  // A residual suffix would change repository identity on the next normalization.
+  if (match[2]!.toLowerCase().endsWith('.git')) return undefined;
   return `${match[1]}/${match[2]}`.toLowerCase();
 }
 

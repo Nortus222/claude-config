@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { Cause, Effect, Exit, Fiber, Layer, Result } from 'effect';
 import * as candidateApi from '../src/skills/candidates.ts';
-import { Processes, machinePaths, nodeFs, nodeProcesses } from '../src/index.ts';
+import { Fs, Processes, machinePaths, nodeFs, nodeProcesses } from '../src/index.ts';
 import { additionCommand } from '../src/skills/installer.ts';
 import { readSkillCandidates } from '../src/skills/candidates.ts';
 
@@ -32,9 +32,9 @@ const fixture = (t: TestContext, files: Record<string, string>, intercept?: (com
     const localCommand = { ...command, args: command.args.map(a => a === 'https://github.com/fixture/source.git' ? pathToFileURL(repo).href : a) };
     return p.run(intercept?.(localCommand, home) ?? localCommand);
   } }))).pipe(Layer.provide(real));
-  const read = (pin?: string) => readSkillCandidates({ source: 'fixture/source', ...(pin ? { revision: pin } : {}) }).pipe(Effect.provide(Layer.mergeAll(machinePaths(paths), nodeFs, local)));
+  const read = (pin?: string, timeoutMs?: number) => readSkillCandidates({ ...(timeoutMs === undefined ? {} : { timeoutMs }), source: 'fixture/source', ...(pin ? { revision: pin } : {}) }).pipe(Effect.provide(Layer.mergeAll(machinePaths(paths), nodeFs, local)));
   const run = (pin?: string) => Effect.runPromise(read(pin));
-  return { run, read, git, revision, commands, paths, home };
+  return { run, read, git, revision, commands, paths, home, local };
 };
 
 test('binds metadata selector, canonical installed name, blob and tree to an accepted full commit', async t => {
@@ -281,4 +281,24 @@ test('confirmed source cancellation cleans its temporary state without a cleanup
   assert.ok(Exit.isFailure(exit)); assert.equal(Exit.hasInterrupts(exit), true); assert.doesNotMatch(String(exit.cause), /SkillCandidateCleanupFailed/);
   assert.throws(() => process.kill(Number(readFileSync(marker, 'utf8')), 0), { code: 'ESRCH' });
   assert.deepEqual(readdirSync(join(f.paths.stateRoot, 'tmp')), []);
+});
+
+
+test('a caller can shorten the source deadline without changing its confirmed cleanup receipt', async t => {
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, command => command.args.includes('ls-tree')
+    ? { ...command, cmd: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] } : command);
+  const started = Date.now(); const result = await Effect.runPromise(f.read(undefined, 200));
+  assert.deepEqual(result, { ok: false, reason: 'timed-out' });
+  assert.ok(Date.now() - started < 3000); assert.deepEqual(readdirSync(join(f.paths.stateRoot, 'tmp')), []);
+  for (const timeoutMs of [0, -1, NaN, 30_001]) assert.deepEqual(await Effect.runPromise(f.read(undefined, timeoutMs)), { ok: false, reason: 'limit-exceeded' });
+});
+
+test('filesystem cleanup has a finite receipt even when directory removal cannot join', async t => {
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') });
+  const injected = Layer.effect(Fs, Fs.use(fs => Effect.succeed({ ...fs,
+    remove: path => path.includes('candidates-') && !path.endsWith('.prepare') ? Effect.never : fs.remove(path),
+  }))).pipe(Layer.provide(nodeFs));
+  const started = Date.now(); const result = await Effect.runPromise(readSkillCandidates({ source: 'fixture/source', timeoutMs: 500 }).pipe(Effect.provide(Layer.mergeAll(machinePaths(f.paths), injected, f.local))));
+  assert.equal(result.ok, false); if (!result.ok) { assert.equal(result.reason, 'cleanup-failed'); assert.match(result.retainedDirectory!, /candidates-/); }
+  assert.ok(Date.now() - started < 3500);
 });

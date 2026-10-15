@@ -4,7 +4,7 @@ import {
   GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
-  HistoryInputSchema, OperationHistoryResultSchema,
+  HistoryInputSchema, OperationHistoryResultSchema, ResolveSkillCandidateInputSchema, SkillCandidateResultSchema,
 } from './schemas.ts';
 
 export * from './model.ts';
@@ -17,6 +17,7 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  resolveSkillCandidate: define('resolveSkillCandidate', ResolveSkillCandidateInputSchema, SkillCandidateResultSchema),
   getContext: define('getContext', GetContextInputSchema, ContextResultSchema),
   inspect: define('inspect', InspectInputSchema, InspectResultSchema),
   previewChange: define('previewChange', PreviewChangeInputSchema, ChangePreviewSchema),

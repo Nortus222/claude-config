@@ -8,7 +8,7 @@ import { MachinePaths } from '../paths.ts';
 import { Processes } from '../processes.ts';
 
 export const SKILL_CANDIDATE_LIMITS = Object.freeze({
-  timeoutMs: 30_000, treeBytes: 2 * 1024 * 1024, skillBytes: 128 * 1024,
+  timeoutMs: 30_000, cleanupTimeoutMs: 2_000, treeBytes: 2 * 1024 * 1024, skillBytes: 128 * 1024,
   metadataBytes: 8 * 1024 * 1024, candidates: 256,
 } as const);
 
@@ -96,9 +96,10 @@ const parseMetadata = (content: string): { selectorName: string; installedName: 
 };
 
 // Reads only Git objects at a verified commit. It never checks out or executes source files.
-export const readSkillCandidates = (input: { readonly source: string; readonly revision?: string }):
+export const readSkillCandidates = (input: { readonly source: string; readonly revision?: string; readonly timeoutMs?: number }):
   Effect.Effect<SkillCandidatesResult, never, Fs | Processes | MachinePaths> => Effect.gen(function* () {
     const source = normalizeSkillSource(input.source);
+    if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > SKILL_CANDIDATE_LIMITS.timeoutMs)) return { ok: false, reason: 'limit-exceeded' } as const;
     if (!source || source !== input.source) return { ok: false, reason: 'invalid-source' } as const;
     if (input.revision !== undefined && !sha.test(input.revision)) return { ok: false, reason: 'invalid-revision' } as const;
     const fs = yield* Fs;
@@ -213,11 +214,12 @@ export const readSkillCandidates = (input: { readonly source: string; readonly r
       }
       return { ok: true, source, revision, candidates: accepted } as const;
     });
-    // Clone creates its parent through Fs; cleanup follows process timeout/cancellation finalizers.
+    // Process cleanup precedes bounded filesystem cleanup. A removal timeout leaves ownership unresolved,
+    // even if an unabortable filesystem operation finishes later.
     let cleanupFailed = false;
-    return yield* body.pipe(Effect.timeout(SKILL_CANDIDATE_LIMITS.timeoutMs),
+    return yield* body.pipe(Effect.timeout(input.timeoutMs ?? SKILL_CANDIDATE_LIMITS.timeoutMs),
       Effect.ensuring(Effect.suspend(() => shutdownUnconfirmed ? Effect.void
-        : fs.remove(dir).pipe(Effect.catch(() => Effect.sync(() => { cleanupFailed = true; }))))),
+        : fs.remove(dir).pipe(Effect.timeout(SKILL_CANDIDATE_LIMITS.cleanupTimeoutMs), Effect.catch(() => Effect.sync(() => { cleanupFailed = true; }))))),
       Effect.onInterrupt(() => shutdownUnconfirmed || cleanupFailed
         ? Effect.die(new SkillCandidateCleanupFailed({ temporaryDirectory: dir })) : Effect.void),
       Effect.catch(error => Effect.succeed({ ok: false, reason: error instanceof CandidateReadFailed ? error.reason

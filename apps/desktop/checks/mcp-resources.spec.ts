@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
+import { build } from 'esbuild';
 
 test('MCP resource bundling records its own hash and every new bundled dependency notice', async () => {
   const resources = await mkdtemp(join(tmpdir(), 'mcp-resource-'));
@@ -45,4 +46,10 @@ test('post-signing Bun hash refresh updates only the Bun fingerprint after bytes
     await assert.rejects(() => refreshBunHash(resources));
     assert.equal(JSON.parse(await readFile(join(resources, 'runtime.json'), 'utf8')).bunSha256, metadata.bunSha256);
   } finally { await rm(resources, { recursive: true, force: true }); }
+});
+
+
+test('MCP metadata import graph excludes machine readers, YAML and profile execution', async () => {
+  const bundled = await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', write: false, metafile: true });
+  for (const output of Object.values(bundled.metafile!.outputs)) for (const [path, item] of Object.entries(output.inputs)) if (item.bytesInOutput > 0) assert.doesNotMatch(path, /(?:packages\/machine\/src\/(?!paths\.ts|errors\.ts)|packages\/profile-engine\/src\/|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/);
 });

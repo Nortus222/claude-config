@@ -26,6 +26,26 @@ export const OperationScopeSchema = Schema.Union([
 ]);
 export const CapabilityStateSchema = Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(500))) });
 export const ReconcileChangeSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), only: Schema.Array(KeySchema).check(Schema.isMaxLength(MAX_EXCLUDED)) });
+const SkillSourceSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(202), Schema.isPattern(/^[a-z0-9._-]+\/[a-z0-9._-]+$(?![\s\S])/u));
+const SkillNameSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255), Schema.isPattern(/^(?![.-])(?!.*--)[a-z0-9._-]+(?<![.-])$(?![\s\S])/u));
+const SkillTargetsSchema = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMinLength(1), Schema.isMaxLength(2));
+const SkillRevisionSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$(?![\s\S])/u));
+export const AddSkillChangeSchema = Schema.Struct({ kind: Schema.Literal('addSkill'), candidateId: IdSchema, targets: SkillTargetsSchema });
+export const ChangeSchema = Schema.Union([ReconcileChangeSchema, AddSkillChangeSchema]);
+export const SkillCandidateSchema = Schema.Struct({ candidateId: IdSchema, source: SkillSourceSchema, revision: SkillRevisionSchema,
+  sourceDir: KeySchema, selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
+  description: Schema.String.check(Schema.isMaxCodePoints(500)), internal: Schema.Boolean });
+export const SkillCandidateResultSchema = Schema.Struct({ knownSources: CountSchema, unsupportedSources: CountSchema, limit: Schema.optionalKey(Schema.Literals(['source-inventory', 'unsupported-source-inventory', 'candidate-count', 'candidate-path', 'result-bytes', 'candidate-retention'])), status: Schema.Literals(['found', 'ambiguous', 'not-found', 'unavailable', 'limited']),
+  candidates: Schema.Array(SkillCandidateSchema).check(Schema.isMaxLength(32)), searchedSources: Schema.Array(SkillSourceSchema).check(Schema.isMaxLength(8)),
+  failures: Schema.Array(Schema.Struct({ source: SkillSourceSchema, reason: Schema.Literals(['invalid-source', 'invalid-revision', 'source-unavailable', 'unsupported-layout', 'unsupported-metadata', 'ambiguous-selection', 'limit-exceeded', 'timed-out', 'cleanup-failed']), retainedDirectory: Schema.optionalKey(KeySchema) })).check(Schema.isMaxLength(8)),
+  limits: Schema.Struct({ sources: Schema.Literal(8), sourceTimeoutMs: Schema.Literal(15000), candidateLifetimeMs: Schema.Literal(600000), retainedCandidates: Schema.Literal(32), concurrentLookups: Schema.Literal(2), resultBytes: Schema.Literal(32768), deadlineMs: Schema.Literal(20000) }) });
+const SkillDeclarationSchema = Schema.Struct({ source: SkillSourceSchema, name: SkillNameSchema, targets: SkillTargetsSchema, revision: Schema.optionalKey(SkillRevisionSchema) });
+export const SkillAdditionPreviewSchema = Schema.Struct({ candidate: SkillCandidateSchema,
+  declaration: Schema.Struct({ before: Schema.Array(SkillDeclarationSchema).check(Schema.isMaxLength(32)), after: SkillDeclarationSchema, changed: Schema.Boolean }),
+  enablement: Schema.optionalKey(Schema.Struct({ before: Schema.Literal(false), after: Schema.Literal(true) })),
+  installationTargets: SkillTargetsSchema, sharedStore: Schema.Struct({ codexScans: Schema.Literal(true), visibility: Schema.Literal('shared') }),
+  pinImpact: Schema.Struct({ policy: Schema.Literals(['source-pin', 'personal-pin', 'upstream']), revision: SkillRevisionSchema, affectedSkills: Schema.Array(KeySchema).check(Schema.isMaxLength(256)) }),
+  nativeVerification: Schema.Literal('required') });
 export const NextActionSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('share_with_my_machines'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('user'), destinationId: Schema.optionalKey(IdSchema) }),
   Schema.Struct({ kind: Schema.Literal('promote_to_profile'), capability: CapabilityStateSchema, requiredDestination: Schema.Literal('profile'), destinationId: Schema.optionalKey(IdSchema) }),
@@ -38,7 +58,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -56,10 +76,11 @@ export const ContextResultSchema = Schema.Struct({
   scopes: Schema.Struct({ machine: CapabilityStateSchema, user: CapabilityStateSchema, profile: CapabilityStateSchema }),
   capabilities: Schema.Struct(capabilityFields), diagnostics: Schema.Array(Text).check(Schema.isMaxLength(100)),
 });
-export const ChangePreviewSchema = Schema.Struct({
-  planId: IdSchema, scope: OperationScopeSchema, change: ReconcileChangeSchema,
-  generation: IdSchema, plan: PlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
-});
+const previewFields = { planId: IdSchema, scope: OperationScopeSchema,
+  generation: IdSchema, plan: PlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)) };
+export const ReconcilePreviewSchema = Schema.Struct({ ...previewFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never) });
+export const AddSkillPreviewSchema = Schema.Struct({ ...previewFields, change: AddSkillChangeSchema, skillAddition: SkillAdditionPreviewSchema });
+export const ChangePreviewSchema = Schema.Union([ReconcilePreviewSchema, AddSkillPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
 export const RunTerminalResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
@@ -89,7 +110,8 @@ const scope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.suc
 const limit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_HISTORY }));
 export const GetContextInputSchema = Schema.Struct({ scope });
 export const InspectInputSchema = Schema.Struct({ scope });
-export const PreviewChangeInputSchema = Schema.Struct({ scope, change: ReconcileChangeSchema });
+export const PreviewChangeInputSchema = Schema.Struct({ scope, change: ChangeSchema });
+export const ResolveSkillCandidateInputSchema = Schema.Struct({ scope, source: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(250))), name: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)) });
 export const ApplyChangeInputSchema = Schema.Struct({ scope, planId: IdSchema, requestId: IdSchema });
 export const GetRunInputSchema = Schema.Struct({ scope, runId: IdSchema });
 export const ListRunsInputSchema = Schema.Struct({ scope, before: Schema.optionalKey(IdSchema), limit });

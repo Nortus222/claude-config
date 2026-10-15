@@ -234,7 +234,8 @@ test('stale replacements carry the session-owned normalized change and captured 
     const inspected = yield* session.inspect('app');
     const only = inspected.items.map(item => item.key);
     const planned = yield* session.previewChange({ kind: 'reconcile', only: [...only, ...only] });
-    assert.deepEqual(planned.change.only, only);
+    assert.equal(planned.change.kind, 'reconcile');
+    if (planned.change.kind === 'reconcile') assert.deepEqual(planned.change.only, only);
     assert.equal(planned.scope.kind, 'machine');
     assert.ok(planned.generation.length > 0);
     summary = 'after';

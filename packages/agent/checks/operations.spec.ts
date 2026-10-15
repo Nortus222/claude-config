@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { JsonSchema, Schema, SchemaRepresentation } from 'effect';
 import {
   operationDefinitions, operationJsonSchemas, decodeOperationInput, decodeOperationOutput,
-  decodeOperationScope, decodeContextResult, decodeRunView, projectContext, capabilityInventory,
+  ReconcilePreviewSchema, decodeOperationScope, decodeContextResult, decodeRunView, projectContext, capabilityInventory,
 } from '../src/operations/index.ts';
 import { InspectResultSchema, PreviewResultSchema, decodeInspectResult, decodePreviewResult, decodeMessage, decodeRequest } from '../src/ipc/protocol.ts';
 
@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['resolveSkillCandidate', 'getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
@@ -76,7 +76,7 @@ test('preview, run and follow-up outputs decode strictly', () => {
 
 test('legacy IPC result schemas are shared with the operation definitions', () => {
   assert.equal(operationDefinitions.inspect.output, InspectResultSchema);
-  assert.equal(operationDefinitions.previewChange.output.fields.plan, PreviewResultSchema.fields.plan);
+  assert.equal(ReconcilePreviewSchema.fields.plan, PreviewResultSchema.fields.plan);
   assert.deepEqual(Schema.decodeUnknownSync(PreviewResultSchema, { onExcessProperty: 'error' })({ planId: 'p', plan: preview.plan }), { planId: 'p', plan: preview.plan });
 });
 
@@ -92,10 +92,10 @@ test('JSON schemas preserve strict object fields, scope unions and input bounds'
   assert.equal(profile.properties.profileId.minLength, 1);
   assert.equal(profile.properties.profileId.maxLength, 100);
   assert.equal(profile.additionalProperties, false);
-  assert.equal(input.properties.change.additionalProperties, false);
-  assert.deepEqual(input.properties.change.properties.kind.enum, ['reconcile']);
-  assert.equal(input.properties.change.properties.only.maxItems, 10_000);
-  assert.equal(input.properties.change.properties.only.items.maxLength, 500);
+  const reconcile = (input.properties.change.anyOf ?? input.properties.change.oneOf).find((change: any) => change.properties.kind.enum.includes('reconcile'));
+  assert.equal(reconcile.additionalProperties, false);
+  assert.equal(reconcile.properties.only.maxItems, 10_000);
+  assert.equal(reconcile.properties.only.items.maxLength, 500);
   const inspectOutput = operationJsonSchemas.inspect.output as any;
   assert.equal(inspectOutput.properties.items.items.properties.note.type, 'string');
   assert.throws(() => decodeOperationOutput('inspect', { profile: { repo: '/r', revision: null, overrides: '/o', issues: [] }, items: [{ key: 'k', domain: 'skills', label: 'x', group: 'x', state: 'missing', disposition: 'apply', note: null }], probeErrors: [] }));
@@ -218,4 +218,11 @@ test('representable operation constraints preserve the separate legacy IPC valid
   assert.throws(() => decodeRequest({ ...head, command: 'apply', planId: '😀'.repeat(51) }));
   assert.equal(acceptsOperation('applyChange', { planId: '😀'.repeat(51), requestId: 'q' }), true);
   assert.throws(() => decodeRequest({ ...head, command: 'history', limit: 1, before: { at: '2026-10-14T25:00:00Z', seq: 0 } }));
+});
+
+test('skill operation wire contracts require explicit targets and paired addition preview evidence', () => {
+  for (const change of [{ kind: 'addSkill', candidateId: 'id' }, { kind: 'addSkill', candidateId: '/caller/path', targets: [] }, { kind: 'addSkill', candidateId: 'id', targets: ['unknown'] }, { kind: 'addSkill', candidateId: 'id', targets: ['claude'], sourceDir: '/caller/path' }]) assert.throws(() => decodeOperationInput('previewChange', { change }));
+  assert.throws(() => decodeOperationOutput('previewChange', { ...preview, change: { kind: 'addSkill', candidateId: 'id', targets: ['claude'] } }));
+  assert.throws(() => decodeOperationInput('resolveSkillCandidate', { name: '', source: 'owner/repo' }));
+  assert.throws(() => decodeOperationInput('resolveSkillCandidate', { name: 'skill', directory: '/caller/path' }));
 });

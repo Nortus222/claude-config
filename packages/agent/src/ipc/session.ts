@@ -9,8 +9,9 @@ import { itemIdOf, revisionCommit, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
 import { makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
-import { decodeOperationInput, type ChangePreview, type ReconcileChange } from '../operations/index.ts';
+import { decodeOperationInput, type ChangePreview, type ReconcileChange, type OperationChange, type OperationInput, type SkillCandidateResult } from '../operations/index.ts';
 import type { RunActor } from '../run-store.ts';
+import { makeSkillOperations, type SkillOperations } from '../skill-operations.ts';
 import { AgentClock } from '../clock.ts';
 import { runJob, type AgentStatus, type JobInspection } from '../job.ts';
 import type { AgentDomains, AgentServices } from '../layer.ts';
@@ -33,11 +34,13 @@ type Client = 'app' | 'cli' | 'mcp';
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
   readonly runs: AgentRuns;
+  readonly skillOperations: SkillOperations;
+  readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
-  // Runs a job now and answers what it inspected, with its status. Clears any preview.
+  // Runs a job now and answers what it inspected, with its status. Clears the reconcile preview.
   readonly inspect: (actor: Client) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
   readonly preview: (exclude: ReadonlyArray<string>) => Effect.Effect<PreviewResult, SessionError>;
-  readonly previewChange: (change: ReconcileChange) => Effect.Effect<ChangePreview, SessionError>;
+  readonly previewChange: (change: OperationChange) => Effect.Effect<ChangePreview, SessionError>;
   // Answers `started` and runs in the background, or `stale` with a new preview. The run's events
   // start once this resolves, so a caller that writes its reply synchronously on resolving, before
   // yielding, sends the reply first. The terminal event comes after apply.lock is released. A
@@ -110,7 +113,7 @@ const planFor = (inspection: JobInspection, exclude: ReadonlyArray<string>, only
 // Builds the session in the current scope. A run is a fiber in that scope; closing the scope or
 // aborting `signal` cancels it at its next step, and it still records how it ended. `domains` is the
 // agent's factory, which apply's re-inspection builds from.
-export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains }) =>
+export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates'] }) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<AgentServices | SetupSource>();
     const { repo, stateRoot } = yield* MachinePaths;
@@ -119,6 +122,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const closing = new AbortController();
     yield* Effect.addFinalizer(() => Effect.sync(() => closing.abort()));
     const shutdown = AbortSignal.any([options.signal, closing.signal]);
+
+    const skillOperations = yield* makeSkillOperations({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0), ...(options.skillCandidates ? { readCandidates: options.skillCandidates } : {}) });
+    yield* Effect.addFinalizer(() => Effect.sync(skillOperations.clear));
+    const resolveSkillCandidate: AgentSession['resolveSkillCandidate'] = input => skillOperations.resolveSkillCandidate(input).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
 
     let previewed: Previewed | undefined;
     let active: Active | undefined;
@@ -174,8 +181,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const previewChange: AgentSession['previewChange'] = change => Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => decodeOperationInput('previewChange', { change }),
-        catch: () => new SessionError('INVALID_REQUEST', 'Invalid reconcile selection'),
+        catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'addSkill') {
+        if (active) return yield* Effect.fail(busy);
+        return yield* skillOperations.previewAddSkill({ scope: input.scope, candidateId: input.change.candidateId, targets: input.change.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
+      }
       return operationPreview(yield* makePreview([], input.change));
     });
 
@@ -193,6 +204,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           }
         };
         if (active) return yield* Effect.fail(busy);
+        if (yield* skillOperations.acceptedPlan(planId)) return yield* Effect.fail(new SessionError('SKILL_INSTALL_UNAVAILABLE', 'Skill installation is unavailable until the durable verified-addition driver is installed'));
         const wanted = previewed;
         if (wanted === undefined || wanted.planId !== planId) {
           return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'That preview is no longer current; preview again'));
@@ -323,7 +335,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }),
     });
     const session: AgentSession = {
-      runs: agentRuns,
+      runs: agentRuns, skillOperations, resolveSkillCandidate,
       onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,

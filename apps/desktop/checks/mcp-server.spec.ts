@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = { getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = { resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -81,7 +81,7 @@ function output(operation: OperationName, reply: any) {
   assert.deepEqual(JSON.parse(reply.result.content[0].text), reply.result.structuredContent);
   return decodeOperationOutput(operation, reply.result.structuredContent) as any;
 }
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
   const fixture = setupFixture(join(m.root, 'setup'), { headFiles: {
@@ -110,7 +110,7 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: s
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
     const handle = yield* startAgent(domains);
-    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains });
+    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains, skillCandidates: inputs.skillCandidates });
     yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), fixture.source);
@@ -241,4 +241,25 @@ for (const runtime of runtimes) test(`${runtime}: successful MCP inspect omits r
   assert.ok(inspected.profile.issues.some((issue: { source: string }) => issue.source === 'skill-pins.json'));
   assert.ok(!JSON.stringify(client.records).includes(sentinel));
   assert.ok(!client.diagnostics().includes(sentinel));
+});
+
+
+test('MCP exposes bounded discovery and source-specific preview while installation refuses without intent writes', { timeout: 10_000 }, async t => {
+  const source = 'owner/repo', revision = 'a'.repeat(40);
+  const s = await agent('app', { skillCandidates: () => Effect.succeed({ ok: true, source, revision, candidates: [{ source, revision, installedName: 'design-review', selectorName: 'Design Review', sourceDir: 'skills/layout', description: 'Review design', tree: 'b'.repeat(40), blob: 'c'.repeat(40), internal: false, metadata: {} }] }) }); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close);
+  const listed = await client.initialize();
+  for (const operation of ['resolveSkillCandidate', 'previewChange'] as const) {
+    const tool = listed.result.tools.find((tool: any) => tool.name === names[operation]); assert.equal(tool.annotations.readOnlyHint, true); assert.equal(tool.annotations.openWorldHint, true);
+  }
+  output('inspect', await client.call('inspect'));
+  const found = output('resolveSkillCandidate', await client.call('resolveSkillCandidate', { source, name: 'DESIGN REVIEW' })); assert.equal(found.status, 'found');
+  await client.close();
+  const next = open(process.execPath, s.m.paths.stateRoot); t.after(next.close); await next.initialize();
+  const beforeHistory = output('history', await next.call('history', { limit: 10 }));
+  const preview = output('previewChange', await next.call('previewChange', { change: { kind: 'addSkill', candidateId: found.candidates[0].candidateId, targets: ['claude'] } }));
+  assert.equal(preview.skillAddition.declaration.after.name, 'design-review'); assert.equal(preview.skillAddition.sharedStore.codexScans, true); assert.deepEqual(preview.nextActions, []);
+  const refused = await next.call('applyChange', { planId: preview.planId, requestId: 'not-yet-installable' }); assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'SKILL_INSTALL_UNAVAILABLE');
+  assert.equal(s.m.read(join(s.m.paths.stateRoot, 'overrides.json')), undefined); assert.deepEqual(output('listRuns', await next.call('listRuns', { limit: 10 })).runs, []);
+  assert.equal(existsSync(s.m.paths.backups), false); assert.deepEqual(output('history', await next.call('history', { limit: 10 })), beforeHistory);
 });

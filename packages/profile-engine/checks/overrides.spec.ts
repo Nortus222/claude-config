@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeOverrides, serializeOverrides, overridesFromLegacyState } from '../src/overrides.ts';
+import { decodeOverrides, normalizeSkillSource, serializeOverrides, overridesFromLegacyState } from '../src/overrides.ts';
 
 test('decodes a full overrides document without its version', () => {
   const value = {
@@ -99,5 +99,20 @@ test('new declaration names are canonical installed names, not native selector l
   for (const name of ['a', '_', '_skill_', 'a.b-c_d', 'x'.repeat(255)]) {
     assert.deepEqual(decodeName(name).issues, [], name);
     assert.equal(decodeName(name).value.skillAdditions?.[0]?.name, name);
+  }
+});
+
+
+test('every supported source identity is a normalization fixed point and repeated suffixes refuse', () => {
+  for (const source of ['Owner/Repo', 'owner/repo.git', 'owner/repo/', 'owner/repo.git/', 'https://github.com/Owner/Repo', 'https://github.com/Owner/Repo.git/', 'owner/repo.git-tools']) {
+    const canonical = normalizeSkillSource(source); assert.ok(canonical); assert.equal(normalizeSkillSource(canonical), canonical);
+    const input = decodeOverrides({ version: 2, skillAdditions: [{ source, name: 'skill', targets: ['claude'] }] }, 'overrides.json');
+    assert.deepEqual(input.issues, []); const serialized = serializeOverrides(input.value, undefined, 'overrides.json'); assert.ok(serialized.ok);
+    assert.deepEqual(decodeOverrides(JSON.parse(serialized.text), 'overrides.json').value, input.value);
+  }
+  for (const source of ['owner/repo.git.git', 'owner/repo.git.git/', 'https://github.com/owner/repo.git.git', 'owner/repo.git.git.git', 'owner/repo.GIT', 'owner/repo.GIT.git']) {
+    assert.equal(normalizeSkillSource(source), undefined);
+    const input = decodeOverrides({ version: 2, skillAdditions: [{ source, name: 'skill', targets: ['claude'] }] }, 'overrides.json'); assert.ok(input.issues.length > 0);
+    assert.equal(serializeOverrides({ skillAdditions: [{ source, name: 'skill', targets: ['claude'] }] }, undefined, 'overrides.json').ok, false);
   }
 });

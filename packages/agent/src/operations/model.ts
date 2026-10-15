@@ -1,5 +1,5 @@
 import type { Schema } from 'effect';
-import type { OperationScopeSchema, CapabilityStateSchema, ContextResultSchema, ChangePreviewSchema, RunViewSchema, NextActionSchema, ReconcileChangeSchema } from './schemas.ts';
+import type { OperationScopeSchema, CapabilityStateSchema, ContextResultSchema, ChangePreviewSchema, RunViewSchema, NextActionSchema, ReconcileChangeSchema, AddSkillChangeSchema, ChangeSchema, SkillCandidateResultSchema } from './schemas.ts';
 
 export type OperationScope = typeof OperationScopeSchema.Type;
 export type CapabilityState = typeof CapabilityStateSchema.Type;
@@ -16,3 +16,7 @@ export type OperationDefinition<Name extends string, Input extends Schema.Constr
   readonly scopes: ReadonlyArray<OperationScope['kind']>;
   readonly mutation: boolean;
 };
+
+export type AddSkillChange = typeof AddSkillChangeSchema.Type;
+export type OperationChange = typeof ChangeSchema.Type;
+export type SkillCandidateResult = typeof SkillCandidateResultSchema.Type;

@@ -10,8 +10,9 @@ import { POLICIES } from '../policy-values.ts';
 
 // Protocol v3: JSON lines on the agent's socket. It is protocol v2 from the desktop backend,
 // unchanged, plus hello, agent commands and status events. Shared operations use an additive
-// envelope with operationsProtocol 1; legacy requests and replies retain their v3 shapes. Every
-// argument is an opaque key, id or enum, never a path, command line or URL.
+// envelope with operationsProtocol 1; legacy requests and replies retain their v3 shapes.
+// Legacy arguments are opaque keys, ids and enums. Skill discovery adds a validated public source
+// identity, never a caller-selected filesystem path or command.
 export const PROTOCOL_VERSION = 3;
 export const MAX_RECORD_BYTES = 1_048_576;
 export const MAX_DECISIONS = 1000;
@@ -19,7 +20,7 @@ export const MAX_DECISIONS = 1000;
 export type ErrorCode =
   | 'INVALID_REQUEST' | 'MALFORMED' | 'OVERSIZED' | 'SHUTDOWN' | 'BUSY' | 'LOCKED' | 'NO_REPORT' | 'UNKNOWN_KEY'
   | 'UNKNOWN_PLAN' | 'PROFILE_INVALID' | 'REPO_NOT_FOUND' | 'INSPECT_FAILED' | 'INTERNAL'
-  | 'APP_UNAVAILABLE' | 'UNSUPPORTED_SCOPE' | 'UNKNOWN_RUN' | 'REQUEST_CONFLICT' | 'RUN_FAILED' | 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
+  | 'TARGET_UNAVAILABLE' | 'SKILL_INSTALL_UNAVAILABLE' | 'APP_UNAVAILABLE' | 'UNSUPPORTED_SCOPE' | 'UNKNOWN_RUN' | 'REQUEST_CONFLICT' | 'RUN_FAILED' | 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
 
 const Version = Schema.Literal(PROTOCOL_VERSION);
 const ItemId = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
