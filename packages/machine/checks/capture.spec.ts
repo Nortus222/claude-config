@@ -116,3 +116,63 @@ test('shared capture strips owned routing bytes and leaves held configuration un
  assert.equal(m.read(join(m.paths.repo, 'claude/CLAUDE.md')), '# captured\r\n'); assert.equal(m.read(join(m.paths.repo, 'codex/AGENTS.md')), '# repo codex\n');
  assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# captured\r\n' + MCP_ROUTING_BYTES);
 });
+
+const manifestFixture = async () => {
+ const { mkdirSync } = await import('node:fs');
+ const { skillLockPath } = await import('../src/index.ts');
+ const m = authorMachine(); const lock = skillLockPath(m.paths);
+ const manifest = '[owner/repo] exact\nheld\ninstalled\n';
+ m.write(join(m.paths.repo, 'skills-manifest.txt'), manifest);
+ const lockText = JSON.stringify({ skills: { held: { source: 'owner/repo' }, installed: { source: 'owner/repo' } } });
+ m.write(lock, lockText);
+ for (const name of ['held', 'installed']) mkdirSync(join(m.paths.agentsSkills, name), { recursive: true });
+ const input = { author: await m.run(bindAuthorCheckout(m.paths, ['skills-manifest.txt'])), desired: await m.desired(),
+  heldItemIds: ['skill:owner/repo/held'], heldManifestGroups: [{ source: 'owner/repo', exact: true, optional: false, skills: ['held'] }],
+  selection: { ...selectAll, only: ['skills:manifest'] }, allowShrink: true, manageConfig: false };
+ return { m, lock, lockText, manifest, input };
+};
+
+test('manifest preparation refuses unreadable required lock bytes without an applicable held-only shrink', async () => {
+ const { Fs, FsFailed } = await import('../src/index.ts'); const { existsSync } = await import('node:fs');
+ const { m, lock, manifest, input } = await manifestFixture();
+ const exit = await m.run(Effect.gen(function* () {
+  const fs = yield* Fs;
+  return yield* Effect.exit(prepareCapture(input).pipe(Effect.provideService(Fs, { ...fs,
+   readBytes: path => path === lock ? Effect.fail(new FsFailed({ op: 'read', path, reason: 'PRIVATE lock failure' })) : fs.readBytes(path),
+  })));
+ }));
+ assert.equal(exit._tag, 'Failure'); assert.doesNotMatch(JSON.stringify(exit), /PRIVATE lock failure/);
+ assert.equal(m.read(join(m.paths.repo, 'skills-manifest.txt')), manifest); assert.equal(existsSync(m.paths.backups), false);
+});
+
+test('a second lock read failure cannot substitute empty data after an accepted first read', async () => {
+ const { Fs, FsFailed, authorDigest } = await import('../src/index.ts');
+ const { m, lock, lockText, manifest, input } = await manifestFixture(); let reads = 0;
+ const exit = await m.run(Effect.gen(function* () {
+  const fs = yield* Fs;
+  return yield* Effect.exit(prepareCapture(input).pipe(Effect.provideService(Fs, { ...fs,
+   readBytes: path => path !== lock ? fs.readBytes(path) : Effect.suspend(() => ++reads === 2
+    ? Effect.fail(new FsFailed({ op: 'read', path, reason: 'injected second read failure' })) : fs.readBytes(path)),
+  })));
+ }));
+ if (exit._tag === 'Success') {
+  assert.equal(exit.value.inputDigests[lock], authorDigest(lockText));
+  assert.match(exit.value.documents[0]!.text, /\ninstalled\n/);
+ }
+ assert.ok(reads >= 2); assert.equal(m.read(join(m.paths.repo, 'skills-manifest.txt')), manifest);
+});
+
+test('manifest preparation binds null absence and exact present lock bytes before apply', async () => {
+ const { rmSync } = await import('node:fs'); const { authorDigest } = await import('../src/index.ts');
+ for (const transition of ['absent-to-present', 'present-to-absent', 'present-to-changed']) {
+  const { m, lock, lockText, manifest, input } = await manifestFixture();
+  if (transition === 'absent-to-present') rmSync(lock);
+  const prepared = await m.run(prepareCapture(input));
+  assert.ok(Object.hasOwn(prepared.inputDigests, lock));
+  assert.equal(prepared.inputDigests[lock], transition === 'absent-to-present' ? null : authorDigest(lockText));
+  if (transition === 'present-to-absent') rmSync(lock); else m.write(lock, lockText + ' ');
+  const commits: string[] = [];
+  await assert.rejects(m.run(executeCapture(prepared, new AbortController().signal, { pending: () => Effect.void, committed: key => Effect.sync(() => { commits.push(key); }) })));
+  assert.deepEqual(commits, []); assert.equal(m.read(join(m.paths.repo, 'skills-manifest.txt')), manifest);
+ }
+});

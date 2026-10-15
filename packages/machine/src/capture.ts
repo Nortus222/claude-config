@@ -12,7 +12,7 @@ import { MachinePaths } from './paths.ts';
 import type { Domain, MachineReport, Plan, Selection, Step } from './model.ts';
 import { execute, inspect, plan } from './run.ts';
 import { peekMachineState, serializeMachineState, StateStore } from './state.ts';
-import { emitManifest, installedGroups, installedSkillNames, MANIFEST_FILE, readSkillLock } from './skills/index.ts';
+import { emitManifest, installedGroups, installedSkillNames, MANIFEST_FILE, readSkillLock, skillLockPath } from './skills/index.ts';
 
 export const CAPTURE_MANIFEST_STEP: Step = { key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: `write ${MANIFEST_FILE}`, touches: [MANIFEST_FILE], interruptible: false };
 export type CaptureInput = { readonly author: AuthorBinding; readonly desired: DesiredConfig; readonly heldItemIds: readonly string[]; readonly heldManifestGroups: readonly SkillGroup[]; readonly selection: Selection; readonly allowShrink: boolean; readonly manageConfig: boolean };
@@ -69,7 +69,14 @@ export const prepareCapture = (input: CaptureInput): Effect.Effect<PreparedCaptu
     let manifest = { write: false, reason: 'not selected' }; let installedDigest: string | null | undefined;
     if ((input.selection.only === undefined || input.selection.only.includes(CAPTURE_MANIFEST_STEP.key)) && !input.selection.exclude.includes(CAPTURE_MANIFEST_STEP.key)) {
       const path = join(paths.repo, MANIFEST_FILE); const before = parseSkillsManifest(yield* readText(path));
-      const lock = yield* readSkillLock; const installed = yield* installedSkillNames;
+      const lockPath = skillLockPath(paths);
+      // Capture requires readable evidence. Decode only these bound bytes; the tolerant reader
+      // must not swallow a filesystem failure or substitute data from another observation.
+      const lockText = yield* readText(lockPath).pipe(Effect.mapError(() => failure()));
+      const lock = yield* readSkillLock.pipe(Effect.provideService(Fs, { ...memoryFs,
+        readText: path => path === lockPath ? Effect.succeed(lockText) : memoryFs.readText(path),
+      }));
+      const installed = yield* installedSkillNames;
       installedDigest = digestState(installed);
       const groups = installedGroups(lock, installed, before).map(group => ({ ...group, skills: group.skills.filter(name => !input.heldItemIds.includes(`skill:${group.source}/${name}`)) }));
       for (const held of input.heldManifestGroups) {

@@ -27,14 +27,14 @@ const fixture = async () => {
  git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture');
  m.write(join(m.paths.claude, 'CLAUDE.md'), '# PRIVATE local body\n'); m.write(join(m.paths.codex, 'AGENTS.md'), '# second\n');
  await m.trust();
- const within = <A,E>(body: (session: AgentSession) => Effect.Effect<A,E>, failure?: 'second' | 'baseline') => m.run(Effect.scoped(Effect.gen(function* () {
+ const within = <A,E>(body: (session: AgentSession) => Effect.Effect<A,E>, failure?: 'second' | 'baseline' | 'lock') => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const store = yield* StateStore;
   const fail = new FsFailed({ op: 'private path', path: 'private path', reason: 'PRIVATE failure detail' });
   return yield* Effect.gen(function* () {
    const domains = () => [configDomain]; const handle = yield* startAgent(domains, { deferStart: true });
    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains });
    yield* session.inspect('mcp'); return yield* body(session);
-  }).pipe(Effect.provideService(Fs, { ...fs, writeTextAtomic: (path,text) => failure === 'second' && path.endsWith('codex/AGENTS.md') ? Effect.fail(fail) : fs.writeTextAtomic(path,text) }),
+  }).pipe(Effect.provideService(Fs, { ...fs, readBytes: path => failure === 'lock' && path.endsWith('/.skill-lock.json') ? Effect.fail(fail) : fs.readBytes(path), writeTextAtomic: (path,text) => failure === 'second' && path.endsWith('codex/AGENTS.md') ? Effect.fail(fail) : fs.writeTextAtomic(path,text) }),
    Effect.provideService(StateStore, { ...store, update: f => failure === 'baseline' ? Effect.fail(fail) : store.update(f) }));
  })), setup.source);
  return { m, setup, git, within };
@@ -96,5 +96,42 @@ test('partial capture and baseline-write failure survive restart without replay 
    assert.equal((yield* session.runs.submit(request)).runId, run.runId);
   }));
   assert.doesNotMatch(JSON.stringify([run, await f.m.events()]), /PRIVATE|private path/);
+ }
+});
+
+const manifestSessionFixture = async () => {
+ const { mkdirSync } = await import('node:fs'); const { skillLockPath } = await import('@nortuscc/machine');
+ const f = await fixture(); const lock = skillLockPath(f.m.paths);
+ const manifest = '[owner/repo] exact\nheld\ninstalled\n';
+ f.m.write(join(f.m.paths.repo, 'skills-manifest.txt'), manifest);
+ const lockText = JSON.stringify({ skills: { held: { source: 'owner/repo' }, installed: { source: 'owner/repo' } } });
+ f.m.write(lock, lockText);
+ for (const name of ['held', 'installed']) mkdirSync(join(f.m.paths.agentsSkills, name), { recursive: true });
+ f.m.write(join(f.m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held: { 'skill:owner/repo/held': f.git('rev-parse', 'HEAD').trim() } }));
+ return { ...f, lock, lockText, manifest };
+};
+const manifestChange: OperationChange = { kind: 'capture', only: ['skills:manifest'], takeLocal: false, allowShrink: true, manageConfig: false };
+
+test('session refuses an unreadable required manifest lock before retaining an applicable preview', async () => {
+ const f = await manifestSessionFixture();
+ await f.within(session => Effect.gen(function* () {
+  const exit = yield* Effect.exit(session.previewChange(manifestChange)); assert.equal(exit._tag, 'Failure');
+  assert.doesNotMatch(JSON.stringify(exit), /PRIVATE failure detail|private path/);
+  assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
+ }), 'lock');
+ assert.equal(f.m.read(join(f.m.paths.repo, 'skills-manifest.txt')), f.manifest);
+});
+
+test('session rejects changed absent or present manifest locks before accepting capture', async () => {
+ const { rmSync } = await import('node:fs');
+ for (const transition of ['absent-to-present', 'present-to-absent', 'present-to-changed']) {
+  const f = await manifestSessionFixture(); if (transition === 'absent-to-present') rmSync(f.lock);
+  await f.within(session => Effect.gen(function* () {
+   const preview = yield* session.previewChange(manifestChange);
+   if (transition === 'present-to-absent') rmSync(f.lock); else f.m.write(f.lock, f.lockText + ' ');
+   const error = yield* Effect.flip(session.runs.submit({ planId: preview.planId, requestId: 'stale-lock', inputDigest: operationDigest(preview.planId), actor: 'mcp' }));
+   assert.equal(error.code, 'UNKNOWN_PLAN');
+  }));
+  assert.equal(f.m.read(join(f.m.paths.repo, 'skills-manifest.txt')), f.manifest);
  }
 });
