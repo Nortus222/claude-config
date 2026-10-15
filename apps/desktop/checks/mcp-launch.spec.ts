@@ -57,7 +57,11 @@ function clean(client: ReturnType<typeof open>) {
 
 test('native MCP starts without setup or GUI, from unrelated cwd, and EOF leaves no runtime or state writes', { skip, timeout: 15_000 }, async t => {
   const f = fixture(t), client = open(t, f);
-  const tools = await client.ask('tools/list'); assert.equal(tools.result.tools.length, 8);
+  const tools = await client.ask('tools/list');
+  assert.deepEqual(tools.result.tools.map((tool: { name: string }) => tool.name).sort(), [
+    'nortuscc_get_context', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect', 'nortuscc_preview_change',
+    'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history',
+  ].sort());
   const reply = await client.ask('tools/call', { name: 'nortuscc_inspect', arguments: {} });
   assert.equal(reply.result.structuredContent.error.code, 'APP_UNAVAILABLE');
   const pid = client.child.pid!;
@@ -152,6 +156,7 @@ test('native installed entry serves MCP against its actual bundled foreground ag
     await client.ask('tools/list');
     const reply = await client.ask('tools/call', { name: 'nortuscc_get_context', arguments: {} });
     assert.notEqual(reply.result.isError, true, JSON.stringify(reply)); assert.equal(reply.result.structuredContent.app.ownership, 'app');
+    assert.equal(reply.result.structuredContent.capabilities.addSkill.available, true);
   };
   const first = open(t, f); await context(first); first.child.stdin.end(); await first.exited;
   assert.equal(first.child.exitCode, 0); assert.equal(agent.exitCode, null); process.kill(agent.pid!, 0);
