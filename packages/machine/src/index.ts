@@ -33,3 +33,6 @@ export * from './skills/index.ts';
 export * from './undeclared/probe.ts';
 
 export { inspectMcpRouting, setMcpRouting, type McpRoutingStatus, type McpRoutingResult } from './config/mcp-routing.ts';
+export { ProcessDialogue, nodeProcessDialogue, DialogueFailed, DialogueCleanupFailed,
+  type DialogueFailure, type DialogueDecision, type DialogueStep, type DialogueExchange } from './process-dialogue.ts';
+export { verifyCodexSkill, type CodexUsability } from './skills/codex-catalog.ts';
