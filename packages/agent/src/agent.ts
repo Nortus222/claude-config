@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { Cause, Effect, Exit, Layer, Ref, Semaphore } from 'effect';
 import {
-  acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, type Processes, type ProcessDialogue,
+  acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, Processes, type ProcessDialogue,
 } from '@nortuscc/machine';
 import type { AgentSkillInstaller } from './skill-installer.ts';
 import { AgentClock } from './clock.ts';
@@ -15,7 +15,7 @@ import { makeNotifier } from './notifier.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
 import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
-import type { SetupSource } from '@nortuscc/sync';
+import { SetupSource, SetupsStore, ownSetup, originUrl, normalizeRepoUrl } from '@nortuscc/sync';
 import { configuredHostedRuntime, type HostedRuntime, type HostedOptions } from './hosted.ts';
 import { HostedFailure, type SignInStarted } from '@nortuscc/hosted-client';
 import type { AgentStateStore, Policy } from './state.ts';
@@ -35,7 +35,16 @@ export type AgentMutationBodies = {
 
 // What #78's IPC handlers and the CLI's agent commands call. Each change answers with the status
 // of the job that ran after it. `inspection` is what the latest job inspected, if it got that far.
+export type OperationSetup = {
+  readonly setupId: string;
+  readonly accountId: string | null;
+  readonly repository: string | null;
+  readonly trusted: boolean;
+  readonly source?: SetupSource['Service'];
+};
 export type AgentHandle = {
+  readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
+  readonly operationSetupIds?: Effect.Effect<readonly string[],unknown>;
   readonly mutationBodies: AgentMutationBodies;
   readonly withJobMutation: <A, E, R>(effect: Effect.Effect<A, E, R>, invalidate?: boolean) => Effect.Effect<A, E, R>;
   readonly status: Effect.Effect<AgentStatus | undefined>;
@@ -128,6 +137,24 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
         Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
     const hosted = options.hosted;
+    const localSource = yield* SetupSource;
+    const setups = yield* SetupsStore;
+    const sourceProcesses = yield* Processes;
+    const selectOperationSetup = (setupId: string): Effect.Effect<OperationSetup, unknown> =>
+      setupId !== 'local'
+        ? hosted
+          ? hosted.selectOperationSetup(setupId)
+          : Effect.fail(new SessionError('UNKNOWN_KEY', 'Setup is unavailable'))
+        : Effect.gen(function* () {
+            const entry = ownSetup(yield* setups.read, paths.repo);
+            const url = yield* originUrl(paths.repo).pipe(Effect.provideService(Processes, sourceProcesses));
+            const repository = url === undefined ? null : (normalizeRepoUrl(url) ?? null);
+            const trusted =
+              entry !== undefined &&
+              entry.setupId === null &&
+              (entry.repoUrl === null || normalizeRepoUrl(entry.repoUrl) === repository);
+            return { setupId: 'local', accountId: null, repository, trusted, ...(trusted ? { source: localSource } : {}) };
+          });
     const mutationBodies: AgentMutationBodies = {
       decideAll: (decisions, actor) => Effect.forEach(decisions, (decision): Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure> =>
         decision.revision === null ? withServices(recordDecision(decision, actor))
@@ -140,7 +167,8 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       ...(hosted ? { hosted: { signIn: hosted.signIn, signOut: hosted.signOut, sync: () => hosted.sync, machine: hosted.machine } } : {}),
     };
     const handle: AgentHandle = {
-      mutationBodies, withJobMutation,
+      mutationBodies, withJobMutation, selectOperationSetup,
+      operationSetupIds: hosted ? Effect.map(hosted.state,state=>['local',...state.setups.map(s=>s.setupId)]) : Effect.succeed(['local']),
       status: Ref.get(latest),
       inspection: Ref.get(inspection),
       request: scheduler.request,

@@ -34,7 +34,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = { inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = { inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -157,6 +157,9 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     }
     assert.equal(output('getContext', await client.call('getContext')).app.ownership, 'app');
     output('inspect', await client.call('inspect'));
+    const setups=output('inspectSetups',await client.call('inspectSetups',{limit:1})); assert.equal(setups.items[0].setupId,'local'); assert.equal(setups.items[0].trusted,true);
+    const incoming=output('incomingChanges',await client.call('incomingChanges',{setupId:'local',limit:1})); assert.equal(incoming.revision.kind,'local'); assert.equal(incoming.revision.commit,'b'.repeat(40)); assert.equal(incoming.items.length,1);
+    const trust=output('prepareTrustRequest',await client.call('prepareTrustRequest',{setupId:'local'})); assert.equal(trust.action,'open-app-repository-trust'); assert.equal(trust.trusted,true);
     const updates = output('inspectUpdates', await client.call('inspectUpdates', { limit: 1 }));
     assert.deepEqual(updates.items, []); assert.equal(updates.unavailable, false);
     const invalid = await client.call('previewChange', { change: { kind: 'reconcile', only: [], force: 'invalid' } });
@@ -446,4 +449,19 @@ test('dedicated MCP update read and explicit machine-only update recover a lost 
   let run = output('applyChange',await next.call('applyChange',args)).run;
   for (let n=0;n<100 && !run.result;n++) { await new Promise(resolve => setTimeout(resolve,10)); run = output('getRun',await next.call('getRun',{ runId: run.runId })); }
   assert.equal(run.state,'succeeded'); assert.equal(run.parity.kind,'update'); assert.equal(output('listRuns',await next.call('listRuns',{ limit: 10 })).runs.length,1);
+});
+
+test('authenticated MCP sync hold retains one decision run after a lost reply', {timeout:30000},async t=>{
+ const s=await agent();t.after(s.close);const client=open(process.execPath,s.m.paths.stateRoot);t.after(client.close);await client.initialize();
+ const incoming=output('incomingChanges',await client.call('incomingChanges',{setupId:'local'}));
+ const preview=output('previewChange',await client.call('previewChange',{change:{kind:'syncDecision',setupId:'local',revision:incoming.revision,itemId:EFFORT,action:'hold'}}));
+ const args={planId:preview.planId,requestId:'sync-held'};client.loseNextReply();const lost=client.call('applyChange',args).catch(()=>undefined);
+ for(let n=0;n<100&&client.droppedReplies()===0;n++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(client.droppedReplies(),1);await client.terminate();await lost;
+ const next=open(process.execPath,s.m.paths.stateRoot);t.after(next.close);await next.initialize();let run=output('applyChange',await next.call('applyChange',args)).run;
+ for(let n=0;n<100&&!run.result;n++){await new Promise(resolve=>setTimeout(resolve,10));run=output('getRun',await next.call('getRun',{runId:run.runId}));}
+ assert.equal(run.state,'succeeded');assert.equal(run.actor,'mcp');assert.equal(run.parity.kind,'syncDecision');assert.ok(run.parity.committedKeys.includes('sync:hold'));assert.ok(run.parity.committedKeys.includes('sync:decision'));
+ assert.equal(output('applyChange',await next.call('applyChange',args)).run.runId,run.runId);
+ assert.equal(JSON.parse(s.m.read(join(s.m.paths.stateRoot,'sync.json'))!).held[EFFORT],'a'.repeat(40));
+ const choices=await s.m.run(DecisionsStore.use(store=>store.read));assert.equal(choices.find(d=>d.itemId===EFFORT)?.decision,'skip');
+ const held=output('incomingChanges',await next.call('incomingChanges',{setupId:'local'}));assert.equal(held.items.find((i:any)=>i.itemId===EFFORT).held,true);
 });

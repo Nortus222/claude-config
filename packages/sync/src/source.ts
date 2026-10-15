@@ -1,6 +1,7 @@
 import { Context, Data, type Effect } from 'effect';
-import type { DesiredConfig } from '@nortuscc/profile-engine';
+import type { DesiredConfig, Input, MachineOverrides } from '@nortuscc/profile-engine';
 import type { Decision } from '@nortuscc/machine';
+import type { Holds } from './store.ts';
 import type { SyncRevision } from '@nortuscc/hosted-protocol';
 
 export type Revision = string | SyncRevision;
@@ -57,13 +58,16 @@ export class SetupSource extends Context.Service<
     readonly trusted?: Effect.Effect<boolean, RevisionUnavailable>;
     readonly baseline?: Effect.Effect<HostedBaseline, RevisionUnavailable>;
     readonly recordApplied?: (evidence: AppliedEvidence) => Effect.Effect<void, RevisionMismatch | RevisionUnavailable>;
+    // Each hosted item's latest offered change, resolved by the existing verified record owner.
+    readonly offeredItems?: Effect.Effect<ReadonlyArray<{readonly itemId:string;readonly revision:Revision}>, RevisionMismatch | RevisionUnavailable>;
     // Answers the latest offered revision. Local sources refresh their tracked branch here;
     // hosted sources fetch and verify exact tags in load/effective. Never moves the checkout.
     readonly fetch: Effect.Effect<{ readonly head: Revision }, RevisionUnavailable>;
     // Verified configuration: local branch reachability, or hosted exact tag and item diff.
     readonly load: (revision: Revision) => Effect.Effect<Snapshot, RevisionMismatch | RevisionUnavailable>;
     // This machine's desired configuration; skipped and undecided items stay at their applied value.
-    readonly effective: (decisions: ReadonlyArray<Decision>) => Effect.Effect<Effective, RevisionMismatch | RevisionUnavailable>;
+    // Optional choices resolve a tentative decision without persisting overrides or holds.
+    readonly effective: (decisions: ReadonlyArray<Decision>, choices?: {readonly overrides:Input<MachineOverrides>;readonly holds:Holds}) => Effect.Effect<Effective, RevisionMismatch | RevisionUnavailable>;
     // Local sources inspect checkout HEAD with holds without trust. Hosted sources read their
     // consent-checked durable baseline without fetching. Neither operation authorizes apply.
     readonly current: Effect.Effect<Snapshot, RevisionUnavailable>;

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { Context, Data, Effect, Layer } from 'effect';
-import { Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
+import { canonical, Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
 import { parseItemId } from './items.ts';
 
 // Held items: each item id maps to the commit whose value this machine keeps.
@@ -48,11 +48,11 @@ export class SyncStore extends Context.Service<
   SyncStore,
   {
     readonly read: Effect.Effect<Holds, FsFailed | SyncStateInvalid>;
-    readonly write: (held: Holds) => Effect.Effect<void, FsFailed | SyncStateInvalid>;
+    readonly write: (held: Holds, expected?: {readonly held:Holds;readonly bytes:string|undefined}) => Effect.Effect<void, FsFailed | SyncStateInvalid>;
   }
 >()('sync/SyncStore') {}
 
-// <stateRoot>/sync.json, replaced atomically. `write` refuses an invalid existing file or invalid holds. Composition reads it; only `nortuscc sync` writes it.
+// <stateRoot>/sync.json, replaced atomically. `write` refuses an invalid existing file or invalid holds. Shared decisions and the foreground CLI write it under the common mutation lock.
 export const syncStore = Layer.effect(
   SyncStore,
   Effect.gen(function* () {
@@ -62,12 +62,15 @@ export const syncStore = Layer.effect(
     const read = Effect.flatMap(fs.readText(path), (text) => decodeSyncState(text, path));
     return {
       read,
-      write: (held: Holds) =>
+      write: (held: Holds, expected?: {readonly held:Holds;readonly bytes:string|undefined}) =>
         Effect.gen(function* () {
-          yield* read; // an invalid file is never overwritten
+          const before=yield* fs.readText(path);
+          const current=yield* decodeSyncState(before,path); // an invalid file is never overwritten
+          if(expected && (before!==expected.bytes || canonical(current)!==canonical(expected.held)))return yield* new SyncStateInvalid({path,reason:'holds changed before replacement'});
           const reason = holdsProblem(held);
           if (reason !== undefined) return yield* new SyncStateInvalid({ path, reason });
           const sorted = Object.fromEntries(Object.entries(held).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+          if((yield* fs.readText(path))!==before)return yield* new SyncStateInvalid({path,reason:'holds changed before replacement'});
           yield* fs.writeTextAtomic(path, JSON.stringify({ version: 1, held: sorted }, null, 2) + '\n');
         }),
     };

@@ -4,6 +4,7 @@ import { AgentError, AgentUnavailable } from '../../../src/agent-client.ts';
 import type { AppAgentClient } from './client.ts';
 
 export const toolNames = {
+  inspectSetups: 'nortuscc_inspect_setups', incomingChanges: 'nortuscc_incoming_changes', prepareTrustRequest: 'nortuscc_prepare_trust_request',
   inspectUpdates: 'nortuscc_inspect_updates',
   inspectIntent: 'nortuscc_inspect_intent',
   resolveSkillCandidate: 'nortuscc_resolve_skill_candidate',
@@ -12,6 +13,9 @@ export const toolNames = {
   cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
 } as const;
 const descriptions: Record<OperationName, string> = {
+  inspectSetups: 'Read known setup identities and local trust without granting consent.',
+  incomingChanges: 'Read verified exact setup revisions and incoming item identities without repository contents.',
+  prepareTrustRequest: 'Prepare the existing app-local repository trust action. This read grants no trust and writes no consent.',
   inspectUpdates: 'Read bounded source-qualified skill update offers, selection keys, target policy and content identities. Addition repair requires resolveSkillCandidate, previewChange(addSkill) and applyChange. Unavailable observations never prove installation or authorization.',
   inspectIntent: 'Read bounded effective machine configuration, owned settings, declaration enablement, required targets, source policy and provenance. Reset reveals inherited intent. Intent changes save choices without installing or deleting content.',
   resolveSkillCandidate: 'Resolve an exact native selector or canonical installed name in a public GitHub source. Without source, search bounded configured and installed sources. Ambiguous candidates require source selection before preview.',

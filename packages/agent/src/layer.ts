@@ -8,10 +8,10 @@ import { agentSkillInstaller, type AgentSkillInstaller } from './skill-installer
 import { runStore, type RunStore } from './run-store.ts';
 import { AgentClock, systemClock } from './clock.ts';
 import { agentStateStore, type AgentStateStore } from './state.ts';
-import { setupsStore, type SetupsStore } from '@nortuscc/sync';
+import { syncStore, type SyncStore, setupsStore, type SetupsStore } from '@nortuscc/sync';
 
 export type AgentServices =
-  | AgentSkillInstaller | ProcessDialogue | OverridesStore | RunStore | MachinePaths | Fs | Processes | StateStore | HistoryStore | DecisionsStore | AgentStateStore | SetupsStore | AgentClock;
+  | SyncStore | AgentSkillInstaller | ProcessDialogue | OverridesStore | RunStore | MachinePaths | Fs | Processes | StateStore | HistoryStore | DecisionsStore | AgentStateStore | SetupsStore | AgentClock;
 
 // The domains a job inspects and applies with; a fresh Backups is provided per job.
 export type AgentDomain = Domain<MachinePaths | Fs | Processes | StateStore | Backups>;
@@ -24,6 +24,6 @@ export const agentLayer = (
   paths: MachinePathsValue,
   options: { readonly processes?: Layer.Layer<Processes>; readonly dialogue?: Layer.Layer<ProcessDialogue>; readonly skillInstaller?: Layer.Layer<AgentSkillInstaller>; readonly clock?: Layer.Layer<AgentClock> } = {},
 ): Layer.Layer<AgentServices> =>
-  Layer.mergeAll(stateStore, overridesStore, historyStore(), decisionsStore, agentStateStore, setupsStore, runStore).pipe(
+  Layer.mergeAll(syncStore, stateStore, overridesStore, historyStore(), decisionsStore, agentStateStore, setupsStore, runStore).pipe(
     Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, options.processes ?? nodeProcesses(), options.dialogue ?? nodeProcessDialogue({ env: {} }), options.skillInstaller ?? agentSkillInstaller(), options.clock ?? systemClock)),
   );

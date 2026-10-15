@@ -5,13 +5,13 @@ import { constants, homedir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  Backups, canonical, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, StateStore,
+  acquireApplyLock, Backups, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, StateStore,
   withApplied, type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { MachineOverrides } from '@nortuscc/profile-engine';
 import {
-  incoming, isAncestor, LOCAL_SETUP, nextHolds, revParse, SyncStore, syncStore, upstreamOf, withoutOverride,
-  type Conflict, type Holds, type ItemChange,
+  incoming, isAncestor, LOCAL_SETUP, nextHolds, revParse, SyncStore, syncStore, upstreamOf, snapshotFor, prepareSyncDecision, persistSyncDecision,
+  type Conflict, type Holds, type ItemChange, type SetupSource, type SyncDecisionChange,
 } from '@nortuscc/sync';
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
 import { restartAfterPull } from '../agent-service.ts';
@@ -154,7 +154,7 @@ const decide = (itemId: string, head: string, decision: 'accept' | 'skip', decid
     }
   });
 
-// Step 7: decisions, holds, and taken overrides (overrides.json backed up first).
+// The foreground CLI has already fetched and checked reachability. Adapt its exact offer to the shared decision owner.
 const record = (input: {
   readonly changes: ReadonlyArray<ItemChange>;
   readonly chosen: Chosen;
@@ -162,26 +162,97 @@ const record = (input: {
   readonly applied: string;
   readonly head: string;
   readonly overrides: MachineOverrides;
-  readonly stateRoot: string;
+  readonly paths: MachinePathsValue;
+  readonly release?: string;
 }) =>
   Effect.gen(function* () {
-    const decidedAt = new Date().toISOString();
-    for (const change of input.changes) {
-      yield* decide(change.itemId, input.head, input.chosen.accepted.has(change.itemId) ? 'accept' : 'skip', decidedAt);
+    const context = yield* Effect.context<
+      import('@nortuscc/machine').Fs | import('@nortuscc/machine').Processes | DecisionsStore | HistoryStore
+    >();
+    const now = new Date();
+    const snapshot = (commit: string, held: Holds, choices?: Parameters<SetupSource['Service']['effective']>[1]) =>
+      snapshotFor({
+        repo: input.paths.repo,
+        stateRoot: input.paths.stateRoot,
+        commit,
+        held,
+        overrides: choices?.overrides ?? {
+          value: input.overrides,
+          source: join(input.paths.stateRoot, 'overrides.json'),
+          issues: [],
+        },
+        now,
+      }).pipe(Effect.provideContext(context), Effect.orDie);
+    const source: SetupSource['Service'] = {
+      fetch: Effect.succeed({ head: input.head }),
+      load: () => snapshot(input.head, {}),
+      current: snapshot(input.applied, input.holds),
+      effective: (decisions, choices) =>
+        Effect.gen(function* () {
+          const accepted = new Set(
+            decisions
+              .filter((d) => d.setupId === LOCAL_SETUP && d.commit === input.head && d.decision === 'accept')
+              .map((d) => d.itemId),
+          );
+          return {
+            applied: {
+              ...(yield* snapshot(input.applied, choices?.holds ?? input.holds, choices)),
+              revision: input.applied,
+            },
+            effective: yield* snapshot(
+              input.head,
+              nextHolds({
+                holds: choices?.holds ?? input.holds,
+                changes: input.changes,
+                accepted,
+                applied: input.applied,
+              }),
+              choices,
+            ),
+            conflicts: [],
+          };
+        }),
+    };
+    const ids = input.release ? [input.release] : input.changes.map((c) => c.itemId);
+    for (const itemId of ids) {
+      const overrides = yield* (yield* OverridesStore).read;
+      const action: SyncDecisionChange['action'] = input.release
+        ? 'release'
+        : input.chosen.takeTheirs.has(itemId)
+          ? 'takeTheirs'
+          : input.chosen.accepted.has(itemId)
+            ? 'accept'
+            : 'hold';
+      const prepared = yield* prepareSyncDecision({
+        source,
+        change: {
+          kind: 'syncDecision',
+          setupId: LOCAL_SETUP,
+          revision: { kind: 'local', commit: input.head },
+          itemId,
+          action,
+        },
+        overrides: overrides.value,
+        holds: yield* (yield* SyncStore).read,
+        decisions: yield* (yield* DecisionsStore).read,
+        now,
+      });
+      yield* persistSyncDecision(
+        prepared,
+        (decisions) =>
+          Effect.forEach(decisions, (d) => decide(d.itemId, d.commit!, d.decision, d.decidedAt), {
+            discard: true,
+          }).pipe(Effect.provideContext(context)),
+        { pending: () => Effect.void, committed: () => Effect.void },
+      );
     }
-    const next = nextHolds({ holds: input.holds, changes: input.changes, accepted: input.chosen.accepted, applied: input.applied });
-    if (canonical(next) !== canonical(input.holds)) yield* (yield* SyncStore).write(next);
-    if (input.chosen.takeTheirs.size === 0) return;
-    const backups = yield* Backups;
-    yield* backups.preserve(join(input.stateRoot, 'overrides.json'), 'overrides.json', undefined, { private: true });
-    let value = input.overrides;
-    for (const itemId of input.chosen.takeTheirs) value = withoutOverride(value, itemId);
-    yield* (yield* OverridesStore).write(value);
-    const dir = yield* backups.dir;
-    process.stdout.write(`\noverrides.json: took the setup's value for ${[...input.chosen.takeTheirs].join(', ')}`
-      + `${dir ? `; the previous file is in ${dir}` : ''}\n`);
+    if (input.chosen.takeTheirs.size) {
+      const dir = yield* (yield* Backups).dir;
+      process.stdout.write(
+        `\noverrides.json: took the setup's value for ${[...input.chosen.takeTheirs].join(', ')}${dir ? `; the previous file is in ${dir}` : ''}\n`,
+      );
+    }
   });
-
 // A pull can bring down a newly declared integration. It is reported, never installed: a
 // fast-forward must not turn into an unattended run of third-party installers. With --install,
 // apply already ran the install workflow.
@@ -206,16 +277,15 @@ const reportIntegrations = (target: TargetChoice, rest: ReadonlyArray<string>) =
   }));
 
 // `--release <itemId>`: drops one hold without fetching, records the accept, then applies.
-const release = (repo: string, holds: Holds, itemId: string, target: TargetChoice, rest: ReadonlyArray<string>) =>
+const release = (paths: MachinePathsValue, holds: Holds, itemId: string, target: TargetChoice, rest: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     if (!Object.hasOwn(holds, itemId)) {
       console.error(`nortuscc: ${itemId} is not held (held: ${Object.keys(holds).sort().join(', ') || 'nothing'})`);
       return 2;
     }
-    const head = yield* revParse(repo, 'HEAD');
-    if (head !== undefined) yield* decide(itemId, head, 'accept', new Date().toISOString());
-    const { [itemId]: _released, ...remaining } = holds;
-    yield* (yield* SyncStore).write(remaining);
+    const head = yield* revParse(paths.repo, 'HEAD');
+    if(head===undefined)return 1;
+    yield* Effect.scoped(Effect.andThen(acquireApplyLock,record({paths,holds,head,applied:head,changes:[],chosen:{accepted:new Set([itemId]),takeTheirs:new Set()},overrides:(yield* (yield* OverridesStore).read).value,release:itemId})));
     process.stdout.write('\n' + section('sync', [formatRow(itemId, 'released', "takes the checkout's value")]));
     return applyChild(target, rest);
   });
@@ -231,7 +301,7 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     if (refuseInvalidOverrides(overrides)) return 1;
     const holds = yield* (yield* SyncStore).read;
     const decisions = yield* (yield* DecisionsStore).read;
-    if (flags.release !== undefined) return yield* release(repo, holds, flags.release, target, flags.rest);
+    if (flags.release !== undefined) return yield* release(paths, holds, flags.release, target, flags.rest);
 
     // 2. Fetch the tracked branch's ref; a checkout without one, or diverged from it, is left alone.
     const upstream = yield* upstreamOf(repo);
@@ -307,7 +377,7 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     }
 
     // 7. Record decisions and holds; take theirs.
-    yield* record({ changes, chosen, holds, applied, head, overrides: overrides.value, stateRoot: paths.stateRoot });
+    yield* Effect.scoped(Effect.andThen(acquireApplyLock,record({ changes, chosen, holds, applied, head, overrides: overrides.value, paths })));
 
     // 8. Apply through the pulled code; 9. on success, record the applied commit.
     const code = applyChild(target, flags.rest);

@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
+  InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
   InspectUpdatesInputSchema, UpdatesInspectionResultSchema, InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
@@ -17,6 +18,9 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  inspectSetups: define('inspectSetups',InspectSetupsInputSchema,SetupInspectionResultSchema),
+  incomingChanges: define('incomingChanges',IncomingChangesInputSchema,IncomingChangesResultSchema),
+  prepareTrustRequest: define('prepareTrustRequest',PrepareTrustRequestInputSchema,TrustRequestResultSchema),
   resolveSkillCandidate: define('resolveSkillCandidate', ResolveSkillCandidateInputSchema, SkillCandidateResultSchema),
   getContext: define('getContext', GetContextInputSchema, ContextResultSchema),
   inspectUpdates: define('inspectUpdates', InspectUpdatesInputSchema, UpdatesInspectionResultSchema),

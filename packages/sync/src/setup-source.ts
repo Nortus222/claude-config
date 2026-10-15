@@ -56,9 +56,9 @@ export const setupSourceLayer = (
     return state.applied?.commit;
   });
 
-  const snapshot = (commit: string, held: Holds) =>
+  const snapshot = (commit: string, held: Holds, tentative?: Parameters<SetupSource['Service']['effective']>[1]) =>
     Effect.gen(function* () {
-      const overrides = yield* (yield* OverridesStore).read;
+      const overrides = tentative?.overrides ?? (yield* (yield* OverridesStore).read);
       return yield* snapshotFor({ repo, stateRoot: paths.stateRoot, commit, held, overrides, now: now() });
     });
 
@@ -91,7 +91,7 @@ export const setupSourceLayer = (
       Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
     );
 
-  const effective = (decisions: ReadonlyArray<Decision>) =>
+  const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) =>
     Effect.gen(function* () {
       const upstream = yield* trustedOrigin('HEAD');
       const head = yield* revParse(repo, upstream.ref);
@@ -99,14 +99,14 @@ export const setupSourceLayer = (
       const recorded = yield* recordedApplied;
       const applied = (recorded === undefined ? undefined : yield* revParse(repo, recorded)) ?? (yield* revParse(repo, 'HEAD'));
       if (applied === undefined) return yield* unavailable('HEAD', 'the checkout has no commit');
-      const holds = yield* (yield* SyncStore).read;
-      const overrides = yield* (yield* OverridesStore).read;
+      const holds = choices?.holds ?? (yield* (yield* SyncStore).read);
+      const overrides = choices?.overrides ?? (yield* (yield* OverridesStore).read);
       const { changes, conflicts } = yield* incoming({ repo, applied, head, holds, overrides: overrides.value });
       const accepted = new Set(decisions
         .filter((d) => d.setupId === LOCAL_SETUP && d.commit === head && d.decision === 'accept')
         .map((d) => d.itemId));
-      const appliedSnapshot = yield* snapshot(applied, holds);
-      const effectiveSnapshot = yield* snapshot(head, nextHolds({ holds, changes, accepted, applied }));
+      const appliedSnapshot = yield* snapshot(applied, holds, choices);
+      const effectiveSnapshot = yield* snapshot(head, nextHolds({ holds, changes, accepted, applied }), choices);
       yield* pruneSnapshots(paths.stateRoot, [appliedSnapshot.repo, effectiveSnapshot.repo], now());
       const result: Effective = {
         applied: { ...appliedSnapshot, revision: applied },
@@ -145,7 +145,7 @@ export const setupSourceLayer = (
       return {
         fetch: provide(fetch),
         load: (revision: Revision) => provide(load(revision)),
-        effective: (decisions: ReadonlyArray<Decision>) => provide(effective(decisions)),
+        effective: (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(decisions, choices)),
         current: provide(current),
       };
     }),

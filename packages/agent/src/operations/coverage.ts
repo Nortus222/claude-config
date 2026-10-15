@@ -35,9 +35,10 @@ export const engineCapabilityCoverage = {
   historyDetail: remaining('agent/ipc/server.ts History projection', parity, 'Expose bounded decision/setup/revision, policy from/to, pause and backup/pruning facts currently omitted by the operation projection.'),
   backupPruning: remaining('machine/prune.ts', parity, 'Existing retention pruning needs a bounded operation and common mutation contract.'),
   backupInventoryRestore: remaining('machine/backups.ts', 'Backup inventory and selected restoration', 'No public typed inventory or general selected-backup restoration exists.'),
-  incomingSyncDecisions: remaining('sync/plan.ts and agent/agent.ts', parity, 'Accept/hold incoming items and resolve conflicting overrides with existing local consent.'),
-  heldConfiguration: remaining('sync/compose.ts and setup-source.ts', parity, 'Expose held revisions and verified effective setup configuration through bounded owning reads.'),
-  setupFollowTrust: remaining('sync/setups.ts and source.ts', 'Setup follow and local consent workflow', 'MCP may report the app action; an assistant boolean cannot replace repository trust.', 'prerequisite'),
+  incomingSyncDecisions: available('sync/decisions.ts and operations/sync.ts', ['incomingChanges','previewChange','applyChange'], 'Exact local or hosted per-item accept, hold, release and take-theirs retain backups, partial facts and post-lock policy scheduling.'),
+  heldConfiguration: available('sync/compose.ts and setup-source.ts', ['inspectSetups','incomingChanges'], 'Known trusted setup and verified incoming item inspection; no repository document projection.'),
+  setupTrust: available('agent/setups.ts and operations/sync.ts', ['prepareTrustRequest'], 'Returns only the existing app-local trust action and bounded repository identity; no consent write.'),
+  setupFollowTrust: remaining('sync/setups.ts and source.ts', 'Independent follow and primary selection', 'No independent follow or select-primary owner exists; known trusted setup access is available separately.', 'prerequisite'),
   sourceWatch: remaining('source-watch/watch.ts', parity, 'Upstream/local skill diffs and commits require an authenticated bounded read adapter.'),
   sourcePinImpact: remaining('source-watch/impact.ts', parity, 'Source-wide pin impact preview must retain the resolved revision.'),
   sourcePinUnpin: remaining('source-watch/pins.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
@@ -59,7 +60,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
-  inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
+  inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
   addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
 };

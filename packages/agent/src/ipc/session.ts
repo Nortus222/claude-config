@@ -14,6 +14,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
 import { prepareCaptureChange } from '../operations/capture.ts';
 import { prepareActionChange } from '../operations/actions.ts';
@@ -45,6 +46,9 @@ export type AgentSession = {
   // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
   readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
   readonly skillOperations: SkillOperations;
+  readonly inspectSetups: (input: OperationInput<'inspectSetups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSetups'>, SessionError>;
+  readonly incomingChanges: (input: OperationInput<'incomingChanges'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'incomingChanges'>, SessionError>;
+  readonly prepareTrustRequest: (input: OperationInput<'prepareTrustRequest'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'prepareTrustRequest'>, SessionError>;
   readonly inspectUpdates: (input: OperationInput<'inspectUpdates'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectUpdates'>, SessionError>;
   readonly inspectIntent: (input: OperationInput<'inspectIntent'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectIntent'>, SessionError>;
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
@@ -255,6 +259,17 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'syncDecision') {
+        if (active) return yield* Effect.fail(busy);
+        const change = input.change;
+        return yield* handle.exclusive(Effect.gen(function* () {
+          const generation = yield* (handle.generation ?? Effect.succeed(0));
+          const prepared = yield* prepareSyncOperation(handle, change, generation).pipe(Effect.provideContext(context));
+          if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation)
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed'));
+          return yield* retainParityChange(prepared);
+        }));
+      }
       if (input.change.kind === 'machineIntent') {
         if (active) return yield* Effect.fail(busy);
         return yield* retainParityChange(yield* intentOperations.prepare(input.change));
@@ -505,7 +520,34 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         return Deferred.await(current.done);
       }),
     });
+    const syncRead = <N extends 'inspectSetups' | 'incomingChanges' | 'prepareTrustRequest'>(
+      name: N,
+      input: OperationInput<N>,
+    ) =>
+      handle.exclusive(
+        Effect.gen(function* () {
+          const args = yield* Effect.try({
+            try: () => decodeOperationInput(name, input),
+            catch: () => new SessionError('INVALID_REQUEST', 'Invalid sync inspection'),
+          });
+          if (args.scope.kind !== 'machine')
+            return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'Sync supports machine scope only'));
+          const generation = yield* (handle.generation ?? Effect.succeed(0)),
+            inspection = yield* handle.inspection;
+          const unchanged = Effect.gen(function* () {
+            if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection)
+              return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed; inspect again'));
+          });
+          yield* unchanged;
+          const result = yield* readSyncOperation(handle, name, args, generation).pipe(Effect.provideContext(context));
+          yield* unchanged;
+          return result;
+        }),
+      );
     const session: AgentSession = {
+      inspectSetups: input => syncRead('inspectSetups', input),
+      incomingChanges: input => syncRead('incomingChanges', input),
+      prepareTrustRequest: input => syncRead('prepareTrustRequest', input),
       runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
         const generation = yield* (handle.generation ?? Effect.succeed(0));
         const inspection = yield* handle.inspection;

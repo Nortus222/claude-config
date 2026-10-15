@@ -35,6 +35,9 @@ The app exposes ten machine operations:
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
 | `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
+| `nortuscc_inspect_setups` | Known setup identities and trust status |
+| `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
+| `nortuscc_prepare_trust_request` | Existing app repository trust action; grants no consent |
 | `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |
 | `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
@@ -132,7 +135,7 @@ npm run smoke:mcp -w apps/desktop -- "$app"
 The desktop Node checks cover v3 schemas, renderer event ordering and recovery, lifecycle ownership and upgrades with fake Processes, and the login environment. `DESKTOP_AGENT_RESOURCES` enables the resource and smoke checks after bundling; without it these checks skip. `test:bun` runs schemas and controller checks under Bun, then runs `test:resources` against a temporary bundled Bun fixture. Rust tests use fake Unix socket servers and helpers for handshake, framing, timeouts, disconnect and generation behavior.
 
 Installed MCP acceptance uses the exact app's native `--mcp` entry and bundled foreground agent
-with a temporary HOME, local Git origin and inert file copies. It verifies all eight tools, durable
+with a temporary HOME, local Git origin and inert file copies. It verifies all fourteen tools, durable
 acceptance/retry, disconnect recovery, MCP History attribution, terminal cancellation lookup and
 unavailable-agent diagnostics, then joins its owned subprocesses before deleting the fixture. It installs no service
 and opens no GUI. This smoke does not establish host reload, natural-language skill addition,

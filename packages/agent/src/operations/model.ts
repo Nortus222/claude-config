@@ -31,3 +31,5 @@ export type MachineIntentChange = typeof import('./schemas.ts').MachineIntentCha
 export type MachineIntentPatch = typeof import('./schemas.ts').MachineIntentPatchSchema.Type;
 
 export type ActionChange = Extract<OperationChange, { kind: 'reconcile' | 'uninstallConfig' }>;
+
+export type { SyncDecisionChange } from '@nortuscc/sync';

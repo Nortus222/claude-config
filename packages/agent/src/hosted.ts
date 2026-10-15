@@ -174,6 +174,16 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     return current;
   }));
   return {
+    selectOperationSetup: (setupId: string) => Effect.gen(function* () {
+      const current = yield* client.state;
+      const offered = current.setups.find(s => s.setupId === setupId);
+      if (!offered || !current.accountId) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
+      const selection = yield* select;
+      const selected = selection.selected.find(s => s.source.setupId === setupId);
+      // Selection verifies existing account/repository consent. Content verification remains in the source.
+      return { setupId, accountId: current.accountId, repository: normalizeRepoUrl(offered.repoUrl) ?? null,
+        trusted: selected !== undefined, source: selected?.source };
+    }).pipe(Effect.mapError(safe)),
     state, generation: Effect.sync(() => generation), runJobs, inspectPrimary,
     afterPerson: (inspection: JobInspection, successful: ReadonlyArray<string>) => Effect.flatMap(select, (selection) => report(selection, { inspection, successful })).pipe(Effect.ignore),
     decide: (decision: Decision, actor: Actor) => remember(Effect.gen(function* () {
