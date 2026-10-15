@@ -90,6 +90,7 @@ export class MachineController {
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
   private operationRead = 0;
+  private runDiscovery: { readonly read: number; terminalRunId?: string } | null = null;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
@@ -177,10 +178,12 @@ export class MachineController {
   }
 
   // Durable reads share this controller's session and never replace a different observed run.
-  private async refreshRun(runId?: string) {
+  private async refreshRun(runId?: string, completionObserved = false) {
     if (!this.bridge || this.state.hello?.operations?.available !== true) return;
     const token = this.sessionToken();
     const read = ++this.operationRead;
+    const discovery = runId ? null : { read, terminalRunId: undefined as string | undefined };
+    if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
         : await this.bridge.invoke('list_operation_runs', { limit: 1 });
@@ -189,7 +192,13 @@ export class MachineController {
         : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
       if (!receipt || runId && receipt.runId !== runId) return;
       const current = this.state.run;
-      if (current && current.runId !== receipt.runId || !current && this.state.status?.applying && receipt.result !== null) return;
+      if (current && current.runId !== receipt.runId) return;
+      // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
+      if (discovery?.terminalRunId === receipt.runId) {
+        await this.refreshRun(receipt.runId, true);
+        return;
+      }
+      if (!current && this.state.status?.applying && receipt.result !== null && !completionObserved) return;
       const outcome = receipt.state === 'accepted' || receipt.state === 'running' ? 'running'
         : receipt.state === 'succeeded' ? 'done' : receipt.state === 'cancelled' ? 'cancelled' : 'failed';
       const summary = receipt.installation?.message ?? (receipt.result && 'message' in receipt.result ? receipt.result.message : `Run ${receipt.state}`);
@@ -197,6 +206,8 @@ export class MachineController {
       this.update({ run: { ...current, runId: receipt.runId, steps, outcome, summary, receipt }, detail: summary });
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
+    } finally {
+      if (this.runDiscovery === discovery) this.runDiscovery = null;
     }
   }
 
@@ -204,6 +215,7 @@ export class MachineController {
     if (!this.bridge) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.runDiscovery = null;
     this.reviewRefresh = false;
     this.earlyReviews.clear();
     this.earlyDisconnects.clear();
@@ -404,6 +416,7 @@ export class MachineController {
     if (!this.bridge || this.state.pending || (this.state.connection === 'connected' && (this.state.run?.outcome === 'running' || this.state.status?.applying === true))) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.runDiscovery = null;
     this.reviewRefresh = false;
     this.earlyReviews.clear();
     this.starting = false;
@@ -475,6 +488,11 @@ export class MachineController {
       return;
     }
     let run = this.state.run;
+    if (!run && this.runDiscovery?.read === this.operationRead
+      && (event.progress.type === 'done' || event.progress.type === 'failed' || event.progress.type === 'cancelled')) {
+      this.runDiscovery.terminalRunId = event.runId;
+      return;
+    }
     const discoversRun = event.progress.type === 'started' && run?.outcome !== 'running';
     if (event.progress.type === 'started' && run?.outcome !== 'running') {
       run = { runId: event.runId, steps: [], outcome: 'running', summary: 'Applying machine changes' };

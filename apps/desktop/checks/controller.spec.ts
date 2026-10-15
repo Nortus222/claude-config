@@ -972,3 +972,89 @@ test('a mismatched run lookup cannot attach another receipt to live progress', a
   f.emit(event('live', { type: 'started', index: 0, total: 1, step: step('config:a') })); await settle();
   assert.equal(c.state.run?.runId, 'live'); assert.equal(c.state.run?.receipt, undefined); assert.equal(c.state.run?.outcome, 'running');
 });
+
+
+for (const entry of ['connect', 'restart'] as const) for (const outcome of ['verified', 'failed', 'needsInspection'] as const)
+  test(`${entry} preserves ${outcome} completion observed during initial durable discovery`, async () => {
+    const list = deferred<unknown>(); const listed = deferred<void>();
+    let discovering = entry === 'connect';
+    const initial = skillRun({ state: 'running', installation: undefined, result: null });
+    const completed = outcome === 'verified' ? skillRun() : skillRun({ state: outcome === 'failed' ? 'failed' : 'interrupted',
+      result: { status: outcome === 'failed' ? 'failed' : 'interrupted', message: 'Inspect retained installation' },
+      installation: { ...skillRun().installation!, state: outcome, message: 'Inspect retained installation', nextActions: [] } });
+    const f = fake({ agent_generation: () => discovering ? operationHello : null,
+      restart_agent: () => { discovering = true; return operationHello; },
+      agent_status: () => status({ applying: discovering }), inspect_machine: () => inspection([]),
+      list_operation_runs: () => { listed.resolve(); return list.promise; }, get_operation_run: () => completed });
+    const c = new MachineController(f.bridge);
+    if (entry === 'restart') await c.connect();
+    const connecting = entry === 'connect' ? c.connect() : c.restart();
+    await listed.promise;
+    assert.equal(c.snapshot().run, null);
+    f.emit(event(initial.runId, outcome === 'verified' ? { type: 'done', ok: 3, failed: 0 }
+      : { type: 'failed', message: 'Inspect retained installation' }));
+    list.resolve({ runs: [initial], nextBefore: null });
+    await connecting; await settle();
+    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+    assert.equal(c.state.run?.receipt?.installation?.state, outcome);
+    assert.equal(c.state.run?.receipt?.installation?.nextActions.length, outcome === 'verified' ? 2 : 0);
+    assert.deepEqual(c.state.run?.receipt?.intent.skillAddition?.declaration, completed.intent.skillAddition?.declaration);
+    assert.deepEqual(f.calls.filter(([command]) => command === 'get_operation_run').map(([, args]) => args), [{ runId: initial.runId }]);
+    discovering = false;
+    f.emit({ generation: 1, version: 3, event: 'status', status: { ...status({ applying: false }), policy: 'notify' } }); await settle();
+    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+    assert.equal(c.state.pending, false); assert.equal(c.state.inspection?.items.length, 0);
+    c.dispose();
+  });
+
+test('initial durable discovery does not authorize an unrelated terminal run', async () => {
+  const list = deferred<unknown>(); const listed = deferred<void>();
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying: true }),
+    list_operation_runs: () => { listed.resolve(); return list.promise; }, get_operation_run: () => skillRun({ runId: 'other' }) });
+  const c = new MachineController(f.bridge); const connecting = c.connect(); await listed.promise;
+  f.emit(event('other', { type: 'done', ok: 3, failed: 0 }));
+  list.resolve({ runs: [skillRun({ state: 'running', installation: undefined, result: null })], nextBefore: null });
+  await connecting;
+  assert.equal(c.state.run?.runId, 'addition-run'); assert.equal(c.state.run?.outcome, 'running');
+  assert.equal(f.calls.some(([command]) => command === 'get_operation_run'), false);
+  c.dispose();
+});
+
+
+test('a terminal lookup discovered during connect cannot replace a newer live legacy run', async () => {
+  const list = deferred<unknown>(); const listed = deferred<void>();
+  const terminal = deferred<unknown>(); const queried = deferred<void>();
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying: true }),
+    list_operation_runs: () => { listed.resolve(); return list.promise; }, get_operation_run: args => {
+      if (args?.runId !== 'addition-run') throw new Error('UNKNOWN_RUN');
+      queried.resolve(); return terminal.promise;
+    } });
+  const c = new MachineController(f.bridge); const connecting = c.connect(); await listed.promise;
+  f.emit(event('addition-run', { type: 'done', ok: 3, failed: 0 }));
+  list.resolve({ runs: [skillRun({ state: 'running', installation: undefined, result: null })], nextBefore: null });
+  await queried.promise;
+  f.emit(event('legacy-run', { type: 'started', index: 0, total: 1, step: step('config:a') }));
+  terminal.resolve(skillRun()); await connecting;
+  assert.equal(c.state.run?.runId, 'legacy-run'); assert.equal(c.state.run?.outcome, 'running');
+  assert.equal(c.state.run?.receipt, undefined);
+  c.dispose();
+});
+
+test('a terminal lookup discovered during connect cannot cross a restart session', async () => {
+  const list = deferred<unknown>(); const listed = deferred<void>(); let reads = 0; let restarted = false;
+  const terminal = deferred<unknown>(); const queried = deferred<void>();
+  const f = fake({ agent_generation: () => operationHello,
+    restart_agent: () => { restarted = true; return operationHello; },
+    agent_status: () => status({ applying: !restarted }), inspect_machine: () => inspection([]),
+    list_operation_runs: () => { if (++reads === 1) { listed.resolve(); return list.promise; } return { runs: [], nextBefore: null }; },
+    get_operation_run: () => { queried.resolve(); return terminal.promise; } });
+  const c = new MachineController(f.bridge); const connecting = c.connect(); await listed.promise;
+  f.emit(event('addition-run', { type: 'done', ok: 3, failed: 0 }));
+  list.resolve({ runs: [skillRun({ state: 'running', installation: undefined, result: null })], nextBefore: null });
+  await queried.promise;
+  f.emit({ generation: 1, event: 'disconnected', detail: 'Fixture disconnected' });
+  await c.restart(); terminal.resolve(skillRun()); await connecting;
+  assert.equal(c.state.run, null); assert.equal(c.state.connection, 'connected');
+  assert.equal(c.state.pending, false);
+  c.dispose();
+});
