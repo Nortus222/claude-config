@@ -491,8 +491,9 @@ export const prepareSourceDecision = (change: SourceDecision, inspection: JobIns
   if (change.action === 'ignore' && change.revision !== observedRevision) return yield* Effect.fail(sourceChanged());
   const prepared = yield* prepareSourceEdit({ author, source, action: change.action, ...('revision' in change ? { revision: change.revision } : {}) }).pipe(Effect.provide(machineGit({env:environment.env,timeoutMs:15000,maxBytes:1048576})));
   const nextPins = prepared.documents.find(document => document.path === 'skill-pins.json')?.text ?? pins;
-  // Include machine additions when validating source-wide policy; personal revisions stay separate.
-  const resolved = resolveProfile({ base: buildBaseProfile({ skillsManifest: manifest }, () => false), pins: parsePins(nextPins), overrides });
+  // This base declares skills only; validate skill choices/additions without unrelated config intent.
+  const sourceOverrides = { ...overrides, value: { skills: overrides.value.skills, skillAdditions: overrides.value.skillAdditions } };
+  const resolved = resolveProfile({ base: buildBaseProfile({ skillsManifest: manifest }, () => false), pins: parsePins(nextPins), overrides: sourceOverrides });
   if (resolved.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'The proposed author source policy conflicts with declared machine choices'));
   const target = change.action === 'pin' ? change.revision : change.action === 'unpin' ? observedRevision : undefined;
   const impact = target === undefined ? [] : (yield* withGit(pinImpactWithServices(source, target, { cacheDir: join(configured.stateRoot, 'source-watch') }))).skills;

@@ -676,3 +676,52 @@ test('a source moving after backup fails before replacement with durable backup 
     assert.equal(f.m.read(join(f.m.paths.backups,run.parity!.backupIds[0]!,'author/skill-pins.json')),f.original);
   }));
 });
+
+const machineSourceChoices = (revision?: string) => JSON.stringify({
+  version: 2,
+  settings: { 'claude:settings.json': { effortLevel: 'low' } },
+  integrations: { hk: false },
+  skills: { added: false },
+  skillAdditions: [{ source: 'owner/repo', name: 'added', targets: ['codex'], ...(revision ? { revision } : {}) }],
+}, null, 3).replace(/\n/g, '\r\n') + '\r\n';
+
+test('valid setting and integration choices permit all source decisions and keep the complete raw overrides stale guard', async t => {
+  const f = await sourceDecisionFixture(t), path = join(f.m.paths.stateRoot, 'overrides.json'), bytes = machineSourceChoices();
+  f.m.write(path, bytes);
+  const full = await f.m.run(Effect.gen(function* () {
+    const overrides = yield* (yield* OverridesStore).read;
+    return yield* loadProfile(join(f.m.root, 'setup/head'), { overrides }).pipe(Effect.provide(nodeFiles));
+  }));
+  assert.deepEqual(full.issues, []);
+  assert.equal(full.files.find(file => file.id === 'claude:settings.json')?.keys?.effortLevel?.value, 'low');
+  assert.equal(full.integrations.find(integration => integration.id === 'hk')?.enabled, false);
+  await f.within(s => Effect.gen(function* () {
+    for (const action of ['pin', 'unpin', 'ignore', 'unignore'] as const) {
+      const change = action === 'pin' || action === 'ignore'
+        ? { kind: 'sourceDecision' as const, sourceId: 'owner/repo', action, revision: f.to }
+        : { kind: 'sourceDecision' as const, sourceId: 'owner/repo', action };
+      const preview = yield* s.previewChange(change);
+      if (!('sourceDecision' in preview)) throw new Error('Missing source preview');
+      assert.equal(preview.sourceDecision.machinePolicy.find(skill => skill.skillId === 'skill:owner/repo/added')?.enabled, false);
+      assert.equal((yield* submitSource(s, preview.planId, 'unrelated-choices-' + action)).run.state, 'succeeded');
+      assert.equal(f.m.read(path), bytes);
+      yield* s.inspect('mcp');
+    }
+    const preview = yield* s.previewChange({ kind: 'sourceDecision', sourceId: 'owner/repo', action: 'ignore', revision: f.to });
+    const writes = f.writes, changed = bytes + ' \r\n';
+    f.m.write(path, changed);
+    const error = yield* Effect.flip(s.runs.submit({ planId: preview.planId, requestId: 'raw-choices-stale', inputDigest: operationDigest(preview.planId), actor: 'mcp' }));
+    assert.equal(error.code, 'UNKNOWN_PLAN'); assert.equal(f.writes, writes); assert.equal(f.m.read(path), changed);
+  }));
+});
+
+test('source-only validation still rejects a conflicting explicit addition revision with valid unrelated choices', async t => {
+  const f = await sourceDecisionFixture(t), path = join(f.m.paths.stateRoot, 'overrides.json'), bytes = machineSourceChoices(f.from);
+  f.m.write(path, bytes);
+  await f.within(s => Effect.gen(function* () {
+    const valid = yield* s.previewChange({ kind: 'sourceDecision', sourceId: 'owner/repo', action: 'pin', revision: f.from });
+    assert.equal(valid.plan.steps.length, 0);
+    const error = yield* Effect.flip(s.previewChange({ kind: 'sourceDecision', sourceId: 'owner/repo', action: 'pin', revision: f.to }));
+    assert.equal(error.code, 'PROFILE_INVALID'); assert.equal(f.writes, 0); assert.equal(f.m.read(path), bytes);
+  }));
+});
