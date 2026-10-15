@@ -1,3 +1,4 @@
+import { MachinePatchSchema, DisplayNameSchema, DeviceStartResponseSchema, SyncMachineSchema, SyncSetupSchema } from '@nortuscc/hosted-protocol';
 import { Effect, Schema, SchemaGetter } from 'effect';
 import { intentValueProblem } from '@nortuscc/profile-engine/intent-value';
 import { POLICIES } from '../policy-values.ts';
@@ -61,7 +62,14 @@ export const MachineIntentChangeSchema = Schema.Struct({ kind: Schema.Literal('m
 const SyncCommitSchema = Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$(?![\s\S])/u));
 export const SyncRevisionIdentitySchema = Schema.Union([Schema.Struct({kind:Schema.Literal('local'),commit:SyncCommitSchema}),Schema.Struct({kind:Schema.Literal('hosted'),number:Schema.Int.check(Schema.isBetween({minimum:1,maximum:Number.MAX_SAFE_INTEGER})),commitSha:SyncCommitSchema})]);
 export const SyncDecisionChangeSchema = Schema.Struct({kind:Schema.Literal('syncDecision'),setupId:IdSchema,revision:SyncRevisionIdentitySchema,itemId:KeySchema,action:Schema.Literals(['accept','hold','release','takeTheirs'])});
-export const ChangeSchema = Schema.Union([...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
+export const SetPolicyChangeSchema = Schema.Struct({ kind: Schema.Literal('setPolicy'), policy: Schema.Literals(POLICIES) });
+export const ResumeChangeSchema = Schema.Struct({ kind: Schema.Literal('resume') });
+export const SignInChangeSchema = Schema.Struct({ kind: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema), reportStatus: Schema.optionalKey(Schema.Boolean) });
+export const SignOutChangeSchema = Schema.Struct({ kind: Schema.Literal('signOut') });
+export const SyncAccountChangeSchema = Schema.Struct({ kind: Schema.Literal('syncAccount') });
+export const PatchMachineMetadataChangeSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), patch: MachinePatchSchema });
+export const AccountChangeSchema = Schema.Union([SetPolicyChangeSchema, ResumeChangeSchema, SignInChangeSchema, SignOutChangeSchema, SyncAccountChangeSchema, PatchMachineMetadataChangeSchema]);
+export const ChangeSchema = Schema.Union([...AccountChangeSchema.members, ...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
 export const SkillCandidateSchema = Schema.Struct({ candidateId: IdSchema, source: SkillSourceSchema, revision: SkillRevisionSchema,
   sourceDir: KeySchema, selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
   description: Schema.String.check(Schema.isMaxCodePoints(500)), internal: Schema.Boolean });
@@ -88,7 +96,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -133,7 +141,13 @@ const CaptureAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('capture'),
 const UpdateAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('update'), ...parityAcceptanceFields, author: Schema.optionalKey(AuthorEvidenceSchema) });
 const SyncAcceptanceSchema = Schema.Struct({kind:Schema.Literal('syncDecision'),...parityAcceptanceFields});
 const SourceAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('sourceDecision'), ...parityAcceptanceFields, author: AuthorEvidenceSchema, sourceId: KeySchema, observedRevision: AuthorHeadSchema });
-export const ParityAcceptanceSchema = Schema.Union([SourceAcceptanceSchema, SyncAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema]);
+const SetPolicyAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('setPolicy'), ...parityAcceptanceFields });
+const ResumeAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('resume'), ...parityAcceptanceFields });
+const SignInAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('signIn'), ...parityAcceptanceFields });
+const SignOutAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('signOut'), ...parityAcceptanceFields });
+const SyncAccountAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('syncAccount'), ...parityAcceptanceFields });
+const PatchMachineMetadataAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), ...parityAcceptanceFields });
+export const ParityAcceptanceSchema = Schema.Union([SetPolicyAcceptanceSchema, ResumeAcceptanceSchema, SignInAcceptanceSchema, SignOutAcceptanceSchema, SyncAccountAcceptanceSchema, PatchMachineMetadataAcceptanceSchema, SourceAcceptanceSchema, SyncAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema]);
 const parityEvidenceFields = { state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']), committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) };
 const ReconcileEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityEvidenceFields });
 const UninstallEvidenceSchema = Schema.Struct({ kind: Schema.Literal('uninstallConfig'), ...parityEvidenceFields });
@@ -146,7 +160,18 @@ const CaptureEvidenceSchema = Schema.Struct({ kind: Schema.Literal('capture'), .
 const UpdateEvidenceSchema = Schema.Struct({ kind: Schema.Literal('update'), ...parityEvidenceFields });
 const SyncEvidenceSchema = Schema.Struct({kind:Schema.Literal('syncDecision'),...parityEvidenceFields});
 const SourceEvidenceSchema = Schema.Struct({ kind: Schema.Literal('sourceDecision'), ...parityEvidenceFields });
-export const ParityRunEvidenceSchema = Schema.Union([SourceEvidenceSchema, SyncEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
+export const SignInRunResultSchema = Schema.Union([
+  Schema.Struct({kind:Schema.Literal('signIn'),state:Schema.Literal('awaiting-user'),userCode:Schema.optionalKey(DeviceStartResponseSchema.fields.userCode),verificationUri:Schema.optionalKey(DeviceStartResponseSchema.fields.verificationUri.check(Schema.isMaxCodePoints(500))),expiresAt:OperationTimeSchema}),
+  Schema.Struct({kind:Schema.Literal('signIn'),state:Schema.Literals(['expired','needsInspection']),expiresAt:OperationTimeSchema}),
+]);
+export type SignInRunResult = typeof SignInRunResultSchema.Type;
+const SetPolicyEvidenceSchema = Schema.Struct({ kind: Schema.Literal('setPolicy'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
+const ResumeEvidenceSchema = Schema.Struct({ kind: Schema.Literal('resume'), ...parityEvidenceFields, resumed: Schema.optionalKey(Schema.Boolean) });
+const SignInEvidenceSchema = Schema.Struct({ kind: Schema.Literal('signIn'), ...parityEvidenceFields, signIn: Schema.optionalKey(SignInRunResultSchema) });
+const SignOutEvidenceSchema = Schema.Struct({ kind: Schema.Literal('signOut'), ...parityEvidenceFields });
+const SyncAccountEvidenceSchema = Schema.Struct({ kind: Schema.Literal('syncAccount'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
+const PatchMachineMetadataEvidenceSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
+export const ParityRunEvidenceSchema = Schema.Union([SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
 const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId });
 const IntentTargets = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2));
 export const IntentItemSchema = Schema.Union([
@@ -190,7 +215,8 @@ export const SourceDecisionPreviewSchema = Schema.Struct({ ...previewFields, cha
     impact: Schema.Array(Schema.Struct({ skillId: KeySchema, status: Schema.Literals(['unchanged', 'changed', 'removed', 'missing']) })).check(Schema.isMaxLength(256)),
   }), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)),
 });
-export const ChangePreviewSchema = Schema.Union([SourceDecisionPreviewSchema, SyncPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
+const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
+export const ChangePreviewSchema = Schema.Union([AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
 export const RunTerminalResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
@@ -229,6 +255,12 @@ const runFields = {
   installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
 };
 export const RunViewSchema = Schema.Union([
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SetPolicyChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SetPolicyAcceptanceSchema}),parity:Schema.optionalKey(SetPolicyEvidenceSchema)}),
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:ResumeChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:ResumeAcceptanceSchema}),parity:Schema.optionalKey(ResumeEvidenceSchema)}),
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SignInChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SignInAcceptanceSchema}),parity:Schema.optionalKey(SignInEvidenceSchema)}),
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SignOutChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SignOutAcceptanceSchema}),parity:Schema.optionalKey(SignOutEvidenceSchema)}),
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SyncAccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SyncAccountAcceptanceSchema}),parity:Schema.optionalKey(SyncAccountEvidenceSchema)}),
+  Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:PatchMachineMetadataChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:PatchMachineMetadataAcceptanceSchema}),parity:Schema.optionalKey(PatchMachineMetadataEvidenceSchema)}),
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: SourceDecisionChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: SourceAcceptanceSchema }), parity: Schema.optionalKey(SourceEvidenceSchema) }),
   Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SyncDecisionChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SyncAcceptanceSchema}),parity:Schema.optionalKey(SyncEvidenceSchema)}),
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
@@ -310,3 +342,19 @@ const sourceDiffFields = {generation:IdSchema,skillId:KeySchema,state:sourceStat
 export const SourceDiffResultSchema = Schema.Union([Schema.Struct({...sourceDiffFields,...sourcePair}),Schema.Struct({...sourceDiffFields,...localSelection})]);
 export const PinImpactResultSchema = Schema.Struct({generation:IdSchema,sourceId:SourceIdentitySchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),fromRevision:Schema.NullOr(SourceRevision),toRevision:Schema.NullOr(SourceRevision),skills:Schema.Array(sourceSkill).check(Schema.isMaxLength(256))});
 export const ChangelogResultSchema = Schema.Struct({generation:IdSchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),text:Schema.String.check(Schema.isMaxCodePoints(32768))});
+
+export const AgentStatusInputSchema = Schema.Struct({...syncPage,section:Schema.Literals(['status','pending','drift','conflicts'])});
+export const AccountStateInputSchema = Schema.Struct({...syncPage,section:Schema.Literals(['account','setups','machine'])});
+const accountPageResult = {generation:IdSchema,nextCursor:syncCursor};
+const agentStatusFields = {policy:Schema.Literals(POLICIES),paused:Schema.Boolean,trusted:Schema.Boolean,error:Schema.NullOr(Schema.Literals(['PROFILE_INVALID','DECISIONS_INVALID','REVISION_UNAVAILABLE','JOB_FAILED']))};
+export const AgentStatusResultSchema = Schema.Union([
+ Schema.Struct({...accountPageResult,section:Schema.Literal('status'),items:Schema.Array(Schema.Struct(agentStatusFields)).check(Schema.isMaxLength(1))}),
+ Schema.Struct({...accountPageResult,section:Schema.Literal('pending'),items:Schema.Array(Schema.Struct({key:KeySchema,itemId:KeySchema,verdict:Schema.Literals(['inert','held'])})).check(Schema.isMaxLength(100))}),
+ Schema.Struct({...accountPageResult,section:Schema.Literals(['drift','conflicts']),items:Schema.Array(KeySchema).check(Schema.isMaxLength(100))}),
+]);
+const accountBase = {...accountPageResult,enabled:Schema.Boolean};
+export const AccountStateResultSchema = Schema.Union([
+ Schema.Struct({...accountBase,section:Schema.Literal('account'),items:Schema.Array(Schema.Struct({accountId:Schema.NullOr(IdSchema),login:Schema.NullOr(Text),machineId:Schema.NullOr(IdSchema),auth:Schema.Literals(['signed-in','signed-out','unauthenticated']),recovered:Schema.Boolean,signingIn:Schema.Boolean,lastSyncAt:Schema.NullOr(OperationTimeSchema),retryAt:Schema.NullOr(OperationTimeSchema),error:Schema.NullOr(Schema.Literal('hosted-unavailable'))})).check(Schema.isMaxLength(1))}),
+ Schema.Struct({...accountBase,section:Schema.Literal('setups'),items:Schema.Array(SyncSetupSchema).check(Schema.isMaxLength(100))}),
+ Schema.Struct({...accountBase,section:Schema.Literal('machine'),items:Schema.Array(Schema.Struct({effective:Schema.NullOr(SyncMachineSchema),confirmed:Schema.NullOr(SyncMachineSchema),persistence:Schema.Literals(['locally-queued','confirmed','unknown'])})).check(Schema.isMaxLength(1))}),
+]);

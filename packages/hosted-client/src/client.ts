@@ -10,6 +10,9 @@ import { MachineTokenStore } from './token.ts';
 import { HostedStore, type HostedAccount, type HostedDocument, type OutboxEntry } from './store.ts';
 
 export type HostedState = {
+  readonly pendingMachinePatches?: ReadonlyArray<MachinePatch>;
+  readonly machinePersistence?: 'locally-queued' | 'confirmed';
+  readonly confirmedMachine?: SyncMachine | null;
   readonly accountId: string | null; readonly login: string | null; readonly machineId: string | null;
   readonly auth: 'signed-in' | 'signed-out' | 'unauthenticated'; readonly setups: ReadonlyArray<SyncSetup>;
   readonly machine: SyncMachine | null; readonly lastSyncAt: string | null; readonly retryAt: string | null;
@@ -62,6 +65,8 @@ const effectiveMachine = (a: HostedAccount): SyncMachine => {
   return machine;
 };
 const project = (a: HostedAccount | undefined): HostedState => ({ accountId: a?.accountId ?? null, login: a?.login ?? null, machineId: a?.machineId ?? null,
+  pendingMachinePatches: a?.outbox.flatMap(e => e.kind === 'machine' ? [e.patch] : []) ?? [],
+  machinePersistence: a?.outbox.some(e => e.kind === 'machine') ? 'locally-queued' : 'confirmed', confirmedMachine: a?.machine ?? null,
   auth: a?.auth ?? 'signed-out', setups: a?.setups ?? [], machine: a ? effectiveMachine(a) : null, lastSyncAt: a?.lastSyncAt ?? null,
   retryAt: a?.retryAt ?? null, pollAfter: a?.pollAfter ?? 900, error: (a?.error as HostedFailureCode | null) ?? null });
 const osNames = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };

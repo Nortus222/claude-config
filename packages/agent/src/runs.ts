@@ -40,15 +40,31 @@ const error = (cause: unknown): RunError => cause instanceof RunError ? cause : 
 const copy = <T>(value: T): T => structuredClone(value);
 // Attribution comes from the immutable receipt owner, including older receipts without a view actor.
 const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor });
+// Push notifications contain no device challenge. Read the current display through get/list.
+const notificationView = (receipt: RunReceipt): RunView => {
+  const view = publicView(receipt);
+  if (view.parity?.kind === 'signIn' && view.parity.signIn) {
+    const challenge = view.parity.signIn;
+    return { ...view, parity: { ...view.parity, signIn: {
+      kind: 'signIn', state: challenge.state, expiresAt: challenge.expiresAt,
+    } } } as RunView;
+  }
+  return view;
+};
 
 // Created once alongside the shared session. The session retains lock and execution ownership.
 export const makeAgentRuns = (driver: {
+  readonly now?: Effect.Effect<Date>;
   readonly start: (input: SubmitRun, lifecycle: RunLifecycle) => Effect.Effect<
     { readonly status: 'started'; readonly runId: string } | { readonly status: 'stale'; readonly preview: ChangePreview }, unknown>;
   readonly cancel: (runId: string) => Effect.Effect<void>;
 }) => Effect.gen(function* () {
   const store = yield* RunStore;
   const gate = yield* Semaphore.make(1);
+  const writes = yield* Semaphore.make(1);
+  const hidden = new Map<string, 'expired' | 'needsInspection'>();
+  const dirtyScrubs = new Set<string>();
+  const now = driver.now ?? Effect.sync(() => new Date());
   const receipts = new Map<string, RunReceipt>();
   const requests = new Map<string, string>();
   const listeners = new Map<string, Set<(run: RunView) => void>>();
@@ -56,14 +72,49 @@ export const makeAgentRuns = (driver: {
   let sequence = 0;
   const publish = (receipt: RunReceipt) => {
     for (const listener of listeners.get(receipt.view.runId) ?? []) {
-      try { listener(publicView(receipt)); } catch {}
+      try { listener(notificationView(receipt)); } catch {}
     }
   };
-  const save = (receipt: RunReceipt) => store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
+  const conceal = (receipt: RunReceipt, state: 'expired' | 'needsInspection'): RunReceipt => {
+    const parity = receipt.view.parity;
+    if (parity?.kind !== 'signIn' || !parity.signIn) return receipt;
+    return { ...receipt, view: decodeRunView({ ...receipt.view, parity: { ...parity,
+      signIn: { kind: 'signIn', state, expiresAt: parity.signIn.expiresAt },
+    } }) };
+  };
+  const persist = (receipt: RunReceipt) => store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
     receipts.set(receipt.view.runId, copy(receipt));
     requests.set(receipt.view.intent.requestId, receipt.view.runId);
     publish(receipt);
   })));
+  const save = (receipt: RunReceipt) => Effect.gen(function* () {
+    const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
+    if (!hidden.has(receipt.view.runId) && challenge?.state === 'awaiting-user'
+      && (yield* now).getTime() >= Date.parse(challenge.expiresAt)) hidden.set(receipt.view.runId, 'expired');
+    const reason = hidden.get(receipt.view.runId);
+    yield* persist(reason ? conceal(receipt, reason) : receipt);
+  }).pipe(writes.withPermit);
+  const scrub = (runId: string, restart = false) => Effect.gen(function* () {
+    const receipt = receipts.get(runId)!;
+    const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
+    if (!challenge) return receipt;
+    if (challenge.state === 'awaiting-user' && (restart || (yield* now).getTime() >= Date.parse(challenge.expiresAt))) {
+      hidden.set(runId, restart ? 'needsInspection' : 'expired');
+      dirtyScrubs.add(runId);
+    }
+    if (!dirtyScrubs.has(runId)) return receipt;
+    const clean = conceal(receipt, hidden.get(runId) ?? 'needsInspection');
+    // Hide before I/O. A failed scrub cannot reveal a challenge through reads or retries.
+    receipts.set(runId, copy(clean));
+    yield* persist(clean).pipe(Effect.match({
+      onSuccess: () => { dirtyScrubs.delete(runId); },
+      onFailure: () => {
+        hidden.set(runId, 'needsInspection');
+        receipts.set(runId, conceal(clean, 'needsInspection'));
+      },
+    }));
+    return receipts.get(runId)!;
+  }).pipe(writes.withPermit);
   for (const receipt of yield* store.read.pipe(Effect.mapError(error))) {
     sequence = Math.max(sequence, receipt.sequence);
     if (receipts.has(receipt.view.runId) || requests.has(receipt.view.intent.requestId)) return yield* Effect.fail(new RunError('RUN_FAILED', 'Duplicate receipt identity'));
@@ -71,14 +122,16 @@ export const makeAgentRuns = (driver: {
     const recovered: RunReceipt = incomplete ? { ...receipt, view: decodeRunView({ ...receipt.view, state: 'interrupted', ...(receipt.view.parity ? { parity: { ...receipt.view.parity, state: 'needsInspection' as const } } : {}), ...(receipt.view.intent.skillAddition ? { installation: { ...receipt.view.installation, state: 'needsInspection' as const, message: 'Agent stopped; inspect saved intent and installed files before retrying', sharedStore: { codexScans: true as const, visibility: 'shared' as const }, nextActions: [] } } : {}), result: {
       status: 'interrupted', message: receipt.inFlight ? bounded(`Agent stopped while applying ${receipt.inFlight}; inspect before trying again`) : 'Agent stopped before the run finished; inspect before trying again',
     } }) } : receipt;
-    if (incomplete) yield* save(recovered);
-    else { receipts.set(receipt.view.runId, copy(receipt)); requests.set(receipt.view.intent.requestId, receipt.view.runId); }
+    receipts.set(receipt.view.runId, copy(recovered));
+    requests.set(receipt.view.intent.requestId, receipt.view.runId);
+    if (recovered.view.parity?.kind === 'signIn' && recovered.view.parity.signIn) yield* scrub(receipt.view.runId, true);
+    else if (incomplete) yield* save(recovered);
   }
   const find = (runId: string) => Effect.suspend(() => {
     const receipt = receipts.get(runId);
     return receipt ? Effect.succeed(receipt) : Effect.fail(new RunError('UNKNOWN_RUN', 'No run has that ID'));
   });
-  const get: AgentRuns['get'] = runId => Effect.map(find(runId), r => publicView(r));
+  const get: AgentRuns['get'] = runId => Effect.andThen(find(runId), Effect.map(scrub(runId), publicView));
   const submit: AgentRuns['submit'] = original => {
     const input = copy(original);
     return Effect.gen(function* () {
@@ -92,7 +145,7 @@ export const makeAgentRuns = (driver: {
         if (previous.view.intent.inputDigest !== input.inputDigest || previous.view.intent.planId !== input.planId || previous.actor !== input.actor) {
           return yield* Effect.fail(new RunError('REQUEST_CONFLICT', 'This request ID already belongs to different input'));
         }
-        return publicView(previous);
+        return yield* get(previousId);
       }
       const runId = randomUUID();
       let noteLimit = 500;
@@ -179,6 +232,7 @@ export const makeAgentRuns = (driver: {
     get,
     list: input => Effect.gen(function* () {
       yield* Effect.try({ try: () => decodeOperationInput('listRuns', input), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
+      for (const id of receipts.keys()) yield* scrub(id);
       const sorted = [...receipts.values()].sort((a, b) => b.sequence - a.sequence || b.view.runId.localeCompare(a.view.runId));
       const offset = input.before === undefined ? 0 : sorted.findIndex(r => r.view.runId === input.before) + 1;
       if (input.before !== undefined && offset === 0) return yield* Effect.fail(new RunError('UNKNOWN_RUN', 'Unknown run cursor'));
@@ -200,7 +254,7 @@ export const makeAgentRuns = (driver: {
       const set = listeners.get(runId) ?? new Set();
       listeners.set(runId, set); set.add(listener);
       const receipt = receipts.get(runId);
-      if (receipt) { try { listener(publicView(receipt)); } catch {} }
+      if (receipt) { try { listener(notificationView(receipt)); } catch {} }
       let disposed = false;
       return () => {
         if (disposed) return;

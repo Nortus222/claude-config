@@ -1,3 +1,4 @@
+import { isAccountChange, prepareAccountOperation, readAccountOperation } from '../operations/account.ts';
 import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -43,6 +44,8 @@ type Client = 'app' | 'cli' | 'mcp';
 
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
+  readonly agentStatus: (input: OperationInput<'agentStatus'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'agentStatus'>, SessionError>;
+  readonly accountState: (input: OperationInput<'accountState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'accountState'>, SessionError>;
   readonly runs: AgentRuns;
   // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
   readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
@@ -270,6 +273,16 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (isAccountChange(input.change)) {
+        if(active)return yield* Effect.fail(busy);
+        const change=input.change;
+        return yield* handle.exclusive(Effect.gen(function*(){
+          const generation=yield* (handle.generation??Effect.succeed(0));
+          const prepared=yield* prepareAccountOperation(handle,change,generation).pipe(Effect.provideContext(context));
+          if((yield* (handle.generation??Effect.succeed(0)))!==generation)return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Account observation changed'));
+          return yield* retainParityChange(prepared);
+        }));
+      }
       if (input.change.kind === 'syncDecision') {
         if (active) return yield* Effect.fail(busy);
         const change = input.change;
@@ -520,6 +533,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const progressListeners = new Set<(runId: string, progress: RunProgress) => void>();
     yield* Effect.addFinalizer(() => Effect.sync(() => progressListeners.clear()));
     const agentRuns = yield* makeAgentRuns({
+      now: clock.now,
       start: (input, lifecycle) => apply(input.planId, input.actor, (runId, progress) => {
         for (const listener of progressListeners) { try { listener(runId, progress); } catch {} }
       }, lifecycle).pipe(Effect.map(result =>
@@ -576,7 +590,15 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       yield* unchanged;
       return result;
     }));
+    const accountRead = <N extends 'agentStatus'|'accountState'>(name:N,input:OperationInput<N>) => handle.exclusive(Effect.gen(function*(){
+      const generation=yield* (handle.generation??Effect.succeed(0)),inspection=yield* handle.inspection;
+      const result=yield* readAccountOperation(handle,name,input,generation).pipe(Effect.provideContext(context));
+      if((yield* (handle.generation??Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Account observation changed; inspect again'));
+      return result;
+    }));
     const session: AgentSession = {
+      agentStatus: input=>accountRead('agentStatus',input),
+      accountState: input=>accountRead('accountState',input),
       watchSources: input => sourceRead('watchSources',input),
       inspectSourceDiff: input => sourceRead('inspectSourceDiff',input),
       pinImpact: input => sourceRead('pinImpact',input),

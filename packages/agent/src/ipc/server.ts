@@ -17,7 +17,7 @@ import { operationDefinitions, decodeOperationOutput, capabilityInventory, proje
 import { operationDigest, RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
 import {
-  decodeHostedState, decodeSignInResult, decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
+  toWireHostedState, decodeSignInResult, decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
   type AppRuntime, type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
 } from './protocol.ts';
 import { SessionError, type AgentSession } from './session.ts';
@@ -319,7 +319,7 @@ export const serveIpc = (input: {
       if (client === 'mcp' && !['hello', 'operation'].includes(request.command)) return Effect.fail(new SessionError('UNAUTHORIZED', 'MCP connections use shared operations only; open the app for consent and service management.'));
       const hosted = handle.hosted;
       const hostedResult = (effect: Effect.Effect<unknown, unknown>) => Effect.andThen(effect,
-        Effect.map(hosted?.state ?? Effect.succeed(disabledHostedState), (s) => ({ result: decodeHostedState(s) })));
+        Effect.map(hosted?.state ?? Effect.succeed(disabledHostedState), (s) => ({ result: toWireHostedState(s) })));
       const unavailable = Effect.fail(new SessionError('NOT_SIGNED_IN', 'Hosted mode is not configured'));
       switch (request.command) {
         case 'operation': return Effect.gen(function* () {
@@ -332,6 +332,8 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'agentStatus': result = yield* session.agentStatus(request.input); break;
+            case 'accountState': result = yield* session.accountState(request.input); break;
             case 'watchSources': result = yield* session.watchSources(request.input); break;
             case 'inspectSourceDiff': result = yield* session.inspectSourceDiff(request.input); break;
             case 'pinImpact': result = yield* session.pinImpact(request.input); break;

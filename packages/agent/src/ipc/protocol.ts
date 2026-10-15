@@ -102,6 +102,8 @@ export const HostedStateSchema = Schema.Struct({
   pollAfter: RevisionNumberSchema, error: Schema.NullOr(Schema.Literals(HOSTED_FAILURE_CODES)),
 });
 export const decodeSignInResult = Schema.decodeUnknownSync(SignInResultSchema, strict);
+// Internal owner metadata must not change the existing app/CLI response contract.
+export const toWireHostedState = Schema.decodeUnknownSync(HostedStateSchema, { onExcessProperty: 'ignore' });
 export const decodeHostedState = Schema.decodeUnknownSync(HostedStateSchema, strict);
 export type WireHostedState = typeof HostedStateSchema.Type;
 const decodeRequestSchema = Schema.decodeUnknownSync(RequestSchema, strict);

@@ -23,12 +23,12 @@ import type { AgentStateStore, Policy } from './state.ts';
 // Bodies assume apply.lock and the job permit are held. They never schedule follow-up jobs.
 export type AgentMutationBodies = {
   readonly decideAll: (decisions: ReadonlyArray<Decision>, actor: Actor) => Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure>;
-  readonly resume: (actor: Actor) => Effect.Effect<void, FsFailed>;
+  readonly resume: (actor: Actor) => Effect.Effect<Effect.Success<ReturnType<typeof resume>>, Effect.Error<ReturnType<typeof resume>>>;
   readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<void, FsFailed | HostedFailure>;
   readonly hosted?: {
     readonly signIn: HostedRuntime['signIn'];
     readonly signOut: HostedRuntime['signOut'];
-    readonly sync: () => Effect.Effect<void, unknown>;
+    readonly sync: () => HostedRuntime['sync'];
     readonly machine: HostedRuntime['machine'];
   };
 };

@@ -36,7 +36,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -189,6 +189,33 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} account and policy operations use authenticated MCP`, {timeout:30000}, async t => {
+    const s=await agent();t.after(s.close);
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    for(const section of ['status','pending','drift','conflicts']) {
+      const result=output('agentStatus',await client.call('agentStatus',{section,limit:1}));
+      assert.equal(result.section,section);assert.ok(result.items.length<=1);
+    }
+    for(const section of ['account','setups','machine']) {
+      const result=output('accountState',await client.call('accountState',{section,limit:1}));
+      assert.equal(result.section,section);assert.equal(result.enabled,false);
+    }
+    assert.equal((await client.call('accountState',{section:'account',token:'secret'})).result.isError,true);
+    assert.equal((await client.call('agentStatus',{section:'pending',limit:101})).result.isError,true);
+    for(const change of [{kind:'setPolicy',policy:'manual'},{kind:'resume'}]) {
+      const preview=output('previewChange',await client.call('previewChange',{change}));
+      const request={planId:preview.planId,requestId:`account-${change.kind}`};
+      const accepted=output('applyChange',await client.call('applyChange',request));
+      let run=accepted.run;
+      for(let i=0;i<200 && !run.result;i++){await new Promise(r=>setTimeout(r,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
+      assert.equal(run.state,'succeeded');assert.equal(run.parity.kind,change.kind);
+      assert.equal(output('applyChange',await client.call('applyChange',request)).run.runId,run.runId);
+    }
+    const status=output('agentStatus',await client.call('agentStatus',{section:'status'}));assert.equal(status.items[0].policy,'manual');
+    assert.equal((await client.call('previewChange',{change:{kind:'signIn'}})).result.isError,true);
+    assert.equal((await client.call('previewChange',{change:{kind:'pause'}})).result.isError,true);
+    assert.doesNotMatch(JSON.stringify(client.records.filter(r=>r.result?.structuredContent)),/nmt_|userCode|pendingId/);
+  });
   test(`${runtime}: ${modern ? 'modern' : 'legacy'} trusted local edits use authenticated MCP`, {timeout:30000}, async t => {
     const s=await agent('app',{localSource:true});t.after(s.close);
     const id=sourceIdentity(pathToFileURL(s.m.paths.repo).href);

@@ -590,3 +590,19 @@ test('invalid local reporting preferences fail before HTTP device start', async 
   }
   assert.deepEqual(f.requests, []);
 });
+
+test('machine persistence projection keeps exact pending patches separate from confirmed state across offline restart', async t => {
+  const f=await fixture(t);await f.signIn();
+  await run(f.client.enqueueMachine({name:'Work',reportStatus:false}));
+  let state=await run(f.client.state);
+  assert.equal(state.machinePersistence,'locally-queued');assert.equal(state.machine!.reportStatus,false);assert.equal(state.confirmedMachine!.reportStatus,true);
+  assert.deepEqual(state.pendingMachinePatches,[{name:'Work',reportStatus:false}]);
+  f.actions.push(()=>Effect.fail(new HostedFailure({code:'network'})));
+  await assert.rejects(run(f.client.sync()));await f.restart();
+  state=await run(f.client.state);assert.equal(state.machinePersistence,'locally-queued');assert.equal(state.confirmedMachine!.reportStatus,true);
+  assert.deepEqual(state.pendingMachinePatches,[{name:'Work',reportStatus:false}]);
+  f.advance(1000000);f.setResponse(delta({machine:{policy:'auto-apply',reportStatus:false}}));
+  await run(f.client.sync());state=await run(f.client.state);
+  assert.equal(state.machinePersistence,'confirmed');assert.deepEqual(state.pendingMachinePatches,[]);assert.equal(state.confirmedMachine!.reportStatus,false);
+  assert.doesNotMatch(JSON.stringify(state),/nmt_|pendingId|userCode/);
+});

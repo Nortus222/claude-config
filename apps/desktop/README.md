@@ -29,12 +29,14 @@ owned registrations through the app lifecycle. The installed app is required for
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
 packaging targets are unvalidated, and Windows has no supported agent IPC.
 
-The app exposes eighteen machine operations:
+The app exposes twenty machine operations:
 
 | MCP tool | Behavior |
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
 | `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
+| `nortuscc_agent_status` | Bounded status, pending, drift and conflicts |
+| `nortuscc_account_state` | Account, setups and machine metadata with queued versus confirmed persistence |
 | `nortuscc_inspect_setups` | Known setup identities and trust status |
 | `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
 | `nortuscc_prepare_trust_request` | Existing app repository trust action; grants no consent |

@@ -45,9 +45,9 @@ export const engineCapabilityCoverage = {
   sourceIgnoreUnignore: available('source-watch/documents.ts and operations/sources.ts', ['previewChange','applyChange','getRun'], 'Author ignore/unignore edits only suppress source notifications; machine installation policy remains separate.'),
   changelogDraft: available('source-watch/changelog.ts', ['draftChangelog'], 'Read-only accepted revision draft with validated added and ignored selections.'),
   captureCommitPush: remaining('src/commands/capture.ts and push.ts', 'Author publication workflow', 'Existing CLI capture/commit/push is not reusable profile publication; explicit publication authority remains necessary.'),
-  hostedAccount: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Sign-in/out, recovery and sync retain credential ownership and app device-flow actions.'),
-  hostedMachineMetadata: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Machine name/reporting and durable outbox are metadata, not personal configuration sharing.'),
-  agentPolicyResume: remaining('agent/agent.ts', parity, 'Manual/automatic policy and explicit resume are distinct from cancellation and require dedicated semantics.'),
+  hostedAccount: available('hosted-client/client.ts and operations/account.ts', ['accountState','previewChange','applyChange','getRun'], 'Existing account owner and device flow; bounded challenge retention and explicit queued metadata.'),
+  hostedMachineMetadata: available('hosted-client/client.ts and operations/account.ts', ['accountState','previewChange','applyChange'], 'Exact machine metadata patches queue through the existing outbox; reads distinguish effective values from last authoritative values.'),
+  agentPolicyResume: available('agent/agent.ts and operations/account.ts', ['agentStatus','previewChange','applyChange'], 'Manual, notify and auto-apply retain policy semantics; resume clears failure pause without changing policy. No user pause or trust grant.'),
   skillCandidateDiscovery: available('agent/skill-operations.ts', ['resolveSkillCandidate', 'previewChange'], 'Bounded source-specific metadata discovery and exact side-effect-free tentative machine declaration preview.'),
   skillAddition: available('agent/skill-addition.ts', ['applyChange', 'getRun', 'listRuns', 'cancelRun'], 'Durable machine declaration, accepted content verification and selected native catalog evidence.'),
   arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Physical general skill removal', 'Enablement and declaration removal change intent; general physical deletion has no supported owner.'),
@@ -60,6 +60,8 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
+  agentStatus: {state:'available'}, accountState: {state:'available'},
+  setPolicy: {state:'available'}, resume: {state:'available'}, signIn: {state:'available'}, signOut: {state:'available'}, syncAccount: {state:'available'}, patchMachineMetadata: {state:'available'},
   sourceDecision: {state:'available'}, watchSources: {state:'available'}, inspectSourceDiff: {state:'available'}, pinImpact: {state:'available'}, draftChangelog: {state:'available'},
   inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
