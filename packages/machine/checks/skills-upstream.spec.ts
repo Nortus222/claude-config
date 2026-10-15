@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -323,4 +323,33 @@ test('addition fetch refs follow upstream tree changes while legacy refs and act
   assert.deepEqual(followed.outdated.map(s => s.name), ['addition']); assert.deepEqual(followed.offPin?.map(s => s.name), ['legacy']);
   const pinned = planUpdates({ ...input, pins: new Map([[source, sha]]) });
   assert.deepEqual(pinned.current.map(s => s.name), ['addition', 'legacy']); assert.deepEqual(pinned.outdated, []);
+});
+
+import { Fs, FsFailed, Processes, hasVerifiedAdoption } from '../src/index.ts';
+test('verified available offers bind actual native metadata and reject directory aliases, name collisions and missing metadata', async () => {
+  for (const kind of ['matching','alias','collision','missing','cleanup'] as const) {
+    const m = skillsMachine(); const src = join(m.home,'metadata-source'); mkdirSync(src); git(src,'init','-q');
+    for (const name of ['known','offer','other']) {
+      const selector = name === 'offer' && (kind === 'alias' || kind === 'collision') ? 'native-offer' : name === 'other' && kind === 'collision' ? 'offer' : name;
+      mkdirSync(join(src,'skills',name),{ recursive:true });
+      writeFileSync(join(src,'skills',name,'SKILL.md'),kind === 'missing' && name === 'offer' ? '# no native metadata\n' : `---\nname: ${selector}\ndescription: Fixture\n---\n# ${name}\n`);
+    }
+    git(src,'add','.'); git(src,'commit','-qm','metadata');
+    mkdirSync(join(m.paths.agentsSkills,'known'),{ recursive:true });
+    writeFileSync(join(m.paths.agentsSkills,'..','.skill-lock.json'),JSON.stringify({ skills:{ known:{ source:'o/r',sourceUrl:pathToFileURL(src).href,skillPath:'skills/known/SKILL.md',skillFolderHash:git(src,'rev-parse','HEAD:skills/known') } } }));
+    const native = Layer.effect(Processes,Effect.gen(function* () { const real = yield* Processes; return { ...real,run:(command:import('../src/index.ts').Command) => real.run({ ...command,args:command.args.map(arg => arg === 'https://github.com/o/r.git' ? pathToFileURL(src).href : arg) }) }; })).pipe(Layer.provide(nodeProcesses()));
+    const desired: DesiredConfig = { files:[],integrations:[],allow:{},issues:[],skills:[] };
+    const report = await Effect.runPromise(Effect.gen(function* () { const fs = yield* Fs; return yield* inspectUpdates(desired,{ verifyAdoption:true }).pipe(Effect.provideService(Fs,{ ...fs,remove:path => kind === 'cleanup' && path.includes('/candidates-') ? Effect.fail(new FsFailed({ op:'cleanup',path,reason:'PRIVATE retention failure' })) : fs.remove(path) })); }).pipe(Effect.provide(Layer.mergeAll(m.layer,native))));
+    const offer = report.items.find(item => item.label === 'offer')!;
+    assert.equal(hasVerifiedAdoption(offer),kind === 'matching',kind);
+    assert.ok(offer.facts?.includes(`offered-tree:${git(src,'rev-parse','HEAD:skills/offer')}`));
+    if (kind === 'matching') {
+      const evidence = JSON.parse(offer.facts!.find(fact => fact.startsWith('native-adoption:'))!.slice('native-adoption:'.length));
+      assert.equal(evidence.revision,git(src,'rev-parse','HEAD')); assert.equal(evidence.sourceDir,'skills/offer'); assert.equal(evidence.selectorName,'offer'); assert.equal(evidence.installedName,'offer'); assert.equal(evidence.blob,git(src,'rev-parse','HEAD:skills/offer/SKILL.md'));
+    }
+    if (kind === 'cleanup') {
+      assert.equal(report.sourceFailures?.[0]?.reason,'cleanup-failed'); assert.ok(report.sourceFailures?.[0]?.retainedDirectory?.includes('/candidates-')); assert.equal(report.probeErrors.length,1);
+    } else assert.deepEqual(readdirSync(join(m.paths.stateRoot,'tmp')),[]);
+    rmSync(m.home,{ recursive:true,force:true });
+  }
 });

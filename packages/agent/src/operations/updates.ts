@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { parseSkillsManifest, normalizeSkillSource } from '@nortuscc/profile-engine';
-import { addCommand, authorDigest, Backups, backupsForRun, bindAuthorCheckout, canonical, emitManifest, executeAuthorEdit, Fs, inspectUpdates,
-  installedSkillNames, machinePaths, MANIFEST_FILE, plan, prepareUpdateManifest, Processes, readSkillLockEvidence, selectAll, skillsDomain, skillsUpdateDomain, additionLockEntry,
-  SKILL_STEP, skillNamesOf, updateManifestGroups, validateAuthorBinding,
+import { addCommand, authorDigest, Backups, backupsForRun, bindAuthorCheckout, canonical, executeUpdateManifest, Fs, inspectUpdates,
+  installedSkillNames, machinePaths, MANIFEST_FILE, plan, prepareUpdateManifest, Processes, readSkillLockEvidence, selectAll, skillsDomain, skillsUpdateDomain, additionLockEntry, hasVerifiedAdoption,
+  SKILL_STEP, skillNamesOf, validateAuthorBinding,
   type MachinePathsValue, type MachineReport, type Plan, type PreparedAuthorEdit, type Progress } from '@nortuscc/machine';
 import { checkoutGroups, decodeSyncState } from '@nortuscc/sync';
 import { AgentClock } from '../clock.ts';
@@ -21,7 +21,7 @@ const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author ch
 const failed = () => new SessionError('INTERNAL', 'Update is incomplete; inspect machine effects, author changes and backups before previewing again');
 export const ADDITION_REPAIR = 'Resolve this source and skill with resolveSkillCandidate, review previewChange(addSkill), then applyChange for native verification';
 export const LEGACY_NATIVE_PREREQUISITE = 'Exact legacy source and native selector evidence is required; resolveSkillCandidate then previewChange(addSkill) and applyChange';
-const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8 }).pipe(Effect.timeout('20 seconds'));
+const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8, verifyAdoption: true }).pipe(Effect.timeout('20 seconds'));
 
 export const inspectUpdateOperations = (inspection: JobInspection | undefined, generation: number, input: OperationInput<'inspectUpdates'>): Effect.Effect<OperationOutput<'inspectUpdates'>, SessionError, AgentServices> => Effect.gen(function* () {
   const args = yield* Effect.try({ try: () => decodeOperationInput('inspectUpdates', input), catch: () => new SessionError('INVALID_REQUEST', 'Invalid update inspection') });
@@ -43,13 +43,14 @@ export const inspectUpdateOperations = (inspection: JobInspection | undefined, g
     const addition = declaration?.targets !== undefined;
     const tree = row.facts?.find(f => /^offered-tree:[a-f0-9]{40}$/.test(f))?.slice(13);
     const revision = row.state === 'off-pin' ? declaration?.pin?.ref : undefined;
-    const exactLegacy = row.state === 'available' || additionLockEntry(acceptedLock.success.lock,row.label)?.selectorName === row.label;
-    const repairRoute = addition ? 'addition' as const : exactLegacy && ['available','off-pin','gone','outdated'].includes(row.state) ? 'reconcile' as const : 'unavailable' as const;
+    const adoptionPrerequisite = row.state === 'available' && !hasVerifiedAdoption(row);
+    const exactLegacy = row.state === 'available' ? hasVerifiedAdoption(row) : additionLockEntry(acceptedLock.success.lock,row.label)?.selectorName === row.label;
+    const repairRoute = addition || adoptionPrerequisite ? 'addition' as const : exactLegacy && ['available','off-pin','gone','outdated'].includes(row.state) ? 'reconcile' as const : 'unavailable' as const;
     const item = { id: `skill:${source}/${row.label}`, key: row.key, source, name: row.label,
       state: row.state as OperationOutput<'inspectUpdates'>['items'][number]['state'], targets: declaration?.targets ?? ['claude', 'codex'] as const,
       policy: !declaration?.pin ? 'upstream' as const : declaration.pin.from.layer === 'machine' ? 'personal-pin' as const : 'source-pin' as const,
       offered: tree ? { kind: 'tree' as const, digest: tree } : revision && /^[a-f0-9]{40}$/.test(revision) ? { kind: 'revision' as const, digest: revision } : null,
-      repairRoute, ...(addition ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}) };
+      repairRoute, ...(addition || adoptionPrerequisite ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}) };
     if ([item.id,item.key,item.source,item.name].some(v => !safeOwnerString(v))) return { generation: String(generation), items: [], nextCursor: null, unavailable: true, limitReason: 'unsafe-owner-data' as const };
     items.push(item);
   }
@@ -85,8 +86,8 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
   if (rows.some(row => change.only.includes(row.key) && row.group && normalizeSkillSource(row.group) !== row.group)) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE',LEGACY_NATIVE_PREREQUISITE));
   const legacy = plan('update', report, selection, [skillsDomain]);
   const selectedRows = report.items.filter(row => change.only.includes(row.key));
-  const invalidLegacy = selectedRows.filter(row => inspection.desired.skills.find(s => s.name === row.label)?.targets === undefined && row.state !== 'available' && ['outdated','gone','off-pin'].includes(row.state) &&
-    (!additionLockEntry(raw.lock,row.label) || additionLockEntry(raw.lock,row.label)?.selectorName !== row.label || normalizeSkillSource(row.group) !== row.group));
+  const invalidLegacy = selectedRows.filter(row => inspection.desired.skills.find(s => s.name === row.label)?.targets === undefined && (row.state === 'available' ? !hasVerifiedAdoption(row) : ['outdated','gone','off-pin'].includes(row.state) &&
+    (!additionLockEntry(raw.lock,row.label) || additionLockEntry(raw.lock,row.label)?.selectorName !== row.label || normalizeSkillSource(row.group) !== row.group)));
   const blockedNames = new Set(invalidLegacy.map(row => row.label));
   const blocked = legacy.steps.filter(step => skillNamesOf(step).some(name => blockedNames.has(name)));
   let planned: Plan = { ...legacy, steps: legacy.steps.filter(step => step.key !== SKILL_STEP.manifest && !blocked.includes(step)).map(step => step.key === SKILL_STEP.expose ? { ...step, touches: [...new Set(legacy.steps.filter(s => s.key !== SKILL_STEP.remove && s.key !== SKILL_STEP.manifest && s.key !== SKILL_STEP.expose).flatMap(s => s.touches))] } : step),
@@ -137,12 +138,8 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
       if (step.key === SKILL_STEP.manifest) {
         if (!authorEdit) return { ok: false };
         yield* choices;
-        const { lock } = yield* readSkillLockEvidence;
-        const names = yield* installedSkillNames;
-        const prunedNames = planned.steps.filter(s => s.key === SKILL_STEP.remove).flatMap(skillNamesOf).filter(name => !names.includes(name));
-        const groups = updateManifestGroups({ desired: inspection.desired.skills, lock, installed: names, prunedNames, heldManifestGroups, heldItemIds: Object.keys(holds) });
-        if (emitManifest(groups) !== authorEdit.documents[0]?.text) return { ok: false, note: 'Observed outcomes differ from the reviewed author proposal; preview again' };
-        const result = yield* executeAuthorEdit(authorEdit,signal,{ pending: () => checkpoint(), committed: () => commit(SKILL_STEP.manifest) });
+        const result = yield* executeUpdateManifest({ edit:authorEdit,desired:inspection.desired,selected:planned,heldManifestGroups,heldItemIds:Object.keys(holds) },signal,
+          { pending:() => checkpoint(),committed:() => commit(SKILL_STEP.manifest) },choices);
         return { ok: !result.remainingPaths.length };
       }
       return yield* nativeDomain.run(step,input).pipe(Effect.provideService(Processes,{ ...processes, run: command => {

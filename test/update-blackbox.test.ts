@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,7 @@ function upstream() {
 
 // Models the installer's surface: the shared store, the lock, and Claude's links.
 const FAKE_NPX = `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const argv = process.argv.slice(2);
@@ -59,6 +60,12 @@ if (verb === 'add') {
   for (const n of names(3)) { rmSync(join(store, n), { recursive: true, force: true }); rmSync(claudeLink(n), { recursive: true, force: true }); delete lock.skills[n]; }
 }
 writeFileSync(lockPath, JSON.stringify(lock));
+const authorChange = process.env.NORTUSCC_TEST_AUTHOR_CHANGE;
+const repo = process.env.NORTUSCC_REPO_DIR;
+if (authorChange === 'bytes') writeFileSync(join(repo,'skills-manifest.txt'),'# external author edit\\n[o/r]\\nstale\\n');
+if (authorChange === 'index') execFileSync('git',['-C',repo,'update-index','--chmod=+x','skills-manifest.txt']);
+if (authorChange === 'head') execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=f@f','commit','--allow-empty','-qm','external head']);
+if (authorChange === 'git') rmSync(join(repo,'.git'),{ recursive:true,force:true });
 `;
 
 type Trees = Record<'stale' | 'fresh' | 'wizard', string>;
@@ -74,6 +81,7 @@ function machine(options: { installed: Record<string, string>; manifest: string;
   };
   for (const dir of [m.repo, m.claude, m.codex, m.store, m.bin]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(m.repo, 'skills-manifest.txt'), options.manifest);
+  git(m.repo,'init','-q'); git(m.repo,'add','.'); git(m.repo,'commit','-qm','fixture');
   const sourceUrl = options.unreachable ? `file://${join(home, 'missing')}` : up.url;
   const entry = (name: string, hash: string) => ({ source: 'o/r', sourceUrl, skillPath: `s/${name}/SKILL.md`, skillFolderHash: hash });
   const lock: Record<string, object> = { ...options.extraLock };
@@ -213,4 +221,23 @@ test('--check with an action flag is a usage error', async () => {
 
 test("no run rewrites the checkout's own skills-manifest.txt", () => {
   assert.equal(hashOf(CHECKOUT_MANIFEST), checkoutBefore);
+});
+
+
+test('CLI author update refuses an unusable checkout before native effects', async () => {
+ const m = machine({ installed:{ stale:'old0000aaaa' },manifest:'[o/r]\nstale\n' }); const before = hashOf(join(m.repo,'skills-manifest.txt')); rmSync(join(m.repo,'.git'),{ recursive:true,force:true });
+ const result = await update(m,['--yes','--add','wizard']); assert.equal(result.code,1); assert.deepEqual(calls(m),[]); assert.equal(hashOf(join(m.repo,'skills-manifest.txt')),before);
+ const refresh = machine({ installed:{ stale:'old0000aaaa' },manifest:'[o/r]\nstale\n' }); rmSync(join(refresh.repo,'.git'),{ recursive:true,force:true });
+ assert.equal((await update(refresh,['--yes'])).code,0); assert.ok(calls(refresh).some(call => call[2] === 'update'));
+});
+test('CLI author update never replaces externally changed bytes, index, HEAD or checkout after machine effects', async () => {
+ for (const change of ['bytes','index','head','git']) {
+  const m = machine({ installed:{ stale:'old0000aaaa' },manifest:'[o/r]\nstale\n' }); const result = await update(m,['--yes','--add','wizard'],{ NORTUSCC_TEST_AUTHOR_CHANGE:change });
+  assert.equal(result.code,1,change); assert.ok(calls(m).some(call => call[2] === 'add')); const manifest = readFileSync(join(m.repo,'skills-manifest.txt'),'utf8'); assert.doesNotMatch(manifest,/^wizard$/m,change); if (change === 'bytes') assert.match(manifest,/external author edit/);
+ }
+});
+
+test('CLI partial adoption preserves dirty author bytes and still reports machine backups', async () => {
+ const m = machine({ installed:{ stale:'old0000aaaa' },manifest:'[o/r]\nstale\n' }); const before = '# dirty author bytes\n[o/r]\nstale\n'; writeFileSync(join(m.repo,'skills-manifest.txt'),before);
+ const result = await update(m,['--yes','--add','wizard'],{ NORTUSCC_TEST_FAIL:'add' }); assert.equal(result.code,1); assert.equal(readFileSync(join(m.repo,'skills-manifest.txt'),'utf8'),before); assert.match(result.stdout,/backed up ->/); assert.ok(calls(m).some(call => call[2] === 'update'));
 });

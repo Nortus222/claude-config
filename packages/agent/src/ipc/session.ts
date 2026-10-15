@@ -506,7 +506,18 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }),
     });
     const session: AgentSession = {
-      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => Effect.gen(function* () { return yield* inspectUpdateOperations(yield* handle.inspection, yield* (handle.generation ?? Effect.succeed(0)), input).pipe(Effect.provideContext(context)); }), inspectIntent: intentOperations.inspectIntent,
+      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
+        const generation = yield* (handle.generation ?? Effect.succeed(0));
+        const inspection = yield* handle.inspection;
+        const unchanged = Effect.gen(function* () {
+          if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection)
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The update inspection changed; inspect again'));
+        });
+        yield* unchanged;
+        const result = yield* inspectUpdateOperations(inspection,generation,input).pipe(Effect.provideContext(context));
+        yield* unchanged;
+        return result;
+      })), inspectIntent: intentOperations.inspectIntent,
       onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,

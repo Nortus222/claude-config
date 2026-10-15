@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { parseSkillsManifest, type SkillGroup, TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
+import { TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import { Backups } from '../backups.ts';
 import type { Domain, MachineReport, Observed, PlanKind, Selection, Skipped, Step, StepResult } from '../model.ts';
 import { Fs } from '../fs.ts';
@@ -10,6 +10,7 @@ import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } 
 import { MANIFEST_FILE, emitManifest, groupsOf, manifestOutcome, sourceOf, updateManifestGroups } from './manifest.ts';
 import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
 import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, readSkillLockEvidence, skillLockPath, skillExposure } from './store.ts';
+import { hasVerifiedAdoption } from './upstream.ts';
 import { verifyPinned } from './verify.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
@@ -260,20 +261,20 @@ const reExpose = (step: Step, report: MachineReport, scopedRemoval = false) => E
   return { ok, note: parts.join('; ') };
 });
 
-// Regenerates with the shrink guard at the explicitly supplied author root, or the legacy repo root.
-const writeManifest = (report: MachineReport, author?: { readonly repo: string; readonly heldManifestGroups: readonly SkillGroup[]; readonly heldItemIds?: readonly string[] }) => Effect.gen(function* () {
+// Legacy direct-domain regeneration retains the shrink guard; explicit author updates use the bound owner.
+const writeManifest = (report: MachineReport) => Effect.gen(function* () {
   const fs = yield* Fs;
   const paths = yield* MachinePaths;
   const { lock } = yield* readSkillLockEvidence;
   const installed = yield* installedSkillNames;
   const present = new Set(installed);
   const personal = new Set(report.desired.skills.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
-  const before = author ? parseSkillsManifest(yield* fs.readText(join(author.repo, MANIFEST_FILE))) : groupsOf(report.desired.skills.filter(s => !personal.has(s.name)));
+  const before = groupsOf(report.desired.skills.filter(s => !personal.has(s.name)));
   const pruned = report.items.filter((i) => i.domain === 'skills' && i.state === 'gone' && !present.has(i.label)).map((i) => i.label);
-  const groups = updateManifestGroups({ desired: report.desired.skills, lock, installed, prunedNames: pruned, heldManifestGroups: author?.heldManifestGroups, heldItemIds: author?.heldItemIds });
+  const groups = updateManifestGroups({ desired: report.desired.skills, lock, installed, prunedNames: pruned });
   const outcome = manifestOutcome({ before, groups, prunedNames: pruned });
   if (!outcome.write) return { ok: true, note: `left alone — ${outcome.reason}` };
-  const target = join(author?.repo ?? paths.repo, MANIFEST_FILE);
+  const target = join(paths.repo, MANIFEST_FILE);
   yield* (yield* Backups).preserve(target, join('author', MANIFEST_FILE));
   yield* fs.writeTextAtomic(target, emitManifest(groups));
   return { ok: true, note: `written — ${outcome.reason}` };
@@ -339,10 +340,9 @@ export const skillsDomain: Domain<Fs | MachinePaths | Processes | Backups> = {
 export const skillsUpdateDomain = (targets: readonly Target[]): typeof skillsDomain => ({
   ...skillsDomain,
   steps: (items, selection, kind, desired) => { const result = skillSteps(items,selection,kind,desired); return { ...result, steps: result.steps.filter(step => step.key !== SKILL_STEP.manifest) }; },
-  run: (step,report) => runSkillStep(step,report,targets),
-});
-
-// CLI composition supplies its author root and adapted held declarations without writing the snapshot.
-export const skillsDomainWithManifest = (author: { readonly repo: string; readonly heldManifestGroups: readonly SkillGroup[]; readonly heldItemIds?: readonly string[] }): typeof skillsDomain => ({
-  ...skillsDomain, run: (step,report) => step.action === 'write-manifest' ? writeManifest(report,author) : skillsDomain.run(step,report),
+  run: (step,report) => {
+    if (step.key.startsWith(SKILL_STEP.install) && skillNamesOf(step).some(name => report.items.some(item => item.label === name && item.state === 'available' && !hasVerifiedAdoption(item))))
+      return Effect.succeed({ ok:false,note:'Exact native metadata is unavailable; resolveSkillCandidate, previewChange(addSkill), then applyChange' });
+    return runSkillStep(step,report,targets);
+  },
 });

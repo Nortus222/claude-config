@@ -22,7 +22,7 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean } = {}) => {
  const m = agentMachine();
  const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\none\ngone\n`;
  const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest } });
@@ -36,7 +36,7 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  for (const name of ['one','gone']) { lock.skills[name] = entry(name); m.write(join(m.paths.agentsSkills,name,'SKILL.md'),`# ${name}\n`); m.write(join(m.paths.claude,'skills',name,'SKILL.md'),`# old ${name}\n`); }
  if (options.additions) m.write(join(m.paths.stateRoot,'overrides.json'),JSON.stringify({ version: 2, skillAdditions: [{ source: 'owner/repo', name: 'one', targets: ['claude'] }] }));
  if (options.additions) { lock.skills['One'] = lock.skills.one; delete lock.skills.one; if (options.missingNative) delete lock.skills['One']; }
- m.write(lockPath,JSON.stringify(lock)); await m.trust(); const calls: Command[] = [];
+ m.write(lockPath,JSON.stringify(lock)); await m.trust(); const calls: Command[] = []; let metadataReads = 0;
  const compose = <T extends { repo: string }>(snapshot: T) => Effect.gen(function* () { const overrides = yield* Effect.promise(() => m.run(OverridesStore.use(store => store.read))); return { ...snapshot, desired: yield* loadProfile(snapshot.repo,{ overrides }).pipe(Effect.provide(nodeFiles)) }; });
  const source = Layer.succeed(SetupSource,{ ...setup.service,current: setup.service.current.pipe(Effect.flatMap(compose),Effect.orDie), load: revision => setup.service.load(revision).pipe(Effect.flatMap(compose),Effect.orDie), effective: decisions => setup.service.effective(decisions).pipe(Effect.flatMap(value => Effect.gen(function* () { return { ...value, applied: yield* compose(value.applied), effective: yield* compose(value.effective) }; })),Effect.orDie) });
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
@@ -44,6 +44,15 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
   const fake: Processes['Service'] = { ...processes, run: command => {
    if (command.cmd === 'git' && command.args[0] === 'clone') return Effect.succeed({ code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
+   if (command.cmd === 'git' && command.args[0] === '-c') {
+    const names = ['one','two','three'];
+    const blob = (n: string) => String(names.indexOf(n)+1).repeat(40);
+    const content = (n: string) => `---\nname: ${options.adoptionNames?.[n] ?? n}\ndescription: Fixture skill\n---\n# ${n}\n`;
+    if (command.args.includes('clone')) { metadataReads++; return Effect.succeed({ code:0,stdout:'',stderr:'' }); }
+    if (command.args.includes('rev-parse')) return Effect.succeed({ code:0,stdout:H,stderr:'' });
+    if (command.args.includes('ls-tree')) return Effect.succeed({ code:0,stdout:`040000 tree ${H}\ts\0` + names.map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${blob(n)}\ts/${n}/SKILL.md\0`).join(''),stderr:'' });
+    if (command.args.includes('cat-file')) { const n = names.find(n => command.args.at(-1) === blob(n))!; const text = content(n); return Effect.succeed({ code:0,stdout:command.args.includes('-s') ? String(Buffer.byteLength(text)) : text,stderr:'' }); }
+   }
    if (command.cmd !== 'npx') return processes.run(command);
    calls.push(command);
    return Effect.sync(() => {
@@ -63,11 +72,12 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
    const domains = () => [skillsDomain]; const handle = yield* startAgent(domains,{ deferStart: true }); const session = yield* makeSession(handle,{ signal: new AbortController().signal,domains });
    yield* session.inspect('mcp'); return yield* body(session);
   }).pipe(Effect.provideService(Processes,fake), Effect.provideService(Fs,{ ...fs,
+   remove:path => options.metadataCleanup && path.includes('/candidates-') ? Effect.fail(new FsFailed({ op:'cleanup',path,reason:'PRIVATE cleanup' })) : fs.remove(path),
    readBytes: path => options.fail === 'lock' && path === lockPath ? Effect.fail(new FsFailed({ op: 'read', path, reason: 'PRIVATE_READ' })) : fs.readBytes(path),
    writeTextAtomic: (path,text) => options.fail === 'author' && path.endsWith('/checkout/skills-manifest.txt') ? Effect.fail(new FsFailed({ op: 'write', path, reason: 'PRIVATE_AUTHOR' })) : fs.writeTextAtomic(path,text),
   }),Effect.provide(options.mapping === false ? agentSkillInstaller() : agentSkillInstaller({ home: dirname(m.paths.claude) })));
  })),source);
- return { m,setup,within,calls,lockPath };
+ return { m,setup,within,calls,lockPath,metadataReads:() => metadataReads };
 };
 const update = (only: string[],authorManifest = false) => ({ kind: 'update' as const, only, targets: ['claude'] as const, authorManifest });
 const submit = (session: AgentSession,planId: string,requestId = 'update') => Effect.gen(function* () {
@@ -80,7 +90,7 @@ const submit = (session: AgentSession,planId: string,requestId = 'update') => Ef
 test('bounded updates execute a source-qualified offer read, paginate and reject stale cursors', async () => {
  const f = await fixture(); await f.within(s => Effect.gen(function* () {
   const first = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1 })); assert.equal(first.items.length,1); assert.ok(first.nextCursor);
-  const all = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 })); assert.equal(all.items.find(i => i.name === 'two')?.offered?.digest,H); assert.equal(all.items.find(i => i.name === 'gone')?.state,'gone');
+  const all = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 })); assert.equal(all.items.find(i => i.name === 'two')?.offered?.digest,H); assert.equal(all.items.find(i => i.name === 'two')?.repairRoute,'reconcile'); assert.equal(all.items.find(i => i.name === 'gone')?.state,'gone');
   assert.ok(all.items.every(i => i.id === `skill:${i.source}/${i.name}`));
   const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })); assert.notEqual(first.items[0]?.id,next.items[0]?.id);
   f.m.write(f.lockPath,'{"skills":{}}'); assert.equal((yield* Effect.flip(s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })))).code,'UNKNOWN_PLAN');
@@ -179,4 +189,45 @@ test('an addition with missing native lock evidence remains unavailable for gene
   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); const item = read.items.find(item => item.name === 'one'); assert.equal(item?.source,'owner/repo'); assert.equal(item?.state,'local'); assert.equal(item?.repairRoute,'addition'); assert.equal(item?.offered,null);
   const p = yield* s.previewChange(update(['skill:one'])); assert.equal(p.plan.steps.length,0); assert.ok(p.plan.skipped.some(item => /native verification/.test(item.reason))); assert.equal(f.calls.length,0);
  }));
+});
+
+
+test('available adoption requires matching native metadata identity, including a same-source folder/name collision', async () => {
+ for (const adoptionNames of [{ two:'native-two' },{ two:'native-two',three:'two' }] as readonly Readonly<Record<string,string>>[]) {
+  const f = await fixture({ adoptionNames }); await f.within(s => Effect.gen(function* () {
+   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); const offer = read.items.find(i => i.name === 'two')!;
+   assert.equal(offer.repairRoute,'addition'); assert.match(offer.prerequisite!,/resolveSkillCandidate.*previewChange.*applyChange/);
+   const p = yield* s.previewChange(update(['skill:two'])); assert.equal(p.plan.steps.length,0); assert.ok(p.plan.skipped.some(i => /resolveSkillCandidate/.test(i.reason))); assert.equal(f.calls.length,0);
+  }));
+ }
+});
+
+test('update inspection refuses old inspection/new generation and changes during upstream observation', async () => {
+ for (const seam of ['inspection','upstream'] as const) {
+  const m = agentMachine(); let generation = 0;
+  const desired = { files:[],integrations:[],allow:{},issues:[],skills:[{ name:'one',source:'owner/repo',exact:false,optional:false,install:true,targets:['claude'] as const,from:{ layer:'base' as const,source:'skills-manifest.txt' } }] };
+  const old = { trusted:true,desired,paths:m.paths,report:{ desired,items:[],probeErrors:[] },domains:[skillsDomain],revision:null }; let live = old;
+  const change = () => { generation++; live = { ...old,desired:{ ...desired,skills:[{ ...desired.skills[0]!,targets:['codex'] as never }] } }; };
+  m.write(join(m.paths.agentsSkills,'one/SKILL.md'),'# one'); m.write(join(dirname(m.paths.agentsSkills),'.skill-lock.json'),JSON.stringify({ skills:{ one:{ source:'owner/repo',sourceUrl:'https://github.com/owner/repo.git',skillPath:'s/one/SKILL.md',skillFolderHash:H } } }));
+  let reads=0;
+  const handle = { inspection:Effect.sync(() => { const observed = live; if (seam === 'inspection' && reads++ === 0) change(); return observed; }),generation:Effect.sync(() => generation),request:() => Effect.void,exclusive:<A,E,R>(effect:Effect.Effect<A,E,R>) => effect } as unknown as import('../src/agent.ts').AgentHandle;
+  await m.run(Effect.scoped(Effect.gen(function* () { const s = yield* makeSession(handle,{ signal:new AbortController().signal,domains:() => [skillsDomain] }); const result = yield* Effect.result(s.inspectUpdates(decodeOperationInput('inspectUpdates',{}))); assert.equal(result._tag,'Failure'); if (result._tag === 'Failure') assert.equal(result.failure.code,'UNKNOWN_PLAN'); })).pipe(Effect.provideService(Processes,{ run:command => Effect.sync(() => { if (seam === 'upstream') change(); return { code:0,stdout:command.args[0] === 'ls-tree' ? `040000 tree ${H}\ts/one\0` + `100644 blob ${H}\ts/one/SKILL.md\0` : '',stderr:'' }; }) })));
+ }
+});
+
+
+test('accepted available adoption revalidates exact metadata evidence before effects', async () => {
+ const adoptionNames: Record<string,string> = {}; const f = await fixture({ adoptionNames }); await f.within(s => Effect.gen(function* () {
+  const p = yield* s.previewChange(update(['skill:two'])); assert.ok(p.plan.steps.some(step => step.touches.includes('skills/two')));
+  adoptionNames.two = 'new-selector'; const result = yield* Effect.result(s.runs.submit({ planId:p.planId,requestId:'metadata-stale',inputDigest:operationDigest(p.planId),actor:'mcp' })); assert.equal(result._tag,'Failure'); assert.equal(f.calls.length,0);
+ }));
+});
+
+
+test('candidate enrichment reads once per source and unconfirmed cleanup blocks every update effect', async () => {
+ const f = await fixture(); await f.within(s => Effect.gen(function* () { const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); assert.equal(read.items.filter(item => item.state === 'available').length,2); assert.equal(f.metadataReads(),1); }));
+ const uncertain = await fixture({ metadataCleanup:true }); await uncertain.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); assert.equal(read.unavailable,true); assert.deepEqual(read.items,[]); assert.doesNotMatch(JSON.stringify(read),/PRIVATE|candidates-/);
+  const preview = yield* Effect.result(s.previewChange(update(['skill:one']))); assert.equal(preview._tag,'Failure'); assert.equal(uncertain.calls.length,0);
+ })); rmSync(uncertain.m.root,{ recursive:true,force:true });
 });

@@ -4,11 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
-  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain, skillsDomainWithManifest,
-  type Observed, type Processes, type RepoNotFound, type SkillLock,
+  authorDigest, bindAuthorCheckout, canonical, executeUpdateManifest, installedSkillNames, prepareUpdateManifest, readSkillLockEvidence, stateStore, UpdateManifestRefused, validateAuthorBinding, backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
+  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
+  type PreparedAuthorEdit, type Observed, type Processes, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
-import { checkoutGroups, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
+import { checkoutGroups, decodeSyncState, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
 import { composeHeld } from '../machine.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { select } from '../select.ts';
@@ -288,10 +288,43 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // Reported after the run, once the manifest has reached the checkout.
     let manifestNote: string | undefined;
 
-    const authorRepo = holds?.checkout ?? (yield* MachinePaths).repo;
-    const authorGroups = parseSkillsManifest(yield* (yield* Fs).readText(join(authorRepo, MANIFEST_FILE)));
-    const updateDomain = skillsDomainWithManifest({ repo: authorRepo, heldItemIds: Object.keys(holds?.held ?? {}), heldManifestGroups: holds ? checkoutGroups([], authorGroups, holds.held) : [] });
-    yield* Stream.runForEach(execute(p, report, [updateDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
+    const paths = yield* MachinePaths; const fs = yield* Fs;
+    const authorRepo = holds?.checkout ?? paths.repo;
+    const syncPath = join(paths.stateRoot,'sync.json');
+    const syncBytes = yield* fs.readBytes(syncPath);
+    const acceptedHolds = yield* decodeSyncState(syncBytes === undefined ? undefined : new TextDecoder('utf-8',{ fatal:true }).decode(syncBytes),syncPath);
+    if (canonical(acceptedHolds) !== canonical(holds?.held ?? {})) return yield* Effect.fail(new Error('Sync choices changed; inspect and select again'));
+    const author = p.steps.some(step => step.key === SKILL_STEP.manifest) ? yield* bindAuthorCheckout({ ...paths,repo:authorRepo },[MANIFEST_FILE]) : undefined;
+    const authorGroups = author ? parseSkillsManifest(yield* fs.readText(join(author.realCheckout,MANIFEST_FILE))) : [];
+    const heldManifestGroups = checkoutGroups([],authorGroups,acceptedHolds); const heldItemIds = Object.keys(acceptedHolds);
+    const native = yield* readSkillLockEvidence; const installed = yield* installedSkillNames;
+    let prepared: PreparedAuthorEdit | undefined; let refusal: string | undefined;
+    if (author) {
+      const result = yield* Effect.result(prepareUpdateManifest({ author,desired,report,selected:p,heldManifestGroups,heldItemIds }));
+      if (result._tag === 'Success') prepared = result.success;
+      else if (result.failure instanceof UpdateManifestRefused) refusal = result.failure.reason;
+      else return yield* Effect.fail(result.failure);
+    }
+    const revalidateChoices = Effect.gen(function* () {
+      if (authorDigest(yield* fs.readBytes(syncPath)) !== authorDigest(syncBytes)) return yield* Effect.fail(new Error('Sync choices changed; inspect and select again'));
+    });
+    const updateDomain = { ...skillsDomain,run:(step:import('@nortuscc/machine').Step,input:import('@nortuscc/machine').MachineReport) => Effect.gen(function* () {
+      if (step.key !== SKILL_STEP.manifest) return yield* skillsDomain.run(step,input);
+      yield* revalidateChoices;
+      if (author) yield* validateAuthorBinding(author);
+      if (!prepared) return { ok:true,note:`left alone — ${refusal ?? 'no author change selected'}` };
+      const result = yield* executeUpdateManifest({ edit:prepared,desired,selected:p,heldManifestGroups,heldItemIds },deps.signal ?? new AbortController().signal,
+        { pending:() => Effect.void,committed:() => Effect.void },revalidateChoices);
+      const count = prepared.documents.length ? parseSkillsManifest(prepared.documents[0]!.text).reduce((count,group) => count+group.skills.length,0) : authorGroups.reduce((count,group) => count+group.skills.length,0);
+      return { ok:!result.remainingPaths.length,note:`written — ${count} skill(s)` };
+    }) };
+    const checkpoint = (event: Extract<import('@nortuscc/machine').Progress,{ type:'started' | 'finished' }>) => Effect.gen(function* () {
+      if (event.type !== 'started' || event.index !== 0) return;
+      yield* revalidateChoices;
+      if (author) yield* validateAuthorBinding(author);
+      if (authorDigest((yield* readSkillLockEvidence).bytes) !== authorDigest(native.bytes) || canonical(yield* installedSkillNames) !== canonical(installed)) return yield* Effect.fail(new Error('Machine update inputs changed; inspect and select again'));
+    });
+    yield* Stream.runForEach(execute(p, report, [updateDomain], { signal: deps.signal,checkpoint }), (event) => Effect.sync(() => {
       switch (event.type) {
         case 'started': {
           const key = event.step.key;
@@ -396,6 +429,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
   });
 
   return Effect.runPromise(program.pipe(
+    Effect.provide(stateStore),
     Effect.provide(deps.layer),
     Effect.catch((error: unknown) => Effect.sync(() => {
       console.error(`nortuscc: ${messageOf(error)}`);
