@@ -5,7 +5,9 @@ import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
 import { Processes } from '../processes.ts';
 import { lockRef, short } from './pins.ts';
-import { readSkillLock } from './store.ts';
+import { normalizeSkillSource } from '@nortuscc/profile-engine';
+import { readSkillCandidates, type SkillCandidate } from './candidates.ts';
+import { additionLockEntry, readSkillLock } from './store.ts';
 import { skillFolder } from './upstream.ts';
 
 // One entry of a pinned skill folder's tree; `path` is relative to the skill folder.
@@ -166,4 +168,33 @@ export const verifyPinned = (input: { source: string; sha: string; names: Readon
     }
   }
   return { failed, scripts };
+});
+
+// Local content comparison shared by preview and post-install verification.
+export const verifyInstalledSkillTree = (name: string, tree: readonly TreeEntry[], revision: string) => Effect.gen(function* () {
+  const installed = yield* installedHashes(name);
+  return installed ? compareInstall(tree, installed, revision) : ['installed files unreadable'];
+});
+
+// The selected tuple owns the fetch URL and path. Lock metadata is evidence, never fetch authority.
+export const verifyAcceptedSkill = (accepted: SkillCandidate, reader = readSkillCandidates): Effect.Effect<
+  { readonly verified: boolean; readonly problems: readonly string[] }, never, Fs | Processes | MachinePaths
+> => Effect.gen(function* () {
+  const lock = yield* readSkillLock;
+  const native = additionLockEntry(lock, accepted.installedName);
+  const meta = native?.selectorName === accepted.selectorName ? native.meta : undefined;
+  const skillPath = accepted.sourceDir === '.' ? 'SKILL.md' : `${accepted.sourceDir}/SKILL.md`;
+  if (!isRecord(meta) || normalizeSkillSource(str(meta.source) ?? '') !== accepted.source
+    || normalizeSkillSource(str(meta.sourceUrl) ?? '') !== accepted.source
+    || lockRef(meta) !== accepted.revision || meta.skillPath !== skillPath
+    || meta.skillFolderHash !== accepted.tree) return { verified: false, problems: ['installed lock does not match accepted source, revision, path and tree'] };
+  let tree: readonly TreeEntry[] | undefined;
+  const result = yield* reader({ source: accepted.source, revision: accepted.revision, observeTree: (candidate, entries) => {
+    if (candidate.source === accepted.source && candidate.revision === accepted.revision && candidate.sourceDir === accepted.sourceDir && candidate.selectorName === accepted.selectorName
+      && candidate.installedName === accepted.installedName && candidate.blob === accepted.blob
+      && candidate.tree === accepted.tree && candidate.internal === accepted.internal) tree = entries;
+  } });
+  if (!result.ok || result.source !== accepted.source || result.revision !== accepted.revision || !tree) return { verified: false, problems: [result.ok ? 'accepted metadata no longer matches' : `accepted source verification: ${result.reason}${result.retainedDirectory ? ` (${result.retainedDirectory})` : ''}`] };
+  const problems = yield* verifyInstalledSkillTree(accepted.installedName, tree, accepted.revision);
+  return { verified: problems.length === 0, problems };
 });

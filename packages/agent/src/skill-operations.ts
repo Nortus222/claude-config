@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { additionRunPlan } from './skill-addition.ts';
 import { Cause, Effect, Exit, Fiber, Layer } from 'effect';
 import {
-  canonical, Fs, MachinePaths, machinePaths, OverridesStore, Processes, readSkillCandidates,
-  sourceOf, skillLockPath, agentSkillsDirs, skillsDomain, inspectSkills, plan, selectAll, type Plan, type SkillCandidate,
+  additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, Processes, readSkillCandidates,
+  sourceOf, skillLockPath, agentSkillsDirs, inspectSkills, type Plan, type SkillCandidate,
 } from '@nortuscc/machine';
 import {
   loadProfile, normalizeSkillSource, ProfileFiles, ReadFailed, TARGETS,
@@ -27,7 +28,7 @@ const identity = (c: SkillCandidate) => canonical({ source: c.source, revision: 
 type Retained = { readonly candidate: SkillCandidate; readonly expires: number };
 export type AcceptedSkillPlan = {
   readonly preview: ChangePreview; readonly candidate: SkillCandidate; readonly desired: DesiredConfig;
-  readonly overrides: Input<MachineOverrides>; readonly baseline: DesiredConfig; readonly plan: Plan;
+  readonly overrides: Input<MachineOverrides>; readonly priorOverrides: Input<MachineOverrides>; readonly baseline: DesiredConfig; readonly plan: Plan;
   readonly generation: number; readonly expires: number;
 };
 
@@ -154,7 +155,8 @@ export const makeSkillOperations = (options: {
     const baseline = yield* loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(profileFiles));
     if (canonical(baseline) !== canonical(inspection.desired)) return yield* refuse('UNKNOWN_PLAN', 'The composed setup or overrides changed; inspect and resolve again');
     const pin = pinFor(baseline, c.source);
-    const refreshed = yield* reader({ source: c.source, ...(pin ? { revision: pin } : {}), timeoutMs: SKILL_OPERATION_LIMITS.sourceTimeoutMs });
+    let acceptedTree: readonly TreeEntry[] | undefined;
+    const refreshed = yield* reader({ source: c.source, ...(pin ? { revision: pin } : {}), timeoutMs: SKILL_OPERATION_LIMITS.sourceTimeoutMs, observeTree: (candidate, tree) => { if (identity(candidate) === identity(c)) acceptedTree = tree; } });
     if (!refreshed.ok) return yield* refuse('INSPECT_FAILED', refreshed.reason === 'cleanup-failed'
       ? `Skill source cleanup failed; retained directory: ${refreshed.retainedDirectory ?? 'unknown'}` : `Skill source review is unavailable: ${refreshed.reason}`);
     const current = refreshed.candidates.find(next => identity(next) === identity(c));
@@ -167,7 +169,7 @@ export const makeSkillOperations = (options: {
       if (name === c.installedName) {
         const kind = (yield* fs.stat(destination))?.kind;
         if (kind !== 'directory' && kind !== 'symlink') return yield* refuse('INVALID_REQUEST', 'The skill destination conflicts with a non-skill filesystem entry');
-        if (normalizeSkillSource(sourceOf(lock.skills[name]) ?? '') !== c.source) return yield* refuse('INVALID_REQUEST', 'An existing same-name skill conflicts with the selected source');
+        if (normalizeSkillSource(sourceOf(additionLockEntry(lock, name)?.meta) ?? '') !== c.source) return yield* refuse('INVALID_REQUEST', 'An existing same-name skill conflicts with the selected source');
       } else if (canonicalDestination !== undefined && (yield* fs.realPath(join(inspection.paths.agentsSkills, name))) === canonicalDestination) {
         return yield* refuse('INVALID_REQUEST', 'The selected installed name aliases an existing skill destination');
       }
@@ -200,21 +202,28 @@ export const makeSkillOperations = (options: {
     if (affectedSkills.length > 256 || affectedSkills.some(s => s.length > 500)) return yield* refuse('OVERSIZED', 'Source policy impact exceeds the supported preview bounds');
     const report = { desired: exact, ...yield* inspectSkills(exact).pipe(Effect.provide(machinePaths(inspection.paths))) };
     if (report.probeErrors.length) return yield* refuse('INSPECT_FAILED', 'Skill store or exposure is unreadable; repair machine access before adding skills');
-    const only = report.items.filter(i => i.label === c.installedName).map(i => i.key);
-    const selectedPlan = plan('apply', { ...report, items: report.items.filter(i => i.label === c.installedName) }, { ...selectAll, only, targets: change.targets }, [skillsDomain]);
-    // Refuse any planner expansion before retaining a preview that a future driver could consume.
-    if (selectedPlan.steps.length > 1 || selectedPlan.steps.some(s => s.touches.some(t => t !== `skills/${c.installedName}`))) return yield* refuse('PROFILE_INVALID', 'Skill planner expanded beyond the selected candidate');
+    const native = additionLockEntry(lock, c.installedName);
+    const meta = native?.meta as Record<string, unknown> | undefined;
+    const path = c.sourceDir === '.' ? 'SKILL.md' : `${c.sourceDir}/SKILL.md`;
+    const currentContent = acceptedTree && canonicalDestination !== undefined
+      ? (yield* verifyInstalledSkillTree(c.installedName, acceptedTree, c.revision)).length === 0 : false;
+    const needsInstall = report.items.some(i => i.label === c.installedName && i.disposition === 'apply')
+      || !currentContent || native?.selectorName !== c.selectorName || meta?.ref !== c.revision || meta?.skillPath !== path || meta?.skillFolderHash !== c.tree;
+    const selectedPlan: Plan = { kind: 'apply', skipped: [], steps: needsInstall ? [{
+      key: `skills:install:${c.source}#${c.revision}`, domain: 'skills', action: 'install-skills',
+      summary: `install ${c.installedName} at the accepted revision`, touches: [`skills/${c.installedName}`], interruptible: true, targets: after.targets,
+    }] : [] };
     if ((yield* clock.now).getTime() >= retained.expires) return yield* refuse('UNKNOWN_PLAN', 'Candidate expired during preview; resolve and review again');
     if (generation !== (yield* options.generation) || canonical(yield* store.read) !== canonical(overrides)
       || canonical(yield* loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(profileFiles))) !== canonical(baseline)) return yield* refuse('UNKNOWN_PLAN', 'The setup changed during preview; inspect and resolve again');
-    const preview: ChangePreview = { planId: randomUUID(), scope: { kind: 'machine' }, change, generation: String(generation), plan: selectedPlan, nextActions: [],
+    const preview: ChangePreview = { planId: randomUUID(), scope: { kind: 'machine' }, change, generation: String(generation), plan: additionRunPlan(selectedPlan, c.installedName), nextActions: [],
       skillAddition: { candidate: project(change.candidateId, c), declaration: { before, after, changed: before.length !== 1 || canonical(before[0]) !== canonical(after) },
-        ...(enable ? { enablement: { before: false, after: true } } : {}), installationTargets: change.targets,
+        ...(enable ? { enablement: { before: false, after: true } } : {}), installationTargets: after.targets,
         sharedStore: { codexScans: true, visibility: 'shared' }, pinImpact: { policy: pin ? selected.pin?.from.layer === 'machine' ? 'personal-pin' : 'source-pin' : 'upstream', revision: c.revision, affectedSkills }, nativeVerification: 'required' } };
     if (Buffer.byteLength(JSON.stringify(preview)) > SKILL_OPERATION_LIMITS.resultBytes) return yield* refuse('OVERSIZED', 'Skill preview exceeds its result bound');
     if (previews.size >= SKILL_OPERATION_LIMITS.retainedCandidates) return yield* refuse('BUSY', 'Skill preview retention limit reached; retry after previews expire');
     const checked = decodeOperationOutput('previewChange', preview);
-    previews.set(preview.planId, { preview: checked, candidate: c, desired: exact, baseline, overrides: tentative, plan: selectedPlan, generation, expires: retained.expires });
+    previews.set(preview.planId, { preview: checked, candidate: c, desired: exact, baseline, priorOverrides: overrides, overrides: tentative, plan: selectedPlan, generation, expires: retained.expires });
     return structuredClone(checked);
   })).pipe(Effect.provideContext(context), Effect.mapError(e => e instanceof SkillOperationError ? e : new SkillOperationError('INSPECT_FAILED', 'Skill preview could not read the machine')));
   return { resolveSkillCandidate, previewAddSkill: (input: { readonly scope: OperationScope; readonly candidateId: string; readonly targets: ReadonlyArray<'claude' | 'codex'> }) => previewSkillChange({ scope: input.scope, change: { kind: 'addSkill', candidateId: input.candidateId, targets: input.targets } }),

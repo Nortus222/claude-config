@@ -9,7 +9,7 @@ import { MachinePaths } from '../paths.ts';
 import { Processes, type Command } from '../processes.ts';
 import type { SkillLock } from './manifest.ts';
 import { lockRef, offPinNote, pinsBySource, short } from './pins.ts';
-import { installedSkillNames, readSkillLock } from './store.ts';
+import { additionLockEntry, installedSkillNames, readSkillLock } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -36,11 +36,11 @@ export type UpdatableSkill = {
 // An entry is updatable only if it names both where it came from and where it
 // lives in that repo. A source with no skillPath cannot be located upstream,
 // so there is no SHA to compare and nothing this command could do with it.
-export function updatableSkills(lock: SkillLock, installed: ReadonlyArray<string>): UpdatableSkill[] {
+export function updatableSkills(lock: SkillLock, installed: ReadonlyArray<string>, additions?: ReadonlySet<string>): UpdatableSkill[] {
   const skills = isRecord(lock) && isRecord(lock.skills) ? lock.skills : {};
   const entries: UpdatableSkill[] = [];
   for (const name of installed) {
-    const meta = skills[name];
+    const meta = additions?.has(name) ? additionLockEntry(lock, name)?.meta : skills[name];
     if (!isRecord(meta)) continue;
     const source = str(meta.source);
     const skillPath = str(meta.skillPath);
@@ -111,9 +111,10 @@ export function planUpdates(input: {
   installed: ReadonlyArray<string>;
   remoteTrees: Map<string, Map<string, string | null>>;
   pins?: ReadonlyMap<string, string>;
+  additions?: ReadonlySet<string>;
 }): Omit<UpdatePlan, 'available'> {
   const names = [...input.installed].sort();
-  const entries = updatableSkills(input.lock, names);
+  const entries = updatableSkills(input.lock, names, input.additions);
   const updatable = new Set(entries.map((e) => e.name));
 
   const plan: Omit<UpdatePlan, 'available'> = { current: [], outdated: [], gone: [], unknown: [], local: [] };
@@ -127,13 +128,13 @@ export function planUpdates(input: {
   for (const entry of entries) {
     const pin = input.pins?.get(entry.source);
     if (pin !== undefined) {
-      const recorded = lockRef(input.lock.skills[entry.name]);
+      const recorded = lockRef(input.additions?.has(entry.name) ? additionLockEntry(input.lock, entry.name)?.meta : input.lock.skills[entry.name]);
       if (recorded === pin) plan.current.push({ name: entry.name, source: entry.source });
       else offPin.push({ name: entry.name, source: entry.source, from: recorded, to: pin });
       continue;
     }
-    const stuck = lockRef(input.lock.skills[entry.name]);
-    if (stuck !== null) {
+    const stuck = lockRef(input.additions?.has(entry.name) ? additionLockEntry(input.lock, entry.name)?.meta : input.lock.skills[entry.name]);
+    if (stuck !== null && !input.additions?.has(entry.name)) {
       offPin.push({ name: entry.name, source: entry.source, from: stuck, to: null });
       continue;
     }
@@ -256,17 +257,19 @@ export const checkUpdates = (desired: DesiredConfig): Effect.Effect<UpdatePlan, 
   Effect.gen(function* () {
     const lock = yield* readSkillLock;
     const installed = yield* installedSkillNames;
-    const exact = new Set(desired.skills.filter((s) => s.exact).map((s) => s.source));
+    const exact = new Set(desired.skills.filter(s => s.exact && s.declaredFrom?.layer !== 'machine').map(s => s.source));
+    for (const skill of desired.skills) if (skill.declaredFrom?.layer === 'machine' && !desired.skills.some(s => s.source === skill.source && s.declaredFrom?.layer !== 'machine')) exact.add(skill.source);
+    const additions = new Set(desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
     const pins = pinsBySource(desired);
     const remoteTrees = new Map<string, Map<string, string | null>>();
     const upstreamBySource = new Map<string, { path: string; name: string }[]>();
-    for (const check of sourcesOf(updatableSkills(lock, installed).filter((e) => !pins.has(e.source)), exact)) {
+    for (const check of sourcesOf(updatableSkills(lock, installed, additions).filter((e) => !pins.has(e.source)), exact)) {
       const found = yield* inspectSource(check.sourceUrl, check.paths, !check.exact);
       if (!found) continue;
       remoteTrees.set(check.sourceUrl, found.trees);
       upstreamBySource.set(check.source, upstreamSkills(found.skillPaths));
     }
-    return { ...planUpdates({ lock, installed, remoteTrees, pins }), available: availableSkills({ upstreamBySource, installed }) };
+    return { ...planUpdates({ lock, installed, remoteTrees, pins, additions }), available: availableSkills({ upstreamBySource, installed }) };
   });
 
 // Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names.

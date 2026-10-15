@@ -16,5 +16,5 @@ test('every audited engine behavior has implemented operation coverage or explic
 test('a new operation or advertised capability cannot bypass coverage review', () => {
   assert.throws(() => assertCapabilityCoverage({ operations: [...Object.keys(operationDefinitions), 'newOperation'], capabilities: capabilityInventory }), /newOperation/);
   assert.throws(() => assertCapabilityCoverage({ operations: Object.keys(operationDefinitions), capabilities: { ...capabilityInventory, newCapability: { available: true } } }), /newCapability/);
-  assert.throws(() => assertCapabilityCoverage({ operations: Object.keys(operationDefinitions), capabilities: { ...capabilityInventory, addSkill: { available: true } } }), /addSkill/);
+  assert.throws(() => assertCapabilityCoverage({ operations: Object.keys(operationDefinitions), capabilities: { ...capabilityInventory, addSkill: { available: false, reason: 'disabled' } } }), /addSkill/);
 });

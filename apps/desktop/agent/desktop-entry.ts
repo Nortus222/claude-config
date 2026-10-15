@@ -1,9 +1,9 @@
 import { homedir, userInfo } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 import { Cause, Effect, Exit, Layer } from 'effect';
-import { agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
+import { agentSkillInstaller, agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
 import {
-  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, pathsFromEnvironment, skillsDomain,
+  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, nodeProcessDialogue, pathsFromEnvironment, skillsDomain,
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
 import { setupSourceLayer } from '@nortuscc/sync';
@@ -230,7 +230,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
         ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: resolve(input.resources, '../../MacOS'), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
-        paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
+        paths, domains, source: setupSourceLayer(paths, { processes }), processes, dialogue: nodeProcessDialogue({ env }), skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal,
         onLifecycle: trace.record,
       });

@@ -314,3 +314,13 @@ test('inspectUpdates reports an unreadable store as one probe error and no items
   assert.deepEqual(out.items, []);
   assert.equal(out.probeErrors.length, 1);
 });
+
+test('addition fetch refs follow upstream tree changes while legacy refs and actual pins retain their meaning', () => {
+  const source = 'o/r'; const url = 'https://github.com/o/r.git'; const sha = 'a'.repeat(40);
+  const lock = { skills: Object.fromEntries(['addition', 'legacy'].map(name => [name, { source, sourceUrl: url, ref: sha, skillPath: `skills/${name}/SKILL.md`, skillFolderHash: 'old' }])) };
+  const input = { lock, installed: ['addition', 'legacy'], additions: new Set(['addition']), remoteTrees: new Map([[url, new Map([['skills/addition', 'new']])]]) };
+  const followed = planUpdates(input);
+  assert.deepEqual(followed.outdated.map(s => s.name), ['addition']); assert.deepEqual(followed.offPin?.map(s => s.name), ['legacy']);
+  const pinned = planUpdates({ ...input, pins: new Map([[source, sha]]) });
+  assert.deepEqual(pinned.current.map(s => s.name), ['addition', 'legacy']); assert.deepEqual(pinned.outdated, []);
+});

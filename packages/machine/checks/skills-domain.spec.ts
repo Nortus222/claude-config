@@ -421,3 +421,34 @@ test('a failing installer fails its own step and later steps still run', async (
   ]);
   assert.deepEqual((events.at(-1) as Extract<Progress, { type: 'done' }>).failed, 1);
 });
+
+test('machine addition repairs honor persisted required targets while legacy skills retain both', async () => {
+  const m = skillsMachine();
+  for (const name of ['personal', 'legacy']) mkdirSync(join(m.paths.agentsSkills, name), { recursive: true });
+  const desired = desiredWith([skill('personal', 'o/r', { targets: ['codex'], declaredFrom: { layer: 'machine', source: 'overrides.json' } }), skill('legacy', 'o/r')]);
+  const report = await m.run(inspectSkills(desired));
+  assert.equal(report.items.some(i => i.key === 'skill-link:claude:personal'), false);
+  assert.equal(report.items.some(i => i.key === 'skill-link:claude:legacy'), true);
+});
+
+test('routine manifest regeneration excludes personal declarations even when enablement has base provenance', async () => {
+  const m = skillsMachine();
+  for (const n of ['base', 'personal', 'adopted']) mkdirSync(join(m.paths.agentsSkills, n), { recursive: true });
+  writeLock(m.paths, { base: { source: 'o/r' }, personal: { source: 'o/r' }, adopted: { source: 'o/r' } });
+  const desired = desiredWith([skill('base', 'o/r'), skill('personal', 'o/r', { declaredFrom: { layer: 'machine', source: 'overrides.json' } })]);
+  const report: MachineReport = { desired, items: [], probeErrors: [] };
+  await m.run(skillsDomain.run({ key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: 'write', touches: ['skills-manifest.txt'], interruptible: false }, report));
+  const manifest = readFileSync(join(m.paths.repo, 'skills-manifest.txt'), 'utf8');
+  assert.match(manifest, /base/); assert.match(manifest, /adopted/); assert.doesNotMatch(manifest, /personal/);
+});
+
+test('generic repair and update expose an addition prerequisite rather than invoke the legacy installer', () => {
+  const desired = desiredWith([skill('personal', 'o/r', { targets: ['claude'], declaredFrom: { layer: 'machine', source: 'overrides.json' } }),
+    skill('overlay', 'o/r', { targets: ['codex'], declaredFrom: { layer: 'base', source: 'skills-manifest.txt' } }), skill('legacy', 'o/r')]);
+  for (const [kind, state] of [['apply', 'missing'], ['update', 'outdated'], ['update', 'gone']] as const) {
+    const report: MachineReport = { desired, probeErrors: [], items: desired.skills.map(s => ({ key: `skill:${s.name}`, domain: 'skills', label: s.name, group: s.source, state, disposition: 'apply' })) };
+    const planned = plan(kind, report, selectAll, [skillsDomain]);
+    assert.ok(planned.steps.every(s => !s.touches.some(t => t === 'skills/personal' || t === 'skills/overlay')));
+    assert.equal(planned.skipped.filter(s => /native verification/.test(s.reason)).length, 2);
+  }
+});

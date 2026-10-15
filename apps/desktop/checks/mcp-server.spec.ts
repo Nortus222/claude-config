@@ -244,7 +244,7 @@ for (const runtime of runtimes) test(`${runtime}: successful MCP inspect omits r
 });
 
 
-test('MCP exposes bounded discovery and source-specific preview while installation refuses without intent writes', { timeout: 10_000 }, async t => {
+test('MCP exposes bounded discovery and source-specific preview; a stale mutation refuses without intent writes', { timeout: 10_000 }, async t => {
   const source = 'owner/repo', revision = 'a'.repeat(40);
   const s = await agent('app', { skillCandidates: () => Effect.succeed({ ok: true, source, revision, candidates: [{ source, revision, installedName: 'design-review', selectorName: 'Design Review', sourceDir: 'skills/layout', description: 'Review design', tree: 'b'.repeat(40), blob: 'c'.repeat(40), internal: false, metadata: {} }] }) }); t.after(s.close);
   const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close);
@@ -259,7 +259,9 @@ test('MCP exposes bounded discovery and source-specific preview while installati
   const beforeHistory = output('history', await next.call('history', { limit: 10 }));
   const preview = output('previewChange', await next.call('previewChange', { change: { kind: 'addSkill', candidateId: found.candidates[0].candidateId, targets: ['claude'] } }));
   assert.equal(preview.skillAddition.declaration.after.name, 'design-review'); assert.equal(preview.skillAddition.sharedStore.codexScans, true); assert.deepEqual(preview.nextActions, []);
-  const refused = await next.call('applyChange', { planId: preview.planId, requestId: 'not-yet-installable' }); assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'SKILL_INSTALL_UNAVAILABLE');
-  assert.equal(s.m.read(join(s.m.paths.stateRoot, 'overrides.json')), undefined); assert.deepEqual(output('listRuns', await next.call('listRuns', { limit: 10 })).runs, []);
+  // Change composed intent after review. The durable driver must refuse before any installer.
+  s.m.write(join(s.m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skills: { changed: false } }));
+  const refused = await next.call('applyChange', { planId: preview.planId, requestId: 'stale-addition' }); assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'UNKNOWN_PLAN');
+  assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.stateRoot, 'overrides.json'))!), { version: 2, skills: { changed: false } }); assert.deepEqual(output('listRuns', await next.call('listRuns', { limit: 10 })).runs, []);
   assert.equal(existsSync(s.m.paths.backups), false); assert.deepEqual(output('history', await next.call('history', { limit: 10 })), beforeHistory);
 });

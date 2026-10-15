@@ -87,12 +87,39 @@ export const RunTerminalResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('cancelled'), remaining: list(KeySchema) }),
   Schema.Struct({ status: Schema.Literals(['failed', 'interrupted']), message: Text }),
 ]);
+export const AcceptedSkillSchema = Schema.Struct({
+  source: SkillSourceSchema, acceptedRevision: SkillRevisionSchema, sourceDir: KeySchema,
+  selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
+  blob: SkillRevisionSchema, tree: SkillRevisionSchema, internal: Schema.Boolean, targets: SkillTargetsSchema,
+  declaration: SkillDeclarationSchema, policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']),
+});
+const NativePath = Schema.String.check(Schema.isMaxCodePoints(4096));
+const NativeReason = Schema.String.check(Schema.isMaxCodePoints(100));
+export const SkillInstallationSchema = Schema.Struct({
+  state: Schema.Literals(['verified', 'failed', 'cancelled', 'needsInspection']), message: Text, retainedDirectory: Schema.optionalKey(NativePath),
+  sharedStore: Schema.Struct({ codexScans: Schema.Literal(true), visibility: Schema.Literal('shared') }),
+  codex: Schema.optionalKey(Schema.Union([
+    Schema.Struct({ verified: Schema.Literal(true), path: NativePath, enabled: Schema.Literal(true) }),
+    Schema.Struct({ verified: Schema.Literal(false), reason: NativeReason }),
+  ])),
+  claude: Schema.optionalKey(Schema.Struct({ verified: Schema.Boolean, reason: Schema.optionalKey(NativeReason),
+    physical: Schema.Union([Schema.Struct({ status: Schema.Literal('present'), path: NativePath }), Schema.Struct({ status: Schema.Literal('unavailable') })]),
+    catalog: Schema.Struct({ status: Schema.Literals(['present', 'missing', 'ambiguous', 'unavailable']), userCommand: Schema.optionalKey(Schema.Boolean) }),
+    restrictions: Schema.Struct({ status: Schema.Literals(['no-known-denial', 'denied', 'unknown', 'unavailable']), managedOnly: Schema.optionalKey(Schema.Boolean), diagnostics: Schema.Array(NativeReason).check(Schema.isMaxLength(6)) }),
+    limits: Schema.Struct({ selectedSource: Schema.Literal('not-attested'), invocationAuthorization: Schema.Literal('not-attested'), configRoot: Schema.Literal('requested-environment-only'), managedStartup: Schema.Literal('remains-active') }),
+  })),
+  nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
+});
+const intentFields = { requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema };
 export const RunViewSchema = Schema.Struct({
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
-  intent: Schema.Struct({ requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema, change: ReconcileChangeSchema }),
-  // Reconciliation changes installed state without saving a new declaration.
-  intentSaved: Schema.Boolean, steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
+  intent: Schema.Union([
+    Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never) }),
+    Schema.Struct({ ...intentFields, change: AddSkillChangeSchema, skillAddition: AcceptedSkillSchema }),
+  ]),
+  intentSaved: Schema.Boolean, intentState: Schema.optionalKey(Schema.Literals(['pending', 'saved', 'needsInspection'])),
+  installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
 });
 export const ApplyChangeResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('started'), run: RunViewSchema }),

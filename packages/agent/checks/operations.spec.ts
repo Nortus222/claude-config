@@ -44,7 +44,7 @@ test('operation inputs reject unknown fields, oversized IDs and unsupported chan
 });
 
 test('future capabilities are unavailable inventory entries without executable definitions', () => {
-  for (const name of ['addSkill', 'shareWithMyMachines', 'promoteToProfile']) {
+  for (const name of ['shareWithMyMachines', 'promoteToProfile']) {
     const state = capabilityInventory[name as keyof typeof capabilityInventory];
     assert.equal(state.available, false);
     assert.ok('reason' in state && state.reason.length > 0);
@@ -103,7 +103,7 @@ test('JSON schemas preserve strict object fields, scope unions and input bounds'
   assert.ok(history.properties.before.properties.at.pattern);
   assert.equal(history.properties.before.properties.seq.maximum, Number.MAX_SAFE_INTEGER);
   const run = operationJsonSchemas.getRun.output as any;
-  assert.equal(run.properties.intent.properties.inputDigest.pattern, '^[0-9a-f]{64}$');
+  assert.equal((run.properties.intent.anyOf ?? run.properties.intent.oneOf)[0].properties.inputDigest.pattern, '^[0-9a-f]{64}$');
   for (const schemas of Object.values(operationJsonSchemas)) {
     const inspect = (node: any) => {
       if (!node || typeof node !== 'object') return;

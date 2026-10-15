@@ -19,6 +19,7 @@ export type HistoryEventBody =
     // Set only when reading: the folder was pruned, so `backup` reads 'pruned'.
     readonly prunedFolder?: string; readonly prunedAt?: string;
   }
+  | { readonly kind: 'skill-addition'; readonly runId: string; readonly intentSaved: boolean; readonly intentState: 'pending' | 'saved' | 'needsInspection'; readonly installationState?: 'verified' | 'failed' | 'cancelled' | 'needsInspection'; readonly message: string }
   | { readonly kind: 'held' | 'ready'; readonly items: ReadonlyArray<ItemReason> }
   | {
     readonly kind: 'decided'; readonly setupId: string; readonly itemId: string;

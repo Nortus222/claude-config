@@ -3,6 +3,7 @@ import { Effect } from 'effect';
 import type { Target } from '@nortuscc/profile-engine';
 import { Fs } from '../fs.ts';
 import { MachinePaths, type MachinePathsValue } from '../paths.ts';
+import { isSkillCandidateSelector, nativeInstalledName } from './candidates.ts';
 import { SKILL_AGENTS } from './installer.ts';
 import type { SkillLock } from './manifest.ts';
 
@@ -89,3 +90,11 @@ export function skillExposure(input: {
   }
   return { exposed, partial, missing };
 }
+
+// Vendor lock keys are native metadata selectors, distinct from sanitized store folders.
+// Only addition-aware callers opt into this mapping; ambiguous aliases never select a source.
+export const additionLockEntry = (lock: SkillLock, name: string): { readonly selectorName: string; readonly meta: unknown } | undefined => {
+  const matches = Object.entries(lock.skills).filter(([selector]) => isSkillCandidateSelector(selector) && nativeInstalledName(selector) === name);
+  if (matches.length !== 1) return undefined;
+  return { selectorName: matches[0]![0], meta: matches[0]![1] };
+};

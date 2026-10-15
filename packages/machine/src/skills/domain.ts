@@ -9,7 +9,7 @@ import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
 import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
 import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
-import { installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
+import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
 import { verifyPinned } from './verify.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
@@ -42,7 +42,7 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
       items.push({ ...base, state: 'unknown', disposition: 'blocked', note: STORE_UNREADABLE });
     } else if (present.has(skill.name)) {
       okSkills.push({ name: skill.name, source: skill.source });
-      const recorded = lockRef(lock.skills[skill.name]);
+      const recorded = lockRef(skill.targets ? additionLockEntry(lock, skill.name)?.meta : lock.skills[skill.name]);
       if (skill.pin && recorded !== skill.pin.ref) {
         items.push({ ...base, state: 'off-pin', disposition: 'apply', note: offPinNote(recorded, skill.pin.ref) });
       } else {
@@ -76,7 +76,7 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
     ]);
     for (const { name, source } of okSkills) {
       for (const target of TARGETS) {
-        if (!lacking.get(name)?.includes(target)) continue;
+        if (!lacking.get(name)?.includes(target) || !(desired.skills.find(s => s.name === name)?.targets ?? TARGETS).includes(target)) continue;
         items.push({
           key: `skill-link:${target}:${name}`, domain: 'skills', target, label: name, group: source,
           state: 'unlinked', disposition: 'apply', note: `not loadable by ${SKILL_AGENTS[target]}`,
@@ -160,10 +160,15 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins:
   return { steps, skipped };
 };
 
-const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) =>
-  kind === 'apply' ? applySteps(items, selection, pinsBySource(desired))
-  : kind === 'update' ? updateSteps(items, selection, pinsBySource(desired))
-  : { steps: [], skipped: [] };
+const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) => {
+  const additions = new Set(desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
+  const blocked = items.filter(i => additions.has(i.label) && i.disposition === 'apply');
+  const legacy = items.filter(i => !additions.has(i.label));
+  const result = kind === 'apply' ? applySteps(legacy, selection, pinsBySource(desired))
+    : kind === 'update' ? updateSteps(legacy, selection, pinsBySource(desired)) : { steps: [], skipped: [] };
+  return { ...result, skipped: [...result.skipped, ...blocked.map(i => ({ key: i.key,
+    reason: 'Resolve and preview this skill addition to repair or update it with native verification' }))] };
+};
 
 // Copies each named store folder to the run's backups before the installer touches it.
 const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
@@ -211,7 +216,8 @@ const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: Rea
 // An unreadable target is reported, never repaired.
 const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () {
   const installed = new Set(yield* installedSkillNames);
-  const scope = sortedUnique([...report.desired.skills.map((s) => s.name), ...skillNamesOf(step)]).filter((n) => installed.has(n));
+  const additions = new Set(report.desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
+  const scope = sortedUnique([...report.desired.skills.map((s) => s.name), ...skillNamesOf(step)]).filter(n => installed.has(n) && !additions.has(n));
   const lock = yield* readSkillLock;
   const pins = pinsBySource(report.desired);
   const exposure = yield* readExposure(step.targets ?? TARGETS);
@@ -219,7 +225,7 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
   const bySource = new Map<string, string[]>();
   for (const name of scope) {
     const source = sourceOf(lock.skills[name]);
-    if (!source || readable.every((t) => exposure.list[t]!.includes(name))) continue;
+    if (!source || readable.every(t => exposure.list[t]!.includes(name))) continue;
     bySource.set(source, [...(bySource.get(source) ?? []), name]);
   }
   let ok = true;
@@ -256,12 +262,13 @@ const writeManifest = (report: MachineReport) => Effect.gen(function* () {
   const lock = yield* readSkillLock;
   const installed = yield* installedSkillNames;
   const present = new Set(installed);
-  const before = groupsOf(report.desired.skills);
+  const personal = new Set(report.desired.skills.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
+  const before = groupsOf(report.desired.skills.filter(s => !personal.has(s.name)));
   const pruned = report.items.filter((i) => i.domain === 'skills' && i.state === 'gone' && !present.has(i.label)).map((i) => i.label);
   const declared = before
     .map((g) => (g.optional ? { ...g, skills: g.skills.filter((n) => !pruned.includes(n)) } : g))
     .filter((g) => g.skills.length > 0);
-  const groups = installedGroups(lock, installed, declared);
+  const groups = installedGroups(lock, installed.filter(name => !personal.has(name)), declared);
   const outcome = manifestOutcome({ before, groups, prunedNames: pruned });
   if (!outcome.write) return { ok: true, note: `left alone — ${outcome.reason}` };
   yield* fs.writeTextAtomic(join(paths.repo, MANIFEST_FILE), emitManifest(groups));

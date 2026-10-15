@@ -6,7 +6,7 @@ export const capabilityInventory = {
   applyChange: { available: true }, getRun: { available: true }, listRuns: { available: true },
   cancelRun: { available: true }, history: { available: true },
   resolveSkillCandidate: { available: true },
-  addSkill: { available: false, reason: 'Installation requires the durable verified-addition driver; discovery and preview are available.' },
+  addSkill: { available: true },
   shareWithMyMachines: { available: false, reason: 'Personal sharing requires an available distribution destination.' },
   promoteToProfile: { available: false, reason: 'Profile promotion requires the owning profile workflow.' },
 } as const;

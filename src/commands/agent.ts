@@ -1,9 +1,10 @@
+import { homedir } from 'node:os';
 import { fstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { Cause, Effect } from 'effect';
-import { configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
+import { nodeProcessDialogue, configDomain, Fs, integrationsDomain, skillsDomain, type MachinePathsValue } from '@nortuscc/machine';
 import {
-  decodeWireStatus, decodeHostedState, decodeSignInResult, decodeRequest, agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
+  agentSkillInstaller, decodeWireStatus, decodeHostedState, decodeSignInResult, decodeRequest, agentLayer, AgentStateStore, installService, POLICIES, runAgent, trustOwnSetup, uninstallService, unitPath,
   type ApplyResult, type InspectResult, type Policy, type PreviewResult, type RunEvent, type RunProgress, type ServiceFailed,
   type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
@@ -129,7 +130,7 @@ async function runForeground(): Promise<number> {
       }
       return yield* runAgent({
         ...(process.env.NORTUSCC_HOSTED_URL === undefined ? {} : { hosted: { url: process.env.NORTUSCC_HOSTED_URL, platform: process.platform } }),
-        paths, domains, source: setupSourceLayer(paths), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
+        paths, domains, source: setupSourceLayer(paths), dialogue: nodeProcessDialogue({ env: process.env }), skillInstaller: agentSkillInstaller({ home: homedir(), xdgStateHome: process.env.XDG_STATE_HOME }), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
         ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
         onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
       }).pipe(

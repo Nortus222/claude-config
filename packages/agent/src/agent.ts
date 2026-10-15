@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import { Cause, Effect, Exit, Layer, Ref, Semaphore } from 'effect';
 import {
-  acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, type Processes,
+  acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, type Processes, type ProcessDialogue,
 } from '@nortuscc/machine';
+import type { AgentSkillInstaller } from './skill-installer.ts';
 import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
 import { agentLayer, type AgentDomains } from './layer.ts';
@@ -186,6 +187,8 @@ export const runAgent = (input: {
   readonly hosted?: HostedOptions;
   readonly clock?: Layer.Layer<AgentClock>;
   readonly processes?: Layer.Layer<Processes>;
+  readonly dialogue?: Layer.Layer<ProcessDialogue>;
+  readonly skillInstaller?: Layer.Layer<AgentSkillInstaller>;
   readonly ipc?: boolean;
   readonly notifications?: { readonly platform: string; readonly timeoutMs?: number };
   readonly logOutput?: AgentLogOutput;
@@ -242,7 +245,7 @@ export const runAgent = (input: {
     yield* observe('running', 'started');
     yield* untilAborted(signal);
   }).pipe(Effect.onExit(() => observe('shutdown', 'started')))).pipe(
-    Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, clock: input.clock }), input.source)),
+    Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, dialogue: input.dialogue, skillInstaller: input.skillInstaller, clock: input.clock }), input.source)),
     Effect.onExit((exit) => observe('stopped', outcome(exit))),
   );
 };

@@ -47,7 +47,7 @@ export const engineCapabilityCoverage = {
   hostedMachineMetadata: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Machine name/reporting and durable outbox are metadata, not personal configuration sharing.'),
   agentPolicyResume: remaining('agent/agent.ts', parity, 'Manual/automatic policy and explicit resume are distinct from cancellation and require dedicated semantics.'),
   skillCandidateDiscovery: available('agent/skill-operations.ts', ['resolveSkillCandidate', 'previewChange'], 'Bounded source-specific metadata discovery and exact side-effect-free tentative machine declaration preview.'),
-  skillAddition: remaining('agent/skill-operations.ts and skills/domain.ts', additions, 'Discovery and declaration preview are available. Durable backed-up installation, accepted content verification and native catalog evidence for selected targets remain required.'),
+  skillAddition: available('agent/skill-addition.ts', ['applyChange', 'getRun', 'listRuns', 'cancelRun'], 'Durable machine declaration, accepted content verification and selected native catalog evidence.'),
   arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Personal additions and inherited enable/disable', 'Command constructors are not authorization; general inherited-disable and personal deletion semantics do not exist.'),
   integrationRemoval: remaining('machine/integrations/domain.ts', 'Integration removal semantics', 'No existing domain removal steps exist; cannot publish a callable placeholder.'),
   personalSharing: remaining('hosted-protocol/revisions.ts', profiles, 'Requires an available personal distribution destination and declaration workflow.', 'prerequisite'),
@@ -60,7 +60,7 @@ export const engineCapabilityCoverage = {
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
   getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
-  addSkill: { state: 'remaining', reason: additions }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
+  addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
 };
 
 // Refuse an operation/capability added without reviewing its coverage and readiness.

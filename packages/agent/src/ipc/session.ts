@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
 import {
-  acquireApplyLock, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
+  acquireApplyLock, canonical, Fs, skillLockPath, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
 import { itemIdOf, revisionCommit, type SetupSource } from '@nortuscc/sync';
@@ -11,7 +11,9 @@ import { recordedRun } from '../apply.ts';
 import { makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
 import { decodeOperationInput, type ChangePreview, type ReconcileChange, type OperationChange, type OperationInput, type SkillCandidateResult } from '../operations/index.ts';
 import type { RunActor } from '../run-store.ts';
-import { makeSkillOperations, type SkillOperations } from '../skill-operations.ts';
+import { AgentSkillInstaller } from '../skill-installer.ts';
+import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
+import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
 import { AgentClock } from '../clock.ts';
 import { runJob, type AgentStatus, type JobInspection } from '../job.ts';
 import type { AgentDomains, AgentServices } from '../layer.ts';
@@ -113,10 +115,12 @@ const planFor = (inspection: JobInspection, exclude: ReadonlyArray<string>, only
 // Builds the session in the current scope. A run is a fiber in that scope; closing the scope or
 // aborting `signal` cancels it at its next step, and it still records how it ended. `domains` is the
 // agent's factory, which apply's re-inspection builds from.
-export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates'] }) =>
+export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates']; readonly skillVerification?: Parameters<typeof makeAdditionDriver>[3] }) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<AgentServices | SetupSource>();
     const { repo, stateRoot } = yield* MachinePaths;
+    const installer = yield* AgentSkillInstaller;
+    const fs = yield* Fs;
     // Runs live in a child scope, closed after the abort below: finalizers run in reverse.
     const runs = yield* Scope.fork(yield* Effect.scope);
     const closing = new AbortController();
@@ -204,8 +208,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           }
         };
         if (active) return yield* Effect.fail(busy);
-        if (yield* skillOperations.acceptedPlan(planId)) return yield* Effect.fail(new SessionError('SKILL_INSTALL_UNAVAILABLE', 'Skill installation is unavailable until the durable verified-addition driver is installed'));
-        const wanted = previewed;
+        const addition = yield* skillOperations.acceptedPlan(planId);
+        if (addition && !lifecycle) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Skill additions require the durable applyChange operation'));
+        const wanted = addition ? { planId, generation: addition.generation } : previewed;
         if (wanted === undefined || wanted.planId !== planId) {
           return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'That preview is no longer current; preview again'));
         }
@@ -243,16 +248,39 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           const inspection = job.inspection;
           if (inspection === undefined) return yield* Effect.fail(noInspection(job.status));
           yield* validate(inspection);
-          if (wanted.exactSelection) {
+          if (addition) {
+            if (canonical(inspection.desired) !== canonical(addition.baseline)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+            const freshPreview = yield* skillOperations.previewAddSkill({ scope: { kind: 'machine' }, candidateId: addition.preview.change.kind === 'addSkill' ? addition.preview.change.candidateId : '', targets: addition.preview.skillAddition!.installationTargets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
+            const checked = (yield* skillOperations.acceptedPlan(freshPreview.planId))!;
+            if (!samePlan(addition.plan, checked.plan) || canonical(addition.overrides) !== canonical(checked.overrides)
+              || canonical(addition.preview.skillAddition) !== canonical(checked.preview.skillAddition)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The selected skill changed; inspect and preview again'));
+            let invocation: AdditionInvocation | undefined;
+            if (addition.plan.steps.length) {
+              const command = yield* installer.prepare(inspection.paths, { source: addition.candidate.source, revision: addition.candidate.revision, selectorName: addition.candidate.selectorName, targets: addition.preview.skillAddition!.declaration.after.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
+              const text = yield* fs.readText(skillLockPath(inspection.paths)).pipe(Effect.mapError(() => new SessionError('SKILL_INSTALL_UNAVAILABLE', 'Native skill lock cannot be read safely')));
+              if (text !== undefined) yield* Effect.try({ try: () => {
+                const lock = JSON.parse(text);
+                if (!lock || lock.version !== 3 || !lock.skills || typeof lock.skills !== 'object' || Array.isArray(lock.skills)) throw new Error();
+              }, catch: () => new SessionError('SKILL_INSTALL_UNAVAILABLE', 'Native skill lock version is incompatible; inspect it before installing') });
+              invocation = { command, lockText: text };
+            }
+            const selected = additionRunPlan(addition.plan, addition.candidate.installedName);
+            const run = execute(inspection, selected, self.runId, actor, AbortSignal.any([shutdown, abort.signal]), progress => emit(self.runId, progress), release, clear, lifecycle, addition, invocation);
+            yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(addition.preview.change, selected.steps.map(step => step.key), acceptedSkillTuple(addition)),
+              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; }))));
+            return { status: 'started' as const, runId: self.runId };
+          }
+          const reconcile = wanted as Previewed;
+          if (reconcile.exactSelection) {
             const available = new Set(inspection.report.items.map(item => item.key));
-            if (wanted.change.only.some(key => !available.has(key))) {
+            if (reconcile.change.only.some(key => !available.has(key))) {
               return yield* Effect.fail(new SessionError('UNKNOWN_KEY', 'The selected items changed; inspect and preview again'));
             }
           }
-          const fresh = planFor(inspection, wanted.exclude, wanted.exactSelection ? wanted.change.only : undefined);
-          const evidence = instructionEvidence(inspection.report, wanted.change.only);
-          if (!samePlan(wanted.plan, fresh) || !sameInstructionEvidence(wanted.instructionEvidence, evidence)) {
-            const next: Previewed = { ...wanted, planId: randomUUID(), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
+          const fresh = planFor(inspection, reconcile.exclude, reconcile.exactSelection ? reconcile.change.only : undefined);
+          const evidence = instructionEvidence(inspection.report, reconcile.change.only);
+          if (!samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
+            const next: Previewed = { ...reconcile, planId: randomUUID(), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
             previewed = next;
             const stale = { status: 'stale' as const, planId: next.planId, plan: wirePlan(fresh), preview: operationPreview(next) };
             return stale;
@@ -261,7 +289,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           const run = execute(inspection, fresh, runId, actor, AbortSignal.any([shutdown, abort.signal]), (progress) => emit(runId, progress), release, clear, lifecycle);
           // Forked and handed off as one step, so an interruption either starts the run or settles.
           yield* Effect.uninterruptible(Effect.suspend(() =>
-            Effect.andThen(lifecycle?.accepted(wanted.change, fresh.steps.map(step => step.key)) ?? Effect.void, Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(
+            Effect.andThen(lifecycle?.accepted(reconcile.change, fresh.steps.map(step => step.key)) ?? Effect.void, Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(
               Effect.andThen(Effect.sync(() => { handedOff = true; previewed = undefined; })),
             )));
           const started: ApplyResult = { status: 'started', runId };
@@ -279,7 +307,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     // saw the run, so a failed step does not pause auto-apply.
     const execute = (
       inspection: JobInspection, planned: Plan, runId: string, actor: RunActor, signal: AbortSignal,
-      emit: (progress: RunProgress) => void, release: Effect.Effect<void>, clear: Effect.Effect<void>, lifecycle?: RunLifecycle,
+      emit: (progress: RunProgress) => void, release: Effect.Effect<void>, clear: Effect.Effect<void>, lifecycle?: RunLifecycle, addition?: AcceptedSkillPlan, invocation?: AdditionInvocation,
     ) =>
       Effect.gen(function* () {
         const now = yield* (yield* AgentClock).now;
@@ -289,14 +317,19 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           if (wire.type === 'done' || wire.type === 'cancelled') terminal = wire;
           else emit(wire);
         });
+        const driver = addition && lifecycle ? yield* makeAdditionDriver(addition, lifecycle,
+          handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.flatMap(job => job.inspection ? Effect.succeed(job.inspection) : Effect.fail(noInspection(job.status))), Effect.provideContext(context)), options.skillVerification, invocation) : undefined;
         const exit = yield* Effect.exit(
-          recordedRun(planned, inspection.report, inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle?.progress,
+          recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle?.progress,
             ...(lifecycle ? { operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId } as const } : {}) }).pipe(
             Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))),
           ),
         );
-        if (Exit.isFailure(exit)) terminal = { type: 'failed', message: describe(Cause.squash(exit.cause)) };
-        if (handle.afterPerson && Exit.isSuccess(exit)) {
+        if (Exit.isFailure(exit)) terminal = { type: 'failed', message: addition ? 'Skill addition was interrupted; inspect saved intent and partial installation before retrying' : describe(Cause.squash(exit.cause)) };
+        if (driver && (Exit.isFailure(exit) || terminal?.type === 'cancelled' || (terminal?.type === 'done' && terminal.failed > 0))) {
+          yield* driver.finish(Exit.isFailure(exit) ? 'needsInspection' : terminal?.type === 'cancelled' ? 'cancelled' : 'failed').pipe(Effect.catch(() => Effect.void));
+        }
+        if (!addition && handle.afterPerson && Exit.isSuccess(exit)) {
           const ok = new Set(exit.value.steps.filter((s) => s.outcome === 'ok').map((s) => s.key));
           const successful = planned.steps.filter((s) => ok.has(s.key)).flatMap((step) => {
             const id = itemIdOf(step.key, inspection.desired);

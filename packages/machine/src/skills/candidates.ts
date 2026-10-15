@@ -6,6 +6,7 @@ import { isAlias, parseDocument, visit } from 'yaml';
 import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
 import { Processes } from '../processes.ts';
+import type { TreeEntry } from './verify.ts';
 
 export const SKILL_CANDIDATE_LIMITS = Object.freeze({
   timeoutMs: 30_000, cleanupTimeoutMs: 2_000, treeBytes: 2 * 1024 * 1024, skillBytes: 128 * 1024,
@@ -54,13 +55,13 @@ const safePath = (path: string) => path.length > 0 && !/[\\\x00-\x1f\x7f-\x9f]/.
   && !path.startsWith('/') && path.split('/').every(p => p !== '' && p !== '.' && p !== '..');
 
 // Native sanitizeName, constrained to Task1's canonical declaration subset after transformation.
-const installedName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._]+/g, '-')
+export const nativeInstalledName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._]+/g, '-')
   .replace(/^[.\-]+|[.\-]+$/g, '').substring(0, 255) || 'unnamed-skill';
 
 // Safe, bounded native --skill operand whose installed name the declaration layer supports.
 export const isSkillCandidateSelector = (name: string): boolean => name.length > 0 && name.length <= 255
   && name === name.trim() && !['.', '..', '*'].includes(name) && !name.startsWith('-')
-  && !/[/\\\x00-\x1f\x7f-\x9f]/.test(name) && isSkillAdditionName(installedName(name));
+  && !/[/\\\x00-\x1f\x7f-\x9f]/.test(name) && isSkillAdditionName(nativeInstalledName(name));
 
 type Entry = { readonly mode: string; readonly type: string; readonly id: string; readonly path: string };
 const parseTree = (text: string): Entry[] => text.split('\0').filter(Boolean).map(line => {
@@ -84,7 +85,7 @@ const parseMetadata = (content: string): { selectorName: string; installedName: 
     const name = data.name.trim();
     const description = data.description.replace(/[\r\n]+/g, ' ').trim();
     if (!isSkillCandidateSelector(name) || !description) throw fail('unsupported-metadata');
-    const canonical = installedName(name);
+    const canonical = nativeInstalledName(name);
     if (data.metadata !== undefined && !record(data.metadata)) throw fail('unsupported-metadata');
     const internal = record(data.metadata) ? data.metadata.internal : undefined;
     if (internal !== undefined && typeof internal !== 'boolean') throw fail('unsupported-metadata');
@@ -96,7 +97,7 @@ const parseMetadata = (content: string): { selectorName: string; installedName: 
 };
 
 // Reads only Git objects at a verified commit. It never checks out or executes source files.
-export const readSkillCandidates = (input: { readonly source: string; readonly revision?: string; readonly timeoutMs?: number }):
+export const readSkillCandidates = (input: { readonly source: string; readonly revision?: string; readonly timeoutMs?: number; readonly observeTree?: (candidate: SkillCandidate, entries: readonly TreeEntry[]) => void }):
   Effect.Effect<SkillCandidatesResult, never, Fs | Processes | MachinePaths> => Effect.gen(function* () {
     const source = normalizeSkillSource(input.source);
     if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > SKILL_CANDIDATE_LIMITS.timeoutMs)) return { ok: false, reason: 'limit-exceeded' } as const;
@@ -151,7 +152,11 @@ export const readSkillCandidates = (input: { readonly source: string; readonly r
         const metadata = yield* Effect.try({ try: () => parseMetadata(content), catch: () => fail('unsupported-metadata') });
         const tree = trees.get(sourceDir);
         if (!tree) return yield* Effect.fail(fail('unsupported-layout'));
-        accepted.push({ source, revision, sourceDir, blob: entry.id, tree, ...metadata });
+        const candidate = { source, revision, sourceDir, blob: entry.id, tree, ...metadata };
+        accepted.push(candidate);
+        input.observeTree?.(candidate, entries.filter(e => e.type === 'blob' && beneath(e.path, sourceDir)).map(e => ({
+          mode: e.mode, sha: e.id, path: sourceDir === '.' ? e.path : e.path.slice(sourceDir.length + 1),
+        })));
       });
       if (skills.has('.')) {
         yield* read('.');

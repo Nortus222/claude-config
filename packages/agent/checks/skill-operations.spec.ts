@@ -78,7 +78,7 @@ test('preview keeps exact selected identity, declaration diff, explicit enableme
     assert.deepEqual(p.skillAddition!.enablement, { before: false, after: true });
     assert.equal(p.skillAddition!.declaration.after.name, 'design-review');
     assert.equal(p.skillAddition!.sharedStore.codexScans, true); assert.deepEqual(p.nextActions, []);
-    assert.ok(p.plan.steps.every(s => s.touches.every(t => t === 'skills/design-review')));
+    assert.ok(p.plan.steps.every(s => s.touches.every(t => t === 'skills/design-review' || t === 'overrides.json')));
     const accepted = (yield* ops.acceptedPlan(p.planId))!;
     assert.equal(accepted.candidate.selectorName, 'Design Review'); assert.equal(accepted.desired.skills.find(s => s.name === 'design-review')!.exact, true);
     assert.equal(accepted.desired.skills.find(s => s.name === 'design-review')!.install, true);
@@ -193,12 +193,12 @@ test('parallel lookup count and candidate retention limits refuse instead of gro
   await retained.run(ops => Effect.gen(function* () { for (let i = 0; i < 32; i++) assert.equal((yield* resolve(ops, `owner/repo${i}`)).status, 'found'); assert.equal((yield* resolve(ops, 'owner/overflow')).status, 'limited'); }));
 });
 
-test('an already declared and exposed store candidate has no install step but still requires native catalog verification', async () => {
+test('physical exposure without accepted lock/content evidence still plans installation and native verification', async () => {
   const f = fixture({ overrides: { version: 2, skillAdditions: [{ source: 'owner/one', name: 'design-review', targets: ['claude'] }] } });
   mkdirSync(join(f.m.paths.agentsSkills, 'design-review'), { recursive: true }); mkdirSync(join(f.m.paths.claude, 'skills'), { recursive: true });
   symlinkSync(join(f.m.paths.agentsSkills, 'design-review'), join(f.m.paths.claude, 'skills', 'design-review'));
   f.m.write(join(f.m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({ skills: { 'design-review': { source: 'owner/one' } } }));
-  await f.run(ops => Effect.gen(function* () { const r = yield* resolve(ops, 'owner/one'); const p = yield* ops.previewAddSkill({ scope: { kind: 'machine' }, ...add(r.candidates[0]!.candidateId) }); assert.deepEqual(p.plan.steps, []); assert.equal(p.skillAddition!.declaration.changed, false); assert.equal(p.skillAddition!.nativeVerification, 'required'); }));
+  await f.run(ops => Effect.gen(function* () { const r = yield* resolve(ops, 'owner/one'); const p = yield* ops.previewAddSkill({ scope: { kind: 'machine' }, ...add(r.candidates[0]!.candidateId) }); assert.deepEqual(p.plan.steps.map(s => s.key), ['skill-intent:design-review', `skills:install:owner/one#${sha}`, 'skill-verify:design-review']); assert.equal(p.skillAddition!.declaration.changed, false); assert.equal(p.skillAddition!.nativeVerification, 'required'); }));
 });
 
 test('held local and mixed hosted snapshots retain composed values and provenance in tentative resolution', async () => {

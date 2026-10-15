@@ -302,3 +302,36 @@ test('filesystem cleanup has a finite receipt even when directory removal cannot
   assert.equal(result.ok, false); if (!result.ok) { assert.equal(result.reason, 'cleanup-failed'); assert.match(result.retainedDirectory!, /candidates-/); }
   assert.ok(Date.now() - started < 3500);
 });
+
+test('accepted verification binds source selector path and content even when a SHA-named branch resolves elsewhere', async t => {
+  const { verifyAcceptedSkill, skillLockPath } = await import('../src/index.ts');
+  const f = fixture(t, { 'skills/not-the-name/SKILL.md': md('Design Review'), 'skills/not-the-name/data.txt': 'accepted' });
+  const resolved = await f.run(); assert.ok(resolved.ok); const candidate = resolved.candidates[0]!;
+  const installed = join(f.paths.agentsSkills, candidate.installedName);
+  mkdirSync(installed, { recursive: true });
+  writeFileSync(join(installed, 'SKILL.md'), md('Design Review')); writeFileSync(join(installed, 'data.txt'), 'accepted');
+  const lock = { source: candidate.source, sourceUrl: 'https://github.com/fixture/source.git', ref: candidate.revision,
+    skillPath: 'skills/not-the-name/SKILL.md', skillFolderHash: candidate.tree };
+  const write = (meta: object) => writeFileSync(skillLockPath(f.paths), JSON.stringify({ skills: { [candidate.selectorName]: meta } }));
+  write(lock);
+  const verify = () => Effect.runPromise(verifyAcceptedSkill(candidate).pipe(Effect.provide(Layer.mergeAll(machinePaths(f.paths), nodeFs, f.local))));
+  assert.equal((await verify()).verified, true);
+  for (const changed of [{ sourceUrl: 'https://evil.invalid/repo' }, { skillPath: 'skills/design-review/SKILL.md' }, { ref: 'main' }, { skillFolderHash: 'd'.repeat(40) }]) {
+    const count = f.commands.length; write({ ...lock, ...changed }); assert.equal((await verify()).verified, false); assert.equal(f.commands.length, count);
+  }
+  write(lock);
+  writeFileSync(join(f.paths.repo, 'skills/not-the-name/data.txt'), 'other'); f.git(['add', '.']);
+  f.git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'changed']);
+  f.git(['branch', candidate.revision, 'HEAD']);
+  // Simulate the vendor's branch preference, including a dishonest accepted lock tree.
+  writeFileSync(join(installed, 'data.txt'), 'other');
+  const rejected = await verify(); assert.equal(rejected.verified, false);
+  assert.match(rejected.problems.join('; '), /data.txt differs/);
+});
+
+test('native selector lock identity differs from folder name and rejects ambiguous sanitized aliases', async () => {
+  const { additionLockEntry } = await import('../src/index.ts');
+  const meta = { source: 'fixture/source' };
+  assert.deepEqual(additionLockEntry({ skills: { 'Design Review': meta } }, 'design-review'), { selectorName: 'Design Review', meta });
+  assert.equal(additionLockEntry({ skills: { 'Design Review': meta, 'Design-Review': meta } }, 'design-review'), undefined);
+});

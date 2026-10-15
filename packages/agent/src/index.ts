@@ -30,3 +30,5 @@ export * from './operations/index.ts';
 
 export * from './runs.ts';
 export * from './run-store.ts';
+
+export { AgentSkillInstaller, agentSkillInstaller, SkillInstallUnavailable } from './skill-installer.ts';
