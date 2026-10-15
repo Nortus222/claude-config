@@ -17,10 +17,10 @@ export type PreparedParityChange = {
 // Receipt and History are both attempted. Observed commits remain in memory if either store fails.
 export const parityObserver = (lifecycle: RunLifecycle, acceptance: ParityAcceptance) => Effect.gen(function* () {
   const history = yield* HistoryStore;
-  let evidence: ParityRunEvidence = { kind: acceptance.kind, state: 'pending', committedKeys: [], remainingKeys: [...acceptance.plannedKeys], backupIds: [] };
+  let evidence: ParityRunEvidence = { kind: acceptance.kind, state: 'pending', committedKeys: [], remainingKeys: [...acceptance.plannedKeys], backupIds: [], ...(acceptance.kind === 'machineIntent' ? { intentState: 'pending' as const, routingEffects: [] } : {}) } as ParityRunEvidence;
   const checkpoint = (update: Partial<ParityRunEvidence>) => Effect.gen(function* () {
     const previous = evidence;
-    evidence = { ...evidence, ...update };
+    evidence = { ...evidence, ...update } as ParityRunEvidence;
     const receipt = yield* Effect.exit(lifecycle.parity(evidence));
     const failure = Exit.isFailure(receipt) ? Cause.squash(receipt.cause) : undefined;
     if (failure instanceof RunError && failure.code === 'INVALID_INPUT' && Exit.isFailure(receipt)) {

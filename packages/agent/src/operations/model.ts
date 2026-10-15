@@ -26,3 +26,6 @@ export type OperationPlan = typeof import('./schemas.ts').OperationPlanSchema.Ty
 export type OperationProgress = typeof import('./schemas.ts').OperationProgressSchema.Type;
 export type ParityAcceptance = typeof import('./schemas.ts').ParityAcceptanceSchema.Type;
 export type ParityRunEvidence = typeof import('./schemas.ts').ParityRunEvidenceSchema.Type;
+
+export type MachineIntentChange = typeof import('./schemas.ts').MachineIntentChangeSchema.Type;
+export type MachineIntentPatch = typeof import('./schemas.ts').MachineIntentPatchSchema.Type;

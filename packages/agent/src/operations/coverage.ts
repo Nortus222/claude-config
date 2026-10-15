@@ -14,7 +14,7 @@ const profiles = 'Personal sharing and owned-profile distribution';
 export const engineCapabilityCoverage = {
   appContext: available('operations/context.ts', ['getContext'], 'App ownership, runtime, configured targets, setup/account availability and supported scopes.'),
   machineInspection: available('machine/run.ts', ['inspect'], 'Config, integrations, skills, drift, conflicts and reconciliation keys.'),
-  effectiveConfiguration: remaining('profile-engine/load.ts and resolve.ts', parity, 'Inspection projects item provenance; complete effective values, pins and resolution issues need a bounded semantic read.'),
+  effectiveConfiguration: available('operations/intent.ts', ['inspectIntent'], 'Bounded effective owned values, provenance, enablement, targets and source policy; safe constant issue diagnostics.'),
   reconciliationPreview: available('machine/run.ts plan(apply)', ['previewChange'], 'Explicit inspected keys, machine scope, no force, target or category selection.'),
   reconciliationApply: available('machine/run.ts execute', ['applyChange'], 'Reviewed plans use the shared lock, maintenance fence, backups and scheduler.'),
   configApply: available('machine/config/domain.ts', ['previewChange', 'applyChange'], 'Declared file copies and settings-key merges preserve unrelated keys and project trust.'),
@@ -30,7 +30,7 @@ export const engineCapabilityCoverage = {
   configUninstall: remaining('machine/config/restore.ts plan(uninstall)', parity, 'Restore trusted recorded originals or remove created content, preserving local-change restrictions. No arbitrary backup restore.'),
   skillUpdates: remaining('machine/skills/upstream.ts plan(update)', parity, 'Discover and refresh upstream skills with existing source-wide pin rules.'),
   skillAdoptionPruning: remaining('machine/skills/domain.ts plan(update)', parity, 'Existing source adoption and selected gone-upstream pruning need typed selection and retained outcomes.'),
-  machineOverrides: remaining('machine/overrides.ts', parity, 'Existing declared-item overrides need lock, backup, preview and history adapters; reset and broader intent need owning semantics.'),
+  machineOverrides: available('machine/intent.ts', ['previewChange', 'applyChange'], 'Semantic machine choices and explicit declaration removal with backed-up intent persistence and routing release; no installer or physical content deletion.'),
   historyDetail: remaining('agent/ipc/server.ts History projection', parity, 'Expose bounded decision/setup/revision, policy from/to, pause and backup/pruning facts currently omitted by the operation projection.'),
   backupPruning: remaining('machine/prune.ts', parity, 'Existing retention pruning needs a bounded operation and common mutation contract.'),
   backupInventoryRestore: remaining('machine/backups.ts', 'Backup inventory and selected restoration', 'No public typed inventory or general selected-backup restoration exists.'),
@@ -48,7 +48,7 @@ export const engineCapabilityCoverage = {
   agentPolicyResume: remaining('agent/agent.ts', parity, 'Manual/automatic policy and explicit resume are distinct from cancellation and require dedicated semantics.'),
   skillCandidateDiscovery: available('agent/skill-operations.ts', ['resolveSkillCandidate', 'previewChange'], 'Bounded source-specific metadata discovery and exact side-effect-free tentative machine declaration preview.'),
   skillAddition: available('agent/skill-addition.ts', ['applyChange', 'getRun', 'listRuns', 'cancelRun'], 'Durable machine declaration, accepted content verification and selected native catalog evidence.'),
-  arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Personal additions and inherited enable/disable', 'Command constructors are not authorization; general inherited-disable and personal deletion semantics do not exist.'),
+  arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Physical general skill removal', 'Enablement and declaration removal change intent; general physical deletion has no supported owner.'),
   integrationRemoval: remaining('machine/integrations/domain.ts', 'Integration removal semantics', 'No existing domain removal steps exist; cannot publish a callable placeholder.'),
   personalSharing: remaining('hosted-protocol/revisions.ts', profiles, 'Requires an available personal distribution destination and declaration workflow.', 'prerequisite'),
   profilePromotionPublication: remaining('profile-engine/resolve.ts and hosted-protocol/revisions.ts', profiles, 'Owned-profile identity, promotion, edits and verified revision publication remain prerequisite work.', 'prerequisite'),
@@ -58,7 +58,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
-  getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
+  inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
   addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
 };

@@ -29,14 +29,15 @@ owned registrations through the app lifecycle. The installed app is required for
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
 packaging targets are unvalidated, and Windows has no supported agent IPC.
 
-The app exposes nine machine operations:
+The app exposes ten machine operations:
 
 | MCP tool | Behavior |
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
 | `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
+| `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
-| `nortuscc_preview_change` | Preview explicit reconcile keys or `change: { kind: "addSkill", candidateId, targets }` |
+| `nortuscc_preview_change` | Preview explicit reconcile keys, a reviewed skill addition, or a semantic `machineIntent` patch |
 | `nortuscc_apply_change` | Apply a reviewed `planId` with a caller-chosen durable `requestId` |
 | `nortuscc_get_run` | Recover a run's attributed intent, installation evidence, terminal outcome and follow-up prerequisites |
 | `nortuscc_list_runs` | List retained runs with bounded pagination |
@@ -46,6 +47,7 @@ The app exposes nine machine operations:
 Machine scope is the default. Review the preview before applying, retain the same `requestId`
 when acceptance is uncertain, and query runs after reconnecting. Reconciliation repairs existing
 declarations with their current consent, pin and installer rules. It saves no new declaration.
+Machine intent sets or resets owned settings, targets and enablement, or removes an explicit machine skill declaration. It backs up and saves choices and releases owned routing for unmanaged targets; it does not run installers or delete skill content.
 stdout contains MCP JSON-RPC records only; bounded results and stderr carry diagnostics.
 
 Skill additions resolve a candidate, preview its exact machine declaration and revision policy,

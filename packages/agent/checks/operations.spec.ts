@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['resolveSkillCandidate', 'getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['resolveSkillCandidate', 'getContext', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
@@ -246,4 +246,27 @@ test('parity evidence and acceptance are paired in both engine and JSON schemas'
     assert.equal(Schema.decodeUnknownResult(Schema.toType(schema), { onExcessProperty: 'error' })(value)._tag === 'Success', expected);
     assert.equal((() => { try { decodeRunView(value); return true; } catch { return false; } })(), expected);
   }
+});
+
+test('intent schemas publish strict patches, bounded reads and kind-paired durable evidence', () => {
+  const inputs = [
+    { section: 'settings', limit: 100 }, { section: 'settings', limit: 101 }, { section: 'settings', limit: 0 },
+    { section: 'settings', extra: true }, { section: 'unknown' },
+  ];
+  for (const [index, input] of inputs.entries()) {
+    assert.equal(acceptsOperation('inspectIntent', input), index === 0);
+    assert.equal(acceptsJsonInput('inspectIntent', input), index === 0);
+  }
+  const intentSchema = (operationJsonSchemas.previewChange.input as any).properties.change.anyOf.find((item: any) => item.properties.kind.enum.includes('machineIntent'));
+  assert.match(intentSchema.properties.patch.anyOf[0].properties.value.description, /32768 bytes.*depth <=16.*nodes <=4096/);
+  const intentChange = { kind: 'machineIntent', patch: { kind: 'manageConfig', action: 'reset' } };
+  assert.equal(acceptsOperation('previewChange', { change: intentChange }), true); assert.equal(acceptsJsonInput('previewChange', { change: intentChange }), true);
+  for (const patch of [{ ...intentChange.patch, value: false }, { kind: 'setting', fileId: 'f', key: 'k', action: 'reset', value: 'forbidden' }, { kind: 'skill', name: 'a', action: 'disable' }, { kind: 'integration', id: 'i', action: 'delete' }]) {
+    assert.equal(acceptsOperation('previewChange', { change: { kind: 'machineIntent', patch } }), false); assert.equal(acceptsJsonInput('previewChange', { change: { kind: 'machineIntent', patch } }), false);
+  }
+  for (const value of [NaN, Infinity, 'x'.repeat(32768), Array(4097).fill(null)]) assert.equal(acceptsOperation('previewChange', { change: { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'f', key: 'k', action: 'set', value } } }), false);
+  const acceptance = { kind: 'machineIntent', generation: '1', baselineDigest: 'a'.repeat(64), planDigest: 'b'.repeat(64), plannedKeys: ['intent:overrides'] };
+  const valid = { ...run, intent: { ...run.intent, change: intentChange, parity: acceptance }, parity: { kind: 'machineIntent', state: 'pending', committedKeys: [], remainingKeys: ['intent:overrides'], backupIds: [], intentState: 'pending', routingEffects: [] } };
+  assert.deepEqual(decodeRunView(valid), valid);
+  for (const value of [{ ...valid, intent: { ...valid.intent, change } }, { ...valid, parity: { ...valid.parity, kind: 'reconcile' } }, { ...valid, parity: { ...valid.parity, routingEffects: [{ fileId: '/arbitrary', state: 'needsInspection' }] } }]) assert.throws(() => decodeRunView(value));
 });

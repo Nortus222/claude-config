@@ -1,4 +1,5 @@
-import { Effect, Schema } from 'effect';
+import { Effect, Schema, SchemaGetter } from 'effect';
+import { intentValueProblem } from '@nortuscc/profile-engine/intent-value';
 import { POLICIES } from '../policy-values.ts';
 import { CountSchema, PlanSchema, StepSchema, ProgressSchema, InspectResultSchema, MAX_EXCLUDED, MAX_HISTORY, MAX_KEY_LENGTH } from './wire.ts';
 
@@ -31,7 +32,24 @@ const SkillNameSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.is
 const SkillTargetsSchema = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMinLength(1), Schema.isMaxLength(2));
 const SkillRevisionSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$(?![\s\S])/u));
 export const AddSkillChangeSchema = Schema.Struct({ kind: Schema.Literal('addSkill'), candidateId: IdSchema, targets: SkillTargetsSchema });
-export const ChangeSchema = Schema.Union([ReconcileChangeSchema, AddSkillChangeSchema]);
+// Validation walks bounded JSON iteratively before the owner's recursive secret checks.
+export const IntentValueSchema = Schema.declare((value): value is unknown => intentValueProblem(value) === undefined, {
+  toCodecJson: () => Schema.link<unknown>()(Schema.Json.annotate({ description: 'Finite JSON; UTF-8 JSON <=32768 bytes, depth <=16, nodes <=4096. Limits are checked before recursive validation.' }), { decode: SchemaGetter.transform((value: Schema.Json): unknown => value), encode: SchemaGetter.transform((value: unknown) => value as Schema.Json) }),
+});
+const PatchId = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(500));
+export const MachineIntentPatchSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('setting'), fileId: PatchId, key: PatchId, action: Schema.Literal('set'), value: IntentValueSchema }),
+  Schema.Struct({ kind: Schema.Literal('setting'), fileId: PatchId, key: PatchId, action: Schema.Literal('reset') }),
+  Schema.Struct({ kind: Schema.Literal('manageConfig'), action: Schema.Literal('set'), value: Schema.Boolean }),
+  Schema.Struct({ kind: Schema.Literal('manageConfig'), action: Schema.Literal('reset') }),
+  Schema.Struct({ kind: Schema.Literal('configTargets'), action: Schema.Literal('set'), value: Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2)) }),
+  Schema.Struct({ kind: Schema.Literal('configTargets'), action: Schema.Literal('reset') }),
+  Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, action: Schema.Literals(['enable', 'disable', 'reset']) }),
+  Schema.Struct({ kind: Schema.Literal('integration'), id: PatchId, action: Schema.Literals(['enable', 'disable', 'reset']) }),
+  Schema.Struct({ kind: Schema.Literal('removeSkillDeclaration'), source: SkillSourceSchema, name: SkillNameSchema }),
+]);
+export const MachineIntentChangeSchema = Schema.Struct({ kind: Schema.Literal('machineIntent'), patch: MachineIntentPatchSchema });
+export const ChangeSchema = Schema.Union([ReconcileChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
 export const SkillCandidateSchema = Schema.Struct({ candidateId: IdSchema, source: SkillSourceSchema, revision: SkillRevisionSchema,
   sourceDir: KeySchema, selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
   description: Schema.String.check(Schema.isMaxCodePoints(500)), internal: Schema.Boolean });
@@ -58,7 +76,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['getContext', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['getContext', 'inspect', 'inspectIntent', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -92,15 +110,42 @@ export const OperationProgressSchema = Schema.Union([
   ...ProgressSchema.members.slice(1),
 ]);
 const DigestSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$(?![\s\S])/u));
-export const ParityAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), generation: IdSchema,
-  baselineDigest: DigestSchema, planDigest: DigestSchema, plannedKeys: list(KeySchema) });
-export const ParityRunEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']),
-  committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) });
+const parityAcceptanceFields = { generation: IdSchema, baselineDigest: DigestSchema, planDigest: DigestSchema, plannedKeys: list(KeySchema) };
+const ReconcileAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityAcceptanceFields });
+const IntentAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('machineIntent'), ...parityAcceptanceFields });
+export const ParityAcceptanceSchema = Schema.Union([ReconcileAcceptanceSchema, IntentAcceptanceSchema]);
+const parityEvidenceFields = { state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']), committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) };
+const ReconcileEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityEvidenceFields });
+const RoutingEffectSchema = Schema.Union([
+  Schema.Struct({ fileId: Schema.Literals(['claude:CLAUDE.md', 'codex:AGENTS.md']), state: Schema.Literal('needsInspection') }),
+  Schema.Struct({ fileId: Schema.Literals(['claude:CLAUDE.md', 'codex:AGENTS.md']), state: Schema.Literal('observed'), intentChanged: Schema.Boolean, instructionsChanged: Schema.Boolean, outcome: Schema.Literals(['changed', 'unchanged', 'conflict', 'unmanaged']) }),
+]);
+const IntentEvidenceSchema = Schema.Struct({ kind: Schema.Literal('machineIntent'), ...parityEvidenceFields, intentState: Schema.Literals(['pending', 'saved', 'needsInspection']), routingEffects: Schema.Array(RoutingEffectSchema).check(Schema.isMaxLength(2)) });
+export const ParityRunEvidenceSchema = Schema.Union([ReconcileEvidenceSchema, IntentEvidenceSchema]);
+const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId });
+const IntentTargets = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2));
+export const IntentItemSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('manageConfig'), value: Schema.Boolean, from: IntentOrigin }),
+  Schema.Struct({ kind: Schema.Literal('configTargets'), value: IntentTargets, from: IntentOrigin }),
+  Schema.Struct({ kind: Schema.Literal('file'), id: PatchId, target: Schema.Literals(['claude', 'codex']), managed: Schema.Boolean, from: IntentOrigin }),
+  Schema.Struct({ kind: Schema.Literal('setting'), fileId: PatchId, key: PatchId, value: IntentValueSchema, from: IntentOrigin }),
+  Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, enabled: Schema.Boolean, from: IntentOrigin, declaredFrom: IntentOrigin, targets: IntentTargets,
+    policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']), revision: Schema.optionalKey(SkillRevisionSchema) }),
+  Schema.Struct({ kind: Schema.Literal('integration'), id: PatchId, type: Schema.Literals(['hook', 'mcp', 'plugin', 'marketplace', 'unknown']), target: Schema.optionalKey(Schema.Literals(['claude', 'codex'])), enabled: Schema.Boolean, from: IntentOrigin, prerequisites: Schema.Array(Text).check(Schema.isMaxLength(4)) }),
+  Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId, message: Schema.Literal('Configuration input is invalid; inspect the owning document in the app') }),
+]);
+export const IntentInspectionResultSchema = Schema.Struct({ generation: IdSchema, items: Schema.Array(IntentItemSchema).check(Schema.isMaxLength(100)), nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(512))), limitReason: Schema.optionalKey(Schema.Literals(['record-bytes', 'result-bytes', 'value-limit', 'unsafe-value', 'identity-limit'])) });
+export const MachineIntentDetailsSchema = Schema.Struct({
+  intentChanges: Schema.Array(Schema.Struct({ kind: Schema.Literal('machine-choice'), action: Schema.Literals(['set', 'reset', 'enable', 'disable', 'removeSkillDeclaration']), message: Text, before: Schema.NullOr(IntentItemSchema), after: Schema.NullOr(IntentItemSchema) })).check(Schema.isMaxLength(1)),
+  installationEffects: Schema.Array(Text).check(Schema.isMaxLength(4)),
+  sourceImpact: Schema.Array(Schema.Struct({ source: SkillSourceSchema, skills: Schema.Array(SkillNameSchema).check(Schema.isMaxLength(256)), policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']) })).check(Schema.isMaxLength(1)),
+});
 const previewFields = { planId: IdSchema, scope: OperationScopeSchema,
   generation: IdSchema, plan: OperationPlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)) };
 export const ReconcilePreviewSchema = Schema.Struct({ ...previewFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never) });
 export const AddSkillPreviewSchema = Schema.Struct({ ...previewFields, change: AddSkillChangeSchema, skillAddition: SkillAdditionPreviewSchema });
-export const ChangePreviewSchema = Schema.Union([ReconcilePreviewSchema, AddSkillPreviewSchema]);
+export const MachineIntentPreviewSchema = Schema.Struct({ ...previewFields, change: MachineIntentChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), machineIntent: MachineIntentDetailsSchema });
+export const ChangePreviewSchema = Schema.Union([ReconcilePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
 export const RunTerminalResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
@@ -140,7 +185,8 @@ const runFields = {
 };
 export const RunViewSchema = Schema.Union([
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: ParityAcceptanceSchema }), parity: Schema.optionalKey(ParityRunEvidenceSchema) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: ReconcileAcceptanceSchema }), parity: Schema.optionalKey(ReconcileEvidenceSchema) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: MachineIntentChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: IntentAcceptanceSchema }), parity: Schema.optionalKey(IntentEvidenceSchema) }),
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AddSkillChangeSchema, skillAddition: AcceptedSkillSchema, parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
 ]);
 export const ApplyChangeResultSchema = Schema.Union([
@@ -158,6 +204,7 @@ export const OperationHistoryResultSchema = Schema.Struct({ events: Schema.Array
 const scope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ kind: 'machine' } as const)));
 const limit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_HISTORY }));
 export const GetContextInputSchema = Schema.Struct({ scope });
+export const InspectIntentInputSchema = Schema.Struct({ scope, section: Schema.Literals(['configuration', 'files', 'settings', 'skills', 'integrations', 'issues']), cursor: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(512))), limit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 })).pipe(Schema.withDecodingDefaultKey(Effect.succeed(50))) });
 export const InspectInputSchema = Schema.Struct({ scope });
 export const PreviewChangeInputSchema = Schema.Struct({ scope, change: ChangeSchema });
 export const ResolveSkillCandidateInputSchema = Schema.Struct({ scope, source: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(250))), name: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)) });

@@ -108,7 +108,7 @@ try {
   await until(() => { if (agent.error) throw agent.error; assert.equal(agent.child.exitCode, null); return existsSync(join(agentDir, 'agent.sock')) && existsSync(join(agentDir, 'agent.token')); });
   let client = open();
   const toolsReply = await client.ask('tools/list');
-  assert.deepEqual(toolsReply.tools.map(tool => tool.name).sort(), ['nortuscc_resolve_skill_candidate', 'nortuscc_get_context', 'nortuscc_inspect', 'nortuscc_preview_change', 'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history'].sort());
+  assert.deepEqual(toolsReply.tools.map(tool => tool.name).sort(), ['nortuscc_resolve_skill_candidate', 'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_inspect', 'nortuscc_preview_change', 'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history'].sort());
   const context = await client.call('getContext', 'nortuscc_get_context', {});
   assert.equal(context.app.ownership, 'app'); assert.equal(context.capabilities.addSkill.available, true);
   const inspected = await client.call('inspect', 'nortuscc_inspect', {});

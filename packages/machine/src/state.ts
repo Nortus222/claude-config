@@ -3,7 +3,7 @@ import { Context, Effect, Layer } from 'effect';
 import { serializeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
 import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
-import { MachinePaths } from './paths.ts';
+import { MachinePaths, type MachinePathsValue } from './paths.ts';
 import { Backups } from './backups.ts';
 
 export type Baseline = { readonly hash: string; readonly appliedAt: string };
@@ -99,6 +99,25 @@ export const withApplied = (state: MachineState, commit: string, now = new Date(
   applied: { commit, at: now.toISOString() },
 });
 
+// Observe current bookkeeping without materializing the pre-Codex fallback.
+const observeState = (fs: Fs['Service'], paths: MachinePathsValue) => Effect.gen(function* () {
+  const text = yield* fs.readText(join(paths.stateRoot, 'state.json'));
+  if (text !== undefined) return { state: parseState(text) ?? emptyState, migrate: false };
+  const legacyText = yield* fs.readText(join(paths.claude, '.nortuscc-lock.json'));
+  const legacy = legacyText === undefined ? undefined : parseState(legacyText);
+  if (!legacy) return { state: emptyState, migrate: false };
+  const files: Record<string, Baseline> = {};
+  for (const [oldKey, newKey] of Object.entries(LEGACY_KEYS)) {
+    if (legacy.files[oldKey]) files[newKey] = legacy.files[oldKey];
+  }
+  return { state: { ...emptyState, repo: legacy.repo, files,
+    ...(Object.hasOwn(legacy, 'mcpRouting') ? { mcpRouting: legacy.mcpRouting } : {}) }, migrate: true };
+});
+
+export const peekMachineState = Effect.gen(function* () {
+  return (yield* observeState(yield* Fs, yield* MachinePaths)).state;
+});
+
 export class StateStore extends Context.Service<
   StateStore,
   {
@@ -117,7 +136,6 @@ export const stateStore = Layer.effect(
     const fs = yield* Fs;
     const statePath = join(paths.stateRoot, 'state.json');
     const overridesPath = join(paths.stateRoot, 'overrides.json');
-    const legacyPath = join(paths.claude, '.nortuscc-lock.json');
 
     const saveState = (state: MachineState) => {
       const { version, repo, files, applied } = state;
@@ -144,19 +162,9 @@ export const stateStore = Layer.effect(
 
     // Migrates the pre-Codex lock only when no state file exists; the old lock is left untouched.
     const read = Effect.gen(function* () {
-      const text = yield* fs.readText(statePath);
-      if (text !== undefined) return parseState(text) ?? emptyState;
-      const legacyText = yield* fs.readText(legacyPath);
-      const legacy = legacyText === undefined ? undefined : parseState(legacyText);
-      if (!legacy) return emptyState;
-      const files: Record<string, Baseline> = {};
-      for (const [oldKey, newKey] of Object.entries(LEGACY_KEYS)) {
-        if (legacy.files[oldKey]) files[newKey] = legacy.files[oldKey];
-      }
-      const migrated: MachineState = { ...emptyState, repo: legacy.repo, files,
-        ...(Object.hasOwn(legacy, 'mcpRouting') ? { mcpRouting: legacy.mcpRouting } : {}) };
-      yield* saveState(migrated);
-      return migrated;
+      const observed = yield* observeState(fs, paths);
+      if (observed.migrate) yield* saveState(observed.state);
+      return observed.state;
     });
 
     return {

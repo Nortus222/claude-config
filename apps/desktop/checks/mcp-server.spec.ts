@@ -34,7 +34,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = { resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = { inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -351,4 +351,29 @@ for (const runtime of runtimes) test(`${runtime}: MCP addition from arbitrary cw
   assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 1);
   const history = output('history', await next.call('history', { limit: 100 }));
   assert.ok(history.events.some((event: any) => event.kind === 'skill-addition' && event.actor === 'mcp' && event.runId === runId && event.requestId === 'lost-addition-reply'));
+});
+
+
+test('dedicated MCP intent read and reset recover one shared run after a lost acceptance reply', { timeout: 30_000 }, async t => {
+  const s = await agent('app', { addition: true }); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  output('inspect', await client.call('inspect'));
+  const initial = output('inspectIntent', await client.call('inspectIntent', { section: 'settings' }));
+  assert.ok(initial.items.some((item: any) => item.kind === 'setting' && item.key === 'theme' && item.value === 'dark'));
+  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'claude:settings.json', key: 'theme', action: 'reset' } } }));
+  assert.equal(preview.plan.kind, 'operation'); assert.ok(preview.machineIntent.intentChanges.length);
+  const args = { planId: preview.planId, requestId: 'mcp-intent-reset' };
+  client.loseNextReply();
+  const lost = client.call('applyChange', args).catch(() => undefined);
+  for (let n = 0; n < 100 && client.droppedReplies() === 0; n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(client.droppedReplies(), 1); await client.terminate(); await lost;
+  const next = open(process.execPath, s.m.paths.stateRoot); t.after(next.close); await next.initialize();
+  let run = output('applyChange', await next.call('applyChange', args)).run;
+  for (let n = 0; n < 100 && !run.result; n++) {
+    await new Promise(resolve => setTimeout(resolve, 10)); run = output('getRun', await next.call('getRun', { runId: run.runId }));
+  }
+  assert.equal(run.state, 'succeeded'); assert.equal(run.intentSaved, true); assert.equal(run.parity.kind, 'machineIntent');
+  assert.equal(output('applyChange', await next.call('applyChange', args)).run.runId, run.runId);
+  assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 1);
+  const saved = JSON.parse(s.m.read(join(s.m.paths.stateRoot, 'overrides.json'))!); assert.equal(saved.settings?.['claude:settings.json']?.theme, undefined);
 });

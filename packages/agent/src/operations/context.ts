@@ -2,7 +2,7 @@ import { Schema } from 'effect';
 import { ContextResultSchema } from './schemas.ts';
 
 export const capabilityInventory = {
-  getContext: { available: true }, inspect: { available: true }, previewChange: { available: true },
+  inspectIntent: { available: true }, machineIntent: { available: true }, getContext: { available: true }, inspect: { available: true }, previewChange: { available: true },
   applyChange: { available: true }, getRun: { available: true }, listRuns: { available: true },
   cancelRun: { available: true }, history: { available: true },
   resolveSkillCandidate: { available: true },

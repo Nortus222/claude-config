@@ -14,6 +14,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { makeIntentOperations } from '../operations/intent.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
 import type { ParityAcceptance } from '../operations/index.ts';
 import { AgentClock } from '../clock.ts';
@@ -41,6 +42,7 @@ export type AgentSession = {
   // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
   readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
   readonly skillOperations: SkillOperations;
+  readonly inspectIntent: (input: OperationInput<'inspectIntent'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectIntent'>, SessionError>;
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
   // Runs a job now and answers what it inspected, with its status. Clears the reconcile preview.
@@ -137,6 +139,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     yield* Effect.addFinalizer(() => Effect.sync(skillOperations.clear));
     const resolveSkillCandidate: AgentSession['resolveSkillCandidate'] = input => skillOperations.resolveSkillCandidate(input).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
 
+    const intentOperations = yield* makeIntentOperations({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0),
+      freshInspection: (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.map(job => job.inspection), Effect.provideContext(context)), invalidate: skillOperations.clear });
+
     let previewed: Previewed | undefined;
     let active: Active | undefined;
     const clock = yield* AgentClock;
@@ -215,6 +220,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'machineIntent') {
+        if (active) return yield* Effect.fail(busy);
+        return yield* retainParityChange(yield* intentOperations.prepare(input.change));
+      }
       if (input.change.kind === 'addSkill') {
         if (active) return yield* Effect.fail(busy);
         return yield* skillOperations.previewAddSkill({ scope: input.scope, candidateId: input.change.candidateId, targets: input.change.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
@@ -449,7 +458,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }),
     });
     const session: AgentSession = {
-      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange,
+      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectIntent: intentOperations.inspectIntent,
       onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,

@@ -4,12 +4,14 @@ import { AgentError, AgentUnavailable } from '../../../src/agent-client.ts';
 import type { AppAgentClient } from './client.ts';
 
 export const toolNames = {
+  inspectIntent: 'nortuscc_inspect_intent',
   resolveSkillCandidate: 'nortuscc_resolve_skill_candidate',
   getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change',
   applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs',
   cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
 } as const;
 const descriptions: Record<OperationName, string> = {
+  inspectIntent: 'Read bounded effective machine configuration, owned settings, declaration enablement, required targets, source policy and provenance. Reset reveals inherited intent. Intent changes save choices without installing or deleting content.',
   resolveSkillCandidate: 'Resolve an exact native selector or canonical installed name in a public GitHub source. Without source, search bounded configured and installed sources. Ambiguous candidates require source selection before preview.',
   getContext: 'Read the installed app, agent, setup and operation capabilities. Start here. Machine scope is the default.',
   inspect: 'Inspect current machine configuration and available reconcile keys.',

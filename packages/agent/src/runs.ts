@@ -102,7 +102,7 @@ export const makeAgentRuns = (driver: {
         accepted: (change, keys, skillAddition, parity) => Effect.gen(function* () {
           const view = yield* Effect.try({ try: () => decodeRunView({ runId, state: 'accepted', operation: 'applyChange', scope: { kind: 'machine' },
             intent: { requestId: input.requestId, inputDigest: input.inputDigest, planId: input.planId, change: copy(change), ...(skillAddition ? { skillAddition: copy(skillAddition) } : {}), ...(parity ? { parity: copy(parity) } : {}) },
-            ...(skillAddition ? { intentState: 'pending' } : {}), ...(parity ? { parity: { kind: parity.kind, state: 'pending', committedKeys: [], remainingKeys: [...keys], backupIds: [] } } : {}), intentSaved: false, steps: [], result: null }), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
+            ...(skillAddition || change.kind === 'machineIntent' ? { intentState: 'pending' } : {}), ...(parity ? { parity: { kind: parity.kind, state: 'pending', committedKeys: [], remainingKeys: [...keys], backupIds: [], ...(parity.kind === 'machineIntent' ? { intentState: 'pending', routingEffects: [] } : {}) } } : {}), intentSaved: false, steps: [], result: null }), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
           if (parity && (new Set(keys).size !== keys.length || JSON.stringify(parity.plannedKeys) !== JSON.stringify(keys))) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Parity acceptance keys differ from the plan'));
           // Reserve room for all outcomes and remaining keys before accepting any work.
           const largest = { ...view, steps: keys.map(key => ({ key, outcome: 'cancelled', note: '' })), result: { status: 'cancelled', remaining: keys } };
@@ -113,7 +113,7 @@ export const makeAgentRuns = (driver: {
         }),
         parity: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
-          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, parity: copy(update) }), catch: () => new RunError('INVALID_INPUT', 'Invalid operation evidence') });
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, parity: copy(update), ...(update.kind === 'machineIntent' ? { intentSaved: update.intentState === 'saved', intentState: update.intentState } : {}) }), catch: () => new RunError('INVALID_INPUT', 'Invalid operation evidence') });
           const accepted = view.intent.parity!;
           const keys = new Set(accepted.plannedKeys);
           if (new Set([...update.committedKeys, ...update.remainingKeys]).size !== keys.size

@@ -332,6 +332,7 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'inspectIntent': result = yield* session.inspectIntent(request.input); break;
             case 'resolveSkillCandidate': result = yield* session.resolveSkillCandidate(request.input); break;
             case 'getContext': result = yield* context(conn.runtimeId); break;
             case 'inspect': result = yield* session.inspect(client); break;

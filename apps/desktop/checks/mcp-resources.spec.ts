@@ -51,5 +51,5 @@ test('post-signing Bun hash refresh updates only the Bun fingerprint after bytes
 
 test('MCP metadata import graph excludes machine readers, YAML and profile execution', async () => {
   const bundled = await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', write: false, metafile: true });
-  for (const output of Object.values(bundled.metafile!.outputs)) for (const [path, item] of Object.entries(output.inputs)) if (item.bytesInOutput > 0) assert.doesNotMatch(path, /(?:packages\/machine\/src\/(?!paths\.ts|errors\.ts)|packages\/profile-engine\/src\/|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/);
+  for (const output of Object.values(bundled.metafile!.outputs)) for (const [path, item] of Object.entries(output.inputs)) if (item.bytesInOutput > 0) assert.doesNotMatch(path, /(?:packages\/machine\/src\/(?!paths\.ts|errors\.ts)|packages\/profile-engine\/src\/(?!intent-value\.ts)|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/);
 });

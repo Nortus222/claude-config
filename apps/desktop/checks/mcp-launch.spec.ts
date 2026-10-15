@@ -59,7 +59,7 @@ test('native MCP starts without setup or GUI, from unrelated cwd, and EOF leaves
   const f = fixture(t), client = open(t, f);
   const tools = await client.ask('tools/list');
   assert.deepEqual(tools.result.tools.map((tool: { name: string }) => tool.name).sort(), [
-    'nortuscc_get_context', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect', 'nortuscc_preview_change',
+    'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect', 'nortuscc_preview_change',
     'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history',
   ].sort());
   const reply = await client.ask('tools/call', { name: 'nortuscc_inspect', arguments: {} });

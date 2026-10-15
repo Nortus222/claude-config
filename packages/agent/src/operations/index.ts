@@ -1,7 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
-  GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
+  InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
   HistoryInputSchema, OperationHistoryResultSchema, ResolveSkillCandidateInputSchema, SkillCandidateResultSchema,
@@ -19,6 +19,7 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 export const operationDefinitions = {
   resolveSkillCandidate: define('resolveSkillCandidate', ResolveSkillCandidateInputSchema, SkillCandidateResultSchema),
   getContext: define('getContext', GetContextInputSchema, ContextResultSchema),
+  inspectIntent: define('inspectIntent', InspectIntentInputSchema, IntentInspectionResultSchema),
   inspect: define('inspect', InspectInputSchema, InspectResultSchema),
   previewChange: define('previewChange', PreviewChangeInputSchema, ChangePreviewSchema),
   applyChange: define('applyChange', ApplyChangeInputSchema, ApplyChangeResultSchema, true),

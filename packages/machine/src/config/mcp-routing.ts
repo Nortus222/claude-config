@@ -66,7 +66,7 @@ export type McpRoutingResult = McpRoutingStatus & {
   readonly instructionsChanged: boolean;
 };
 
-const routingEvidence = (text: string | undefined, ownership: unknown, managed: boolean) =>
+export const mcpRoutingEvidence = (text: string | undefined, ownership: unknown, managed: boolean) =>
   hashText(JSON.stringify({ text, ownership, managed }));
 
 const readRouting = (desired: DesiredConfig, fileId: McpRoutingFileId) => Effect.gen(function* () {
@@ -78,7 +78,7 @@ const readRouting = (desired: DesiredConfig, fileId: McpRoutingFileId) => Effect
   const dest = fileId === 'claude:CLAUDE.md' ? join(paths.claude, 'CLAUDE.md') : join(paths.codex, 'AGENTS.md');
   const text = yield* fs.readText(dest);
   const split = splitMcpRouting(text, fileId, state.mcpRouting);
-  const evidence = routingEvidence(text, state.mcpRouting, file?.managed ?? false);
+  const evidence = mcpRoutingEvidence(text, state.mcpRouting, file?.managed ?? false);
   const status: McpRoutingStatus = {
     fileId, blockId: MCP_ROUTING_BLOCK_ID, evidence, offeredText: MCP_ROUTING_GUIDANCE,
     intent: state.mcpRouting !== undefined && !validMcpRouting(state.mcpRouting) ? 'invalid' : split.receipt?.state ?? 'unowned',
@@ -128,7 +128,7 @@ export const setMcpRouting = (
   yield* (yield* StateStore).write(next);
   // A failed write leaves durable active/missing or released/present ownership for repair.
   const persisted = yield* inspectMcpRouting(desired, fileId);
-  if (persisted.evidence !== routingEvidence(now.text, next.mcpRouting, now.file?.managed ?? false)) return {
+  if (persisted.evidence !== mcpRoutingEvidence(now.text, next.mcpRouting, now.file?.managed ?? false)) return {
     ...persisted, outcome: 'conflict', intentChanged, instructionsChanged: false,
     note: 'Instructions changed before writing; ownership was retained for repair',
   } satisfies McpRoutingResult;
