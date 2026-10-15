@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
@@ -134,3 +134,34 @@ test('an edit during backup is refused without replacing the new document', asyn
   )));
   assert.equal(readFileSync(path, 'utf8'), edited);
 });
+
+for (const edit of ['targets', 'manageConfig', 'bytes', 'created'] as const)
+  test(`first override creation refuses legacy ${edit} edit during backup`, async () => {
+    const { paths, stateRoot, run } = machine();
+    const path = join(stateRoot, 'overrides.json'); const statePath = join(stateRoot, 'state.json');
+    const original = JSON.stringify({ files: {}, configTargets: ['codex'], skillsOnly: true });
+    if (edit !== 'created') writeFileSync(statePath, original);
+    const before = await run(s => s.read);
+    const edited = edit === 'targets' || edit === 'created' ? JSON.stringify({ files: {}, configTargets: ['claude'], skillsOnly: true })
+      : edit === 'manageConfig' ? JSON.stringify({ files: {}, configTargets: ['codex'], skillsOnly: false }) : original + '\n';
+    const services = Layer.mergeAll(machinePaths(paths), nodeFs);
+    const backupCalls: string[] = [];
+    const backup = Layer.effect(Backups, Effect.map(Backups, real => ({ ...real,
+      preserve: (...args: Parameters<typeof real.preserve>) => real.preserve(...args).pipe(Effect.tap(() => Effect.sync(() => {
+        backupCalls.push(args[0]);
+        if (args[0] === statePath) writeFileSync(statePath, edited);
+      }))),
+    }))).pipe(Layer.provide(backupsForRun().pipe(Layer.provide(services))));
+    await assert.rejects(Effect.runPromise(OverridesStore.use(s => s.write({ ...before.value,
+      skillAdditions: [{ source: 'owner/repo', name: 'review', targets: ['codex'] }],
+    }, before.value)).pipe(Effect.provide(Layer.mergeAll(overridesStore, backup).pipe(Layer.provide(services))))));
+    assert.deepEqual(backupCalls, [path, statePath]);
+    assert.equal(existsSync(path), false); assert.equal(readFileSync(statePath, 'utf8'), edited);
+    const after = await run(s => s.read); assert.equal(after.source, statePath);
+    assert.deepEqual(after.value, edit === 'targets' || edit === 'created' ? { manageConfig: false, configTargets: ['claude'] }
+      : edit === 'manageConfig' ? { configTargets: ['codex'] } : before.value);
+    if (edit !== 'created') {
+      const root = join(stateRoot, 'backups'); const saved = join(root, readdirSync(root)[0]!, 'state.json');
+      assert.equal(readFileSync(saved, 'utf8'), original); assert.equal(statSync(saved).mode & 0o777, 0o600);
+    }
+  });

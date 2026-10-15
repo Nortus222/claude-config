@@ -190,7 +190,8 @@ export const acceptedSkillLockMatches = (lock: SkillLock, accepted: SkillCandida
 
 // The selected tuple owns the fetch URL and path. Lock metadata is evidence, never fetch authority.
 export const verifyAcceptedSkill = (accepted: SkillCandidate, reader = readSkillCandidates): Effect.Effect<
-  { readonly verified: boolean; readonly problems: readonly string[] }, never, Fs | Processes | MachinePaths
+  { readonly verified: boolean; readonly problems: readonly string[];
+    readonly cleanup?: { readonly reason: 'cleanup-failed'; readonly retainedDirectory?: string } }, never, Fs | Processes | MachinePaths
 > => Effect.gen(function* () {
   if (!acceptedSkillLockMatches(yield* readSkillLock, accepted)) return { verified: false, problems: ['installed lock does not match accepted source, revision, path and tree'] };
   let tree: readonly TreeEntry[] | undefined;
@@ -199,7 +200,9 @@ export const verifyAcceptedSkill = (accepted: SkillCandidate, reader = readSkill
       && candidate.installedName === accepted.installedName && candidate.blob === accepted.blob
       && candidate.tree === accepted.tree && candidate.internal === accepted.internal) tree = entries;
   } });
-  if (!result.ok || result.source !== accepted.source || result.revision !== accepted.revision || !tree) return { verified: false, problems: [result.ok ? 'accepted metadata no longer matches' : `accepted source verification: ${result.reason}${result.retainedDirectory ? ` (${result.retainedDirectory})` : ''}`] };
+  if (!result.ok && result.reason === 'cleanup-failed') return { verified: false, problems: ['Accepted source cleanup was not confirmed'],
+    cleanup: { reason: 'cleanup-failed', ...(result.retainedDirectory ? { retainedDirectory: [...result.retainedDirectory].slice(0, 4096).join('') } : {}) } };
+  if (!result.ok || result.source !== accepted.source || result.revision !== accepted.revision || !tree) return { verified: false, problems: [result.ok ? 'accepted metadata no longer matches' : `accepted source verification: ${result.reason}`] };
   const problems = yield* verifyInstalledSkillTree(accepted.installedName, tree, accepted.revision);
   return { verified: problems.length === 0, problems };
 });

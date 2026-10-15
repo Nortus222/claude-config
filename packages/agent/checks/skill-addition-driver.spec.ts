@@ -3,14 +3,18 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { Cause, Deferred, Effect, Fiber } from 'effect';
+import { Cause, Deferred, Effect, Exit, Fiber } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
-import { DialogueCleanupFailed, Fs, FsFailed, HistoryStore, OverridesStore, Processes, inspectSkills, skillsDomain, type HistoryInput, type SkillCandidate } from '@nortuscc/machine';
+import { DialogueCleanupFailed, Fs, FsFailed, HistoryStore, OverridesStore, Processes, inspectSkills, skillsDomain, verifyAcceptedSkill, SkillCandidateCleanupFailed, type HistoryInput, type SkillCandidatesResult, type SkillCandidate } from '@nortuscc/machine';
 import { agentSkillInstaller } from '../src/skill-installer.ts';
 import { makeSession, type AgentSession } from '../src/ipc/session.ts';
 import { type AgentHandle } from '../src/agent.ts';
 import { RunStore, RunStoreError, type RunReceipt } from '../src/run-store.ts';
-import { operationDigest } from '../src/runs.ts';
+import { makeAdditionDriver } from '../src/skill-addition.ts';
+import { makeSkillOperations } from '../src/skill-operations.ts';
+import type { JobInspection } from '../src/job.ts';
+import { decodeRunView } from '../src/operations/index.ts';
+import { operationDigest, type RunLifecycle } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 
 const roots: string[] = [];
@@ -18,7 +22,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const contentText = '---\nname: Design Review\ndescription: Review design\n---\n';
 const contentBlob = createHash('sha1').update(`blob ${Buffer.byteLength(contentText)}\0${contentText}`).digest('hex');
 const c: SkillCandidate = { source: 'owner/repo', revision: 'a'.repeat(40), sourceDir: 'skills/odd-folder', selectorName: 'Design Review', installedName: 'design-review', blob: contentBlob, tree: 'c'.repeat(40), description: 'Design review', internal: false, metadata: {} };
-const fixture = (options: { noOverrides?: boolean; legacyState?: 'empty' | 'choices'; failReceipt?: (r: RunReceipt) => boolean; failHistory?: (event: HistoryInput) => boolean; nativeDefect?: 'defect' | 'mixed'; installerCode?: number; content?: boolean; codex?: boolean; pauseInstaller?: boolean; claude?: boolean; alreadyInstalled?: boolean; nativeCleanupFailed?: boolean; unavailableInstaller?: boolean; afterSaved?: () => void } = {}) => {
+const fixture = (options: { sourceOutcome?: 'returned' | 'defect' | 'mixed' | 'mismatch'; noOverrides?: boolean; legacyState?: 'empty' | 'choices'; failReceipt?: (r: RunReceipt) => boolean; failHistory?: (event: HistoryInput) => boolean; nativeDefect?: 'defect' | 'mixed'; installerCode?: number; content?: boolean; codex?: boolean; pauseInstaller?: boolean; claude?: boolean; alreadyInstalled?: boolean; nativeCleanupFailed?: boolean; unavailableInstaller?: boolean; afterSaved?: () => void } = {}) => {
   const m = agentMachine(); roots.push(m.root);
   m.write(join(m.paths.repo, 'skills-manifest.txt'), '[owner/repo] exact\nunrelated\n');
   if (!options.noOverrides) m.write(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skills: { unrelated: false }, future: { keep: true } }));
@@ -30,7 +34,7 @@ const fixture = (options: { noOverrides?: boolean; legacyState?: 'empty' | 'choi
   if (options.legacyState) m.write(join(m.paths.stateRoot, 'state.json'), JSON.stringify({ files: {}, ...(options.legacyState === 'choices' ? { configTargets: ['codex'] } : {}) }));
   const started = Deferred.makeUnsafe<void>(); const release = Deferred.makeUnsafe<void>();
   const calls: string[] = []; const historyAttempts: HistoryInput[] = []; let installing = 0;
-  const within = (body: (session: AgentSession) => Effect.Effect<unknown, unknown, any>) => m.run(Effect.scoped(Effect.gen(function* () {
+  const within = (body: (session: AgentSession, fresh: Effect.Effect<JobInspection, unknown>) => Effect.Effect<unknown, unknown, any>) => m.run(Effect.scoped(Effect.gen(function* () {
     const context = yield* Effect.context<any>();
     const fresh = Effect.gen(function* () {
       const overrides = yield* (yield* OverridesStore).read;
@@ -43,7 +47,18 @@ const fixture = (options: { noOverrides?: boolean; legacyState?: 'empty' | 'choi
     const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [skillsDomain],
       skillCandidates: input => Effect.sync(() => { input.observeTree?.(c, [{ path: 'SKILL.md', sha: c.blob, mode: '100644' }]); return { ok: true, source: c.source, revision: c.revision, candidates: [c] }; }),
       skillVerification: {
-        content: candidate => Effect.sync(() => { assert.equal(candidate.sourceDir, c.sourceDir); calls.push('content'); return { verified: options.content !== false, problems: ['content differs'] }; }),
+        content: candidate => options.sourceOutcome ? verifyAcceptedSkill(candidate, input => Effect.suspend<SkillCandidatesResult, never, never>(() => {
+          calls.push('content');
+          const retainedDirectory = join(m.paths.stateRoot, 'tmp', 'candidates-retained');
+          if (options.sourceOutcome !== 'mismatch') m.write(join(retainedDirectory, 'owned'), 'retained');
+          if (options.sourceOutcome === 'returned') return Effect.succeed({ ok: false, reason: 'cleanup-failed', retainedDirectory });
+          if (options.sourceOutcome !== 'mismatch') {
+            const cleanup = Cause.die(new SkillCandidateCleanupFailed({ temporaryDirectory: retainedDirectory }));
+            return Effect.failCause(options.sourceOutcome === 'mixed' ? Cause.combine(Cause.interrupt(123), cleanup) : cleanup);
+          }
+          input.observeTree?.(c, [{ path: 'SKILL.md', sha: 'd'.repeat(40), mode: '100644' }]);
+          return Effect.succeed({ ok: true, source: c.source, revision: c.revision, candidates: [c] });
+        })) : Effect.sync(() => { assert.equal(candidate.sourceDir, c.sourceDir); calls.push('content'); return { verified: options.content !== false, problems: ['content differs'] }; }),
         codex: () => options.nativeDefect ? Effect.failCause(options.nativeDefect === 'mixed'
           ? Cause.combine(Cause.interrupt(123), Cause.die(new DialogueCleanupFailed())) : Cause.die(new DialogueCleanupFailed())) : Effect.sync(() => { calls.push('codex'); return options.nativeCleanupFailed ? { verified: false, reason: 'cleanup-failed' } : options.codex === false ? { verified: false, reason: 'disabled' } : { verified: true, enabled: true, path: '/isolated/SKILL.md' }; }),
         claude: () => Effect.sync(() => { calls.push('claude'); return { verified: options.claude !== false, ...(options.claude === false ? { reason: 'denied' as const } : {}), physical: { status: 'present' as const, path: '/isolated/SKILL.md' }, catalog: { status: 'present' as const }, restrictions: { status: options.claude === false ? 'denied' as const : 'no-known-denial' as const, diagnostics: [] }, limits: { selectedSource: 'not-attested' as const, invocationAuthorization: 'not-attested' as const, configRoot: 'requested-environment-only' as const, managedStartup: 'remains-active' as const } }; }),
@@ -64,7 +79,7 @@ const fixture = (options: { noOverrides?: boolean; legacyState?: 'empty' | 'choi
         yield* Deferred.succeed(started, undefined); if (options.pauseInstaller) yield* Deferred.await(release);
         return { code: options.installerCode ?? 0, stdout: '' };
       }) }));
-    return yield* body(session);
+    return yield* body(session, fresh);
   })));
   return { m, within, calls, historyAttempts, started, release, installing: () => installing };
 };
@@ -277,3 +292,111 @@ for (const legacyState of [undefined, 'empty', 'choices'] as const) test(`first 
     assert.equal(f.m.read(join(f.m.paths.stateRoot, 'state.json')), legacy);
   })); assert.equal(f.installing(), 1);
 });
+
+for (const sourceOutcome of ['returned', 'defect', 'mixed', 'mismatch'] as const)
+  test(`accepted source ${sourceOutcome} preserves cleanup ownership or ordinary content failure`, async () => {
+    const f = fixture({ alreadyInstalled: true, sourceOutcome });
+    let id = '';
+    await f.within(s => Effect.gen(function* () {
+      const p = yield* preview(s); const run = yield* s.runs.submit(request(p.planId)); id = run.runId;
+      yield* terminal(s, id);
+      const done = yield* s.runs.get(id);
+      assert.equal(done.intentSaved, true); assert.equal(done.intentState, 'saved');
+      assert.equal(done.installation?.state, sourceOutcome === 'mismatch' ? 'failed' : 'needsInspection');
+      assert.deepEqual(done.installation?.nextActions, []);
+      if (sourceOutcome === 'mismatch') {
+        assert.equal(done.state, 'failed'); assert.equal(done.installation?.retainedDirectory, undefined);
+        assert.match(done.installation!.message, /SKILL.md differs/);
+      } else {
+        assert.equal(done.installation?.retainedDirectory, join(f.m.paths.stateRoot, 'tmp', 'candidates-retained'));
+        assert.ok(existsSync(join(done.installation!.retainedDirectory!, 'owned')));
+      }
+      assert.deepEqual((yield* s.runs.list({ limit: 1 })).runs[0]?.installation, done.installation);
+    }));
+    await f.within(s => Effect.gen(function* () {
+      const recovered = yield* s.runs.get(id);
+      assert.equal(recovered.installation?.state, sourceOutcome === 'mismatch' ? 'failed' : 'needsInspection');
+      assert.deepEqual(recovered.installation?.nextActions, []);
+      if (sourceOutcome !== 'mismatch') assert.ok(existsSync(join(recovered.installation!.retainedDirectory!, 'owned')));
+    }));
+    assert.equal(f.installing(), 0); assert.deepEqual(f.calls, ['content']);
+  });
+
+test('terminal-only receipt failure keeps saved and native evidence without follow-ups before and after restart', async () => {
+  let failTerminal = true;
+  const f = fixture({ alreadyInstalled: true, failReceipt: r => failTerminal && r.view.result !== null });
+  let id = ''; let accepted: unknown; let diagnostics = '';
+  const original = Object.getOwnPropertyDescriptor(process.stderr, 'write');
+  Object.defineProperty(process.stderr, 'write', { configurable: true, writable: true,
+    value: (chunk: string | Uint8Array) => { diagnostics += String(chunk); return true; } });
+  try {
+    await f.within(s => Effect.gen(function* () {
+      const p = yield* preview(s); const run = yield* s.runs.submit(request(p.planId)); id = run.runId;
+      yield* terminal(s, id);
+      const done = yield* s.runs.get(id); accepted = done.intent.skillAddition;
+      assert.equal(done.state, 'interrupted'); assert.equal(done.intentSaved, true); assert.equal(done.intentState, 'saved');
+      assert.equal(done.installation?.state, 'needsInspection'); assert.deepEqual(done.installation?.nextActions, []);
+      assert.deepEqual(done.installation?.codex, { verified: true, enabled: true, path: '/isolated/SKILL.md' });
+      assert.deepEqual((yield* s.runs.list({ limit: 1 })).runs[0], done);
+      assert.equal((yield* s.runs.submit(request(p.planId))).runId, id);
+    }));
+  } finally {
+    if (original) Object.defineProperty(process.stderr, 'write', original); else Reflect.deleteProperty(process.stderr, 'write');
+  }
+  assert.match(diagnostics, /^apply run [0-9a-f-]+: receipt failed: disk failed\n$/);
+  failTerminal = false;
+  await f.within(s => Effect.gen(function* () {
+    const recovered = yield* s.runs.get(id);
+    assert.equal(recovered.state, 'interrupted'); assert.equal(recovered.intentSaved, true); assert.equal(recovered.intentState, 'saved');
+    assert.deepEqual(recovered.intent.skillAddition, accepted);
+    assert.equal(recovered.installation?.state, 'needsInspection'); assert.deepEqual(recovered.installation?.nextActions, []);
+    assert.deepEqual(recovered.installation?.codex, { verified: true, enabled: true, path: '/isolated/SKILL.md' });
+    assert.deepEqual((yield* s.runs.list({ limit: 1 })).runs[0], recovered);
+  }));
+  assert.equal(f.installing(), 0); assert.deepEqual(f.calls, ['content', 'codex']);
+});
+
+for (const outcome of ['returned', 'defect', 'mixed'] as const)
+  test(`source ${outcome} cleanup evidence is bounded and the driver preserves the original cause`, async () => {
+    const f = fixture({ alreadyInstalled: true });
+    await f.within((_session, fresh) => Effect.gen(function* () {
+      const ops = yield* makeSkillOperations({ inspection: fresh.pipe(Effect.orDie), generation: Effect.succeed(1),
+        readCandidates: input => Effect.sync(() => {
+          input.observeTree?.(c, [{ path: 'SKILL.md', sha: c.blob, mode: '100644' }]);
+          return { ok: true, source: c.source, revision: c.revision, candidates: [c] };
+        }),
+      });
+      const found = yield* ops.resolveSkillCandidate({ scope: { kind: 'machine' }, source: c.source, name: c.installedName });
+      const p = yield* ops.previewAddSkill({ scope: { kind: 'machine' }, candidateId: found.candidates[0]!.candidateId, targets: ['codex'] });
+      const accepted = (yield* ops.acceptedPlan(p.planId))!;
+      const updates: Parameters<RunLifecycle['addition']>[0][] = [];
+      const lifecycle: RunLifecycle = { actor: 'mcp', runId: 'direct-run', requestId: 'direct-request',
+        accepted: () => Effect.void, progress: () => Effect.void, finished: () => Effect.void,
+        addition: update => Effect.sync(() => { updates.push(structuredClone(update)); }),
+      };
+      const directory = '/owned/' + '😀'.repeat(5000);
+      const defect = new SkillCandidateCleanupFailed({ temporaryDirectory: directory });
+      const cause = outcome === 'mixed'
+        ? Cause.combine(Cause.interrupt(123), Cause.combine(Cause.die(new Error('private unrelated diagnostic')), Cause.die(defect)))
+        : Cause.die(defect);
+      const driver = yield* makeAdditionDriver(accepted, lifecycle, fresh, { content: candidate => verifyAcceptedSkill(candidate,
+        () => outcome === 'returned' ? Effect.succeed({ ok: false, reason: 'cleanup-failed', retainedDirectory: directory }) : Effect.failCause(cause)) });
+      const report = (yield* fresh).report;
+      assert.equal((yield* driver.domain.run(p.plan.steps[0]!, report)).ok, true);
+      const exit = yield* Effect.exit(driver.domain.run(p.plan.steps.at(-1)!, report));
+      if (outcome === 'returned') { assert.ok(Exit.isSuccess(exit)); assert.equal(exit.value.ok, false); }
+      else { assert.ok(Exit.isFailure(exit)); assert.deepEqual(exit.cause.reasons, cause.reasons); }
+      const update = updates.at(-1)!;
+      assert.equal(update.installation?.state, 'needsInspection'); assert.equal(update.intentSaved, true);
+      assert.deepEqual(update.installation?.nextActions, []);
+      assert.equal(update.installation?.retainedDirectory, [...directory].slice(0, 4096).join(''));
+      assert.doesNotMatch(JSON.stringify(update), /private unrelated diagnostic|Error:/);
+      decodeRunView({ runId: 'direct-run', state: 'running', operation: 'applyChange', scope: { kind: 'machine' },
+        intent: { requestId: 'direct-request', inputDigest: operationDigest(p.planId), planId: p.planId, change: p.change,
+          skillAddition: { source: c.source, acceptedRevision: c.revision, sourceDir: c.sourceDir, selectorName: c.selectorName,
+            installedName: c.installedName, blob: c.blob, tree: c.tree, internal: c.internal, targets: ['codex'],
+            declaration: p.skillAddition!.declaration.after, policy: p.skillAddition!.pinImpact.policy } },
+        ...update, steps: [], result: null });
+    }));
+    assert.equal(f.installing(), 0); assert.deepEqual(f.calls, []);
+  });

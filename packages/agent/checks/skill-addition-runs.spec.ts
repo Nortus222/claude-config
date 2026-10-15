@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Effect } from 'effect';
 import { makeAgentRuns, operationDigest } from '../src/runs.ts';
-import { RunStore, type RunReceipt } from '../src/run-store.ts';
+import { RunStore, RunStoreError, type RunReceipt } from '../src/run-store.ts';
 import { decodeRunView } from '../src/operations/index.ts';
 
 const accepted = { source: 'owner/repo', acceptedRevision: 'a'.repeat(40), sourceDir: 'skills/review', selectorName: 'Review', installedName: 'review', blob: 'b'.repeat(40), tree: 'c'.repeat(40), internal: false, targets: ['codex'], declaration: { source: 'owner/repo', name: 'review', targets: ['codex'] }, policy: 'upstream' } as const;
@@ -27,4 +27,23 @@ test('restart preserves accepted addition and uncertain intent without installer
     assert.deepEqual(recovered.intent.skillAddition, accepted);
   })).pipe(Effect.provideService(RunStore, { read: Effect.succeed([receipt]), write: r => Effect.sync(() => { writes.push(r); }) })));
   assert.equal(writes.length, 1);
+});
+
+test('terminal receipt failure leaves legacy reconcile evidence unchanged', async () => {
+  const writes: RunReceipt[] = [];
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const runs = yield* makeAgentRuns({ cancel: () => Effect.void, start: (_input, lifecycle) => Effect.gen(function* () {
+      yield* lifecycle.accepted({ kind: 'reconcile', only: [] }, []);
+      const failure = yield* Effect.result(lifecycle.finished({ type: 'done', ok: 0, failed: 0 }));
+      assert.equal(failure._tag, 'Failure');
+      return { status: 'started' as const, runId: lifecycle.runId };
+    }) });
+    const run = yield* runs.submit({ requestId: 'request', planId: 'plan', inputDigest: operationDigest('plan'), actor: 'mcp' });
+    assert.equal(run.state, 'interrupted'); assert.equal(run.result?.status, 'interrupted');
+    assert.equal(run.intentSaved, false); assert.equal(run.intentState, undefined); assert.equal(run.installation, undefined);
+    assert.deepEqual(run.intent.change, { kind: 'reconcile', only: [] });
+    assert.deepEqual((yield* runs.list({ limit: 1 })).runs[0], run);
+  })).pipe(Effect.provideService(RunStore, { read: Effect.succeed([]), write: r => r.view.result !== null
+    ? Effect.fail(new RunStoreError('terminal failure')) : Effect.sync(() => { writes.push(r); }) })));
+  assert.equal(writes.length, 1); assert.equal(writes[0]!.view.state, 'accepted');
 });

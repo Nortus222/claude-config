@@ -50,7 +50,9 @@ export const overridesStore = Layer.effect(
         let current: unknown;
         try { current = text === undefined ? undefined : JSON.parse(text); }
         catch { return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'current document is invalid JSON' })); }
-        if (expected !== undefined && canonical((yield* read).value) !== canonical(expected)) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'known choices changed since acceptance' }));
+        const legacyText = text === undefined ? yield* fs.readText(statePath) : undefined;
+        const baseline = text === undefined ? overridesFromLegacyState(legacyText, statePath) : decodeOverrides(current, path);
+        if (expected !== undefined && canonical(baseline.value) !== canonical(expected)) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'known choices changed since acceptance' }));
         const serialized = serializeOverrides(overrides, current, path);
         if (!serialized.ok) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'current or proposed overrides are invalid' }));
         const backups = yield* Backups;
@@ -58,6 +60,7 @@ export const overridesStore = Layer.effect(
         if (text === undefined) yield* backups.preserve(statePath, 'state.json', undefined, { private: true });
         // Callers hold the apply lock; refuse an external edit during preservation as well.
         if ((yield* fs.readText(path)) !== text) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'document changed before replacement' }));
+        if (text === undefined && (yield* fs.readText(statePath)) !== legacyText) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path: statePath, reason: 'legacy choices changed before replacement' }));
         yield* fs.writeTextAtomic(path, serialized.text);
       }),
     };

@@ -135,7 +135,10 @@ export const makeAgentRuns = (driver: {
           const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status;
           const ended = { ...receipt, inFlight: result.status === 'done' || result.status === 'cancelled' ? null : receipt.inFlight, view: { ...receipt.view, state, result } };
           yield* save(ended).pipe(Effect.catch(cause => {
-            const interrupted: RunReceipt = { ...ended, view: { ...ended.view, state: 'interrupted', result: {
+            const interrupted: RunReceipt = { ...ended, view: { ...ended.view, state: 'interrupted', ...(ended.view.intent.skillAddition ? {
+              installation: { ...ended.view.installation, state: 'needsInspection', message: 'The final receipt could not be saved; inspect saved intent and installed files before retrying',
+                sharedStore: { codexScans: true, visibility: 'shared' }, nextActions: [] },
+            } : {}), result: {
               status: 'interrupted', message: 'The final receipt could not be saved; inspect the machine before trying again',
             } } };
             receipts.set(runId, interrupted); publish(interrupted);

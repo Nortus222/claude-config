@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { Effect, Exit } from 'effect';
+import { Cause, Effect, Exit } from 'effect';
 import { Backups, canonical, Fs, HistoryStore, MachinePaths, OverridesStore, runInstaller, skillLockPath, verifyAcceptedSkill,
-  verifyClaudeSkill, verifyCodexSkill, type Command, type Plan, type Step, type ProcessDialogue } from '@nortuscc/machine';
+  verifyClaudeSkill, verifyCodexSkill, SkillCandidateCleanupFailed, type Command, type Plan, type Step, type ProcessDialogue } from '@nortuscc/machine';
 import type { AcceptedSkillPlan } from './skill-operations.ts';
 import type { RunLifecycle } from './runs.ts';
 import type { RunView } from './operations/index.ts';
@@ -43,7 +43,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   let prepared = false;
   let installed = accepted.plan.steps.length === 0;
   let installation: Installation | undefined;
-  let neutralDirectory: string | undefined;
+  let retainedDirectory: string | undefined;
   const update = () => Effect.gen(function* () {
     const receipt = yield* Effect.exit(lifecycle.addition({ intentSaved: saved, intentState, ...(installation ? { installation } : {}) }));
     yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, runId: lifecycle.runId,
@@ -53,7 +53,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
     if (Exit.isFailure(receipt)) return yield* Effect.failCause(receipt.cause);
   }).pipe(Effect.onExit(exit => Effect.sync(() => { if (Exit.isFailure(exit)) persistenceUncertain = true; })));
   const result = (state: Installation['state'], message: string, evidence: Pick<Installation, 'claude' | 'codex'> = {}): Installation => ({
-    state, message: [...message].slice(0, 500).join(''), ...(neutralDirectory ? { retainedDirectory: neutralDirectory } : {}), sharedStore: { codexScans: true, visibility: 'shared' }, ...evidence,
+    state, message: [...message].slice(0, 500).join(''), ...(retainedDirectory ? { retainedDirectory: [...retainedDirectory].slice(0, 4096).join('') } : {}), sharedStore: { codexScans: true, visibility: 'shared' }, ...evidence,
     nextActions: state === 'verified' ? [
       { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing requires the personal sharing workflow and a user destination.' }, requiredDestination: 'user' },
       { kind: 'promote_to_profile', capability: { available: false, reason: 'Promotion requires the profile publication workflow and an owned profile destination.' }, requiredDestination: 'profile' },
@@ -97,14 +97,30 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         installed = ran.ok;
         return ran;
       }
-      const content = yield* (readers.content ?? verifyAcceptedSkill)(accepted.candidate);
+      const content = yield* (readers.content ?? verifyAcceptedSkill)(accepted.candidate).pipe(Effect.onExit(exit => Effect.gen(function* () {
+        // Record owned cleanup evidence before the executor settles the step, preserving the full cause.
+        if (Exit.isFailure(exit)) for (const reason of exit.cause.reasons) {
+          if (Cause.isDieReason(reason) && reason.defect instanceof SkillCandidateCleanupFailed) {
+            retainedDirectory = reason.defect.temporaryDirectory;
+            installation = result('needsInspection', 'Accepted source cleanup was not confirmed; temporary source ownership is unresolved');
+            yield* update();
+            break;
+          }
+        }
+      })));
+      if (content.cleanup) {
+        retainedDirectory = content.cleanup.retainedDirectory;
+        installation = result('needsInspection', 'Accepted source cleanup was not confirmed; temporary source ownership is unresolved');
+        yield* update();
+        return { ok: false, note: installation.message };
+      }
       if (!installed || !content.verified) {
         installation = result('failed', !installed ? 'Installer failed; saved intent and backups remain available for repair' : content.problems.join('; '));
         yield* update();
         return { ok: false, note: installation.message };
       }
       const cwd = join(paths.stateRoot, 'tmp', `skill-catalog-${randomUUID()}`);
-      neutralDirectory = cwd;
+      retainedDirectory = cwd;
       installation = result('needsInspection', 'Native catalog verification is incomplete');
       yield* update();
       yield* fs.writeTextAtomic(join(cwd, '.prepare'), '');
@@ -131,7 +147,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         return { ok: false, note: installation.message };
       }
       yield* fs.remove(cwd).pipe(Effect.timeout(2000));
-      neutralDirectory = undefined;
+      retainedDirectory = undefined;
       const verified = tuple.targets.every(t => evidence[t]?.verified === true);
       installation = result(verified ? 'verified' : 'failed', verified
         ? 'Installed content matches the accepted revision and was detected in every selected native model catalog'
