@@ -36,3 +36,5 @@ export { inspectMcpRouting, setMcpRouting, type McpRoutingStatus, type McpRoutin
 export { ProcessDialogue, nodeProcessDialogue, DialogueFailed, DialogueCleanupFailed,
   type DialogueFailure, type DialogueDecision, type DialogueStep, type DialogueExchange } from './process-dialogue.ts';
 export { verifyCodexSkill, type CodexUsability } from './skills/codex-catalog.ts';
+export { verifyClaudeSkill, type ClaudeSkillEvidence, type ClaudeVerificationFailure,
+  type ClaudeRestrictionEvidence, type ClaudeRestrictionDiagnostic } from './skills/claude-catalog.ts';
