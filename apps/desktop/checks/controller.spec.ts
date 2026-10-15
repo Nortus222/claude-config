@@ -1123,3 +1123,59 @@ for (const entry of ['connect', 'restart'] as const) test(`${entry} completion t
   assert.equal(c.state.run?.outcome, 'done'); assert.equal(c.state.run?.receipt?.installation?.state, 'verified');
   c.dispose();
 });
+
+for (const prior of ['none', 'settled'] as const) test(`semantic activity discovers a run with ${prior} prior view`, async () => {
+  let run = skillRun({ runId: 'semantic', state: 'running', result: null });
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: prior === 'settled' ? [skillRun({ runId: 'old' })] : [], nextBefore: null }), get_operation_run: () => run });
+  const c = new MachineController(f.bridge); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'semantic' } as HostEvent);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(c.state.run?.runId, 'semantic'); assert.equal(c.state.run?.outcome, 'running');
+  run = skillRun({ runId: 'semantic' });
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'semantic' } as HostEvent);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(c.state.run?.outcome, 'done'); c.dispose();
+});
+
+test('terminal-first semantic activity refreshes without a synthetic step or reconnect', async () => {
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [], nextBefore: null }), get_operation_run: () => skillRun() });
+  const c = new MachineController(f.bridge); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'addition-run' } as HostEvent);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(c.state.run?.outcome, 'done'); assert.deepEqual(c.state.run?.steps, []); c.dispose();
+});
+
+test('semantic completion during discovery wins over an earlier receipt read', async () => {
+ const first=deferred<unknown>(); let reads=0;
+ const f=fake({agent_generation:()=>operationHello,inspect_machine:()=>inspection([]),list_operation_runs:()=>({runs:[],nextBefore:null}),
+  get_operation_run:()=>++reads===1?first.promise:skillRun()});
+ const c=new MachineController(f.bridge);await c.connect();
+ const notice:HostEvent={generation:1,version:3,event:'operation-run',runId:'addition-run'};
+ f.emit(notice);f.emit(notice);await new Promise(resolve=>setTimeout(resolve,0));
+ first.resolve(skillRun({state:'running',result:null}));await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(c.state.run?.outcome,'done');assert.equal(reads,2);c.dispose();
+});
+test('semantic discovery cannot replace an active run or cross a connection generation', async () => {
+ const held=deferred<unknown>();let listed=0;
+ const f=fake({agent_generation:()=>operationHello,inspect_machine:()=>inspection([]),list_operation_runs:()=>({runs:++listed===1?[]:[skillRun({runId:'current',state:'running',result:null})],nextBefore:null}),
+  get_operation_run:()=>held.promise});
+ const c=new MachineController(f.bridge);await c.connect();
+ f.emit({generation:1,version:3,event:'operation-run',runId:'addition-run'});
+ await c.connect();held.resolve(skillRun());await new Promise(resolve=>setTimeout(resolve,0));
+ assert.equal(c.state.run?.runId,'current');
+ const count=f.calls.filter(([command])=>command==='get_operation_run').length;
+ f.emit({generation:1,version:3,event:'operation-run',runId:'other'});
+ f.emit({generation:0,version:3,event:'operation-run',runId:'current'});
+ assert.equal(f.calls.filter(([command])=>command==='get_operation_run').length,count);c.dispose();
+});
+
+test('receipt invalidations refresh completed effects after a partial snapshot', async () => {
+ let run=skillRun({state:'running',result:null,steps:[{key:'first',outcome:'ok',note:'First committed'}]});
+ const f=fake({agent_generation:()=>operationHello,inspect_machine:()=>inspection([]),list_operation_runs:()=>({runs:[run],nextBefore:null}),get_operation_run:()=>run});
+ const c=new MachineController(f.bridge);await c.connect();
+ run=skillRun({steps:[{key:'first',outcome:'ok',note:'First committed'},{key:'second',outcome:'ok',note:'Second committed'}]});
+ f.emit({generation:1,version:3,event:'operation-run',runId:run.runId});await new Promise(resolve=>setTimeout(resolve,0));
+ assert.deepEqual(c.state.run?.steps.map(step=>step.key),['first','second']);c.dispose();
+});

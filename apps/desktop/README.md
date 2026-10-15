@@ -48,12 +48,27 @@ The app exposes twenty-one machine operations:
 | `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |
 | `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
-| `nortuscc_preview_change` | Preview explicit reconcile keys, a reviewed skill addition, or a semantic `machineIntent` patch |
+| `nortuscc_preview_change` | Preview typed machine intent, selected reconciliation/update, author capture/source edits, config restoration, sync decisions, account/policy changes, backup pruning or a reviewed skill addition |
 | `nortuscc_apply_change` | Apply a reviewed `planId` with a caller-chosen durable `requestId` |
 | `nortuscc_get_run` | Recover a run's attributed intent, installation evidence, terminal outcome and follow-up prerequisites |
 | `nortuscc_list_runs` | List retained runs with bounded pagination |
 | `nortuscc_cancel_run` | Cancel an authorized run at a safe boundary |
 | `nortuscc_history` | Read bounded safe decision, setup, revision, policy, pause and backup details with actor, request, scope and run attribution |
+
+Every mutation uses the same preview, apply and durable run owner. Capture and selected manifest
+updates bind the configured author checkout, HEAD and exact bytes; observation snapshots are never
+author destinations. Source pins and ignores edit author documents and do not change machine
+policy. Publication and standalone pull remain CLI workflows. General physical skill/integration
+removal, selected-backup restoration, user pause, personal distribution and profile follow/promotion
+require owners that are not available through MCP.
+
+The connected app discovers accepted and changed runs through bounded run-ID notifications and
+reads the current safe receipt through its existing controller. Review & apply shows the operation's
+intent, author destination, committed and remaining effects, uncertainty and backups. Device
+sign-in success means initiation only. A current safe read may display the human challenge until
+its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
+from confirmed hosted state. History uses the shared bounded projection with constant fallback for
+unknown events and closed summaries for historical diagnostics.
 
 Source reads use declared identities only. Public GitHub names stay readable; other declared URLs
 and the trusted configured file checkout use stable opaque IDs. An extra local checkout requires

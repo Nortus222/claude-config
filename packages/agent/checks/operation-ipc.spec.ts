@@ -323,3 +323,27 @@ test('authenticated shared History skips raw malformed timestamps and preserves 
     assert.doesNotMatch(JSON.stringify(events),/fixture-only-value|future-invalid/);
   });
 });
+
+test('app subscribers discover semantic receipts while legacy subscribers retain only compatible progress', async () => {
+ await withServer({}, async s => {
+  const app = await s.open('app'); assert.equal((await ask(app,{command:'subscribe',operationsProtocol:1})).ok,true);
+  const legacy = await s.open('app'); await ask(legacy,{command:'subscribe'});
+  const cli = await s.open('cli'); await ask(cli,{command:'subscribe'});
+  const mcp = await s.open();
+  const preview=await operation(mcp,'previewChange',{change:{kind:'setPolicy',policy:'manual'}});
+  assert.equal(preview.ok,true,JSON.stringify(preview));
+  const accepted=await operation(mcp,'applyChange',{planId:preview.result.planId,requestId:'semantic-discovery'});
+  assert.equal(accepted.ok,true,JSON.stringify(accepted));
+  const id=accepted.result.run.runId;
+  const notification=await app.waitFor(r=>r.event==='operation-run'&&r.runId===id);
+  assert.deepEqual(notification,{version:3,event:'operation-run',runId:id});
+  await app.waitFor(r=>r.event==='progress'&&r.runId===id&&r.progress.type==='done');
+  const receipt=await operation(app,'getRun',{runId:id}); assert.equal(receipt.result.state,'succeeded');
+  assert.equal(receipt.result.intent.change.kind,'setPolicy');
+  assert.equal(cli.records.some(r=>r.event==='operation-run'),false);
+  assert.equal(legacy.records.some(r=>r.event==='operation-run'),false);
+  assert.equal(app.records.some(r=>r.event==='progress'&&r.progress.type==='started'),false);
+  assert.equal(mcp.records.some(r=>r.event==='operation-run'),false);
+  assert.ok(app.records.filter(r=>r.event==='operation-run').length>=2);
+ });
+});

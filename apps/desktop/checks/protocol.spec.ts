@@ -90,3 +90,9 @@ test('native review routes have only a positive generation and fixed event', () 
   for (const bad of [{ ...event, version: 3 }, { ...event, path: '/x' }, { ...event, generation: 0 }, { ...event, generation: 1.5 }])
     assert.throws(() => decodeHostEvent(bad));
 });
+
+test('native semantic invalidations accept only a bounded ID and generation', () => {
+ const valid={version:3,event:'operation-run',runId:'r',generation:1};
+ assert.deepEqual(decodeHostEvent(valid),valid);
+ for(const patch of [{runId:''},{runId:'r'.repeat(101)},{generation:0},{receipt:{}},{userCode:'private'},{verificationUri:'private'}])assert.throws(()=>decodeHostEvent({...valid,...patch}));
+});

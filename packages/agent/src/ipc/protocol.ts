@@ -59,7 +59,8 @@ export const RequestSchema = Schema.Union([
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notification'), notificationId: NotificationId }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notificationAck'), notificationId: NotificationId, receipt: Receipt, delivered: Schema.Boolean }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Client }),
-  Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['status', 'inspect', 'cancel', 'resume', 'shutdown', 'subscribe']) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['status', 'inspect', 'cancel', 'resume', 'shutdown']) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('subscribe'), operationsProtocol: Schema.optionalKey(Schema.Literal(OPERATIONS_PROTOCOL_VERSION)) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('preview'), exclude: Schema.Array(Key).check(Schema.isMaxLength(MAX_EXCLUDED)) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('apply'), planId: Id }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('decide'), items: Schema.Array(DecisionSchema).check(Schema.isMaxLength(MAX_DECISIONS)) }),
@@ -80,6 +81,9 @@ export const HelloResultSchema = Schema.Struct({
   policy: Policy,
   paused: WirePausedSchema,
 });
+
+export const OperationRunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('operation-run'), runId: Id });
+export type OperationRunEvent = typeof OperationRunEventSchema.Type;
 
 export const RunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('progress'), runId: Id, progress: ProgressSchema });
 
@@ -108,7 +112,7 @@ export const decodeHostedState = Schema.decodeUnknownSync(HostedStateSchema, str
 export type WireHostedState = typeof HostedStateSchema.Type;
 const decodeRequestSchema = Schema.decodeUnknownSync(RequestSchema, strict);
 export const decodeRequest = (input: unknown): Request => decodeRequestSchema(input) as Request;
-export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
+export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([OperationRunEventSchema, RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
 export const decodeHelloResult = Schema.decodeUnknownSync(HelloResultSchema, strict);
 export const decodeInspectResult = Schema.decodeUnknownSync(InspectResultSchema, strict);
 export const decodePreviewResult = Schema.decodeUnknownSync(PreviewResultSchema, strict);

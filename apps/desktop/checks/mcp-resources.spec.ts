@@ -49,7 +49,14 @@ test('post-signing Bun hash refresh updates only the Bun fingerprint after bytes
 });
 
 
+const runtimeImport = /(?:packages\/machine\/src\/(?!(?:paths|errors)\.ts$)|packages\/profile-engine\/src\/(?!intent-value\.ts$)|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/;
+
+test('metadata exceptions allow only exact pure leaves', () => {
+  assert.doesNotMatch('packages/profile-engine/src/intent-value.ts', runtimeImport);
+  for (const path of ['intent-value.ts-runtime.ts', 'intent-value.ts/runtime.ts', 'intent-value.tsx']) assert.match(`packages/profile-engine/src/${path}`, runtimeImport);
+});
+
 test('MCP metadata import graph excludes machine readers, YAML and profile execution', async () => {
   const bundled = await build({ entryPoints: [fileURLToPath(new URL('../mcp/main.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', target: 'esnext', write: false, metafile: true });
-  for (const output of Object.values(bundled.metafile!.outputs)) for (const [path, item] of Object.entries(output.inputs)) if (item.bytesInOutput > 0) assert.doesNotMatch(path, /(?:packages\/machine\/src\/(?!paths\.ts|errors\.ts)|packages\/profile-engine\/src\/(?!intent-value\.ts)|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/);
+  for (const output of Object.values(bundled.metafile!.outputs)) for (const [path, item] of Object.entries(output.inputs)) if (item.bytesInOutput > 0) assert.doesNotMatch(path, runtimeImport);
 });

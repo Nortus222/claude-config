@@ -27,14 +27,14 @@ const fixture = async () => {
  git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture');
  m.write(join(m.paths.claude, 'CLAUDE.md'), '# PRIVATE local body\n'); m.write(join(m.paths.codex, 'AGENTS.md'), '# second\n');
  await m.trust();
- const within = <A,E>(body: (session: AgentSession) => Effect.Effect<A,E>, failure?: 'second' | 'baseline' | 'lock') => m.run(Effect.scoped(Effect.gen(function* () {
+ const within = <A,E>(body: (session: AgentSession) => Effect.Effect<A,E>, failure?: 'second' | 'baseline' | 'lock', read?: (path: string) => void) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const store = yield* StateStore;
   const fail = new FsFailed({ op: 'private path', path: 'private path', reason: 'PRIVATE failure detail' });
   return yield* Effect.gen(function* () {
    const domains = () => [configDomain]; const handle = yield* startAgent(domains, { deferStart: true });
    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains });
    yield* session.inspect('mcp'); return yield* body(session);
-  }).pipe(Effect.provideService(Fs, { ...fs, readBytes: path => failure === 'lock' && path.endsWith('/.skill-lock.json') ? Effect.fail(fail) : fs.readBytes(path), writeTextAtomic: (path,text) => failure === 'second' && path.endsWith('codex/AGENTS.md') ? Effect.fail(fail) : fs.writeTextAtomic(path,text) }),
+  }).pipe(Effect.provideService(Fs, { ...fs, readBytes: path => { read?.(path); return failure === 'lock' && path.endsWith('/.skill-lock.json') ? Effect.fail(fail) : fs.readBytes(path); }, writeTextAtomic: (path,text) => failure === 'second' && path.endsWith('codex/AGENTS.md') ? Effect.fail(fail) : fs.writeTextAtomic(path,text) }),
    Effect.provideService(StateStore, { ...store, update: f => failure === 'baseline' ? Effect.fail(fail) : store.update(f) }));
  })), setup.source);
  return { m, setup, git, within };
@@ -134,4 +134,14 @@ test('session rejects changed absent or present manifest locks before accepting 
   }));
   assert.equal(f.m.read(join(f.m.paths.repo, 'skills-manifest.txt')), f.manifest);
  }
+});
+
+test('disabled config capture refuses contradictory keys before reading author files', async () => {
+ const f = await fixture(); const reads: string[] = [];
+ await f.within(session => Effect.gen(function* () {
+  reads.length = 0;
+  const result = yield* Effect.result(session.previewChange({kind:'capture', only:[C], manageConfig:false, takeLocal:true, allowShrink:false}));
+  assert.equal(result._tag, 'Failure');
+  assert.deepEqual(reads.filter(path => path.includes('/checkout/')), []);
+ }), undefined, path => reads.push(path));
 });

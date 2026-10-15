@@ -45,6 +45,7 @@ pub enum Request {
     Resume,
     Hello { token: String },
     Subscribe,
+    SubscribeOperations,
     Notification { notification_id: String },
     NotificationAck { notification_id: String, receipt: String, delivered: bool },
 }
@@ -66,7 +67,7 @@ impl Request {
             Self::SetPolicy { .. } => "setPolicy",
             Self::Resume => "resume",
             Self::Hello { .. } => "hello",
-            Self::Subscribe => "subscribe",
+            Self::Subscribe | Self::SubscribeOperations => "subscribe",
             Self::Notification { .. } => "notification",
             Self::NotificationAck { .. } => "notificationAck",
         }
@@ -83,6 +84,7 @@ impl Request {
     fn record(&self, id: &str) -> Result<String, String> {
         let mut record = json!({"version": 3, "id": id, "command": self.command()});
         match self {
+            Self::SubscribeOperations => { record["operationsProtocol"] = json!(1); }
             Self::GetOperationRun { run_id } => {
                 if run_id.is_empty() || run_id.chars().count() > 100 { return Err("Invalid operation run id".into()); }
                 record["operation"] = json!("getRun");
@@ -372,6 +374,12 @@ fn validate(message: &Value) -> Result<(), String> {
     if message.get("event").is_some() {
         if message["event"] == "notification" {
             crate::notifications::Delivery::decode(message.clone())?;
+        } else if message["event"] == "operation-run" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct OperationRunEvent { version: u8, event: String, #[serde(rename = "runId")] run_id: String }
+            let m: OperationRunEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid operation run event")?;
+            if m.version != 3 || m.event != "operation-run" || !valid_id(&m.run_id) { return Err("Invalid operation run event contract".into()); }
         } else if message["event"] == "status" {
             let m: StatusEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid status event")?;
             if m.version != 3 || m.event != "status" { return Err("Invalid status event contract".into()); }
@@ -490,7 +498,19 @@ impl Agent {
         let hello = agent.request_timeout_cancelled(Request::Hello { token }, remaining(hello_timeout),cancel.clone())?;
         validate_hello(&hello)?;
         agent.hello = hello;
-        if subscribe { agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?; }
+        if subscribe {
+            if agent.hello["operationsProtocol"] == 1 {
+                match agent.request_timeout_cancelled(Request::SubscribeOperations, remaining(Request::Subscribe.timeout()),cancel.clone()) {
+                    Err(error) if error.starts_with("INVALID_REQUEST:") => {
+                        // Earlier shared-operation agents accept only the legacy subscription.
+                        agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?;
+                    }
+                    result => { result?; }
+                }
+            } else {
+                agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?;
+            }
+        }
         Ok(agent)
     }
     pub fn connect_notification(state_root: &Path, deadline: Instant) -> Result<Self, String> {
@@ -949,6 +969,21 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
 mod tests {
     use super::*;
     #[test]
+    fn semantic_run_invalidation_is_bounded_metadata_only() {
+        let subscription: Value = serde_json::from_str(&Request::SubscribeOperations.record("1").unwrap()).unwrap();
+        assert_eq!(subscription, json!({"version":3,"id":"1","command":"subscribe","operationsProtocol":1}));
+        let legacy: Value = serde_json::from_str(&Request::Subscribe.record("2").unwrap()).unwrap();
+        assert_eq!(legacy, json!({"version":3,"id":"2","command":"subscribe"}));
+        let good = json!({"version":3,"event":"operation-run","runId":"r"});
+        assert!(validate(&good).is_ok());
+        for patch in [json!({"runId":""}), json!({"runId":"r".repeat(101)}), json!({"runId":null}), json!({"version":4}), json!({"receipt":{}}), json!({"userCode":"private"}), json!({"verificationUri":"private"})] {
+            let mut bad = good.clone();
+            for (key, value) in patch.as_object().unwrap() { bad[key] = value.clone(); }
+            assert!(validate(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn fixed_operation_reads_use_shared_bounds_and_machine_scope() {
         let record: Value = serde_json::from_str(&Request::GetOperationRun {run_id:"😀".repeat(100)}.record("1").unwrap()).unwrap();
         assert_eq!(record["command"], "operation"); assert_eq!(record["operation"], "getRun");
@@ -1112,6 +1147,34 @@ mod socket_tests {
         assert_eq!(agent.request(Request::Inspect).unwrap()["command"], "inspect");
         drop(agent);
         fixture.finish();
+    }
+    #[test]
+    fn semantic_subscription_negotiates_without_hiding_other_errors() {
+        for refusal in [None, Some("INVALID_REQUEST"), Some("UNAUTHORIZED")] {
+            let fixture = Fixture::new(move |mut wire| {
+                let hello = wire.next().unwrap();
+                let mut result = hello_result();
+                result["operationsProtocol"] = json!(1);
+                result["app"] = json!({"ownership":"app","version":"0.1.6","runtimeId":"fake-v1"});
+                result["operations"] = json!({"available":true});
+                wire.reply(&hello, result);
+                let subscribe = wire.next().unwrap();
+                assert_eq!(subscribe, json!({"version":3,"id":subscribe["id"],"command":"subscribe","operationsProtocol":1}));
+                if let Some(code) = refusal { wire.error(&subscribe, code); }
+                else { wire.reply(&subscribe, json!({"subscribed":true})); }
+                if refusal == Some("INVALID_REQUEST") {
+                    let legacy = wire.next().unwrap();
+                    assert_eq!(legacy, json!({"version":3,"id":legacy["id"],"command":"subscribe"}));
+                    wire.reply(&legacy, json!({"subscribed":true}));
+                }
+                assert!(wire.next().is_none());
+            });
+            let result = Agent::connect(&fixture.root, Arc::new(|_| {}));
+            if refusal == Some("UNAUTHORIZED") {
+                assert_eq!(result.err().unwrap(), "UNAUTHORIZED: refused");
+            } else { drop(result.unwrap()); }
+            fixture.finish();
+        }
     }
     #[test]
     fn every_connection_reads_the_fresh_token() {

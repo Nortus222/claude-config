@@ -1,5 +1,5 @@
 import React, { type Ref } from 'react';
-import type { RunView as OperationRunView } from '@nortuscc/agent/operations';
+import type { OperationChange, RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
 import { MachineController, canCancel, type StepStatus, type ViewState } from './controller.ts';
 const DOMAINS = [['config', 'Configuration'], ['integrations', 'Integrations'], ['skills', 'Skills']] as const;
@@ -35,6 +35,59 @@ function SkillAdditionResult({ run }: { run: OperationRunView }) {
       <p>Requires a user request for this declaration.</p>
     </li>)}</ul> : null}
     {installation?.state !== 'verified' ? <p>To repair, ask your coding agent to resolve this skill again, review the machine addition and apply it. Inspect retained intent and installed files before retrying.</p> : null}
+  </div>;
+}
+
+const domainText = {
+  reconcile: ['Reconcile selected items', 'Existing owner guards and selected targets apply.'],
+  machineIntent: ['Machine intent', 'Reset reveals inherited intent. Disabling or removing a declaration does not physically remove content.'],
+  capture: ['Capture configuration', 'Writes selected author documents. Commit and publication remain explicit CLI actions.'],
+  uninstallConfig: ['Restore recorded configuration', 'Restores recorded documents through their owner; general backup restoration is unavailable.'],
+  update: ['Update selected skills', 'Addition repair requires the verified addition workflow. Author manifest edits are separately selected.'],
+  syncDecision: ['Incoming configuration decision', 'Accepting may permit existing policy scheduling. Repository trust requires the app consent action.'],
+  sourceDecision: ['Author source decision', 'Source-wide pins affect all declared skills. Author edits are separate from machine policy; ignore suppresses notifications.'],
+  setPolicy: ['Automatic application policy', 'Manual policy changes scheduling. It does not create a user pause or grant repository trust.'],
+  resume: ['Resume automatic application', 'Clears a failure pause without changing policy.'],
+  signIn: ['Start device authorization', 'Device authorization initiation does not mean authentication completed.'],
+  signOut: ['Sign out', 'Uses the existing account owner. Inspect account state after a partial outcome.'],
+  syncAccount: ['Sync account', 'An empty local queue alone does not confirm persistence of a particular metadata patch.'],
+  patchMachineMetadata: ['Machine account metadata', 'Changes use the existing local outbox.'],
+  pruneBackups: ['Prune retained backups', 'Retention pruning does not back up the backups it removes. General restore remains unavailable.'],
+  addSkill: ['Add a machine skill', 'Required targets verify usability; they do not promise exclusive visibility.'],
+} as const satisfies Record<OperationChange['kind'], readonly [string, string]>;
+
+function SemanticRunResult({ run }: { run: OperationRunView }) {
+  if (run.intent.change.kind === 'addSkill') return null;
+  const change = run.intent.change;
+  const [title, meaning] = domainText[change.kind];
+  const accepted = run.intent.parity;
+  const evidence = run.parity;
+  const author = accepted && 'author' in accepted ? accepted.author : undefined;
+  const signIn = evidence?.kind === 'signIn' ? evidence.signIn : undefined;
+  const challenge = signIn?.state === 'awaiting-user' && Date.parse(signIn.expiresAt) > Date.now() ? signIn : undefined;
+  const keys = (label: string, values: readonly string[]) => <details><summary>{label}: {values.length}</summary><ul>{values.map(value => <li key={value}><code>{value}</code></li>)}</ul></details>;
+  return <div className="pad">
+    <h3>{title}</h3><p>{meaning}</p>
+    {change.kind === 'machineIntent' ? <p>{change.patch.kind}: {'action' in change.patch ? change.patch.action : 'remove declaration'}{'id' in change.patch ? ` (${change.patch.id})` : ''}.</p> : null}
+    {change.kind === 'sourceDecision' ? <p>{change.action}: <code>{change.sourceId}</code>{'revision' in change ? <> at <code>{change.revision}</code></> : null}.</p> : null}
+    {change.kind === 'syncDecision' ? <p>{change.action}: <code>{change.itemId}</code> in setup <code>{change.setupId}</code>.</p> : null}
+    {change.kind === 'setPolicy' ? <p>Selected policy: {change.policy}.</p> : null}
+    {change.kind === 'update' ? <p>Author manifest: {change.authorManifest ? 'included in this request' : 'not selected'}.</p> : null}
+    {run.actor ? <p>Requested via {run.actor}</p> : null}
+    <p>Run: <code>{run.runId}</code>. Request: <code>{run.intent.requestId}</code>. Scope: {run.scope.kind}.</p>
+    {author ? <p>Author destination: <code>{author.checkout}</code>. Revision: <code>{author.head}</code>.</p> : null}
+    {evidence ? <>
+      <p>Effects: {evidence.state === 'needsInspection' ? 'uncertain; inspect committed effects and backups before retrying' : evidence.state}.</p>
+      {keys('Committed effects', evidence.committedKeys)}{keys('Remaining effects', evidence.remainingKeys)}{keys('Backups', evidence.backupIds)}
+      {'metadata' in evidence && evidence.metadata === 'locally-queued' ? <p>Metadata is locally queued; hosted persistence is not confirmed.</p> : null}
+      {evidence.kind === 'machineIntent' ? <p>Machine intent: {evidence.intentState}. Routing effects: {evidence.routingEffects.map(effect => `${effect.fileId}: ${effect.state === 'observed' ? effect.outcome : 'needs inspection'}`).join(', ') || 'none'}.</p> : null}
+    </> : <p>Effects have not been observed yet.</p>}
+    {accepted?.kind === 'pruneBackups' && accepted.retention.limited ? <p>This retention batch is limited. Review another preview for remaining eligible folders.</p> : null}
+    {signIn ? <>
+      <p>Device authorization: {signIn.state}. Display expires at {signIn.expiresAt}.</p>
+      {challenge?.userCode && challenge.verificationUri ? <p>Complete authorization in your browser at <a href={challenge.verificationUri} target="_blank" rel="noreferrer">{challenge.verificationUri}</a> with code <code>{challenge.userCode}</code>.</p>
+        : <p>Challenge unavailable. Inspect current account state before starting authorization again.</p>}
+    </> : null}
   </div>;
 }
 
@@ -204,7 +257,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
                 ))}
               </ol>
             ) : null}
-            {state.run?.receipt ? <SkillAdditionResult run={state.run.receipt} /> : null}
+            {state.run?.receipt ? <><SkillAdditionResult run={state.run.receipt} /><SemanticRunResult run={state.run.receipt} /></> : null}
             {state.run?.backups ? <p className="pad">Backups: <code>{state.run.backups}</code></p> : null}
             <p className="detail" role="status" aria-live="polite">{state.detail}</p>
             <div className="actions">
@@ -216,7 +269,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
           </section>
         </div>
       </div>
-      <footer>Every replaced file is backed up to this run's backup folder first.</footer>
+      <footer>Replaced files are backed up before changes. Retention pruning does not back up removed backups.</footer>
     </div>
   );
 }

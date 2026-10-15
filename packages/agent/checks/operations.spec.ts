@@ -311,3 +311,9 @@ test('History diagnostic schemas accept only paired outcome summaries and closed
     assert.throws(()=>decodeOperationOutput('history',result({...base,kind,detail:{kind:'pause',reason:'password=fixture-only-value'}})));
   }
 });
+
+test('semantic discovery notifications contain only a bounded run ID', () => {
+  const event = { version: 3, event: 'operation-run', runId: 'r' };
+  assert.deepEqual(decodeMessage(event), event);
+  for (const fields of [{ runId: '' }, {runId:'x'.repeat(101)}, {userCode:'SECRET'}, {signInFlow:'private'}, {receipt:run}]) assert.throws(() => decodeMessage({...event,...fields}));
+});

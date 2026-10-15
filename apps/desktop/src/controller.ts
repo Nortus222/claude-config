@@ -177,7 +177,7 @@ export class MachineController {
     return true;
   }
 
-  // Durable reads share this controller's session and never replace a different observed run.
+  // Durable reads share this controller's session and never replace a different active run.
   private async refreshRun(runId?: string, completionObserved = false) {
     if (!this.bridge || this.state.hello?.operations?.available !== true) return;
     const token = this.sessionToken();
@@ -199,7 +199,7 @@ export class MachineController {
         : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
       if (!receipt || runId && receipt.runId !== runId) return;
       const current = this.state.run;
-      if (current && current.runId !== receipt.runId) return;
+      if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
       // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
       if (discovery?.terminalRunIds.has(receipt.runId)) {
         await this.refreshRun(receipt.runId, true);
@@ -209,8 +209,15 @@ export class MachineController {
       const outcome = receipt.state === 'accepted' || receipt.state === 'running' ? 'running'
         : receipt.state === 'succeeded' ? 'done' : receipt.state === 'cancelled' ? 'cancelled' : 'failed';
       const summary = receipt.installation?.message ?? (receipt.result && 'message' in receipt.result ? receipt.result.message : `Run ${receipt.state}`);
-      const steps = current?.steps.length ? current.steps : receipt.steps.map(step => ({ ...step, summary: step.key, status: step.outcome }));
-      this.update({ run: { ...current, runId: receipt.runId, steps, outcome, summary, receipt }, detail: summary });
+      const sameRun = current?.runId === receipt.runId ? current : undefined;
+      const previous = sameRun?.steps ?? [];
+      const settled = new Map(receipt.steps.map(step => [step.key, step]));
+      const steps: StepView[] = previous.map(step => {
+        const completed = settled.get(step.key);
+        return completed ? { ...step, status: completed.outcome, note: completed.note } : step;
+      });
+      for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt }, detail: summary });
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
     } finally {
@@ -488,6 +495,10 @@ export class MachineController {
       this.showStatus(event.status);
       this.refreshReview();
       if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
+      return;
+    }
+    if (event.event === 'operation-run') {
+      if (!this.starting && (this.state.run?.outcome !== 'running' || this.state.run.runId === event.runId)) void this.refreshRun(event.runId, true);
       return;
     }
     if (this.starting) {

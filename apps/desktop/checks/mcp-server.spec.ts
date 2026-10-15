@@ -1,3 +1,5 @@
+import { makeHostedRuntime } from '../../../packages/agent/src/hosted.ts';
+import type { HostedClient, HostedState } from '@nortuscc/hosted-client';
 import { sourceEnvironment, sourceIdentity } from '../../../packages/agent/src/operations/sources.ts';
 import { makeRepo, tempDir, commitFiles, gitSync } from '../../../packages/source-watch/checks/fixtures.ts';
 import assert from 'node:assert/strict';
@@ -11,7 +13,7 @@ import { before, after, test } from 'node:test';
 import { build } from 'esbuild';
 import { Deferred, Effect, Exit, Scope, Layer } from 'effect';
 import { AgentStateStore, makeSession, serveIpc, startAgent, SetupSource, type AgentDomain } from '@nortuscc/agent';
-import { configDomain, DecisionsStore, integrationsDomain, Processes, skillsDomain, OverridesStore } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, integrationsDomain, Processes, skillsDomain, OverridesStore, Fs, FsFailed } from '@nortuscc/machine';
 import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
@@ -113,7 +115,7 @@ test('MCP fixture refuses unfaked installers and non-fixture Git before the real
   }
   assert.equal(launches,0);
 });
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?: boolean; localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boolean; failPruneAt?: number; unavailableSourceDiagnostic?: (text: string) => void; sourceDecisions?: boolean; localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
   if(inputs.sourceDecisions) {
@@ -170,21 +172,36 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?
     }))),
   }) : fixture.source;
   const scope = Scope.makeUnsafe();
+  const metadataPatches: Parameters<HostedClient['enqueueMachine']>[0][] = [];
+  const metadataState = (): HostedState => ({ accountId: 'fixture-account', login: 'fixture', machineId: 'fixture-machine', auth: 'signed-in', setups: [],
+    machine: { policy: 'notify', reportStatus: metadataPatches.at(-1)?.reportStatus ?? true }, confirmedMachine: { policy: 'notify', reportStatus: true },
+    pendingMachinePatches: metadataPatches, machinePersistence: metadataPatches.length ? 'locally-queued' : 'confirmed', lastSyncAt: null, retryAt: null, pollAfter: 900, error: null });
   await m.run(Effect.gen(function* () {
     const processes=fixtureProcesses(yield* Processes,m.root,inputs.sourceReads?.url);
-    const handle = yield* startAgent(domains).pipe(Effect.provideService(Processes,processes));
+    const hosted = inputs.metadata ? yield* makeHostedRuntime({
+      state: Effect.sync(metadataState), signInFlow: Effect.succeed(null), recover: () => Effect.sync(metadataState), sync: () => Effect.sync(metadataState),
+      revisions: () => Effect.succeed([]), reportStatus: () => Effect.void, enqueueDecision: () => Effect.die('Unexpected decision'),
+      enqueueMachine: patch => Effect.sync(() => { metadataPatches.push(patch); }),
+      startSignIn: () => Effect.die('Unexpected sign-in'), pollSignIn: () => Effect.die('Unexpected poll'), signOut: () => Effect.die('Unexpected sign-out'),
+    } satisfies HostedClient, { domains, os: 'macos' }).pipe(Effect.provideService(Processes, processes)) : undefined;
+    const handle = yield* startAgent(domains, { hosted }).pipe(Effect.provideService(Processes,processes));
     const sessionProcesses:Processes['Service']={run:command=>inputs.addition && command.cmd==='npx' ? Effect.gen(function*(){
       yield* Deferred.succeed(started,undefined);yield* Deferred.await(release);return {code:0,stdout:''};
-    }) : processes.run(command)};
+    }) : inputs.unavailableSourceDiagnostic && command.cmd === 'git' && command.args.includes(pathToFileURL(join(m.root, 'unavailable-source')).href)
+      ? processes.run({ ...command, stderr: 'capture' }).pipe(Effect.tap(result => Effect.sync(() => inputs.unavailableSourceDiagnostic!(result.stderr ?? ''))))
+      : processes.run(command)};
+    const fs = yield* Fs; let pruneAttempts = 0;
     const session=yield* makeSession(handle,{signal:new AbortController().signal,domains,skillCandidates:inputs.skillCandidates,skillVerification:inputs.skillVerification}).pipe(
       Effect.provide(agentSkillInstaller({home:join(m.root,'home')})),
       Effect.provide(sourceEnvironment({PATH:process.env.PATH!,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_ALLOW_PROTOCOL:'file'})),
       Effect.provideService(Processes,sessionProcesses),
+      Effect.provideService(Fs, { ...fs, remove: path => path.startsWith(m.paths.backups + '/') && ++pruneAttempts === inputs.failPruneAt
+        ? Effect.fail(new FsFailed({ op: 'remove', path, reason: 'PRIVATE-PRUNE-ERROR' })) : fs.remove(path) }),
     );
     yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), source);
-  return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); assert.equal(existsSync(m.root),false); } };
+  return { m, metadataPatches, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); assert.equal(existsSync(m.root),false); } };
 }
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
@@ -654,7 +671,8 @@ test('MCP capture from an arbitrary cwd binds the configured author and preserve
 
 
 test('dedicated MCP update read and explicit machine-only update recover a lost acceptance reply', { timeout: 30_000 }, async t => {
-  const s = await agent('app',{ addition: true }); t.after(s.close);
+  const diagnostics: string[] = [];
+  const s = await agent('app',{ addition: true, unavailableSourceDiagnostic: text => diagnostics.push(text) }); t.after(s.close);
   s.m.write(join(s.m.paths.agentsSkills,'known','SKILL.md'),'# local known\n');
   s.m.write(join(s.m.paths.agentsSkills,'..','.skill-lock.json'),JSON.stringify({ skills: { known: { source: 'owner/repo',sourceUrl: `file://${join(s.m.root,'unavailable-source')}`,skillPath:'s/known/SKILL.md',skillFolderHash:'a'.repeat(40) } } }));
   const client = open(process.execPath,s.m.paths.stateRoot); t.after(client.close); await client.initialize();
@@ -668,6 +686,8 @@ test('dedicated MCP update read and explicit machine-only update recover a lost 
   let run = output('applyChange',await next.call('applyChange',args)).run;
   for (let n=0;n<100 && !run.result;n++) { await new Promise(resolve => setTimeout(resolve,10)); run = output('getRun',await next.call('getRun',{ runId: run.runId })); }
   assert.equal(run.state,'succeeded'); assert.equal(run.parity.kind,'update'); assert.equal(output('listRuns',await next.call('listRuns',{ limit: 10 })).runs.length,1);
+  assert.equal(diagnostics.length, 4);
+  for (const diagnostic of diagnostics) assert.equal(diagnostic, `fatal: '${join(s.m.root, 'unavailable-source')}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n`);
 });
 
 test('authenticated MCP sync hold retains one decision run after a lost reply', {timeout:30000},async t=>{
@@ -683,4 +703,55 @@ test('authenticated MCP sync hold retains one decision run after a lost reply', 
  assert.equal(JSON.parse(s.m.read(join(s.m.paths.stateRoot,'sync.json'))!).held[EFFORT],'a'.repeat(40));
  const choices=await s.m.run(DecisionsStore.use(store=>store.read));assert.equal(choices.find(d=>d.itemId===EFFORT)?.decision,'skip');
  const held=output('incomingChanges',await next.call('incomingChanges',{setupId:'local'}));assert.equal(held.items.find((i:any)=>i.itemId===EFFORT).held,true);
+});
+
+test('MCP descriptions explain semantic effects and recovery', async t => {
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const listed = await client.ask('tools/list');
+  const description = listed.result.tools.find((tool: { name: string }) => tool.name === names.getRun).description;
+  assert.match(description, /committed.*remaining/i); assert.match(description, /author destination/i); assert.match(description, /uncertain/i);
+});
+
+test('MCP partial retention preserves observed removals and reconnect never retries effects', async t => {
+ const s=await agent('app',{failPruneAt:2});t.after(s.close);
+ const ids=Array.from({length:23},(_,i)=>`nortuscc-${new Date(Date.UTC(2020,0,1)-i*86400000).toISOString().replace(/[:.]/g,'-')}`);
+ for(const id of ids)mkdirSync(join(s.m.paths.backups,id),{recursive:true});
+ const client=open(process.execPath,s.m.paths.stateRoot);t.after(client.close);await client.initialize();
+ const preview=output('previewChange',await client.call('previewChange',{change:{kind:'pruneBackups'}}));
+ const request={planId:preview.planId,requestId:'partial-retention'};
+ let run=output('applyChange',await client.call('applyChange',request)).run;
+ for(let i=0;i<200&&!run.result;i++){await new Promise(r=>setTimeout(r,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
+ assert.equal(run.state,'failed');assert.equal(run.parity.state,'needsInspection');
+ assert.deepEqual(run.parity.committedKeys,[ids[20]]);assert.deepEqual(run.parity.remainingKeys,[ids[21],ids[22]]);
+ assert.deepEqual(run.parity.backupIds,[]);assert.doesNotMatch(JSON.stringify(run),/PRIVATE-PRUNE-ERROR/);
+ const next=open(process.execPath,s.m.paths.stateRoot);t.after(next.close);await next.initialize();
+ assert.equal(output('applyChange',await next.call('applyChange',request)).run.runId,run.runId);
+ for(const id of ids)assert.equal(existsSync(join(s.m.paths.backups,id)),id!==ids[20]);
+});
+
+for(const fence of ['maintenance','ownership','runtime'] as const)test(`MCP ${fence} fence refuses a previewed write`,async t=>{
+ const s=await agent();t.after(s.close);const client=open(process.execPath,s.m.paths.stateRoot);t.after(client.close);await client.initialize();
+ const preview=output('previewChange',await client.call('previewChange',{change:{kind:'setPolicy',policy:'manual'}}));
+ if(fence==='maintenance')s.m.write(join(s.m.paths.stateRoot,'agent/pending-update.json'),'{}');
+ else await s.m.run(AgentStateStore.use(store=>store.update(state=>({...state,...(fence==='ownership'?{installedBy:'cli' as const}:{agentVersion:'replacement'})}))));
+ const applied=await client.call('applyChange',{planId:preview.planId,requestId:'fenced'});
+ assert.equal(applied.result.isError,true);assert.equal(s.m.agentJson().policy,'notify');
+ assert.equal(existsSync(join(s.m.paths.stateRoot,'agent/runs')),false);
+});
+
+test('MCP account metadata preserves queued intent and same-request identity', async t => {
+ const s=await agent('app',{metadata:true});t.after(s.close);
+ const client=open(process.execPath,s.m.paths.stateRoot);t.after(client.close);await client.initialize();
+ const before=output('accountState',await client.call('accountState',{section:'machine'}));assert.equal(before.items[0].persistence,'confirmed');
+ const preview=output('previewChange',await client.call('previewChange',{change:{kind:'patchMachineMetadata',patch:{reportStatus:false}}}));
+ const request={planId:preview.planId,requestId:'metadata-queue'};
+ let run=output('applyChange',await client.call('applyChange',request)).run;
+ for(let i=0;i<200&&!run.result;i++){await new Promise(r=>setTimeout(r,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
+ assert.equal(run.state,'succeeded');assert.equal(run.parity.metadata,'locally-queued');
+ const next=open(process.execPath,s.m.paths.stateRoot);t.after(next.close);await next.initialize();
+ assert.equal(output('applyChange',await next.call('applyChange',request)).run.runId,run.runId);assert.deepEqual(s.metadataPatches,[{reportStatus:false}]);
+ const after=output('accountState',await next.call('accountState',{section:'machine'}));
+ assert.equal(after.items[0].persistence,'locally-queued');assert.equal(after.items[0].effective.reportStatus,false);assert.equal(after.items[0].confirmed.reportStatus,true);
+ assert.doesNotMatch(JSON.stringify(after),/token|credential|signInFlow/);
 });

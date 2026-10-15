@@ -296,3 +296,39 @@ test('addition view displays the receipt owner actor when present', () => {
   c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'done', summary: '', receipt } };
   assert.match(renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c })), /Requested via mcp/);
 });
+
+import { decodeRunView, type OperationChange } from '@nortuscc/agent/operations';
+const semanticRun = (change: OperationChange, extra: object = {}) => {
+  const author = { checkout: '/author', realCheckout: '/author', gitDir: '/author/.git', head: 'c'.repeat(40), files: [] };
+  return decodeRunView({ runId: 'semantic', actor: 'mcp', state: 'failed', operation: 'applyChange', scope: {kind:'machine'},
+    intent: {requestId:'semantic-request', inputDigest:'a'.repeat(64), planId:'p', change,
+      parity: {kind:change.kind, generation:'1', baselineDigest:'a'.repeat(64), planDigest:'b'.repeat(64), plannedKeys:['first','second'], ...(change.kind==='capture'?{author}:{})}},
+    intentSaved:false, steps:[], result:{status:'failed',message:'Inspect effects'},
+    parity: {kind:change.kind,state:'needsInspection',committedKeys:['first'],remainingKeys:['second'],backupIds:['backup'],...extra},
+  });
+};
+const semanticMarkup = (receipt: ReturnType<typeof semanticRun>) => {
+  const c = machine(); c.state={...c.state,run:{runId:receipt.runId,outcome:'failed',summary:'Inspect effects',steps:[],receipt}};
+  return renderToStaticMarkup(createElement(ReviewView,{controller:c,state:c.state}));
+};
+test('semantic run view shows author destination, partial evidence and exact attribution', () => {
+  const text = semanticMarkup(semanticRun({kind:'capture',only:['config:claude:CLAUDE.md'],takeLocal:true,allowShrink:false}));
+  for(const expected of ['Capture configuration','Author destination','/author','Committed effects','Remaining effects','first','second','backup','uncertain','semantic-request','Requested via mcp']) assert.ok(text.includes(expected),expected);
+  assert.doesNotMatch(text,/share it with your other machines/);
+});
+test('metadata run distinguishes local queueing from confirmed persistence', () => {
+  const text=semanticMarkup(semanticRun({kind:'patchMachineMetadata',patch:{name:'fixture'}},{metadata:'locally-queued'}));
+  assert.match(text,/locally queued/); assert.match(text,/not confirmed/);
+});
+for(const state of ['awaiting-user','expired','needsInspection'] as const) test(`sign-in view treats ${state} as initiation only`, () => {
+  const text=semanticMarkup(semanticRun({kind:'signIn'},{signIn:{kind:'signIn',state,expiresAt:'2099-10-15T00:00:00.000Z',...(state==='awaiting-user'?{userCode:'ABCD-EFGH',verificationUri:'https://github.com/login/device'}:{})}}));
+  assert.match(text,/authorization initiation/); assert.match(text,/2099-10-15/);
+  if(state==='awaiting-user')assert.match(text,/ABCD-EFGH/);
+  else {assert.match(text,/challenge unavailable/i);assert.doesNotMatch(text,/ABCD-EFGH|login\/device/);}
+  assert.doesNotMatch(text,/Authenticated|Authentication failed/);
+});
+
+test('machine intent view names reset rather than implying an installation effect', () => {
+ const text=semanticMarkup(semanticRun({kind:'machineIntent',patch:{kind:'manageConfig',action:'reset'}},{intentState:'saved',routingEffects:[]}));
+ assert.match(text,/manageConfig: reset/);assert.match(text,/does not physically remove content/);
+});

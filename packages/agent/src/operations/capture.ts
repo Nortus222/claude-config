@@ -27,6 +27,7 @@ export const prepareCaptureChange = (change: CaptureChange, inspection: JobInspe
   const overrides = yield* (yield* OverridesStore).read;
   if (overrides.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Repair machine choices before capturing configuration'));
   const manageConfig = change.manageConfig ?? overrides.value.manageConfig !== false;
+  if (!manageConfig && change.only.some(key => key.startsWith('config:'))) return yield* Effect.fail(new SessionError('INVALID_INPUT', 'Configuration capture is disabled; remove config selections or enable it explicitly'));
   const selection = { ...selectAll, only: [...new Set(change.only)], targets: change.targets ?? selectAll.targets, force: change.takeLocal };
   const paths = inspection.desired.files.filter(file => selection.only.some(key => key.split('#')[0] === `config:${file.id}`)).map(file => file.src);
   if (selection.only.includes('skills:manifest')) paths.push(MANIFEST_FILE);

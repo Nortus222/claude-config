@@ -17,6 +17,7 @@ export type AgentRuns = {
   readonly get: (runId: string) => Effect.Effect<RunView, RunError>;
   readonly list: (input: { readonly before?: string; readonly limit: number }) => Effect.Effect<{ readonly runs: readonly RunView[]; readonly nextBefore: string | null }, RunError>;
   readonly cancel: (runId: string) => Effect.Effect<RunView, RunError>;
+  readonly onChange: (listener: (runId: string) => void) => () => void;
   readonly subscribe: (runId: string, listener: (run: RunView) => void) => () => void;
 };
 
@@ -70,9 +71,13 @@ export const makeAgentRuns = (driver: {
   const receipts = new Map<string, RunReceipt>();
   const requests = new Map<string, string>();
   const listeners = new Map<string, Set<(run: RunView) => void>>();
-  yield* Effect.addFinalizer(() => Effect.sync(() => listeners.clear()));
+  const changes = new Set<(runId: string) => void>();
+  yield* Effect.addFinalizer(() => Effect.sync(() => { listeners.clear(); changes.clear(); }));
   let sequence = 0;
   const publish = (receipt: RunReceipt) => {
+    for (const listener of changes) {
+      try { listener(receipt.view.runId); } catch {}
+    }
     for (const listener of listeners.get(receipt.view.runId) ?? []) {
       try { listener(notificationView(receipt)); } catch {}
     }
@@ -265,6 +270,7 @@ export const makeAgentRuns = (driver: {
       if (receipt.view.result === null) yield* driver.cancel(runId);
       return yield* get(runId);
     }),
+    onChange: listener => { changes.add(listener); return () => { changes.delete(listener); }; },
     subscribe: (runId, listener) => {
       const set = listeners.get(runId) ?? new Set();
       listeners.set(runId, set); set.add(listener);

@@ -46,6 +46,7 @@ type Connection = {
   readonly socket: Socket;
   client: Client | undefined;
   subscribed: boolean;
+  operationEvents?: boolean;
   runtimeId?: string;
   receipts: Map<string, string>;
   pendingNotification?: { id: string; receipt: string; deadline: number; finish: (delivered: boolean) => void };
@@ -181,6 +182,13 @@ export const serveIpc = (input: {
       const message = { version: PROTOCOL_VERSION, event: 'progress', runId, progress: capped };
       for (const conn of new Set([...(origin ? [origin] : []), ...subscribers()])) event(conn, message);
     };
+
+    // Only app subscribers receive receipt invalidations. Legacy progress remains unchanged.
+    const disposeRuns = session.runs.onChange(runId => {
+      const message = { version: PROTOCOL_VERSION, event: 'operation-run', runId };
+      for (const conn of subscribers()) if (conn.client === 'app' && conn.operationEvents) event(conn, message);
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(disposeRuns));
 
     const disposeProgress = session.onProgress((runId, progress) => fanOut(undefined, runId, progress));
     yield* Effect.addFinalizer(() => Effect.sync(disposeProgress));
@@ -376,6 +384,7 @@ export const serveIpc = (input: {
                 return projected ? [projected] : [];
               }) }; break;
             }
+            default: { const exhaustive: never = request; return exhaustive; }
           }
           return { result: decodeOperationOutput(name, result) };
         });
@@ -458,6 +467,7 @@ export const serveIpc = (input: {
         case 'subscribe':
           return Effect.sync(() => {
             conn.subscribed = true;
+            conn.operationEvents = client === 'app' && request.operationsProtocol === 1;
             return { result: { subscribed: true } };
           });
         case 'shutdown':

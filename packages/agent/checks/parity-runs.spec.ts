@@ -13,6 +13,17 @@ import { makeAgentRuns, operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from './support/setup-fixture.ts';
 
+// Prepared changes settle receipt failures silently; keep legacy production diagnostics observable.
+const observeStderr = (t: import('node:test').TestContext) => {
+  const diagnostics: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  t.mock.method(process.stderr, 'write', (...args: Parameters<typeof process.stderr.write>) => {
+    const text = String(args[0]); diagnostics.push(text);
+    return original(...args);
+  });
+  return diagnostics;
+};
+
 const request = (planId: string) => ({ planId, requestId: 'parity', inputDigest: operationDigest(planId), actor: 'mcp' as const });
 const fixture = async (fail?: (receipt: RunReceipt) => boolean, historyFailure: boolean | ((event: import('@nortuscc/machine').HistoryInput) => boolean) = false) => {
   const m = agentMachine(); const source = setupFixture(join(m.root, 'setup'));
@@ -54,13 +65,15 @@ test('reconnect returns the accepted run', async () => {
   }));
 });
 
-test('receipt failure prevents effects', async () => {
+test('receipt failure prevents effects', async t => {
+  const diagnostics = observeStderr(t);
   const f = await fixture(r => r.view.parity?.state === 'needsInspection');
   await f.run(session => Effect.gen(function* () {
     const p = yield* preview(session); const accepted = yield* session.runs.submit(request(p.planId));
     yield* finish(session, accepted.runId);
     assert.equal(f.effects(), 0); assert.equal((yield* session.runs.get(accepted.runId)).state, 'interrupted');
   }));
+  assert.deepEqual(diagnostics, []);
 });
 
 test('observed committed evidence survives History failure', async () => {
@@ -156,7 +169,8 @@ test('prepared plans expire, evict, invalidate and refuse maintenance before acc
   })));
 });
 
-for (const failure of ['receipt', 'history', 'both'] as const) test(`observed committed evidence survives ${failure} checkpoint failure`, async () => {
+for (const failure of ['receipt', 'history', 'both'] as const) test(`observed committed evidence survives ${failure} checkpoint failure`, async t => {
+  const diagnostics = failure === 'history' ? undefined : observeStderr(t);
   const f = await fixture(failure !== 'history' ? r => (r.view.parity?.committedKeys.length ?? 0) > 0 : undefined,
     failure !== 'receipt' ? event => event.kind === 'operation-checkpoint' && event.committedKeys.length > 0 : false);
   await f.run(session => Effect.gen(function* () {
@@ -166,6 +180,7 @@ for (const failure of ['receipt', 'history', 'both'] as const) test(`observed co
     assert.equal(done.parity?.state, 'needsInspection'); assert.equal(done.parity?.committedKeys.length, 1); assert.equal(done.parity?.backupIds.length, 1);
     assert.equal((yield* session.runs.submit(request(p.planId))).runId, run.runId); assert.equal(f.effects(), 1);
   }));
+  if (diagnostics) assert.deepEqual(diagnostics, []);
 });
 
 test('History pending checkpoint failure prevents physical effects', async () => {
