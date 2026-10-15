@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
-import type { MachineOverrides } from '@nortuscc/profile-engine';
+import { INTEGRATIONS_SOURCE, type MachineOverrides } from '@nortuscc/profile-engine';
 import type { Fs, FsFailed, LaunchFailed, Processes } from '@nortuscc/machine';
+import { desiredOfDocuments } from './documents.ts';
 import { composeDocuments } from './compose.ts';
 import { commitDocuments } from './git.ts';
 import { diffItems, itemValues, parseItemId, type ItemChange, type ItemValues } from './items.ts';
@@ -95,12 +96,17 @@ export const incoming = (input: {
   readonly head: string;
   readonly holds: Holds;
   readonly overrides: MachineOverrides;
+  readonly validation?: 'cli-independent-integrations';
 }): Effect.Effect<Incoming, FsFailed | LaunchFailed | RevisionUnavailable, Fs | Processes> =>
   Effect.gen(function* () {
     if (input.applied === input.head) return { changes: [], conflicts: [] };
-    const rawApplied = itemValues(yield* commitDocuments(input.repo, input.applied));
-    const current = itemValues(yield* composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds }));
-    const head = itemValues(yield* commitDocuments(input.repo, input.head));
-    const changes = incomingChanges({ rawApplied, current, head });
+    const appliedDocuments = yield* commitDocuments(input.repo, input.applied);
+    const currentDocuments = yield* composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds });
+    const headDocuments = yield* commitDocuments(input.repo, input.head);
+    // Invalid integration declarations are unavailable, not evidence that every integration was removed.
+    const unavailableIntegrations = input.validation === 'cli-independent-integrations'
+      && [appliedDocuments, currentDocuments, headDocuments].some(documents => desiredOfDocuments(documents).issues.some(issue => issue.layer === 'base' && issue.source === INTEGRATIONS_SOURCE));
+    const changes = incomingChanges({ rawApplied: itemValues(appliedDocuments), current: itemValues(currentDocuments), head: itemValues(headDocuments) })
+      .filter(change => !unavailableIntegrations || change.kind !== 'integration');
     return { changes, conflicts: conflictsOf(changes, input.overrides) };
   });

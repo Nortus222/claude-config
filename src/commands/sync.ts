@@ -225,6 +225,7 @@ const record = (input: {
             : 'hold';
       const prepared = yield* prepareSyncDecision({
         source,
+        validation: 'cli-independent-integrations',
         change: {
           kind: 'syncDecision',
           setupId: LOCAL_SETUP,
@@ -334,7 +335,7 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
       console.error(`nortuscc: the applied commit ${short(recorded)} is not in this checkout; measuring from ${short(before)}`);
     }
     const applied = known ?? before;
-    const { changes, conflicts } = yield* incoming({ repo, applied, head, holds, overrides: overrides.value });
+    const { changes, conflicts } = yield* incoming({ repo, applied, head, holds, overrides: overrides.value, validation: 'cli-independent-integrations' });
 
     // 4. Report; --check stops here.
     process.stdout.write('\n' + section('sync', previewLines(changes, conflicts)));

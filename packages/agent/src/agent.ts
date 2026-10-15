@@ -50,6 +50,8 @@ export type AgentHandle = {
   readonly withJobMutation: <A, E, R>(effect: Effect.Effect<A, E, R>, invalidate?: boolean) => Effect.Effect<A, E, R>;
   readonly status: Effect.Effect<AgentStatus | undefined>;
   readonly generation?: Effect.Effect<number>;
+  // Local decisions may refresh legacy previews; every other mutation fences them.
+  readonly legacyGeneration?: Effect.Effect<number>;
   readonly freshInspection?: Effect.Effect<JobResult, unknown>;
   readonly afterPerson?: HostedRuntime['afterPerson'];
   readonly hosted?: {
@@ -128,13 +130,14 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const withServices = <A, E>(effect: Effect.Effect<A, E, AgentStateStore | HistoryStore | DecisionsStore>) =>
       Effect.provideContext(effect, context);
     const paths = yield* MachinePaths;
-    let generation = 0;
-    const withJobMutation: AgentHandle['withJobMutation'] = (effect, invalidate = true) => jobs.withPermit(Effect.gen(function* () {
-      if (invalidate) { generation++; yield* Ref.set(inspection, undefined); }
+    let generation = 0, legacyGeneration = 0;
+    const mutateJob = <A, E, R>(effect: Effect.Effect<A, E, R>, invalidate = true, localDecision = false) => jobs.withPermit(Effect.gen(function* () {
+      if (invalidate) { generation++; if (!localDecision) legacyGeneration++; yield* Ref.set(inspection, undefined); }
       return yield* effect;
     }));
-    const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true) =>
-      Effect.scoped(Effect.andThen(acquireApplyLock, withJobMutation(effect, invalidate))).pipe(Effect.provideService(MachinePaths, paths),
+    const withJobMutation: AgentHandle['withJobMutation'] = (effect, invalidate = true) => mutateJob(effect, invalidate);
+    const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true, localDecision = false) =>
+      Effect.scoped(Effect.andThen(acquireApplyLock, mutateJob(effect, invalidate, localDecision))).pipe(Effect.provideService(MachinePaths, paths),
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
         Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
     const hosted = options.hosted;
@@ -173,11 +176,12 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       status: Ref.get(latest),
       inspection: Ref.get(inspection),
       request: scheduler.request,
-      decide: (decision, actor) => mutation(mutationBodies.decideAll([decision], actor)).pipe(Effect.andThen(scheduler.request('decide'))),
+      decide: (decision, actor) => mutation(mutationBodies.decideAll([decision], actor), true, decision.setupId === 'local' && decision.revision === null).pipe(Effect.andThen(scheduler.request('decide'))),
       decideAll: (decisions, actor) =>
-        mutation(mutationBodies.decideAll(decisions, actor)).pipe(Effect.andThen(scheduler.request('decide'))),
+        mutation(mutationBodies.decideAll(decisions, actor), true, decisions.every(d => d.setupId === 'local' && d.revision === null)).pipe(Effect.andThen(scheduler.request('decide'))),
       resume: (actor) => mutation(mutationBodies.resume(actor)).pipe(Effect.andThen(scheduler.request('resume'))),
       setPolicy: (policy, actor) => mutation(mutationBodies.setPolicy(policy, actor)).pipe(Effect.andThen(scheduler.request('policy'))),
+      legacyGeneration: Effect.gen(function* () { return legacyGeneration + (hosted ? yield* hosted.generation : 0); }),
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
         signInFlow: hosted.signInFlow,

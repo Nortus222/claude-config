@@ -1,14 +1,14 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { join, resolve, sep } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
-  MachinePaths, machinePaths, nodeFs, nodeProcesses, Processes, updateItems,
+  Fs, MachinePaths, machinePaths, nodeFs, nodeProcesses, Processes, updateItems,
   type Command, type Completed, type MachinePathsValue, type Observed,
 } from '@nortuscc/machine';
 import { select as realSelect } from '../src/select.ts';
@@ -215,8 +215,9 @@ test('seedKeys with neither flag seeds nothing', () => {
 
 // ---- orchestration: a temp machine, real git sources, a fake installer ----
 
+const gitEnv = (home: string) => ({ PATH: process.env.PATH!, HOME: home, USERPROFILE: home, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_COUNT: '0', GIT_CONFIG_PARAMETERS: '', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file' });
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null', '-c', 'init.templateDir=', '-c', 'user.email=fixture@example.invalid', '-c', 'user.name=Fixture', '-c', 'commit.gpgSign=false', ...args], { cwd, env: gitEnv(cwd), encoding: 'utf8' }).trim();
 
 // A local source repo with one folder per skill under s/.
 function sourceRepo(dir: string, folders: string[]) {
@@ -227,7 +228,7 @@ function sourceRepo(dir: string, folders: string[]) {
     mkdirSync(join(dir, 's', name), { recursive: true });
     writeFileSync(join(dir, 's', name, 'SKILL.md'), `# ${name}\n`);
   }
-  git(dir, 'add', '.');
+  git(dir, 'add', '--', ...folders.map(name => `s/${name}/SKILL.md`));
   git(dir, 'commit', '-qm', 'skills');
   return { url: pathToFileURL(dir).href, tree: (name: string) => git(dir, 'rev-parse', `HEAD:s/${name}`) };
 }
@@ -242,6 +243,7 @@ type Behaviour = {
   readonly blockClone?: boolean;
   // The hash `update` records: absent means the upstream tree, null leaves the lock alone.
   readonly updateTo?: string | null;
+  readonly afterNative?: () => void;
 };
 
 type Options = {
@@ -253,12 +255,14 @@ type Options = {
   readonly unreachable?: boolean;
   // Lock entries that replace the generated ones (another source, say).
   readonly lockOverride?: Record<string, object>;
+  readonly additions?: readonly { source: string; name: string; targets: readonly string[]; revision?: string }[];
+  readonly held?: boolean;
 };
 
 const homes: string[] = [];
 after(() => { for (const home of homes) rmSync(home, { recursive: true, force: true }); });
 function machine(options: Options = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'nortuscc-update-ts-'));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'nortuscc-update-ts-')));
   homes.push(home);
   const paths: MachinePathsValue = {
     repo: join(home, 'repo'), claude: join(home, '.claude'), codex: join(home, '.codex'),
@@ -268,6 +272,17 @@ function machine(options: Options = {}) {
   for (const dir of [paths.repo, paths.claude, paths.codex, paths.agentsSkills]) mkdirSync(dir, { recursive: true });
   const manifestFile = join(paths.repo, 'skills-manifest.txt');
   if (options.manifest !== undefined) writeFileSync(manifestFile, options.manifest);
+  mkdirSync(join(paths.repo, 'claude'), { recursive: true });
+  writeFileSync(join(paths.repo, 'claude/settings.keys.json'), '{"theme":"dark"}\n');
+  git(paths.repo, 'init', '-q');
+  git(paths.repo, 'add', '--', 'claude/settings.keys.json', ...(options.manifest === undefined ? [] : ['skills-manifest.txt']));
+  git(paths.repo, 'commit', '-qm', 'author fixture');
+  mkdirSync(paths.stateRoot, { recursive: true });
+  if (options.additions) writeFileSync(join(paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skillAdditions: options.additions }));
+  if (options.held) {
+    writeFileSync(join(paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held: { 'setting:claude:settings.json#theme': git(paths.repo, 'rev-parse', 'HEAD') } }));
+    writeFileSync(join(paths.repo, 'claude/settings.keys.json'), '{"theme":"light"}\n');
+  }
 
   const src = sourceRepo(join(home, 'upstream'), options.upstream ?? ['stale', 'fresh']);
   const sourceUrl = options.unreachable ? pathToFileURL(join(home, 'missing')).href : src.url;
@@ -300,8 +315,24 @@ function machine(options: Options = {}) {
             commands.push(command);
             return Effect.never;
           }
-          return real.run(command);
+          const args = command.args.map(arg => arg === 'https://github.com/o/r.git' ? src.url : arg === pathToFileURL(join(tmpdir(), 'nonexistent', 'other')).href ? pathToFileURL(join(home, 'missing-other')).href : arg);
+          const directory = command.cwd ?? (args.includes('clone') ? args.at(-1) : undefined);
+          const inside = (path: string) => resolve(path) === home || resolve(path).startsWith(home + sep);
+          let verbAt = 0;
+          while (['-c', '-C', '--git-dir', '--work-tree'].includes(args[verbAt]!)) {
+            if (args[verbAt] !== '-c') assert.ok(inside(args[verbAt + 1]!), 'Git root must be fixture-owned');
+            verbAt += 2;
+          }
+          assert.ok(directory && inside(directory), 'Git must stay inside the owned fixture');
+          assert.ok(['clone', 'rev-parse', 'ls-tree', 'cat-file', 'ls-files', 'fetch'].includes(args[verbAt]!), 'Only known fixture Git operations may run');
+          if (args[verbAt] === 'clone') assert.ok(inside(args.at(-1)!), 'Clone destination must be fixture-owned');
+          assert.ok(!args.some(arg => /^(?:https?:|git@|ssh:)/.test(arg)), 'Unrouted remote refused');
+          assert.ok(!args.some(arg => arg.startsWith('file:') && !inside(fileURLToPath(arg))), 'Non-fixture file remote refused');
+          return real.run({ ...command, args: ['-c', 'core.hooksPath=/dev/null', '-c', 'init.templateDir=', ...args], envAllow: [], env: { ...command.env, ...gitEnv(home) } });
         }
+        assert.equal(command.cmd, 'npx', 'Unfaked external command refused');
+        assert.deepEqual(command.args.slice(0, 2), ['-y', 'skills']);
+        assert.ok(['add', 'update', 'remove'].includes(command.args[2]!), 'Unknown native action refused');
         commands.push(command);
         const [, , verb, ...rest] = command.args;
         if (verb === behaviour.block) return Effect.never;
@@ -335,6 +366,7 @@ function machine(options: Options = {}) {
             }
           }
           writeLock(skills);
+          behaviour.afterNative?.();
           return { code: 0, stdout: '' };
         });
       },
@@ -660,7 +692,8 @@ test('cancelling mid-update stops before the manifest and exits non-zero', async
   const controller = new AbortController();
   let poll: ReturnType<typeof setInterval> | undefined;
   // Cancelled once the installer itself is running: the step backs up the skill folders before it launches.
-  const result = await go(['--yes', '--add', 'wizard'], m.deps({ behaviour: { block: 'add' }, signal: controller.signal }), () => {
+  let result: Awaited<ReturnType<typeof go>>;
+  try { result = await go(['--yes', '--add', 'wizard'], m.deps({ behaviour: { block: 'add' }, signal: controller.signal }), () => {
     poll = setInterval(() => {
       if (m.npx().some((a) => a[0] === 'add')) {
         clearInterval(poll);
@@ -668,7 +701,7 @@ test('cancelling mid-update stops before the manifest and exits non-zero', async
       }
     }, 5);
   });
-  clearInterval(poll);
+  } finally { clearInterval(poll); }
   assert.equal(result.code, 1);
   assert.match(result.out, /cancelled — not run: skills:expose, skills:manifest/);
   assert.equal(m.manifest(), manifest, 'the manifest must not be rewritten after a cancel');
@@ -709,4 +742,88 @@ test('Ctrl-C while sources are being checked cancels before the picker and exits
   assert.equal(picked, false, 'the picker must not open after a cancel');
   assert.deepEqual(m.npx(), []);
   assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args[0] === 'clone'), 'the clone had started');
+});
+
+for (const held of [false, true]) for (const overlay of [false, true]) {
+  for (const state of ['outdated', 'gone', 'off-pin'] as const) test(`update refuses ${state} addition work with held=${held}, overlay=${overlay}`, async () => {
+    const m = machine({ held, upstream: state === 'gone' ? ['fresh'] : ['stale', 'fresh'],
+      installed: { stale: 'old', fresh: CURRENT }, manifest: overlay ? '[o/r]\nstale\nfresh\n' : '[o/r]\nfresh\n',
+      additions: [{ source: 'o/r', name: 'stale', targets: ['claude'] }] });
+    if (state === 'off-pin') writeFileSync(join(m.home, '.agents/.skill-lock.json'), JSON.stringify({ skills: { ...m.readLock(), stale: { ...m.readLock().stale, ref: 'a'.repeat(40) } } }));
+    const before = m.readLock();
+    const result = await go(['--yes', '--prune'], m.deps());
+    assert.deepEqual(m.npx(), [], result.out + result.err);
+    assert.deepEqual(m.readLock(), before);
+    assert.match(result.out, /resolve.*preview.*apply/i);
+  });
+  test(`routine manifest excludes personal additions and retains base overlays with held=${held}, overlay=${overlay}`, async () => {
+    const m = machine({ held, upstream: ['stale', 'fresh', 'new'], installed: { stale: CURRENT, fresh: CURRENT },
+      manifest: overlay ? '[o/r]\nstale\nfresh\n' : '[o/r]\nfresh\n',
+      additions: [{ source: 'o/r', name: 'stale', targets: ['claude'] }] });
+    const result = await go(['--yes', '--add', 'new'], m.deps());
+    assert.equal(result.code, 0, result.err + result.out);
+    assert.match(m.manifest()!, /\nnew\n/);
+    assert.equal(m.manifest()!.includes('\nstale\n'), overlay);
+    assert.ok(m.npx().every(args => !args.includes('stale')), JSON.stringify(m.npx()));
+  });
+}
+for (const held of [false, true]) test(`choice bytes changed during selection refuse all effects with held=${held}`, async () => {
+  const m = machine({ held, additions: [] });
+  const before = m.readLock();
+  const result = await go([], m.deps({ select: async rows => {
+    writeFileSync(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skillAdditions: [{ source: 'o/r', name: 'stale', targets: ['claude'] }] }));
+    return rows.map(row => row.key);
+  } }));
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.deepEqual(m.npx(), []);
+  assert.deepEqual(m.readLock(), before);
+});
+
+for (const held of [false, true]) test(`a choice edit after an update blocks later installation and publication with held=${held}`, async () => {
+  const manifest = '[o/r]\nstale\nfresh\n';
+  const m = machine({ held, manifest, upstream: ['stale', 'fresh', 'new'], additions: [] });
+  const result = await go(['--yes', '--add', 'new'], m.deps({ behaviour: { afterNative: () => {
+    assert.ok(existsSync(join(m.paths.stateRoot, 'apply.lock')));
+    writeFileSync(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skillAdditions: [{ source: 'o/r', name: 'stale', targets: ['claude'] }] }));
+  } } }));
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.deepEqual(m.npx().map(args => args[0]), ['update']);
+  assert.equal(m.manifest(), manifest);
+  assert.equal(m.readLock().stale!.skillFolderHash, m.src.tree('stale'));
+  assert.match(result.out, /choices changed/);
+});
+for (const held of [false, true]) test(`invalid and conflicting addition declarations fail closed with held=${held}`, async () => {
+  for (const document of ['{invalid', JSON.stringify({ version: 2, skillAdditions: [{ source: 'o/r', name: 'stale', targets: ['claude'], revision: 'a'.repeat(40) }] })]) {
+    const m = machine({ held, manifest: '[o/r]\nstale\nfresh\n' });
+    writeFileSync(join(m.paths.stateRoot, 'overrides.json'), document);
+    const result = await go(['--yes'], m.deps());
+    assert.equal(result.code, 1, result.out + result.err);
+    assert.deepEqual(m.npx(), []);
+    assert.equal(readFileSync(join(m.paths.stateRoot, 'overrides.json'), 'utf8'), document);
+  }
+});
+test('update retains its legacy treatment of unrelated skill overrides', async () => {
+  const m = machine();
+  writeFileSync(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 1, skills: { stale: false } }));
+  const result = await go(['--yes'], m.deps());
+  assert.equal(result.code, 0, result.out + result.err);
+  assert.ok(m.npx().some(args => args[0] === 'update' && args.includes('stale')));
+});
+
+test('a choice edit during backup refuses the native updater', async () => {
+  const m = machine({ additions: [] });
+  const fs = Effect.runSync(Effect.gen(function* () { return yield* Fs; }).pipe(Effect.provide(nodeFs)));
+  let changed = false;
+  const guarded = Layer.succeed(Fs, { ...fs, copy: (from, to, options) => fs.copy(from, to, options).pipe(Effect.tap(() => Effect.sync(() => {
+    if (!changed && to.startsWith(m.paths.backups + '/')) {
+      changed = true;
+      writeFileSync(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skillAdditions: [{ source: 'o/r', name: 'stale', targets: ['claude'] }] }));
+    }
+  }))) });
+  const deps = m.deps();
+  const result = await go(['--yes'], { ...deps, layer: Layer.merge(deps.layer, guarded) });
+  assert.equal(changed, true);
+  assert.equal(result.code, 1, result.out + result.err);
+  assert.deepEqual(m.npx(), []);
+  assert.equal(m.readLock().stale!.skillFolderHash, 'old');
 });

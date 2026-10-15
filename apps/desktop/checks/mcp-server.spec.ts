@@ -115,7 +115,7 @@ test('MCP fixture refuses unfaked installers and non-fixture Git before the real
   }
   assert.equal(launches,0);
 });
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boolean; failPruneAt?: number; unavailableSourceDiagnostic?: (text: string) => void; sourceDecisions?: boolean; localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boolean; integrationsJson?: string; failPruneAt?: number; unavailableSourceDiagnostic?: (text: string) => void; sourceDecisions?: boolean; localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
   if(inputs.sourceDecisions) {
@@ -136,6 +136,7 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boole
     ...(nativeOutput === undefined ? {} : { 'integrations.json': JSON.stringify({ version: 1, integrations: [
       { id: 'fixture-mcp', label: 'fixture MCP', target: 'codex', type: 'mcp', default: true, command: 'fixture-server' },
     ] }) }),
+    ...(inputs.integrationsJson === undefined ? {} : { 'integrations.json': inputs.integrationsJson }),
     ...(profileJson === undefined ? {} : { 'claude/settings.keys.json': profileJson }),
     ...(pinsJson === undefined ? {} : { 'skill-pins.json': pinsJson }),
     ...(inputs.localSource ? {'skills-manifest.txt':`[${pathToFileURL(m.paths.repo).href}]\none\n`}:{}),
@@ -754,4 +755,17 @@ test('MCP account metadata preserves queued intent and same-request identity', a
  const after=output('accountState',await next.call('accountState',{section:'machine'}));
  assert.equal(after.items[0].persistence,'locally-queued');assert.equal(after.items[0].effective.reportStatus,false);assert.equal(after.items[0].confirmed.reportStatus,true);
  assert.doesNotMatch(JSON.stringify(after),/token|credential|signInFlow/);
+});
+
+test('MCP sync remains strict when an independent integrations manifest is invalid', async t => {
+  const s = await agent('app', { integrationsJson: '{invalid' }); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const before = s.m.read(join(s.m.paths.stateRoot, 'decisions.json'));
+  const incoming = await client.call('incomingChanges', { setupId: 'local' });
+  assert.equal(incoming.result.isError, true, JSON.stringify(incoming));
+  const preview = await client.call('previewChange', { change: { kind: 'syncDecision', setupId: 'local', revision: { kind: 'local', commit: 'b'.repeat(40) }, itemId: EFFORT, action: 'hold' } });
+  assert.equal(preview.result.isError, true, JSON.stringify(preview));
+  assert.equal(s.m.read(join(s.m.paths.stateRoot, 'decisions.json')), before);
+  assert.equal(s.m.read(join(s.m.paths.stateRoot, 'sync.json')), undefined);
+  assert.deepEqual(output('listRuns', await client.call('listRuns', { limit: 10 })).runs, []);
 });

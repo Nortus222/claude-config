@@ -474,3 +474,32 @@ test('local A/B/C hold remains releasable after the added item disappears', asyn
     rmSync(setup.root, { recursive: true, force: true });
   }
 });
+
+test('only the local CLI compatibility policy permits an independent invalid integrations document', async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.paths.repo, 'integrations.json'), '{invalid');
+    const input = { source: f.source, change: { kind: 'syncDecision' as const, setupId: 'local', revision: { kind: 'local' as const, commit: HEAD }, itemId: ID, action: 'accept' as const }, overrides: {}, holds: {}, decisions: [], now: new Date() };
+    assert.equal((await f.run(Effect.result(prepareSyncDecision(input))))._tag, 'Failure');
+    const prepared = await f.run(prepareSyncDecision({ ...input, validation: 'cli-independent-integrations' }));
+    assert.equal(prepared.decision.itemId, ID);
+    assert.equal((await f.run(Effect.result(prepareSyncDecision({ ...input, validation: 'cli-independent-integrations', change: { ...input.change, revision: { kind: 'local', commit: OLD } } }))))._tag, 'Failure');
+    writeFileSync(join(f.paths.repo, 'claude/settings.keys.json'), '{invalid');
+    assert.equal((await f.run(Effect.result(prepareSyncDecision({ ...input, validation: 'cli-independent-integrations' }))))._tag, 'Failure');
+  } finally { f.close(); }
+});
+
+test('the CLI compatibility policy checks tentative desired validity without relaxing other domains', async () => {
+  const f = fixture();
+  try {
+    const effective = await f.run(f.source.effective([]));
+    const input = { change: { kind: 'syncDecision' as const, setupId: 'local', revision: { kind: 'local' as const, commit: HEAD }, itemId: ID, action: 'accept' as const }, overrides: {}, holds: {}, decisions: [], now: new Date() };
+    for (const source of ['integrations.json', 'claude/settings.keys.json']) {
+      const altered: SetupSource['Service'] = { ...f.source, effective: (_decisions, choices) => Effect.succeed(choices ? {
+        ...effective, effective: { ...effective.effective, desired: desiredOfDocuments({ 'claude/settings.keys.json': '{"theme":"light"}', [source]: '{invalid' }) },
+      } : effective) };
+      assert.equal((await f.run(Effect.result(prepareSyncDecision({ ...input, source: altered }))))._tag, 'Failure');
+      assert.equal((await f.run(Effect.result(prepareSyncDecision({ ...input, source: altered, validation: 'cli-independent-integrations' }))))._tag, source === 'integrations.json' ? 'Success' : 'Failure');
+    }
+  } finally { f.close(); }
+});

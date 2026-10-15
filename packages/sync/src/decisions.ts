@@ -12,7 +12,7 @@ import {
   type MutationObserver,
   type Processes,
 } from '@nortuscc/machine';
-import type { MachineOverrides } from '@nortuscc/profile-engine';
+import { INTEGRATIONS_SOURCE, type DesiredConfig, type MachineOverrides } from '@nortuscc/profile-engine';
 import { desiredOfDocuments, worktreeDocuments } from './documents.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { withoutOverride } from './plan.ts';
@@ -29,6 +29,8 @@ export type SyncDecisionChange = {
 };
 export type SyncDecisionInput = {
   source: SetupSource['Service'];
+  // Legacy CLI applies valid independent domains and reports the refused integrations manifest separately.
+  validation?: 'cli-independent-integrations';
   change: SyncDecisionChange;
   overrides: MachineOverrides;
   holds: Holds;
@@ -60,8 +62,10 @@ export type SyncDecisionResult = {
 };
 const refused = () => new Error('Sync source, revision or item is unavailable');
 const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
+const invalidProfile = (desired: DesiredConfig, independentIntegrations = false) =>
+  desired.issues.some(issue => !(independentIntegrations && issue.layer === 'base' && issue.source === INTEGRATIONS_SOURCE));
 // Verify the source's exact offer before reading snapshots. Values remain inside the owner.
-export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[]) =>
+export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[], independentIntegrations = false) =>
   Effect.gen(function* () {
     if (source.trusted && !(yield* source.trusted)) return yield* Effect.fail(refused());
     const { head } = yield* source.fetch;
@@ -69,7 +73,7 @@ export const observeSyncSource = (source: SetupSource['Service'], decisions: rea
     const effective = yield* source.effective(decisions);
     const before = yield* worktreeDocuments(effective.applied.repo),
       after = yield* worktreeDocuments(offered.repo);
-    if (desiredOfDocuments(before).issues.length || desiredOfDocuments(after).issues.length)
+    if (invalidProfile(desiredOfDocuments(before), independentIntegrations) || invalidProfile(desiredOfDocuments(after), independentIntegrations))
       return yield* Effect.fail(refused());
     const changes = diffItems(itemValues(before), itemValues(after));
     const offers = source.offeredItems
@@ -88,7 +92,9 @@ export const prepareSyncDecision = (
     const { change, source } = input;
     if ((source.setupId ?? LOCAL_SETUP) !== change.setupId || !parseItemId(change.itemId))
       return yield* Effect.fail(refused());
-    const observed = yield* observeSyncSource(source, input.decisions);
+    const independentIntegrations = input.validation === 'cli-independent-integrations' && change.setupId === LOCAL_SETUP
+      && change.revision.kind === 'local' && parseItemId(change.itemId)?.kind !== 'integration';
+    const observed = yield* observeSyncSource(source, input.decisions, independentIntegrations);
     const offeredItem = observed.offers.find((item) => item.itemId === change.itemId);
     // An existing local hold can be released even when both snapshots omit its item.
     const releaseLocalHold =
@@ -174,7 +180,7 @@ export const prepareSyncDecision = (
       };
       const effective = yield* source.effective([...proposed, decision], { overrides, holds: nextHolds });
       nextDesired = effective.effective.desired;
-      if (nextDesired.issues.length) return yield* Effect.fail(refused());
+      if (invalidProfile(nextDesired, independentIntegrations)) return yield* Effect.fail(refused());
     }
     const ref = parseItemId(change.itemId);
     const sourceImpact =

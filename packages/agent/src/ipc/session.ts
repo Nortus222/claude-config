@@ -8,7 +8,7 @@ import {
   acquireApplyLock, Backups, canonical, Fs, skillLockPath, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
-import { itemIdOf, revisionCommit, type SetupSource } from '@nortuscc/sync';
+import { itemIdOf, revisionCommit, revisionSetupId, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
 import { makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
@@ -77,7 +77,7 @@ export type AgentSession = {
   readonly running: Effect.Effect<boolean>;
 };
 
-type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string>; readonly baselineDigest: string };
+type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly legacyGeneration: number; readonly legacySetupIdentity: string; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string>; readonly baselineDigest: string };
 type Active = { readonly runId: string; readonly abort: AbortController; readonly done: Deferred.Deferred<void> };
 
 const describe = (error: unknown): string => {
@@ -209,6 +209,15 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         return result;
       });
 
+    const legacySetupIdentity = (inspection: JobInspection) => Effect.gen(function* () {
+      const setupId = inspection.revision === null ? 'local' : revisionSetupId(inspection.revision);
+      const setup = handle.selectOperationSetup ? yield* handle.selectOperationSetup(setupId).pipe(
+        Effect.mapError(() => new SessionError('UNKNOWN_PLAN', 'The setup identity is unavailable; inspect again')),
+      ) : undefined;
+      return digest({ checkout: configuredPaths.repo, setupId, trusted: inspection.trusted,
+        ...(setup ? { accountId: setup.accountId, repository: setup.repository, configuredTrust: setup.trusted } : {}) });
+    });
+
     const makePreview = (exclude: readonly string[], change?: ReconcileChange) =>
       Effect.gen(function* () {
         if (active) return yield* Effect.fail(busy);
@@ -224,6 +233,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const selected: ReconcileChange = { kind: 'reconcile', only: change ? [...new Set(change.only)] : [...keys].filter(key => !unique.includes(key)) };
         const next: Previewed = {
           planId: randomUUID(), exclude: unique, plan: planFor(inspection, unique, change ? selected.only : undefined),
+          legacySetupIdentity: yield* legacySetupIdentity(inspection),
+          legacyGeneration: yield* (handle.legacyGeneration ?? handle.generation ?? Effect.succeed(0)),
           generation: yield* (handle.generation ?? Effect.succeed(0)), baselineDigest: digest(inspection.desired), change: selected, exactSelection: change !== undefined, instructionEvidence: instructionEvidence(inspection.report, selected.only),
         };
         previewed = next;
@@ -364,7 +375,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             Effect.catchTag('LockHeld', (held) => Effect.fail(new SessionError('LOCKED', `${held.message}; apply again when it finishes`))),
             Effect.catchTag('MaintenancePending', (pending) => Effect.fail(new SessionError('LOCKED', pending.message))),
           );
-          if (wanted.generation !== (yield* (handle.generation ?? Effect.succeed(0)))) {
+          const generationChanged = wanted.generation !== (yield* (handle.generation ?? Effect.succeed(0)));
+          const legacyRecovery = !prepared && !addition && !(wanted as Previewed).exactSelection
+            && (wanted as Previewed).legacyGeneration === (yield* (handle.legacyGeneration ?? handle.generation ?? Effect.succeed(0)));
+          if (generationChanged && !legacyRecovery) {
             previewed = undefined;
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
           }
@@ -448,7 +462,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           }
           const fresh = planFor(inspection, reconcile.exclude, reconcile.exactSelection ? reconcile.change.only : undefined);
           const evidence = instructionEvidence(inspection.report, reconcile.change.only);
-          if (reconcile.baselineDigest !== digest(inspection.desired) || !samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
+          if (reconcile.legacyGeneration !== (yield* (handle.legacyGeneration ?? handle.generation ?? Effect.succeed(0)))
+            || reconcile.legacySetupIdentity !== (yield* legacySetupIdentity(inspection))) {
+            previewed = undefined;
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+          }
+          if (generationChanged || reconcile.baselineDigest !== digest(inspection.desired) || !samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
             const next: Previewed = { ...reconcile, planId: randomUUID(), baselineDigest: digest(inspection.desired), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
             previewed = next;
             const stale = { status: 'stale' as const, planId: next.planId, plan: wirePlan(fresh), preview: operationPreview(next) };
