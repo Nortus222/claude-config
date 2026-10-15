@@ -231,3 +231,18 @@ test('candidate enrichment reads once per source and unconfirmed cleanup blocks 
   const preview = yield* Effect.result(s.previewChange(update(['skill:one']))); assert.equal(preview._tag,'Failure'); assert.equal(uncertain.calls.length,0);
  })); rmSync(uncertain.m.root,{ recursive:true,force:true });
 });
+
+test('cleanup failure after preview refuses unchanged update rows before acceptance or installer effects', async () => {
+ const options = { adoptionNames:{ two:'native-two',three:'native-three' },metadataCleanup:false };
+ const f = await fixture(options); const lockBefore = f.m.read(f.lockPath); const installedBefore = f.m.read(join(f.m.paths.agentsSkills,'one/SKILL.md'));
+ try {
+  await f.within(s => Effect.gen(function* () {
+   const preview = yield* s.previewChange(update(['skill:one'])); assert.ok(preview.plan.steps.some(step => step.key === 'skills:update'));
+   options.metadataCleanup = true;
+   const result = yield* Effect.result(s.runs.submit({ planId:preview.planId,requestId:'late-cleanup',inputDigest:operationDigest(preview.planId),actor:'mcp' }));
+   assert.equal(result._tag,'Failure'); if (result._tag === 'Failure') { assert.equal(result.failure.code,'UNKNOWN_PLAN'); assert.doesNotMatch(result.failure.message,/PRIVATE|candidates-/); }
+   assert.deepEqual((yield* s.runs.list({ limit:10 })).runs,[]); assert.equal(f.calls.length,0);
+  }));
+  assert.equal(f.m.read(f.lockPath),lockBefore); assert.equal(f.m.read(join(f.m.paths.agentsSkills,'one/SKILL.md')),installedBefore);
+ } finally { rmSync(f.m.root,{ recursive:true,force:true }); }
+});

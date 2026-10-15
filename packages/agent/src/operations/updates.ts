@@ -124,7 +124,10 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
   const revalidate = Effect.gen(function* () {
     yield* choices;
     if (authorDigest((yield* readSkillLockEvidence).bytes) !== baseline.raw || canonical(yield* installedSkillNames) !== canonical(installed)) return yield* Effect.fail(stale());
-    if (canonical((yield* observedUpdates(inspection.desired)).items) !== canonical(observed.items)) return yield* Effect.fail(stale());
+    const refreshed = yield* observedUpdates(inspection.desired);
+    if (refreshed.probeErrors.length || refreshed.sourceFailures?.some(failure => failure.reason === 'cleanup-failed' || failure.retainedDirectory !== undefined))
+      return yield* Effect.fail(stale());
+    if (canonical(refreshed.items) !== canonical(observed.items)) return yield* Effect.fail(stale());
     if (authorEdit) yield* validateAuthorBinding(authorEdit.author);
   }).pipe(Effect.provideContext(context), Effect.mapError(stale));
   yield* revalidate;
