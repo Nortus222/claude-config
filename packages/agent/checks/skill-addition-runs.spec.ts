@@ -47,3 +47,9 @@ test('terminal receipt failure leaves legacy reconcile evidence unchanged', asyn
     ? Effect.fail(new RunStoreError('terminal failure')) : Effect.sync(() => { writes.push(r); }) })));
   assert.equal(writes.length, 1); assert.equal(writes[0]!.view.state, 'accepted');
 });
+
+test('addition receipts reject reconcile parity acceptance and evidence', () => {
+  const parity = { kind: 'reconcile', generation: '1', baselineDigest: 'a'.repeat(64), planDigest: 'b'.repeat(64), plannedKeys: [] };
+  assert.throws(() => decodeRunView({ ...view(), intent: { ...view().intent, parity } }));
+  assert.throws(() => decodeRunView({ ...view(), parity: { kind: 'reconcile', state: 'pending', committedKeys: [], remainingKeys: [], backupIds: [] } }));
+});

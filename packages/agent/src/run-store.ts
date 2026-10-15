@@ -63,7 +63,7 @@ export const runStore = Layer.effect(RunStore, Effect.gen(function* () {
         const binding = (r: RunReceipt) => JSON.stringify([
           r.sequence, r.actor, r.view.runId, r.view.operation, r.view.scope.kind,
           r.view.intent.requestId, r.view.intent.inputDigest, r.view.intent.planId,
-          r.view.intent.change, r.view.intent.skillAddition,
+          r.view.intent.change, r.view.intent.skillAddition, r.view.intent.parity,
         ]);
         if ((receipt.view.intent.change.kind === 'reconcile' && receipt.view.intentSaved) || (previous.view.intentSaved && !receipt.view.intentSaved) || binding(previous) !== binding(receipt)) return yield* Effect.fail(new RunStoreError('A run receipt binding cannot change'));
       }

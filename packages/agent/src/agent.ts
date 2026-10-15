@@ -20,9 +20,24 @@ import { configuredHostedRuntime, type HostedRuntime, type HostedOptions } from 
 import { HostedFailure, type SignInStarted } from '@nortuscc/hosted-client';
 import type { AgentStateStore, Policy } from './state.ts';
 
+// Bodies assume apply.lock and the job permit are held. They never schedule follow-up jobs.
+export type AgentMutationBodies = {
+  readonly decideAll: (decisions: ReadonlyArray<Decision>, actor: Actor) => Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure>;
+  readonly resume: (actor: Actor) => Effect.Effect<void, FsFailed>;
+  readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<void, FsFailed | HostedFailure>;
+  readonly hosted?: {
+    readonly signIn: HostedRuntime['signIn'];
+    readonly signOut: HostedRuntime['signOut'];
+    readonly sync: () => Effect.Effect<void, unknown>;
+    readonly machine: HostedRuntime['machine'];
+  };
+};
+
 // What #78's IPC handlers and the CLI's agent commands call. Each change answers with the status
 // of the job that ran after it. `inspection` is what the latest job inspected, if it got that far.
 export type AgentHandle = {
+  readonly mutationBodies: AgentMutationBodies;
+  readonly withJobMutation: <A, E, R>(effect: Effect.Effect<A, E, R>, invalidate?: boolean) => Effect.Effect<A, E, R>;
   readonly status: Effect.Effect<AgentStatus | undefined>;
   readonly generation?: Effect.Effect<number>;
   readonly freshInspection?: Effect.Effect<JobResult, unknown>;
@@ -104,43 +119,47 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       Effect.provideContext(effect, context);
     const paths = yield* MachinePaths;
     let generation = 0;
+    const withJobMutation: AgentHandle['withJobMutation'] = (effect, invalidate = true) => jobs.withPermit(Effect.gen(function* () {
+      if (invalidate) { generation++; yield* Ref.set(inspection, undefined); }
+      return yield* effect;
+    }));
     const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true) =>
-      Effect.scoped(Effect.andThen(acquireApplyLock, jobs.withPermit(Effect.gen(function* () {
-        if (invalidate) {
-          if (options.hosted) generation++;
-          yield* Ref.set(inspection, undefined);
-        }
-        return yield* effect;
-      })))).pipe(Effect.provideService(MachinePaths, paths),
+      Effect.scoped(Effect.andThen(acquireApplyLock, withJobMutation(effect, invalidate))).pipe(Effect.provideService(MachinePaths, paths),
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
         Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
     const hosted = options.hosted;
-    const changes = (decisions: ReadonlyArray<Decision>, actor: Actor) => mutation(Effect.forEach(decisions, (decision): Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure> =>
-      decision.revision === null ? withServices(recordDecision(decision, actor))
-        : hosted ? hosted.decide(decision, actor) : Effect.fail(new HostedFailure({ code: 'unauthenticated' })), { discard: true }));
+    const mutationBodies: AgentMutationBodies = {
+      decideAll: (decisions, actor) => Effect.forEach(decisions, (decision): Effect.Effect<void, FsFailed | DecisionsInvalid | HostedFailure> =>
+        decision.revision === null ? withServices(recordDecision(decision, actor))
+          : hosted ? hosted.decide(decision, actor) : Effect.fail(new HostedFailure({ code: 'unauthenticated' })), { discard: true }),
+      resume: actor => withServices(resume(actor)),
+      setPolicy: (policy, actor) => Effect.gen(function* () {
+        if (hosted && (yield* hosted.state).accountId !== null) yield* hosted.machine({ policy }, actor);
+        else yield* withServices(changePolicy(policy, actor));
+      }),
+      ...(hosted ? { hosted: { signIn: hosted.signIn, signOut: hosted.signOut, sync: () => hosted.sync, machine: hosted.machine } } : {}),
+    };
     const handle: AgentHandle = {
+      mutationBodies, withJobMutation,
       status: Ref.get(latest),
       inspection: Ref.get(inspection),
       request: scheduler.request,
-      decide: (decision, actor) => changes([decision], actor).pipe(Effect.andThen(scheduler.request('decide'))),
+      decide: (decision, actor) => mutation(mutationBodies.decideAll([decision], actor)).pipe(Effect.andThen(scheduler.request('decide'))),
       decideAll: (decisions, actor) =>
-        changes(decisions, actor).pipe(Effect.andThen(scheduler.request('decide'))),
-      resume: (actor) => mutation(withServices(resume(actor))).pipe(Effect.andThen(scheduler.request('resume'))),
-      setPolicy: (policy, actor) => mutation(Effect.gen(function* () {
-        if (hosted && (yield* hosted.state).accountId !== null) yield* hosted.machine({ policy }, actor);
-        else yield* withServices(changePolicy(policy, actor));
-      })).pipe(Effect.andThen(scheduler.request('policy'))),
+        mutation(mutationBodies.decideAll(decisions, actor)).pipe(Effect.andThen(scheduler.request('decide'))),
+      resume: (actor) => mutation(mutationBodies.resume(actor)).pipe(Effect.andThen(scheduler.request('resume'))),
+      setPolicy: (policy, actor) => mutation(mutationBodies.setPolicy(policy, actor)).pipe(Effect.andThen(scheduler.request('policy'))),
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
         freshInspection: hosted.inspectPrimary,
         afterPerson: hosted.afterPerson,
         hosted: {
           state: hosted.state,
-          signIn: (name?: string, reportStatus?: boolean) => mutation(hosted.signIn(name, reportStatus)),
-          signOut: () => mutation(hosted.signOut()),
-          sync: () => mutation(hosted.sync).pipe(Effect.andThen(scheduler.request('inspect')), Effect.asVoid),
+          signIn: (name?: string, reportStatus?: boolean) => mutation(mutationBodies.hosted!.signIn(name, reportStatus)),
+          signOut: () => mutation(mutationBodies.hosted!.signOut()),
+          sync: () => mutation(mutationBodies.hosted!.sync()).pipe(Effect.andThen(scheduler.request('inspect')), Effect.asVoid),
           trust: (id: string, actor: Actor) => mutation(hosted.trust(id, actor)).pipe(Effect.andThen(scheduler.request('inspect')), Effect.asVoid),
-          machine: (patch: Parameters<HostedRuntime['machine']>[0], actor: Actor) => mutation(hosted.machine(patch, actor)).pipe(Effect.andThen(scheduler.request('policy')), Effect.asVoid),
+          machine: (patch: Parameters<HostedRuntime['machine']>[0], actor: Actor) => mutation(mutationBodies.hosted!.machine(patch, actor)).pipe(Effect.andThen(scheduler.request('policy')), Effect.asVoid),
         },
       } : {}),
       onStatus: (listener) => {

@@ -4,6 +4,12 @@ import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
+// Owners call pending before a possible effect and committed after observing completion.
+export type MutationObserver = {
+  readonly pending: (key: string) => Effect.Effect<void, unknown>;
+  readonly committed: (key: string) => Effect.Effect<void, unknown>;
+};
+
 // Who acted. `sync` marks another of the user's machines, whose event also carries its machineId.
 export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp';
 export type ItemReason = { readonly itemId: string; readonly reason: string };
@@ -19,6 +25,7 @@ export type HistoryEventBody =
     // Set only when reading: the folder was pruned, so `backup` reads 'pruned'.
     readonly prunedFolder?: string; readonly prunedAt?: string;
   }
+  | { readonly kind: 'operation-checkpoint'; readonly runId: string; readonly keys: readonly string[]; readonly committedKeys: readonly string[]; readonly remainingKeys: readonly string[]; readonly backupIds: readonly string[]; readonly state: 'pending' | 'committed' | 'partial' | 'needsInspection'; readonly message: string }
   | { readonly kind: 'skill-addition'; readonly runId: string; readonly intentSaved: boolean; readonly intentState: 'pending' | 'saved' | 'needsInspection'; readonly installationState?: 'verified' | 'failed' | 'cancelled' | 'needsInspection'; readonly message: string }
   | { readonly kind: 'held' | 'ready'; readonly items: ReadonlyArray<ItemReason> }
   | {

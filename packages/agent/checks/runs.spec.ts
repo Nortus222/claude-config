@@ -285,3 +285,17 @@ for (const embedded of [undefined, 'app'] as const) test(`receipt owner supplies
     assert.equal((yield* session.runs.submit(inputFor(read.intent.planId))).actor, 'mcp');
   }));
 });
+
+test('persisted parity acceptance cannot replace its baseline or planned keys', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const p = yield* preview(session); const run = yield* session.runs.submit(inputFor(p.planId));
+    yield* Deferred.succeed(f.release, undefined); yield* terminal(session, run.runId);
+    const store = yield* RunStore; const receipt = (yield* store.read)[0]!;
+    assert.ok(receipt.view.intent.parity);
+    for (const change of [{ baselineDigest: 'f'.repeat(64) }, { plannedKeys: [] }]) {
+      const changed = decodeRunView({ ...receipt.view, intent: { ...receipt.view.intent, parity: { ...receipt.view.intent.parity, ...change } } });
+      assert.ok((yield* Effect.flip(store.write({ ...receipt, view: changed }))) instanceof RunStoreError);
+    }
+  }));
+});

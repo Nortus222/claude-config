@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { Cause, Deferred, Effect, Exit, Fiber } from 'effect';
+import { Cause, Deferred, Effect, Exit, Fiber, Semaphore } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import { DialogueCleanupFailed, Fs, FsFailed, HistoryStore, OverridesStore, Processes, inspectSkills, skillsDomain, verifyAcceptedSkill, SkillCandidateCleanupFailed, type HistoryInput, type SkillCandidatesResult, type SkillCandidate } from '@nortuscc/machine';
 import { agentSkillInstaller } from '../src/skill-installer.ts';
@@ -33,7 +33,7 @@ const fixture = (options: { sourceOutcome?: 'returned' | 'defect' | 'mixed' | 'm
   }
   if (options.legacyState) m.write(join(m.paths.stateRoot, 'state.json'), JSON.stringify({ files: {}, ...(options.legacyState === 'choices' ? { configTargets: ['codex'] } : {}) }));
   const started = Deferred.makeUnsafe<void>(); const release = Deferred.makeUnsafe<void>();
-  const calls: string[] = []; const historyAttempts: HistoryInput[] = []; let installing = 0;
+  const calls: string[] = []; const historyAttempts: HistoryInput[] = []; let installing = 0; let refreshes = 0; let heldPermits = 0;
   const within = (body: (session: AgentSession, fresh: Effect.Effect<JobInspection, unknown>) => Effect.Effect<unknown, unknown, any>) => m.run(Effect.scoped(Effect.gen(function* () {
     const context = yield* Effect.context<any>();
     const fresh = Effect.gen(function* () {
@@ -42,7 +42,12 @@ const fixture = (options: { sourceOutcome?: 'returned' | 'defect' | 'mixed' | 'm
       return { paths: m.paths, desired, report: { desired, ...yield* inspectSkills(desired) }, domains: [skillsDomain], trusted: true, revision: null };
     }).pipe(Effect.provideContext(context));
     const status = { state: 'idle', policy: 'manual', paused: null };
-    const handle = { inspection: fresh, freshInspection: Effect.map(fresh, inspection => ({ inspection, status })), generation: Effect.succeed(1), exclusive: (e: any) => e, request: () => Effect.succeed(status) } as unknown as AgentHandle;
+    const permit = yield* Semaphore.make(1);
+    const exclusive = <A, E, R>(effect: Effect.Effect<A, E, R>) => permit.withPermit(Effect.gen(function* () {
+      heldPermits++; refreshes++;
+      return yield* effect.pipe(Effect.ensuring(Effect.sync(() => { heldPermits--; })));
+    }));
+    const handle = { inspection: fresh, freshInspection: Effect.map(fresh, inspection => ({ inspection, status })), generation: Effect.succeed(1), exclusive, withJobMutation: exclusive, request: () => Effect.succeed(status) } as unknown as AgentHandle;
     const history = yield* HistoryStore; const store = yield* RunStore; const processes = yield* Processes;
     const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [skillsDomain],
       skillCandidates: input => Effect.sync(() => { input.observeTree?.(c, [{ path: 'SKILL.md', sha: c.blob, mode: '100644' }]); return { ok: true, source: c.source, revision: c.revision, candidates: [c] }; }),
@@ -67,6 +72,7 @@ const fixture = (options: { sourceOutcome?: 'returned' | 'defect' | 'mixed' | 'm
       Effect.provideService(HistoryStore, { ...history, append: event => { historyAttempts.push(event); return options.failHistory?.(event)
         ? Effect.fail(new FsFailed({ op: 'append', path: '/isolated/history', reason: 'injected failure' })) : history.append(event); } }),
       Effect.provideService(Processes, { ...processes, run: command => command.cmd !== 'npx' ? processes.run(command) : Effect.gen(function* () {
+        assert.equal(heldPermits, 0, 'the addition driver releases its refresh permit before installation');
         installing++; calls.push('installer');
         if (!options.noOverrides) {
           const backups = readdirSync(m.paths.backups, { recursive: true }).filter(p => String(p).endsWith('overrides.json'));
@@ -81,7 +87,7 @@ const fixture = (options: { sourceOutcome?: 'returned' | 'defect' | 'mixed' | 'm
       }) }));
     return yield* body(session, fresh);
   })));
-  return { m, within, calls, historyAttempts, started, release, installing: () => installing };
+  return { m, within, calls, historyAttempts, started, release, installing: () => installing, refreshes: () => refreshes };
 };
 const preview = (session: AgentSession, targets: readonly ('claude' | 'codex')[] = ['codex']) => Effect.gen(function* () {
   const found = yield* session.resolveSkillCandidate({ scope: { kind: 'machine' }, source: c.source, name: c.installedName });
@@ -371,7 +377,7 @@ for (const outcome of ['returned', 'defect', 'mixed'] as const)
       const accepted = (yield* ops.acceptedPlan(p.planId))!;
       const updates: Parameters<RunLifecycle['addition']>[0][] = [];
       const lifecycle: RunLifecycle = { actor: 'mcp', runId: 'direct-run', requestId: 'direct-request',
-        accepted: () => Effect.void, progress: () => Effect.void, finished: () => Effect.void,
+        accepted: () => Effect.void, parity: () => Effect.void, progress: () => Effect.void, finished: () => Effect.void,
         addition: update => Effect.sync(() => { updates.push(structuredClone(update)); }),
       };
       const directory = '/owned/' + '😀'.repeat(5000);
@@ -382,6 +388,8 @@ for (const outcome of ['returned', 'defect', 'mixed'] as const)
       const driver = yield* makeAdditionDriver(accepted, lifecycle, fresh, { content: candidate => verifyAcceptedSkill(candidate,
         () => outcome === 'returned' ? Effect.succeed({ ok: false, reason: 'cleanup-failed', retainedDirectory: directory }) : Effect.failCause(cause)) });
       const report = (yield* fresh).report;
+      assert.notEqual(p.plan.kind, 'operation');
+      if (p.plan.kind === 'operation') throw new Error('Addition requires a physical plan');
       assert.equal((yield* driver.domain.run(p.plan.steps[0]!, report)).ok, true);
       const exit = yield* Effect.exit(driver.domain.run(p.plan.steps.at(-1)!, report));
       if (outcome === 'returned') { assert.ok(Exit.isSuccess(exit)); assert.equal(exit.value.ok, false); }
@@ -400,3 +408,13 @@ for (const outcome of ['returned', 'defect', 'mixed'] as const)
     }));
     assert.equal(f.installing(), 0); assert.deepEqual(f.calls, []);
   });
+
+test('addition refresh does not nest permits', { timeout: 5000 }, async () => {
+  const f = fixture();
+  await f.within(session => Effect.gen(function* () {
+    const p = yield* preview(session); const run = yield* session.runs.submit(request(p.planId));
+    yield* terminal(session, run.runId);
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    assert.equal(f.installing(), 1); assert.ok(f.refreshes() >= 2);
+  }));
+});

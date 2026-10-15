@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Semaphore } from 'effect';
-import type { Progress } from '@nortuscc/machine';
+import type { OperationProgress as Progress, ParityAcceptance, ParityRunEvidence } from './operations/index.ts';
 import { decodeOperationInput, decodeRunView, type RunView, type ChangePreview, type OperationChange } from './operations/index.ts';
 import { MAX_RUN_BYTES, RunStore, type RunActor, type RunReceipt } from './run-store.ts';
 
@@ -29,7 +29,8 @@ export type RunLifecycle = {
   readonly actor: RunActor;
   readonly runId: string;
   readonly requestId: string;
-  readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition']) => Effect.Effect<void, RunError>;
+  readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition'], parity?: ParityAcceptance) => Effect.Effect<void, RunError>;
+  readonly parity: (update: ParityRunEvidence) => Effect.Effect<void, RunError>;
   readonly addition: (update: Pick<RunView, 'intentSaved' | 'intentState' | 'installation'>) => Effect.Effect<void, RunError>;
   readonly progress: (progress: Progress) => Effect.Effect<void, RunError>;
   readonly finished: (progress: { readonly type: 'failed'; readonly message: string } | Extract<Progress, { type: 'done' | 'cancelled' }>) => Effect.Effect<void, RunError>;
@@ -67,9 +68,9 @@ export const makeAgentRuns = (driver: {
     sequence = Math.max(sequence, receipt.sequence);
     if (receipts.has(receipt.view.runId) || requests.has(receipt.view.intent.requestId)) return yield* Effect.fail(new RunError('RUN_FAILED', 'Duplicate receipt identity'));
     const incomplete = receipt.view.state === 'accepted' || receipt.view.state === 'running';
-    const recovered: RunReceipt = incomplete ? { ...receipt, view: { ...receipt.view, state: 'interrupted', ...(receipt.view.intent.skillAddition ? { installation: { ...receipt.view.installation, state: 'needsInspection' as const, message: 'Agent stopped; inspect saved intent and installed files before retrying', sharedStore: { codexScans: true as const, visibility: 'shared' as const }, nextActions: [] } } : {}), result: {
+    const recovered: RunReceipt = incomplete ? { ...receipt, view: decodeRunView({ ...receipt.view, state: 'interrupted', ...(receipt.view.parity ? { parity: { ...receipt.view.parity, state: 'needsInspection' as const } } : {}), ...(receipt.view.intent.skillAddition ? { installation: { ...receipt.view.installation, state: 'needsInspection' as const, message: 'Agent stopped; inspect saved intent and installed files before retrying', sharedStore: { codexScans: true as const, visibility: 'shared' as const }, nextActions: [] } } : {}), result: {
       status: 'interrupted', message: receipt.inFlight ? bounded(`Agent stopped while applying ${receipt.inFlight}; inspect before trying again`) : 'Agent stopped before the run finished; inspect before trying again',
-    } } } : receipt;
+    } }) } : receipt;
     if (incomplete) yield* save(recovered);
     else { receipts.set(receipt.view.runId, copy(receipt)); requests.set(receipt.view.intent.requestId, receipt.view.runId); }
   }
@@ -98,10 +99,11 @@ export const makeAgentRuns = (driver: {
       let durabilityFailed = false;
       const lifecycle: RunLifecycle = {
         runId, requestId: input.requestId, actor: input.actor,
-        accepted: (change, keys, skillAddition) => Effect.gen(function* () {
+        accepted: (change, keys, skillAddition, parity) => Effect.gen(function* () {
           const view = yield* Effect.try({ try: () => decodeRunView({ runId, state: 'accepted', operation: 'applyChange', scope: { kind: 'machine' },
-            intent: { requestId: input.requestId, inputDigest: input.inputDigest, planId: input.planId, change: copy(change), ...(skillAddition ? { skillAddition: copy(skillAddition) } : {}) },
-            ...(skillAddition ? { intentState: 'pending' } : {}), intentSaved: false, steps: [], result: null }), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
+            intent: { requestId: input.requestId, inputDigest: input.inputDigest, planId: input.planId, change: copy(change), ...(skillAddition ? { skillAddition: copy(skillAddition) } : {}), ...(parity ? { parity: copy(parity) } : {}) },
+            ...(skillAddition ? { intentState: 'pending' } : {}), ...(parity ? { parity: { kind: parity.kind, state: 'pending', committedKeys: [], remainingKeys: [...keys], backupIds: [] } } : {}), intentSaved: false, steps: [], result: null }), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
+          if (parity && (new Set(keys).size !== keys.length || JSON.stringify(parity.plannedKeys) !== JSON.stringify(keys))) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Parity acceptance keys differ from the plan'));
           // Reserve room for all outcomes and remaining keys before accepting any work.
           const largest = { ...view, steps: keys.map(key => ({ key, outcome: 'cancelled', note: '' })), result: { status: 'cancelled', remaining: keys } };
           yield* Effect.try({ try: () => decodeRunView(largest), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
@@ -109,6 +111,24 @@ export const makeAgentRuns = (driver: {
           noteLimit = Math.min(500, Math.floor(64 * 1024 / Math.max(1, keys.length) / 4));
           yield* save({ version: 1, sequence: ++sequence, actor: input.actor, view, inFlight: null });
         }),
+        parity: update => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, parity: copy(update) }), catch: () => new RunError('INVALID_INPUT', 'Invalid operation evidence') });
+          const accepted = view.intent.parity!;
+          const keys = new Set(accepted.plannedKeys);
+          if (new Set([...update.committedKeys, ...update.remainingKeys]).size !== keys.size
+            || update.committedKeys.length + update.remainingKeys.length !== keys.size
+            || update.state === 'committed' && update.remainingKeys.length !== 0
+            || [...update.committedKeys, ...update.remainingKeys].some(key => !keys.has(key))
+            || update.committedKeys.some(key => update.remainingKeys.includes(key))
+            || receipt.view.parity?.committedKeys.some(key => !update.committedKeys.includes(key))
+            || receipt.view.parity?.backupIds.some(id => !update.backupIds.includes(id))) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Operation evidence contradicts acceptance'));
+          const updated = { ...receipt, view };
+          if (Buffer.byteLength(JSON.stringify(updated)) > MAX_RUN_BYTES - 4096) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Operation evidence is too large for a run receipt'));
+          // An observed commit survives a failed receipt write and cannot be replayed by a retry.
+          receipts.set(runId, copy(updated)); publish(updated);
+          yield* save(updated);
+        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         addition: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
           const updated = { ...receipt, view: { ...receipt.view, ...copy(update) } };
@@ -135,12 +155,12 @@ export const makeAgentRuns = (driver: {
           const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status;
           const ended = { ...receipt, inFlight: result.status === 'done' || result.status === 'cancelled' ? null : receipt.inFlight, view: { ...receipt.view, state, result } };
           yield* save(ended).pipe(Effect.catch(cause => {
-            const interrupted: RunReceipt = { ...ended, view: { ...ended.view, state: 'interrupted', ...(ended.view.intent.skillAddition ? {
+            const interrupted: RunReceipt = { ...ended, view: decodeRunView({ ...ended.view, state: 'interrupted', ...(ended.view.parity ? { parity: { ...ended.view.parity, state: 'needsInspection' as const } } : {}), ...(ended.view.intent.skillAddition ? {
               installation: { ...ended.view.installation, state: 'needsInspection', message: 'The final receipt could not be saved; inspect saved intent and installed files before retrying',
                 sharedStore: { codexScans: true, visibility: 'shared' }, nextActions: [] },
             } : {}), result: {
               status: 'interrupted', message: 'The final receipt could not be saved; inspect the machine before trying again',
-            } } };
+            } }) };
             receipts.set(runId, interrupted); publish(interrupted);
             return Effect.fail(cause);
           }));

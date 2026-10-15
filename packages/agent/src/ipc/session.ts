@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
 import {
-  acquireApplyLock, canonical, Fs, skillLockPath, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
+  acquireApplyLock, Backups, canonical, Fs, skillLockPath, backupsForRun, liveLockHolder, MachinePaths, machinePaths, plan, pruneBackups, samePlan, selectAll,
   type MachineReport, type Plan, type Progress,
 } from '@nortuscc/machine';
 import { itemIdOf, revisionCommit, type SetupSource } from '@nortuscc/sync';
@@ -14,6 +14,8 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
+import type { ParityAcceptance } from '../operations/index.ts';
 import { AgentClock } from '../clock.ts';
 import { runJob, type AgentStatus, type JobInspection } from '../job.ts';
 import type { AgentDomains, AgentServices } from '../layer.ts';
@@ -36,6 +38,8 @@ type Client = 'app' | 'cli' | 'mcp';
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
   readonly runs: AgentRuns;
+  // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
+  readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
   readonly skillOperations: SkillOperations;
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
@@ -53,7 +57,7 @@ export type AgentSession = {
   readonly running: Effect.Effect<boolean>;
 };
 
-type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string> };
+type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string>; readonly baselineDigest: string };
 type Active = { readonly runId: string; readonly abort: AbortController; readonly done: Deferred.Deferred<void> };
 
 const describe = (error: unknown): string => {
@@ -91,6 +95,8 @@ const wirePlan = (p: Plan): WirePlan => ({
 
 const wireProgress = (progress: Progress): RunProgress =>
   progress.type === 'started' ? { ...progress, step: wireStep(progress.step) } : progress;
+
+const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 
 const busy = new SessionError('BUSY', 'An apply is running');
 
@@ -133,13 +139,35 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
 
     let previewed: Previewed | undefined;
     let active: Active | undefined;
+    const clock = yield* AgentClock;
+    const parityPlans = new Map<string, { prepared: PreparedParityChange; expires: number }>();
+    yield* Effect.addFinalizer(() => Effect.sync(() => parityPlans.clear()));
+    const retainedParity = (planId: string) => Effect.gen(function* () {
+      const now = (yield* clock.now).getTime();
+      const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
+      for (const [id, item] of parityPlans) if (item.expires <= now || item.prepared.acceptance.generation !== generation) parityPlans.delete(id);
+      return parityPlans.get(planId)?.prepared;
+    });
+    const retainParityChange: AgentSession['retainParityChange'] = prepared => Effect.gen(function* () {
+      if (active) return yield* Effect.fail(busy);
+      yield* retainedParity('');
+      if (prepared.preview.scope.kind !== 'machine' || prepared.preview.change.kind !== prepared.acceptance.kind || prepared.preview.generation !== prepared.acceptance.generation
+        || prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0)))
+        || prepared.acceptance.planDigest !== digest(prepared.preview.plan)
+        || canonical(prepared.acceptance.plannedKeys) !== canonical(prepared.preview.plan.steps.map(step => step.key)))
+        return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Prepared operation does not match its acceptance'));
+      if (parityPlans.size >= 32) parityPlans.delete(parityPlans.keys().next().value!);
+      const retained = { ...prepared, preview: structuredClone(prepared.preview), acceptance: structuredClone(prepared.acceptance) };
+      parityPlans.set(prepared.preview.planId, { prepared: retained, expires: (yield* clock.now).getTime() + 600_000 });
+      return structuredClone(retained.preview);
+    });
 
     const inspect: AgentSession['inspect'] = () =>
       Effect.gen(function* () {
         if (active) return yield* Effect.fail(busy);
         const status = yield* handle.request('inspect');
         const inspection = yield* handle.inspection;
-        previewed = undefined;
+        previewed = undefined; parityPlans.clear();
         if (inspection === undefined) return yield* Effect.fail(noInspection(status));
         const result: InspectResult & { status: WireStatus } = {
           profile: {
@@ -170,7 +198,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const selected: ReconcileChange = { kind: 'reconcile', only: change ? [...new Set(change.only)] : [...keys].filter(key => !unique.includes(key)) };
         const next: Previewed = {
           planId: randomUUID(), exclude: unique, plan: planFor(inspection, unique, change ? selected.only : undefined),
-          generation: yield* (handle.generation ?? Effect.succeed(0)), change: selected, exactSelection: change !== undefined, instructionEvidence: instructionEvidence(inspection.report, selected.only),
+          generation: yield* (handle.generation ?? Effect.succeed(0)), baselineDigest: digest(inspection.desired), change: selected, exactSelection: change !== undefined, instructionEvidence: instructionEvidence(inspection.report, selected.only),
         };
         previewed = next;
         return next;
@@ -208,9 +236,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           }
         };
         if (active) return yield* Effect.fail(busy);
+        const prepared = yield* retainedParity(planId);
         const addition = yield* skillOperations.acceptedPlan(planId);
-        if (addition && !lifecycle) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Skill additions require the durable applyChange operation'));
-        const wanted = addition ? { planId, generation: addition.generation } : previewed;
+        if ((prepared || addition) && !lifecycle) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'This operation requires durable applyChange'));
+        const wanted = prepared ? { planId, generation: Number(prepared.acceptance.generation) } : addition ? { planId, generation: addition.generation } : previewed;
         if (wanted === undefined || wanted.planId !== planId) {
           return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'That preview is no longer current; preview again'));
         }
@@ -241,6 +270,38 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             previewed = undefined;
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
           }
+          if (prepared) {
+            yield* handle.withJobMutation(Effect.gen(function* () {
+              if (prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0))))
+                return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+              yield* prepared.revalidate;
+            }), false);
+            const run = Effect.gen(function* () {
+              const observer = yield* parityObserver(lifecycle!, prepared.acceptance);
+              const observed: RunLifecycle = { ...lifecycle!, parity: update => observer.checkpoint(update) };
+              const signal = AbortSignal.any([shutdown, abort.signal]);
+              const exit = yield* Effect.exit(handle.withJobMutation(Effect.gen(function* () {
+                if (signal.aborted) return;
+                yield* observer.checkpoint({ state: 'needsInspection' });
+                yield* prepared.execute(observed, signal);
+              })));
+              const evidence = observer.evidence();
+              const incomplete = evidence.remainingKeys.length > 0;
+              const checkpoint = yield* Effect.exit(observer.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : signal.aborted ? 'partial' : incomplete ? 'needsInspection' : 'committed' }));
+              yield* release;
+              const terminal = Exit.isFailure(exit) || Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
+                : signal.aborted ? { type: 'cancelled' as const, remaining: [...evidence.remainingKeys] }
+                : incomplete ? { type: 'failed' as const, message: 'Operation completion was not observed; inspect before retrying' }
+                : { type: 'done' as const, ok: evidence.committedKeys.length, failed: 0 };
+              yield* lifecycle!.finished(terminal).pipe(Effect.catch(() => Effect.void));
+              yield* clear;
+              emit(self.runId, terminal);
+              if (prepared.afterRelease && !shutdown.aborted) yield* Effect.forkIn(handle.request(prepared.afterRelease), runs);
+            }).pipe(Effect.provideContext(context));
+            yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(prepared.preview.change, prepared.acceptance.plannedKeys, undefined, prepared.acceptance),
+              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; parityPlans.clear(); }))));
+            return { status: 'started' as const, runId: self.runId };
+          }
           const job = yield* handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(
             Effect.provideContext(context),
             Effect.mapError((error) => new SessionError('INSPECT_FAILED', describe(error))),
@@ -267,7 +328,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             const selected = additionRunPlan(addition.plan, addition.candidate.installedName);
             const run = execute(inspection, selected, self.runId, actor, AbortSignal.any([shutdown, abort.signal]), progress => emit(self.runId, progress), release, clear, lifecycle, addition, invocation);
             yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(addition.preview.change, selected.steps.map(step => step.key), acceptedSkillTuple(addition)),
-              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; }))));
+              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; parityPlans.clear(); }))));
             return { status: 'started' as const, runId: self.runId };
           }
           const reconcile = wanted as Previewed;
@@ -279,18 +340,19 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           }
           const fresh = planFor(inspection, reconcile.exclude, reconcile.exactSelection ? reconcile.change.only : undefined);
           const evidence = instructionEvidence(inspection.report, reconcile.change.only);
-          if (!samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
-            const next: Previewed = { ...reconcile, planId: randomUUID(), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
+          if (reconcile.baselineDigest !== digest(inspection.desired) || !samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
+            const next: Previewed = { ...reconcile, planId: randomUUID(), baselineDigest: digest(inspection.desired), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
             previewed = next;
             const stale = { status: 'stale' as const, planId: next.planId, plan: wirePlan(fresh), preview: operationPreview(next) };
             return stale;
           }
+          const acceptance: ParityAcceptance = { kind: 'reconcile', generation: String(reconcile.generation), baselineDigest: reconcile.baselineDigest, planDigest: digest(wirePlan(fresh)), plannedKeys: fresh.steps.map(step => step.key) };
           const runId = self.runId;
-          const run = execute(inspection, fresh, runId, actor, AbortSignal.any([shutdown, abort.signal]), (progress) => emit(runId, progress), release, clear, lifecycle);
+          const run = execute(inspection, fresh, runId, actor, AbortSignal.any([shutdown, abort.signal]), (progress) => emit(runId, progress), release, clear, lifecycle, undefined, undefined, acceptance);
           // Forked and handed off as one step, so an interruption either starts the run or settles.
           yield* Effect.uninterruptible(Effect.suspend(() =>
-            Effect.andThen(lifecycle?.accepted(reconcile.change, fresh.steps.map(step => step.key)) ?? Effect.void, Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(
-              Effect.andThen(Effect.sync(() => { handedOff = true; previewed = undefined; })),
+            Effect.andThen(lifecycle?.accepted(reconcile.change, fresh.steps.map(step => step.key), undefined, acceptance) ?? Effect.void, Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(
+              Effect.andThen(Effect.sync(() => { handedOff = true; previewed = undefined; parityPlans.clear(); })),
             )));
           const started: ApplyResult = { status: 'started', runId };
           return started;
@@ -307,11 +369,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     // saw the run, so a failed step does not pause auto-apply.
     const execute = (
       inspection: JobInspection, planned: Plan, runId: string, actor: RunActor, signal: AbortSignal,
-      emit: (progress: RunProgress) => void, release: Effect.Effect<void>, clear: Effect.Effect<void>, lifecycle?: RunLifecycle, addition?: AcceptedSkillPlan, invocation?: AdditionInvocation,
+      emit: (progress: RunProgress) => void, release: Effect.Effect<void>, clear: Effect.Effect<void>, lifecycle?: RunLifecycle, addition?: AcceptedSkillPlan, invocation?: AdditionInvocation, acceptance?: ParityAcceptance,
     ) =>
       Effect.gen(function* () {
         const now = yield* (yield* AgentClock).now;
         let terminal: RunProgress | undefined;
+        const parity = lifecycle && acceptance ? yield* parityObserver(lifecycle, acceptance) : undefined;
         const onProgress = (progress: Progress) => Effect.sync(() => {
           const wire = wireProgress(progress);
           if (wire.type === 'done' || wire.type === 'cancelled') terminal = wire;
@@ -320,11 +383,29 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const driver = addition && lifecycle ? yield* makeAdditionDriver(addition, lifecycle,
           handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.flatMap(job => job.inspection ? Effect.succeed(job.inspection) : Effect.fail(noInspection(job.status))), Effect.provideContext(context)), options.skillVerification, invocation) : undefined;
         const exit = yield* Effect.exit(
-          recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle?.progress,
-            ...(lifecycle ? { operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId } as const } : {}) }).pipe(
+          Effect.gen(function* () {
+            const backups = yield* Backups;
+            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
+              if (parity) {
+                const folder = yield* backups.dir;
+                const backupIds = folder ? [basename(folder)] : parity.evidence().backupIds;
+                const evidence = parity.evidence();
+                yield* parity.checkpoint({ backupIds, state: progress.type === 'started' ? 'needsInspection' : 'partial',
+                  ...(progress.type === 'finished' && progress.outcome === 'ok' ? {
+                    committedKeys: [...new Set([...evidence.committedKeys, progress.key])], remainingKeys: evidence.remainingKeys.filter(key => key !== progress.key),
+                  } : {}) });
+              }
+              yield* lifecycle.progress(progress);
+            }) : undefined,
+            ...(lifecycle ? { operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId } as const } : {}) });
+          }).pipe(
             Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))),
           ),
         );
+        if (parity) {
+          const checkpoint = yield* Effect.exit(parity.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : terminal?.type === 'done' && terminal.failed === 0 ? 'committed' : 'partial' }));
+          if (Exit.isFailure(checkpoint)) terminal = { type: 'failed', message: 'Operation progress could not be saved; inspect before retrying' };
+        }
         if (Exit.isFailure(exit)) terminal = { type: 'failed', message: addition ? 'Skill addition was interrupted; inspect saved intent and partial installation before retrying' : describe(Cause.squash(exit.cause)) };
         if (driver && (Exit.isFailure(exit) || terminal?.type === 'cancelled' || (terminal?.type === 'done' && terminal.failed > 0))) {
           yield* driver.finish(Exit.isFailure(exit) ? 'needsInspection' : terminal?.type === 'cancelled' ? 'cancelled' : 'failed').pipe(Effect.catch(() => Effect.void));
@@ -368,7 +449,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }),
     });
     const session: AgentSession = {
-      runs: agentRuns, skillOperations, resolveSkillCandidate,
+      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange,
       onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,

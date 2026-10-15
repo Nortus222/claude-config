@@ -74,9 +74,9 @@ test('preview, run and follow-up outputs decode strictly', () => {
   for (const bad of [{ ...run, runId: 'x'.repeat(101) }, { ...run, intent: { ...run.intent, command: 'install' } }, { ...run, result: { status: 'done', ok: -1, failed: 0 } }, { ...run, steps: [{ key: 'x', outcome: 'ok', note: '', token: 'secret' }] }]) assert.throws(() => decodeRunView(bad));
 });
 
-test('legacy IPC result schemas are shared with the operation definitions', () => {
+test('legacy IPC machine result schemas remain compatible with shared operation plans', () => {
   assert.equal(operationDefinitions.inspect.output, InspectResultSchema);
-  assert.equal(ReconcilePreviewSchema.fields.plan, PreviewResultSchema.fields.plan);
+  assert.deepEqual(Schema.decodeUnknownSync(ReconcilePreviewSchema.fields.plan)(preview.plan), preview.plan);
   assert.deepEqual(Schema.decodeUnknownSync(PreviewResultSchema, { onExcessProperty: 'error' })({ planId: 'p', plan: preview.plan }), { planId: 'p', plan: preview.plan });
 });
 
@@ -103,7 +103,7 @@ test('JSON schemas preserve strict object fields, scope unions and input bounds'
   assert.ok(history.properties.before.properties.at.pattern);
   assert.equal(history.properties.before.properties.seq.maximum, Number.MAX_SAFE_INTEGER);
   const run = operationJsonSchemas.getRun.output as any;
-  assert.equal((run.properties.intent.anyOf ?? run.properties.intent.oneOf)[0].properties.inputDigest.pattern, '^[0-9a-f]{64}$');
+  assert.equal((run.anyOf ?? run.oneOf)[0].properties.intent.properties.inputDigest.pattern, '^[0-9a-f]{64}$');
   for (const schemas of Object.values(operationJsonSchemas)) {
     const inspect = (node: any) => {
       if (!node || typeof node !== 'object') return;
@@ -225,4 +225,25 @@ test('skill operation wire contracts require explicit targets and paired additio
   assert.throws(() => decodeOperationOutput('previewChange', { ...preview, change: { kind: 'addSkill', candidateId: 'id', targets: ['claude'] } }));
   assert.throws(() => decodeOperationInput('resolveSkillCandidate', { name: '', source: 'owner/repo' }));
   assert.throws(() => decodeOperationInput('resolveSkillCandidate', { name: 'skill', directory: '/caller/path' }));
+});
+
+test('semantic operation plans remain separate from legacy physical plans', () => {
+  for (const [domain, action] of [['intent', 'save-intent'], ['sync', 'save-decision'], ['sources', 'edit-source'], ['agent', 'set-policy'], ['agent', 'resume'], ['account', 'sign-in'], ['account', 'sign-out'], ['account', 'sync-account'], ['account', 'patch-machine'], ['backups', 'prune-backups']]) {
+    const step = { key: 'k', domain, action, summary: 'Change one item', touches: ['item'], interruptible: false };
+    const value = { ...preview, plan: { kind: 'operation', steps: [step], skipped: [] } };
+    assert.deepEqual(decodeOperationOutput('previewChange', value), value);
+    assert.throws(() => decodePreviewResult({ planId: 'p', plan: value.plan }));
+    assert.throws(() => decodeOperationOutput('previewChange', { ...value, plan: { ...value.plan, steps: [{ ...step, action: 'run-command' }] } }));
+  }
+});
+
+test('parity evidence and acceptance are paired in both engine and JSON schemas', () => {
+  const acceptance = { kind: 'reconcile', generation: '1', baselineDigest: 'a'.repeat(64), planDigest: 'b'.repeat(64), plannedKeys: ['k'] };
+  const evidence = { kind: 'reconcile', state: 'pending', committedKeys: [], remainingKeys: ['k'], backupIds: [] };
+  const valid = { ...run, intent: { ...run.intent, parity: acceptance }, parity: evidence };
+  const schema = SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12(operationJsonSchemas.getRun.output), { patterns: 'apply' });
+  for (const [value, expected] of [[valid, true], [{ ...valid, intent: run.intent }, false], [{ ...valid, intent: { ...valid.intent, parity: { ...acceptance, kind: 'account' } } }, false], [{ ...valid, parity: { ...evidence, token: 'secret' } }, false], [{ ...valid, intent: { ...valid.intent, parity: { ...acceptance, planDigest: 'A'.repeat(64) } } }, false]] as const) {
+    assert.equal(Schema.decodeUnknownResult(Schema.toType(schema), { onExcessProperty: 'error' })(value)._tag === 'Success', expected);
+    assert.equal((() => { try { decodeRunView(value); return true; } catch { return false; } })(), expected);
+  }
 });

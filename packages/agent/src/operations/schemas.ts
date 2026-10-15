@@ -1,6 +1,6 @@
 import { Effect, Schema } from 'effect';
 import { POLICIES } from '../policy-values.ts';
-import { CountSchema, PlanSchema, InspectResultSchema, MAX_EXCLUDED, MAX_HISTORY, MAX_KEY_LENGTH } from './wire.ts';
+import { CountSchema, PlanSchema, StepSchema, ProgressSchema, InspectResultSchema, MAX_EXCLUDED, MAX_HISTORY, MAX_KEY_LENGTH } from './wire.ts';
 
 // Operation string limits count Unicode code points, as JSON Schema does.
 export const OperationIdSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(100));
@@ -76,8 +76,28 @@ export const ContextResultSchema = Schema.Struct({
   scopes: Schema.Struct({ machine: CapabilityStateSchema, user: CapabilityStateSchema, profile: CapabilityStateSchema }),
   capabilities: Schema.Struct(capabilityFields), diagnostics: Schema.Array(Text).check(Schema.isMaxLength(100)),
 });
+const semanticFields = { key: KeySchema, summary: Text, touches: list(KeySchema), interruptible: Schema.Boolean };
+export const OperationStepSchema = Schema.Union([
+  StepSchema,
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('intent'), action: Schema.Literal('save-intent') }),
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('sync'), action: Schema.Literal('save-decision') }),
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('sources'), action: Schema.Literal('edit-source') }),
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('agent'), action: Schema.Literals(['set-policy', 'resume']) }),
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('account'), action: Schema.Literals(['sign-in', 'sign-out', 'sync-account', 'patch-machine']) }),
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('backups'), action: Schema.Literal('prune-backups') }),
+]);
+export const OperationPlanSchema = Schema.Union([PlanSchema, Schema.Struct({ kind: Schema.Literal('operation'), steps: list(OperationStepSchema), skipped: list(Schema.Struct({ key: KeySchema, reason: Text })) })]);
+export const OperationProgressSchema = Schema.Union([
+  Schema.Struct({ type: Schema.Literal('started'), index: CountSchema, total: CountSchema, step: OperationStepSchema }),
+  ...ProgressSchema.members.slice(1),
+]);
+const DigestSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$(?![\s\S])/u));
+export const ParityAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), generation: IdSchema,
+  baselineDigest: DigestSchema, planDigest: DigestSchema, plannedKeys: list(KeySchema) });
+export const ParityRunEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']),
+  committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) });
 const previewFields = { planId: IdSchema, scope: OperationScopeSchema,
-  generation: IdSchema, plan: PlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)) };
+  generation: IdSchema, plan: OperationPlanSchema, nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)) };
 export const ReconcilePreviewSchema = Schema.Struct({ ...previewFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never) });
 export const AddSkillPreviewSchema = Schema.Struct({ ...previewFields, change: AddSkillChangeSchema, skillAddition: SkillAdditionPreviewSchema });
 export const ChangePreviewSchema = Schema.Union([ReconcilePreviewSchema, AddSkillPreviewSchema]);
@@ -111,17 +131,18 @@ export const SkillInstallationSchema = Schema.Struct({
   nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
 });
 const intentFields = { requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema };
-export const RunViewSchema = Schema.Struct({
+const runFields = {
   actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
-  intent: Schema.Union([
-    Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never) }),
-    Schema.Struct({ ...intentFields, change: AddSkillChangeSchema, skillAddition: AcceptedSkillSchema }),
-  ]),
   intentSaved: Schema.Boolean, intentState: Schema.optionalKey(Schema.Literals(['pending', 'saved', 'needsInspection'])),
   installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
-});
+};
+export const RunViewSchema = Schema.Union([
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: ReconcileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: ParityAcceptanceSchema }), parity: Schema.optionalKey(ParityRunEvidenceSchema) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AddSkillChangeSchema, skillAddition: AcceptedSkillSchema, parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
+]);
 export const ApplyChangeResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('started'), run: RunViewSchema }),
   Schema.Struct({ status: Schema.Literal('stale'), preview: ChangePreviewSchema }),

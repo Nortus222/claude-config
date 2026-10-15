@@ -20,3 +20,9 @@ export type OperationDefinition<Name extends string, Input extends Schema.Constr
 export type AddSkillChange = typeof AddSkillChangeSchema.Type;
 export type OperationChange = typeof ChangeSchema.Type;
 export type SkillCandidateResult = typeof SkillCandidateResultSchema.Type;
+
+export type OperationStep = typeof import('./schemas.ts').OperationStepSchema.Type;
+export type OperationPlan = typeof import('./schemas.ts').OperationPlanSchema.Type;
+export type OperationProgress = typeof import('./schemas.ts').OperationProgressSchema.Type;
+export type ParityAcceptance = typeof import('./schemas.ts').ParityAcceptanceSchema.Type;
+export type ParityRunEvidence = typeof import('./schemas.ts').ParityRunEvidenceSchema.Type;
