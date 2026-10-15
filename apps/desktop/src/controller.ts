@@ -38,7 +38,6 @@ export const canCancel = (state: ViewState) => state.connection === 'connected'
   && (state.run?.outcome === 'running' || state.status?.applying === true);
 
 const MAX_EARLY_EVENTS = 10_000;
-const MAX_OPERATION_READS = 32;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
@@ -91,10 +90,11 @@ export class MachineController {
   private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
-  private operationRead = 0;
-  private operationReads = new Map<string, { read: number; discover: boolean }>();
+  private latestRunRead = 0;
+  private discoveryPending = false;
+  private discoveryFlight: { dirty: boolean; observed: boolean; promise?: Promise<void> } | null = null;
   private challengeTimer?: ReturnType<typeof setTimeout>;
-  private runDiscovery: { readonly read: number; readonly terminalRunIds: Set<string>; overflow: boolean } | null = null;
+  private runDiscovery: { readonly terminalRunIds: Set<string>; overflow: boolean } | null = null;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
@@ -119,15 +119,36 @@ export class MachineController {
 
   private update(update: Partial<ViewState>) {
     if (this.disposed) return;
-    if ('run' in update && this.state.run && update.run?.runId !== this.state.run.runId) this.operationReads.delete(this.state.run.runId);
+    if ('run' in update && this.state.run && update.run?.runId !== this.state.run.runId) this.latestRunRead++;
     this.state = { ...this.state, ...update };
     if (this.state.connection !== 'connected') {
-      this.operationReads.clear();
+      this.discoveryFlight = null;
+      this.discoveryPending = false;
       if (this.state.run) this.state = { ...this.state, run: { ...this.state.run, challengeCurrent: false } };
     }
     if ('run' in update || 'connection' in update) this.scheduleChallengeExpiry();
     for (const listener of this.listeners) listener();
+    if (this.discoveryPending && this.state.run?.outcome !== 'running') void this.discoverRuns(true);
     if (update.pending === false) this.refreshReview();
+  }
+
+  // Unknown invalidations have no acceptance order. Coalesce them through the owner's latest-first list.
+  private async discoverRuns(observed = false) {
+    if (!this.bridge || this.state.connection !== 'connected' || this.state.hello?.operations?.available !== true) return;
+    if (this.state.run?.outcome === 'running') { this.discoveryPending = true; return; }
+    this.discoveryPending = false;
+    if (this.discoveryFlight) { this.discoveryFlight.dirty = true; this.discoveryFlight.observed ||= observed; return this.discoveryFlight.promise; }
+    const token = this.sessionToken();
+    const flight = { dirty: false, observed, promise: undefined as Promise<void> | undefined };
+    this.discoveryFlight = flight;
+    flight.promise = (async () => {
+      do {
+        flight.dirty = false;
+        await this.refreshRun(undefined, flight.observed);
+      } while (flight.dirty && this.ownsSession(token) && this.state.run?.outcome !== 'running');
+      if (flight.dirty && this.ownsSession(token)) this.discoveryPending = true;
+    })().finally(() => { if (this.discoveryFlight === flight) this.discoveryFlight = null; });
+    return flight.promise;
   }
 
   // A cached challenge is displayable only while its safe read and deadline remain current.
@@ -218,24 +239,20 @@ export class MachineController {
   private async refreshRun(runId?: string, completionObserved = false) {
     if (!this.bridge || this.state.hello?.operations?.available !== true) return;
     const token = this.sessionToken();
-    if (runId && !this.operationReads.has(runId) && this.operationReads.size >= MAX_OPERATION_READS) {
-      this.update({ connection: 'disconnected', detail: 'Run activity exceeded the read limit. Reconnect to read current runs.' });
-      return;
-    }
-    const read = ++this.operationRead;
-    // An overlapping settled invalidation must not replace the run already being discovered.
-    const discover = !runId || (this.operationReads.get(runId)?.discover
-      ?? ![...this.operationReads.keys()].some(id => id !== this.state.run?.runId));
+    const statusRevision = this.statusRevision;
+    const previousRunId = this.state.run?.runId;
+    const targetedAtStart = this.latestRunRead;
+    const targetedRead = runId ? ++this.latestRunRead : undefined;
     if (runId) {
-      this.operationReads.set(runId, { read, discover });
       if (this.state.run?.runId === runId) this.concealChallenge();
     }
-    const discovery = runId ? null : { read, terminalRunIds: new Set<string>(), overflow: false };
+    const discovery = runId ? null : { terminalRunIds: new Set<string>(), overflow: false };
     if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
         : await this.bridge.invoke('list_operation_runs', { limit: 1 });
-      if (!this.ownsSession(token, reply) || read !== (runId ? this.operationReads.get(runId)?.read : this.operationRead)) return;
+      if (!this.ownsSession(token, reply) || (runId ? targetedRead !== this.latestRunRead : this.runDiscovery !== discovery)) return;
+      if (!runId && this.discoveryFlight?.dirty) return;
       if (discovery?.overflow) {
         if (this.state.run) return;
         const detail = 'Run activity exceeded the discovery limit. Reconnect to read current runs.';
@@ -248,7 +265,8 @@ export class MachineController {
       if (!receipt || runId && receipt.runId !== runId) return;
       const current = this.state.run;
       if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
-      if (!discover && current?.runId !== receipt.runId && receipt.state !== 'accepted' && receipt.state !== 'running') return;
+      if (!runId && current?.runId === receipt.runId && targetedAtStart !== this.latestRunRead) return;
+      if (runId && current && current.runId !== receipt.runId && current.runId !== previousRunId) return;
       // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
       if (discovery?.terminalRunIds.has(receipt.runId)) {
         await this.refreshRun(receipt.runId, true);
@@ -266,11 +284,12 @@ export class MachineController {
         return completed ? { ...step, status: completed.outcome, note: completed.note } : step;
       });
       for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
-      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: true }, detail: summary });
+      const staleChallenge = receipt.parity?.kind === 'signIn' && receipt.parity.signIn?.state === 'awaiting-user' && statusRevision !== this.statusRevision;
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: !staleChallenge }, detail: summary });
+      if (staleChallenge && this.ownsSession(token) && this.state.run?.runId === receipt.runId) await this.refreshRun(receipt.runId);
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
     } finally {
-      if (runId && this.operationReads.get(runId)?.read === read) this.operationReads.delete(runId);
       if (this.runDiscovery === discovery) this.runDiscovery = null;
     }
   }
@@ -297,7 +316,7 @@ export class MachineController {
       if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
       const canInspect = await this.loadStatus(revision, true);
-      await this.refreshRun();
+      await this.discoverRuns();
       if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
@@ -307,12 +326,12 @@ export class MachineController {
   }
 
   private showStatus(status: WireStatus) {
+    this.statusRevision++;
     const challengeRun = this.concealChallenge();
     if (challengeRun) void this.refreshRun(challengeRun);
     const detail = status.error ? `${status.error}${status.detail ? `: ${status.detail}` : ''}`
       : status.applying ? 'The agent is applying changes'
       : status.paused ? `Automatic apply paused: ${status.paused.reason}` : undefined;
-    this.statusRevision++;
     this.update({ status, waitingForReport: false,
       ...(status.applying || status.error ? { initialReadPending: false }
         : this.state.waitingForReport && !this.state.inspection ? { initialReadPending: true } : {}),
@@ -494,7 +513,7 @@ export class MachineController {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
       const canInspect = await this.loadStatus(revision, true);
-      await this.refreshRun();
+      await this.discoverRuns();
       if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
@@ -550,7 +569,10 @@ export class MachineController {
       return;
     }
     if (event.event === 'operation-run') {
-      if (!this.starting && (this.state.run?.outcome !== 'running' || this.state.run.runId === event.runId)) void this.refreshRun(event.runId, true);
+      if (!this.starting) {
+        if (this.state.run?.runId === event.runId) void this.refreshRun(event.runId, true);
+        else void this.discoverRuns(true);
+      }
       return;
     }
     if (this.starting) {
@@ -558,7 +580,7 @@ export class MachineController {
       return;
     }
     let run = this.state.run;
-    if (!run && this.runDiscovery?.read === this.operationRead
+    if (!run && this.runDiscovery
       && (event.progress.type === 'done' || event.progress.type === 'failed' || event.progress.type === 'cancelled')) {
       const discovery = this.runDiscovery;
       if (!discovery.overflow && !discovery.terminalRunIds.has(event.runId)) {
