@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { AgentClock } from '../clock.ts';
 import { join } from 'node:path';
 import { Context, Effect, Exit, Layer } from 'effect';
+import { normalizeRepoUrl } from '@nortuscc/sync';
 import { settingsComplaints } from '@nortuscc/profile-engine';
 import { authorDigest, MachinePaths, canonical } from '@nortuscc/machine';
 import {
@@ -11,8 +12,11 @@ import {
   machineGit,
   pinImpactWithServices,
   sourcesFrom,
-  watchUpstreamWithServices,
+  sourceUrl,
+  watchSourcesWithServices,
+  watchCheckout,
   type SourceReport,
+  type LocalReport,
 } from '@nortuscc/source-watch';
 import { SessionError } from '../ipc/session.ts';
 import type { JobInspection } from '../job.ts';
@@ -77,10 +81,29 @@ const skillRows = (
   source: string,
   skills: readonly { name: string; status: 'changed' | 'unchanged' | 'removed' | 'missing' }[],
 ) => skills.map((skill) => ({ skillId: `skill:${source}/${skill.name}`, name: skill.name, status: skill.status }));
+const relativeOwnerPath = (path: string) =>
+  safeOwnerString(path) && !/^[\\/]|[\x00-\x1f\x7f]/.test(path) && !path.split(/[\\/]/).includes('..');
+const safeLocal = (local: LocalReport) =>
+  local.skills.length <= 256 && local.uncommitted.length <= 256 && local.unpushed.length <= 100 &&
+  (local.branch === undefined || safeOwnerString(local.branch)) && local.uncommitted.every(relativeOwnerPath) &&
+  local.skills.every(s => safeOwnerString(s.name) && relativeOwnerPath(s.path)) &&
+  local.unpushed.every(c => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(c.sha) && safeOwnerString(c.subject));
+const localRow = (sourceId: string, local: LocalReport) => ({
+  observation: digest(local),
+  status: local.status,
+  ...(local.branch === undefined ? {} : { branch: local.branch }),
+  unpushed: local.unpushed.map(({ sha, subject }) => ({ sha, subject })),
+  uncommitted: local.uncommitted,
+  skills: local.skills.map(s => ({ skillId: `skill:${sourceId}/${s.name}`, name: s.name, hasDiff: !!s.skillMd })),
+});
+const diffSelection = (a: OperationInput<'inspectSourceDiff'>) => 'localObservation' in a
+  ? { sourceId: a.sourceId, localObservation: a.localObservation, skillId: a.skillId }
+  : { sourceId: a.sourceId, fromRevision: a.fromRevision, toRevision: a.toRevision, skillId: a.skillId };
 // Validate owner metadata before constructing drafts or retaining cursor bindings.
 const safeReport = (report: SourceReport) => {
   const revisions = [report.baseline, report.latest].filter((r) => r !== undefined);
   return (
+    (report.local === undefined || safeLocal(report.local)) &&
     report.skills.length <= 256 &&
     report.added.length <= 100 &&
     revisions.every((r) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(r.sha) && r.tags.every(safeOwnerString)) &&
@@ -96,6 +119,7 @@ export const readSourceOperation = <N extends SourceOperation>(
   inspection: JobInspection | undefined,
   generation: number,
   cache: SourceReadCache,
+  configuredRepository?: string | null,
 ): Effect.Effect<OperationOutput<N>, SessionError, AgentServices> =>
   Effect.gen(function* () {
     const args = yield* Effect.try({ try: () => decodeOperationInput(name, input), catch: invalid });
@@ -109,7 +133,13 @@ export const readSourceOperation = <N extends SourceOperation>(
       );
     const configured = yield* MachinePaths;
     const environment = yield* AgentSourceEnvironment;
-    const declared = sourcesFrom(inspection.desired);
+    const localUrl = pathToFileURL(configured.repo).href;
+    // Reuse the selected setup owner's identity; no checkout is inferred from caller input.
+    const checkouts = Object.fromEntries(inspection.desired.skills
+      .filter(s => s.source === localUrl ||
+        (configuredRepository != null && normalizeRepoUrl(sourceUrl(s.source)) === configuredRepository))
+      .map(s => [s.source, configured.repo]));
+    const declared = sourcesFrom(inspection.desired, { checkouts });
     const known = (sourceId: string) => {
       const source = declared.find((s) => sourceIdentity(s.source) === sourceId);
       if (
@@ -151,10 +181,7 @@ export const readSourceOperation = <N extends SourceOperation>(
           return {
             ...base,
             ...recovery,
-            sourceId: a.sourceId,
-            fromRevision: a.fromRevision,
-            toRevision: a.toRevision,
-            skillId: a.skillId,
+            ...diffSelection(a),
             state,
             reason,
             text: '',
@@ -176,6 +203,20 @@ export const readSourceOperation = <N extends SourceOperation>(
           return { ...base, ...recovery, state, reason, text: '' };
       }
     };
+    const diffResult = (a: OperationInput<'inspectSourceDiff'>, content: string) => Effect.gen(function* () {
+      if (settingsComplaints({ value: content }).length) return unavailable('unsafe-owner-data');
+      const binding = digest({ generation, desired: inspection.desired, ...diffSelection(a), content });
+      const chars = Array.from(content);
+      const offset = yield* Effect.try({ try: () => cursor(a.cursor, binding, chars.length), catch: stale });
+      let end = offset, bytes = 0;
+      const max = Math.min(32768, a.limit * 1024);
+      while (end < chars.length && bytes + Buffer.byteLength(chars[end]!) <= max)
+        bytes += Buffer.byteLength(chars[end++]!);
+      return {
+        ...base, ...diffSelection(a), state: end < chars.length ? 'limited' : 'complete',
+        text: chars.slice(offset, end).join(''), nextCursor: end < chars.length ? next(binding, end) : null,
+      };
+    });
     const body = Effect.gen(function* () {
       if (name === 'watchSources') {
         const a = args as OperationInput<'watchSources'>;
@@ -199,11 +240,7 @@ export const readSourceOperation = <N extends SourceOperation>(
         )
           return yield* Effect.fail(stale());
         const offset = receipt?.offset ?? 0;
-        const reports = yield* Effect.forEach(
-          sources.slice(offset, offset + a.limit),
-          (source) => watchUpstreamWithServices(source, { cacheDir }),
-          { concurrency: 2 },
-        );
+        const reports = yield* watchSourcesWithServices(sources.slice(offset, offset + a.limit), { cacheDir });
         if (reports.some((r) => !safeReport(r))) return unavailable('unsafe-owner-data');
         const items = reports.map((r, index) => ({
           sourceId: sourceIdentity(sources[offset + index]!.source),
@@ -212,6 +249,7 @@ export const readSourceOperation = <N extends SourceOperation>(
           toRevision: r.latest?.sha ?? null,
           skills: skillRows(sourceIdentity(sources[offset + index]!.source), r.skills),
           added: r.added,
+          ...(r.local ? { local: localRow(sourceIdentity(r.source), r.local) } : {}),
         }));
         try {
           decodeOperationOutput('watchSources', { ...base, state: 'complete', items, nextCursor: null });
@@ -221,8 +259,8 @@ export const readSourceOperation = <N extends SourceOperation>(
         if (Buffer.byteLength(JSON.stringify(items)) > 32768) return unavailable('result-bytes');
         const observed = new Map(receipt?.observed);
         for (const [index, report] of reports.entries()) {
-          if (!report.latest) continue;
-          const sha = digest({ baseline: report.baseline?.sha, latest: report.latest.sha });
+          if (!report.latest && !report.local) continue;
+          const sha = digest({ baseline: report.baseline?.sha, latest: report.latest?.sha, local: report.local });
           if (
             cache.observations.has(sourceIdentity(sources[offset + index]!.source)) &&
             cache.observations.get(sourceIdentity(sources[offset + index]!.source)) !== sha
@@ -236,7 +274,7 @@ export const readSourceOperation = <N extends SourceOperation>(
           cache.cursors.clear();
           return unavailable('source-retention');
         }
-        const incomplete = reports.some((r) => r.status === 'unreachable' || r.status === 'baseline-missing');
+        const incomplete = reports.some((r) => r.status === 'unreachable' || r.status === 'baseline-missing' || r.local?.status === 'not-a-repo');
         let nextCursor: string | null = null;
         if (offset + reports.length < sources.length) {
           while (cache.cursors.size >= 32) cache.cursors.delete(cache.cursors.keys().next().value!);
@@ -267,10 +305,28 @@ export const readSourceOperation = <N extends SourceOperation>(
           skills: skillRows(a.sourceId, result.skills),
         };
       }
+      if (name === 'inspectSourceDiff' && 'localObservation' in args) {
+        const a = args as Extract<OperationInput<'inspectSourceDiff'>, { localObservation: string }>;
+        const source = yield* Effect.try({
+          try: () => known(a.sourceId),
+          catch: error => error instanceof SessionError ? error : invalid(),
+        });
+        if (!source.checkout)
+          return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'This source has no already trusted configured checkout'));
+        const local = yield* watchCheckout(source.checkout);
+        if (!safeLocal(local)) return unavailable('unsafe-owner-data');
+        if (digest(local) !== a.localObservation) {
+          cache.cursors.clear();
+          return yield* Effect.fail(stale());
+        }
+        const skill = local.skills.find(s => `skill:${a.sourceId}/${s.name}` === a.skillId);
+        if (!skill) return yield* Effect.fail(invalid());
+        return yield* diffResult(a, skill.skillMd ?? '');
+      }
       const choices =
         name === 'draftChangelog'
           ? (args as OperationInput<'draftChangelog'>).accepted
-          : [args as OperationInput<'inspectSourceDiff'>];
+          : [args as Extract<OperationInput<'inspectSourceDiff'>, { fromRevision: string }>];
       const selected = yield* Effect.try({
         try: () => {
           if (new Set(choices.map((c) => c.sourceId)).size !== choices.length) throw invalid();
@@ -278,10 +334,8 @@ export const readSourceOperation = <N extends SourceOperation>(
         },
         catch: (error) => (error instanceof SessionError ? error : invalid()),
       });
-      const reports = yield* Effect.forEach(
-        selected,
-        (source, i) => watchUpstreamWithServices(source, { cacheDir, toRevision: choices[i]!.toRevision }),
-        { concurrency: 2 },
+      const reports = yield* watchSourcesWithServices(
+        selected, { cacheDir }, new Map(choices.map((c, i) => [selected[i]!.source, c.toRevision])),
       );
       if (reports.some((r) => !safeReport(r))) return unavailable('unsafe-owner-data');
       if (
@@ -295,37 +349,10 @@ export const readSourceOperation = <N extends SourceOperation>(
       )
         return unavailable('read-unavailable');
       if (name === 'inspectSourceDiff') {
-        const a = args as OperationInput<'inspectSourceDiff'>;
+        const a = args as Extract<OperationInput<'inspectSourceDiff'>, { fromRevision: string }>;
         const skill = reports[0]!.skills.find((s) => `skill:${a.sourceId}/${s.name}` === a.skillId);
         if (!skill) return yield* Effect.fail(invalid());
-        const content = skill.skillMd ?? '';
-        if (settingsComplaints({ value: content }).length) return unavailable('unsafe-owner-data');
-        const binding = digest({
-          generation,
-          desired: inspection.desired,
-          sourceId: a.sourceId,
-          from: a.fromRevision,
-          to: a.toRevision,
-          skillId: a.skillId,
-          content,
-        });
-        const chars = Array.from(content);
-        const offset = yield* Effect.try({ try: () => cursor(a.cursor, binding, chars.length), catch: stale });
-        let end = offset;
-        let bytes = 0;
-        const max = Math.min(32768, a.limit * 1024);
-        while (end < chars.length && bytes + Buffer.byteLength(chars[end]!) <= max)
-          bytes += Buffer.byteLength(chars[end++]!);
-        return {
-          ...base,
-          sourceId: a.sourceId,
-          fromRevision: a.fromRevision,
-          toRevision: a.toRevision,
-          skillId: a.skillId,
-          state: end < chars.length ? 'limited' : 'complete',
-          text: chars.slice(offset, end).join(''),
-          nextCursor: end < chars.length ? next(binding, end) : null,
-        };
+        return yield* diffResult(a, skill.skillMd ?? '');
       }
       const accepted = (args as OperationInput<'draftChangelog'>).accepted;
       for (const [i, choice] of accepted.entries()) {

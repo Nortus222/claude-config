@@ -39,7 +39,7 @@ export const engineCapabilityCoverage = {
   heldConfiguration: available('sync/compose.ts and setup-source.ts', ['inspectSetups','incomingChanges'], 'Known trusted setup and verified incoming item inspection; no repository document projection.'),
   setupTrust: available('agent/setups.ts and operations/sync.ts', ['prepareTrustRequest'], 'Returns only the existing app-local trust action and bounded repository identity; no consent write.'),
   setupFollowTrust: remaining('sync/setups.ts and source.ts', 'Independent follow and primary selection', 'No independent follow or select-primary owner exists; known trusted setup access is available separately.', 'prerequisite'),
-  sourceWatch: available('source-watch/upstream.ts', ['watchSources','inspectSourceDiff'], 'Bounded declared-source observations and exact revision skill diffs; no intent writes.'),
+  sourceWatch: available('source-watch/watch.ts', ['watchSources','inspectSourceDiff'], 'Bounded declared-source and trusted configured checkout observations; exact revision or local-observation skill diffs; no intent writes.'),
   sourcePinImpact: available('source-watch/impact.ts', ['pinImpact'], 'Source-wide impact retains resolved revisions and every declared skill.'),
   sourcePinUnpin: remaining('source-watch/pins.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
   sourceIgnoreUnignore: remaining('source-watch/ignores.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),

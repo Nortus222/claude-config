@@ -32,6 +32,7 @@ test('machine Git injects explicit environment, bounded capture and safe failure
   assert.deepEqual(command?.envAllow, []);
   assert.equal(command?.env?.GIT_DIR, undefined);
   assert.equal(command?.env?.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(command?.env?.GIT_OPTIONAL_LOCKS, '0');
   assert.equal(command?.env?.GIT_CONFIG_VALUE_0, 'test');
   assert.deepEqual(command?.captureLimit, { stdout: 1032192, stderr: 16384 });
 });
@@ -149,8 +150,9 @@ test('cache ownership precedes readers; failure to establish it starts no reader
         guardedCacheRead(dir, body).pipe(
           Effect.provideService(Fs, {
             ...fs,
-            writeTextAtomic: () =>
-              Effect.fail(new FsFailed({ op: 'write', path: marker, reason: 'fixture unavailable' })),
+            createDirectory: (path, options) => path === marker
+              ? Effect.fail(new FsFailed({ op: 'mkdir', path: marker, reason: 'fixture unavailable' }))
+              : fs.createDirectory(path, options),
           }),
         ),
       );
@@ -212,7 +214,7 @@ test('cache claims are exclusive even when concurrent existence checks both repo
         let readers = 0;
         const shared = {
           ...fs,
-          exists: (path: string) => (path.endsWith('.cleanup-uncertain') ? Effect.succeed(false) : fs.exists(path)),
+          stat: (path: string) => (path.endsWith('.cleanup-uncertain') ? Effect.succeed(undefined) : fs.stat(path)),
         };
         const first = yield* Effect.forkChild(
           guardedCacheRead(
@@ -239,4 +241,38 @@ test('cache claims are exclusive even when concurrent existence checks both repo
       }),
     ).pipe(Effect.provide(nodeFs)),
   );
+});
+
+import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+test('cache containment refuses redirected sentinel, root, cache and marker without touching outside bytes', async t => {
+  const root=tempDir(t), outside=join(root,'outside'); mkdirSync(outside);
+  const document=join(outside,'author.txt'); writeFileSync(document,'preserve me\n');
+  for(const target of ['sentinel','root','cache','marker']) {
+    const parent=join(root,target),dir=join(parent,'known');
+    if(target==='root') symlinkSync(outside,parent); else mkdirSync(parent);
+    if(target==='sentinel') symlinkSync(document,join(parent,'.source-cache'));
+    if(target==='cache') symlinkSync(outside,dir);
+    if(target==='marker') symlinkSync(outside,`${dir}.cleanup-uncertain`);
+    let started=0;
+    const result=await Effect.runPromise(Effect.exit(guardedCacheRead(dir,Effect.sync(()=>{started++;}))).pipe(Effect.provide(nodeFs)));
+    assert.ok(Exit.isFailure(result),target); assert.equal(started,0,target);
+    assert.equal(readFileSync(document,'utf8'),'preserve me\n');
+    assert.equal(existsSync(join(outside,'known.cleanup-uncertain')),false);
+  }
+});
+
+test('a failed joined marker removal retains the exclusive claim for the next reader', async t => {
+  const root = tempDir(t), directory = join(root, 'cache', 'known');
+  let readers = 0;
+  await Effect.runPromise(Effect.gen(function* () {
+    const fs = yield* Fs;
+    const read = guardedCacheRead(directory, Effect.sync(() => { readers++; }));
+    const failed = yield* Effect.exit(read.pipe(Effect.provideService(Fs, {
+      ...fs, remove: path => Effect.fail(new FsFailed({ op: 'remove', path, reason: 'fixture' })),
+    })));
+    assert.ok(Exit.isFailure(failed));
+    assert.equal(yield* fs.exists(`${directory}.cleanup-uncertain`), true);
+    assert.ok(Exit.isFailure(yield* Effect.exit(read)));
+    assert.equal(readers, 1);
+  }).pipe(Effect.provide(nodeFs)));
 });

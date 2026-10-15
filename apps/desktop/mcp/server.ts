@@ -14,8 +14,8 @@ export const toolNames = {
   cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
 } as const;
 const descriptions: Record<OperationName, string> = {
-  watchSources: 'Read up to eight declared source observations with SHA-bound cursors. Limited or unavailable results never authorize a mutation. Continue with nextCursor for additional known sources.',
-  inspectSourceDiff: 'Read a bounded skill diff between exact observed source revisions with continuation. Source and skill IDs must be declared; no caller paths.',
+  watchSources: 'Read up to eight declared sources and known trusted local checkout facts with observation-bound cursors. Limited or unavailable results never authorize a mutation. Continue with nextCursor for additional known sources.',
+  inspectSourceDiff: 'Read a bounded skill diff between exact source revisions, or select localObservation from watchSources for known trusted checkout edits. Continuations revalidate local facts. Use the returned source and skill IDs; no caller paths.',
   pinImpact: 'Read source-wide pin impact for every declared skill and the resolved target revision. This read changes no pin.',
   draftChangelog: 'Draft a bounded changelog for up to eight accepted source revision pairs with report-validated ignored and added selections. No publication or intent writes.',
 

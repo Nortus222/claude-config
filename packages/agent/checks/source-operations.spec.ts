@@ -1,10 +1,15 @@
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeOperationInput, operationDefinitions } from '../src/operations/index.ts';
+import { decodeOperationInput, decodeOperationOutput, operationDefinitions } from '../src/operations/index.ts';
 test('four source reads have strict bounded inputs with no caller paths', () => {
   for (const name of ['watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog'])
     assert.ok(name in operationDefinitions, name);
+  const local={sourceId:'a/b',localObservation:'a'.repeat(64),skillId:'skill:a/b/one'};
+  assert.equal(decodeOperationInput('inspectSourceDiff',local).skillId,local.skillId);
+  for(const extra of [{fromRevision:'b'.repeat(40),toRevision:'c'.repeat(40)},{path:'/private'}, {localObservation:'HEAD'}])
+    assert.throws(()=>decodeOperationInput('inspectSourceDiff',{...local,...extra}));
+  assert.throws(()=>decodeOperationOutput('inspectSourceDiff',{generation:'1',...local,state:'complete',text:'',nextCursor:null,path:'/private'}));
   assert.equal(decodeOperationInput('watchSources', {}).limit, 8);
   assert.throws(() => decodeOperationInput('watchSources', { limit: 9 }));
   assert.throws(() => decodeOperationInput('watchSources', { sourceIds: Array(9).fill('a/b') }));
@@ -19,7 +24,7 @@ test('four source reads have strict bounded inputs with no caller paths', () => 
 
 import { Effect, Layer } from 'effect';
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync, readdirSync } from 'node:fs';
 import { Processes, DecisionsStore } from '@nortuscc/machine';
 import { makeRepo, tempDir, gitSync, commitFiles } from '../../source-watch/checks/fixtures.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -44,7 +49,7 @@ test('actual session reads source-wide changes, exact diffs, selected draft and 
   await m.run(DecisionsStore.use((store) => store.record(accept(EFFORT))));
   const fixture = setupFixture(join(m.root, 'setup'), {
     headFiles: {
-      'skills-manifest.txt': '[owner/repo]\none\ntwo\n[other/repo]\nthree\n',
+      'skills-manifest.txt': '[owner/repo]\none\ntwo\n[other/repo]\nthree\n[https://github.com/owner/repo.git]\ntwo\n',
       'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': from } }),
     },
   });
@@ -82,6 +87,11 @@ test('actual session reads source-wide changes, exact diffs, selected draft and 
           m.read(join(m.paths.repo, p)),
         ]);
         const overrides = m.read(join(m.paths.stateRoot, 'overrides.json'));
+        const aliases = yield* session.watchSources(decodeOperationInput('watchSources', {sourceIds:['owner/repo',sourceIdentity('https://github.com/owner/repo.git')]}));
+        assert.equal(aliases.state,'complete'); assert.equal(aliases.items.length,2);
+        assert.equal(aliases.items[0]?.fromRevision,from);assert.equal(aliases.items[1]?.fromRevision,null);
+        assert.deepEqual(aliases.items[1]?.skills.map(s=>s.name),['two']);
+        assert.ok(!readdirSync(join(m.paths.stateRoot,'source-watch')).some(n=>n.endsWith('.cleanup-uncertain')));
         const first = yield* session.watchSources(decodeOperationInput('watchSources', { limit: 1 }));
         assert.equal(first.state, 'complete');
         assert.ok(first.nextCursor);
@@ -134,6 +144,7 @@ test('actual session reads source-wide changes, exact diffs, selected draft and 
           decodeOperationInput('draftChangelog', {
             accepted: [
               { sourceId: 'owner/repo', fromRevision: from, toRevision: to, ignored: ['one'], added: ['added'] },
+              { sourceId: sourceIdentity('https://github.com/owner/repo.git'), fromRevision:from,toRevision:to },
             ],
           }),
         );
@@ -245,7 +256,7 @@ test('source cleanup uncertainty is safe, persistent, and prevents cache reuse',
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   await m.trust();
   await m.run(DecisionsStore.use((store) => store.record(accept(EFFORT))));
-  const fixture = setupFixture(join(m.root, 'setup'), { headFiles: { 'skills-manifest.txt': '[owner/repo]\none\n' } });
+  const fixture = setupFixture(join(m.root, 'setup'), { headFiles: { 'skills-manifest.txt': '[owner/repo]\none\n[https://github.com/owner/repo.git]\none\n' } });
   await m.run(
     Effect.scoped(
       Effect.gen(function* () {
@@ -270,6 +281,11 @@ test('source cleanup uncertainty is safe, persistent, and prevents cache reuse',
         const retried = yield* s.watchSources(decodeOperationInput('watchSources', {}));
         assert.equal(retried.reason, 'cleanup-failed');
         assert.equal(reads, calls);
+        const draft = yield* s.draftChangelog(decodeOperationInput('draftChangelog', { accepted: [
+          { sourceId: 'owner/repo', fromRevision: 'a'.repeat(40), toRevision: 'b'.repeat(40) },
+          { sourceId: sourceIdentity('https://github.com/owner/repo.git'), fromRevision: 'a'.repeat(40), toRevision: 'b'.repeat(40) },
+        ] }));
+        assert.equal(draft.reason, 'cleanup-failed'); assert.equal(reads, calls);
       }),
     ),
     fixture.source,
@@ -433,15 +449,23 @@ test('trusted configured file checkout uses an opaque ID and read-only draft wit
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   await m.trust();
   await m.run(DecisionsStore.use((store) => store.record(accept(EFFORT))));
-  const from = commitFiles(m.paths.repo, 'baseline', { 'skills/one/SKILL.md': 'old' }),
+  const from = commitFiles(m.paths.repo, 'baseline', { 'skills/one/SKILL.md': 'old', 'skills-manifest.txt': '# author manifest\n', 'skill-pins.json': '{"version":1,"pins":{}}\n', 'source-ignores.json': '{}\n' }),
     to = commitFiles(m.paths.repo, 'changed', { 'skills/one/SKILL.md': 'new' });
+  const branch=gitSync(m.paths.repo,'symbolic-ref','--short','HEAD');
+  gitSync(m.paths.repo,'update-ref',`refs/remotes/origin/${branch}`,from);
+  gitSync(m.paths.repo,'branch',`--set-upstream-to=origin/${branch}`);
+  m.write(join(m.paths.repo,'skills/one/SKILL.md'),'dirty\n'+'Z'.repeat(40000));
+  m.write(join(m.paths.repo,'skills/untracked/SKILL.md'),'untracked skill\n');
+  const index=readFileSync(join(m.paths.repo,'.git/index'));
+  const documents=['skills-manifest.txt','skill-pins.json','source-ignores.json'].map(p=>[p,m.read(join(m.paths.repo,p))]);
   const source = pathToFileURL(m.paths.repo).href,
     id = sourceIdentity(source);
-  const fixture = setupFixture(join(m.root, 'setup'), { headFiles: { 'skills-manifest.txt': `[${source}]\none\n` } });
+  const fixture = setupFixture(join(m.root, 'setup'), { headFiles: { 'skills-manifest.txt': `[${source}]\none\n[example/setup]\none\n` } });
   await m.run(
     Effect.scoped(
       Effect.gen(function* () {
         const h = yield* startAgent(() => m.domains, { deferStart: true });
+        const processes=yield* Processes;
         const s = yield* makeSession(h, { domains: () => m.domains, signal: new AbortController().signal }).pipe(
           Effect.provide(
             sourceEnvironment({
@@ -451,11 +475,31 @@ test('trusted configured file checkout uses an opaque ID and read-only draft wit
               GIT_ALLOW_PROTOCOL: 'file',
             }),
           ),
+          Effect.provideService(Processes,{run:c=>c.cmd==='git' ? processes.run({...c,args:c.args.map(a=>a==='https://github.com/example/setup.git'?source:a)}) : Effect.die(new Error('Unfaked command'))}),
         );
         yield* s.inspect('mcp');
+        const page = yield* s.watchSources(decodeOperationInput('watchSources', { limit: 1 }));
+        assert.ok(page.nextCursor);
         const watched = yield* s.watchSources(decodeOperationInput('watchSources', {}));
         assert.equal(watched.items[0]?.sourceId, id);
         assert.equal(watched.items[0]?.toRevision, to);
+        assert.ok(watched.items.find(r=>r.sourceId==='example/setup')?.local);
+        const local=watched.items[0]?.local; assert.ok(local);
+        assert.equal(local.status,'edits');assert.equal(local.branch,branch);assert.deepEqual(local.unpushed.map(c=>c.sha),[to]);
+        assert.deepEqual(local.skills.map(s=>s.name),['one','untracked']);
+        assert.ok(local.uncommitted.includes('skills/untracked/SKILL.md'));
+        const selection={sourceId:id,localObservation:local.observation,skillId:`skill:${id}/one`};
+        const part=yield* s.inspectSourceDiff(decodeOperationInput('inspectSourceDiff',selection));
+        assert.equal(part.state,'limited');assert.ok(part.nextCursor);
+        const rest=yield* s.inspectSourceDiff(decodeOperationInput('inspectSourceDiff',{...selection,cursor:part.nextCursor!}));
+        assert.match(part.text+rest.text,/dirty/);assert.ok((part.text+rest.text).includes('Z'.repeat(40000)));
+        const untracked=yield* s.inspectSourceDiff(decodeOperationInput('inspectSourceDiff',{...selection,skillId:`skill:${id}/untracked`}));assert.match(untracked.text,/untracked skill/);
+        assert.deepEqual(readFileSync(join(m.paths.repo,'.git/index')),index);
+        assert.equal(m.read(join(m.paths.repo,'skills/one/SKILL.md')),'dirty\n'+'Z'.repeat(40000));
+        m.write(join(m.paths.repo,'skills/untracked/SKILL.md'),'changed observation');
+        yield* s.watchSources(decodeOperationInput('watchSources', {sourceIds:[id]}));
+        assert.equal((yield* Effect.flip(s.watchSources(decodeOperationInput('watchSources',{cursor:page.nextCursor!})))).code,'UNKNOWN_PLAN');
+        assert.equal((yield* Effect.flip(s.inspectSourceDiff(decodeOperationInput('inspectSourceDiff',{...selection,cursor:part.nextCursor!})))).code,'UNKNOWN_PLAN');
         assert.ok(!JSON.stringify(watched).includes(m.root));
         const draft = yield* s.draftChangelog(
           decodeOperationInput('draftChangelog', { accepted: [{ sourceId: id, fromRevision: from, toRevision: to }] }),
@@ -463,8 +507,10 @@ test('trusted configured file checkout uses an opaque ID and read-only draft wit
         assert.match(draft.text, /Updated `one`/);
         assert.ok(!draft.text.includes(m.root));
         assert.ok(draft.text.includes(id));
+        assert.deepEqual(readFileSync(join(m.paths.repo,'.git/index')),index);
+        for(const [p,bytes] of documents) assert.equal(m.read(join(m.paths.repo,p!)),bytes);
         assert.equal(gitSync(m.paths.repo, 'rev-parse', 'HEAD'), to);
-        assert.equal(gitSync(m.paths.repo, 'status', '--porcelain'), '');
+        assert.match(gitSync(m.paths.repo, 'status', '--porcelain'), /skills\/one\/SKILL.md/);
         yield* Effect.flip(s.watchSources(decodeOperationInput('watchSources', { sourceIds: [source] })));
       }),
     ),

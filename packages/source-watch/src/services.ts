@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Cause, Data, Effect, Exit, Fiber } from 'effect';
 
 // Cleanup uncertainty retains cache ownership and must survive mixed interruption causes.
@@ -44,14 +44,28 @@ export const guardedCacheRead = <A, E, R>(
     Effect.gen(function* () {
       const fs = yield* Fs;
       const marker = `${directory}.cleanup-uncertain`;
-      if (yield* joinedDeadline(fs.exists(marker), 2000).pipe(Effect.orDie))
-        return yield* Effect.die(new SourceCleanupFailed({ retainedDirectory: directory }));
-      // If establishing ownership fails, no subprocess starts. Ambiguous late Fs writes remain conservative.
-      yield* joinedDeadline(fs.writeTextAtomic(join(dirname(directory), '.source-cache'), 'Source cache\n'), 2000).pipe(
-        Effect.orDie,
-      );
+      const parent = dirname(directory);
+      const refuse = () => Effect.die(new SourceCleanupFailed({ retainedDirectory: directory }));
+      const establish = Effect.gen(function* () {
+        // Reject redirected roots, old sentinels, cache directories and even dangling claims.
+        for (const path of [parent, directory, marker, join(parent, '.source-cache')]) {
+          const entry = yield* fs.stat(path);
+          if (entry?.kind === 'symlink' || (path === marker && entry !== undefined)) return yield* refuse();
+          if ((path === parent || path === directory) && entry && entry.kind !== 'directory') return yield* refuse();
+        }
+        yield* fs.createDirectory(parent, { recursive: true });
+        const root = yield* fs.realPath(parent);
+        const ancestor = yield* fs.realPath(dirname(parent));
+        if (!root || !ancestor || root !== join(ancestor, basename(parent))) return yield* refuse();
+        const existing = yield* fs.realPath(directory);
+        if (existing !== undefined && existing !== join(root, basename(directory))) return yield* refuse();
+        return root;
+      });
+      // Parent creation never writes a sentinel or follows a cache-root symlink.
+      const root = yield* joinedDeadline(establish, 2000).pipe(Effect.orDie);
       // Exclusive creation prevents two readers from claiming a cache after an existence-check race.
       yield* joinedDeadline(fs.createDirectory(marker), 2000).pipe(Effect.orDie);
+      if ((yield* joinedDeadline(fs.realPath(marker), 2000).pipe(Effect.orDie)) !== join(root, basename(marker))) return yield* refuse();
       return yield* restore(body).pipe(
         Effect.onExit((exit) => {
           // A cleanup defect, including a mixed failure/interruption, keeps the marker. Unknown defects do too.

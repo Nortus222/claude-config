@@ -566,7 +566,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Source observation changed; inspect again'));
       });
       yield* unchanged;
-      const result=yield* readSourceOperation(name,input,inspection,generation,sourceCache).pipe(Effect.provideContext(context));
+      const result=yield* readSourceOperation(name,input,inspection,generation,sourceCache,setup?.repository).pipe(Effect.provideContext(context));
       yield* unchanged;
       return result;
     }));

@@ -19,8 +19,8 @@ export class Fs extends Context.Service<
     // A link is copied as a link unless `follow`, which copies what it points at.
     readonly copy: (from: string, to: string, options?: { readonly follow?: boolean }) => Effect.Effect<void, FsFailed>;
     readonly move: (from: string, to: string) => Effect.Effect<void, FsFailed>;
-    // Exclusively creates one directory; existing entries and missing parents fail.
-    readonly createDirectory: (path: string) => Effect.Effect<void, FsFailed>;
+    // Exclusively creates one directory by default. Recursive mode creates missing parents and accepts existing directories.
+    readonly createDirectory: (path: string, options?: { readonly recursive?: boolean }) => Effect.Effect<void, FsFailed>;
     readonly remove: (path: string) => Effect.Effect<void, FsFailed>;
     // Entry names, sorted; undefined when the directory is absent.
     readonly list: (dir: string) => Effect.Effect<string[] | undefined, FsFailed>;
@@ -116,7 +116,7 @@ export const nodeFs = Layer.succeed(Fs, {
       }
     }),
   exists: (path) => Effect.promise(() => lstat(path).then(() => true, () => false)),
-  createDirectory: (path) => attempt('mkdir', path, () => mkdir(path)),
+  createDirectory: (path, options) => attempt('mkdir', path, async () => { await mkdir(path, { recursive: options?.recursive ?? false }); }),
   copy: (from, to, options) => attempt('copy', from, copyTree(from, to, options?.follow)),
   // rename fails across volumes; copy then remove covers that.
   move: (from, to) =>

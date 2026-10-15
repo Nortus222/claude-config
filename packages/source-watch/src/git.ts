@@ -20,10 +20,10 @@ export class Git extends Context.Service<
 // Variables a parent git process (a hook, say) may export that would redirect our commands.
 const INHERITED = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM'];
 
-// The environment for every git command: no prompts, stable messages, literal pathspecs, and
-// log.showSignature off so signature text never lands in `git log --format` output.
+// Reads use no prompts, stable messages, literal pathspecs and no optional index refreshes.
+// Disable log signatures so they cannot enter formatted log output.
 function environment(input: Readonly<Record<string, string | undefined>>, allowProtocols: string | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...input, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_LITERAL_PATHSPECS: '1' };
+  const env: NodeJS.ProcessEnv = { ...input, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' };
   for (const name of INHERITED) delete env[name];
   // Config appended after any the parent passes via GIT_CONFIG_COUNT, so user config survives.
   const count = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0;

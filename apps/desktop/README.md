@@ -38,8 +38,8 @@ The app exposes eighteen machine operations:
 | `nortuscc_inspect_setups` | Known setup identities and trust status |
 | `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
 | `nortuscc_prepare_trust_request` | Existing app repository trust action; grants no consent |
-| `nortuscc_watch_sources` | Up to eight declared sources with bounded observations and SHA-bound continuation |
-| `nortuscc_inspect_source_diff` | Exact source revision and skill diff with bounded text continuation |
+| `nortuscc_watch_sources` | Up to eight declared sources, including trusted configured checkout edits, with bounded observation continuation |
+| `nortuscc_inspect_source_diff` | Exact revision diff or observed local skill diff selected by `localObservation`, with bounded text continuation |
 | `nortuscc_pin_impact` | Source-wide read-only pin impact with resolved revisions |
 | `nortuscc_draft_changelog` | Read-only draft with validated added and ignored selections |
 | `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |

@@ -1,11 +1,11 @@
-import { sourceEnvironment } from '../../../packages/agent/src/operations/sources.ts';
-import { makeRepo, tempDir } from '../../../packages/source-watch/checks/fixtures.ts';
+import { sourceEnvironment, sourceIdentity } from '../../../packages/agent/src/operations/sources.ts';
+import { makeRepo, tempDir, commitFiles, gitSync } from '../../../packages/source-watch/checks/fixtures.ts';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { before, after, test } from 'node:test';
 import { build } from 'esbuild';
@@ -113,15 +113,25 @@ test('MCP fixture refuses unfaked installers and non-fixture Git before the real
   }
   assert.equal(launches,0);
 });
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
+  if(inputs.localSource) {
+    const base=commitFiles(m.paths.repo,'local baseline',{'skills/one/SKILL.md':'old','skills-manifest.txt':'# author manifest\n','skill-pins.json':'{"version":1,"pins":{}}\n','source-ignores.json':'{}\n'});
+    const branch=gitSync(m.paths.repo,'symbolic-ref','--short','HEAD');
+    gitSync(m.paths.repo,'update-ref',`refs/remotes/origin/${branch}`,base);
+    gitSync(m.paths.repo,'branch',`--set-upstream-to=origin/${branch}`);
+    commitFiles(m.paths.repo,'unpushed local change',{'skills/one/notes.md':'local note'});
+    m.write(join(m.paths.repo,'skills/one/SKILL.md'),'dirty tracked\n'+'L'.repeat(40000));
+    m.write(join(m.paths.repo,'skills/new/SKILL.md'),'untracked new skill');
+  }
   const fixture = setupFixture(join(m.root, 'setup'), { headFiles: {
     ...(nativeOutput === undefined ? {} : { 'integrations.json': JSON.stringify({ version: 1, integrations: [
       { id: 'fixture-mcp', label: 'fixture MCP', target: 'codex', type: 'mcp', default: true, command: 'fixture-server' },
     ] }) }),
     ...(profileJson === undefined ? {} : { 'claude/settings.keys.json': profileJson }),
     ...(pinsJson === undefined ? {} : { 'skill-pins.json': pinsJson }),
+    ...(inputs.localSource ? {'skills-manifest.txt':`[${pathToFileURL(m.paths.repo).href}]\none\n`}:{}),
     ...(inputs.sourceReads ? {'skills-manifest.txt':'[owner/repo]\none\ntwo\n','skill-pins.json':JSON.stringify({version:1,pins:{'owner/repo':inputs.sourceReads.from}})}:{}),
   } });
   m.write(join(m.paths.claude, 'settings.json'), '{"theme":"dark"}\n');
@@ -174,6 +184,25 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceReads?: {u
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} trusted local edits use authenticated MCP`, {timeout:30000}, async t => {
+    const s=await agent('app',{localSource:true});t.after(s.close);
+    const id=sourceIdentity(pathToFileURL(s.m.paths.repo).href);
+    const index=readFileSync(join(s.m.paths.repo,'.git/index')),head=gitSync(s.m.paths.repo,'rev-parse','HEAD');
+    const before=['skills/one/SKILL.md','skills/new/SKILL.md','skills-manifest.txt','skill-pins.json','source-ignores.json'].map(p=>[p,s.m.read(join(s.m.paths.repo,p))]);
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    output('inspect',await client.call('inspect'));
+    const watch=output('watchSources',await client.call('watchSources'));
+    const local=watch.items[0]?.local;assert.ok(local);assert.equal(local.status,'edits');assert.ok(local.branch);assert.equal(local.unpushed[0]?.subject,'unpushed local change');assert.deepEqual(local.skills.map((s:any)=>s.name),['new','one']);
+    assert.ok(!JSON.stringify(watch).includes(s.m.root));
+    const select={sourceId:id,localObservation:local.observation,skillId:`skill:${id}/one`};
+    const diff=output('inspectSourceDiff',await client.call('inspectSourceDiff',select));assert.equal(diff.state,'limited');assert.ok(diff.nextCursor);
+    const rest=output('inspectSourceDiff',await client.call('inspectSourceDiff',{...select,cursor:diff.nextCursor}));assert.ok((diff.text+rest.text).includes('L'.repeat(40000)));
+    const added=output('inspectSourceDiff',await client.call('inspectSourceDiff',{...select,skillId:`skill:${id}/new`}));assert.match(added.text,/untracked new skill/);
+    assert.equal(gitSync(s.m.paths.repo,'rev-parse','HEAD'),head);assert.deepEqual(readFileSync(join(s.m.paths.repo,'.git/index')),index);
+    for(const [p,bytes] of before) assert.equal(s.m.read(join(s.m.paths.repo,p!)),bytes);
+    s.m.write(join(s.m.paths.repo,'skills/new/SKILL.md'),'new observation');
+    assert.equal((await client.call('inspectSourceDiff',{...select,cursor:diff.nextCursor})).result.isError,true);
+  });
   test(`${runtime}: ${modern ? 'modern' : 'legacy'} four source reads use authenticated MCP`, {timeout:30000}, async t => {
     const root=tempDir(t),repo=makeRepo(root);
     const from=repo.commit('baseline',{'skills/one/SKILL.md':'old','skills/two/SKILL.md':'same'});

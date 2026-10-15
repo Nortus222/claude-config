@@ -270,3 +270,16 @@ test('intent schemas publish strict patches, bounded reads and kind-paired durab
   assert.deepEqual(decodeRunView(valid), valid);
   for (const value of [{ ...valid, intent: { ...valid.intent, change } }, { ...valid, parity: { ...valid.parity, kind: 'reconcile' } }, { ...valid, parity: { ...valid.parity, routingEffects: [{ fileId: '/arbitrary', state: 'needsInspection' }] } }]) assert.throws(() => decodeRunView(value));
 });
+
+test('source diff schemas retain committed pairs and strictly separate local observations', () => {
+  const local = { sourceId: 'owner/repo', skillId: 'skill:owner/repo/one', localObservation: 'a'.repeat(64) };
+  const pair = { sourceId: local.sourceId, skillId: local.skillId, fromRevision: 'b'.repeat(40), toRevision: 'c'.repeat(40) };
+  for (const [value, valid] of [[local, true], [pair, true], [{ ...local, ...pair }, false], [{ ...local, path: '/private' }, false], [{ ...local, localObservation: 'HEAD' }, false]] as const) {
+    assert.equal(acceptsOperation('inspectSourceDiff', value), valid);
+    assert.equal(acceptsJsonInput('inspectSourceDiff', value), valid);
+    const result = { ...value, generation: '1', state: 'complete', text: '', nextCursor: null };
+    const schema = SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12(operationJsonSchemas.inspectSourceDiff.output), { patterns: 'apply' });
+    assert.equal(Schema.decodeUnknownResult(Schema.toType(schema), { onExcessProperty: 'error' })(result)._tag === 'Success', valid);
+    assert.equal((() => { try { decodeOperationOutput('inspectSourceDiff', result); return true; } catch { return false; } })(), valid);
+  }
+});
