@@ -37,6 +37,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   const history = yield* HistoryStore;
   const context = yield* Effect.context<ProcessDialogue>();
   const tuple = acceptedSkillTuple(accepted);
+  let persistenceUncertain = false;
   let saved = false;
   let intentState: RunView['intentState'] = 'pending';
   let prepared = false;
@@ -50,7 +51,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
       intentSaved: saved, intentState: intentState!, ...(installation ? { installationState: installation.state } : {}),
       message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Declaration write may be in progress; inspect intent before retrying') });
     if (Exit.isFailure(receipt)) return yield* Effect.failCause(receipt.cause);
-  });
+  }).pipe(Effect.onExit(exit => Effect.sync(() => { if (Exit.isFailure(exit)) persistenceUncertain = true; })));
   const result = (state: Installation['state'], message: string, evidence: Pick<Installation, 'claude' | 'codex'> = {}): Installation => ({
     state, message: [...message].slice(0, 500).join(''), ...(neutralDirectory ? { retainedDirectory: neutralDirectory } : {}), sharedStore: { codexScans: true, visibility: 'shared' }, ...evidence,
     nextActions: state === 'verified' ? [
@@ -104,6 +105,8 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
       }
       const cwd = join(paths.stateRoot, 'tmp', `skill-catalog-${randomUUID()}`);
       neutralDirectory = cwd;
+      installation = result('needsInspection', 'Native catalog verification is incomplete');
+      yield* update();
       yield* fs.writeTextAtomic(join(cwd, '.prepare'), '');
       yield* fs.remove(join(cwd, '.prepare'));
       const evidence: { claude?: Installation['claude']; codex?: Installation['codex'] } = {};
@@ -138,7 +141,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
     }).pipe(Effect.catch(() => Effect.succeed({ ok: false, note: 'Skill addition could not complete; inspect saved intent and backups before retrying' }))),
   };
   const finish = (state: 'failed' | 'cancelled' | 'needsInspection') => Effect.gen(function* () {
-    if (intentState === 'needsInspection' || installation?.state === 'needsInspection') state = 'needsInspection';
+    if (persistenceUncertain || intentState === 'needsInspection' || installation?.state === 'needsInspection') state = 'needsInspection';
     if (installation?.state === state) return;
     if (installation?.state === 'verified') state = 'needsInspection';
     installation = result(state, state === 'cancelled' ? 'Installation cancelled; saved intent is retained' : 'Inspect saved intent and partial installation before retrying', { ...(installation?.claude ? { claude: installation.claude } : {}), ...(installation?.codex ? { codex: installation.codex } : {}) });

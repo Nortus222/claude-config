@@ -3,9 +3,9 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { Deferred, Effect, Fiber } from 'effect';
+import { Cause, Deferred, Effect, Fiber } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
-import { Fs, OverridesStore, Processes, inspectSkills, skillsDomain, type SkillCandidate } from '@nortuscc/machine';
+import { DialogueCleanupFailed, Fs, FsFailed, HistoryStore, OverridesStore, Processes, inspectSkills, skillsDomain, type HistoryInput, type SkillCandidate } from '@nortuscc/machine';
 import { agentSkillInstaller } from '../src/skill-installer.ts';
 import { makeSession, type AgentSession } from '../src/ipc/session.ts';
 import { type AgentHandle } from '../src/agent.ts';
@@ -18,7 +18,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const contentText = '---\nname: Design Review\ndescription: Review design\n---\n';
 const contentBlob = createHash('sha1').update(`blob ${Buffer.byteLength(contentText)}\0${contentText}`).digest('hex');
 const c: SkillCandidate = { source: 'owner/repo', revision: 'a'.repeat(40), sourceDir: 'skills/odd-folder', selectorName: 'Design Review', installedName: 'design-review', blob: contentBlob, tree: 'c'.repeat(40), description: 'Design review', internal: false, metadata: {} };
-const fixture = (options: { failReceipt?: (r: RunReceipt) => boolean; installerCode?: number; content?: boolean; codex?: boolean; pauseInstaller?: boolean; claude?: boolean; alreadyInstalled?: boolean; nativeCleanupFailed?: boolean; unavailableInstaller?: boolean; afterSaved?: () => void } = {}) => {
+const fixture = (options: { failReceipt?: (r: RunReceipt) => boolean; failHistory?: (event: HistoryInput) => boolean; nativeDefect?: 'defect' | 'mixed'; installerCode?: number; content?: boolean; codex?: boolean; pauseInstaller?: boolean; claude?: boolean; alreadyInstalled?: boolean; nativeCleanupFailed?: boolean; unavailableInstaller?: boolean; afterSaved?: () => void } = {}) => {
   const m = agentMachine(); roots.push(m.root);
   m.write(join(m.paths.repo, 'skills-manifest.txt'), '[owner/repo] exact\nunrelated\n');
   m.write(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skills: { unrelated: false }, future: { keep: true } }));
@@ -28,7 +28,7 @@ const fixture = (options: { failReceipt?: (r: RunReceipt) => boolean; installerC
     m.write(join(m.paths.stateRoot, 'overrides.json'), JSON.stringify({ version: 2, skills: { unrelated: false }, future: { keep: true }, skillAdditions: [{ source: c.source, name: c.installedName, targets: ['codex'] }] }));
   }
   const started = Deferred.makeUnsafe<void>(); const release = Deferred.makeUnsafe<void>();
-  const calls: string[] = []; let installing = 0;
+  const calls: string[] = []; const historyAttempts: HistoryInput[] = []; let installing = 0;
   const within = (body: (session: AgentSession) => Effect.Effect<unknown, unknown, any>) => m.run(Effect.scoped(Effect.gen(function* () {
     const context = yield* Effect.context<any>();
     const fresh = Effect.gen(function* () {
@@ -38,15 +38,18 @@ const fixture = (options: { failReceipt?: (r: RunReceipt) => boolean; installerC
     }).pipe(Effect.provideContext(context));
     const status = { state: 'idle', policy: 'manual', paused: null };
     const handle = { inspection: fresh, freshInspection: Effect.map(fresh, inspection => ({ inspection, status })), generation: Effect.succeed(1), exclusive: (e: any) => e, request: () => Effect.succeed(status) } as unknown as AgentHandle;
-    const store = yield* RunStore; const processes = yield* Processes;
+    const history = yield* HistoryStore; const store = yield* RunStore; const processes = yield* Processes;
     const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [skillsDomain],
       skillCandidates: input => Effect.sync(() => { input.observeTree?.(c, [{ path: 'SKILL.md', sha: c.blob, mode: '100644' }]); return { ok: true, source: c.source, revision: c.revision, candidates: [c] }; }),
       skillVerification: {
         content: candidate => Effect.sync(() => { assert.equal(candidate.sourceDir, c.sourceDir); calls.push('content'); return { verified: options.content !== false, problems: ['content differs'] }; }),
-        codex: () => Effect.sync(() => { calls.push('codex'); return options.nativeCleanupFailed ? { verified: false, reason: 'cleanup-failed' } : options.codex === false ? { verified: false, reason: 'disabled' } : { verified: true, enabled: true, path: '/isolated/SKILL.md' }; }),
+        codex: () => options.nativeDefect ? Effect.failCause(options.nativeDefect === 'mixed'
+          ? Cause.combine(Cause.interrupt(123), Cause.die(new DialogueCleanupFailed())) : Cause.die(new DialogueCleanupFailed())) : Effect.sync(() => { calls.push('codex'); return options.nativeCleanupFailed ? { verified: false, reason: 'cleanup-failed' } : options.codex === false ? { verified: false, reason: 'disabled' } : { verified: true, enabled: true, path: '/isolated/SKILL.md' }; }),
         claude: () => Effect.sync(() => { calls.push('claude'); return { verified: options.claude !== false, ...(options.claude === false ? { reason: 'denied' as const } : {}), physical: { status: 'present' as const, path: '/isolated/SKILL.md' }, catalog: { status: 'present' as const }, restrictions: { status: options.claude === false ? 'denied' as const : 'no-known-denial' as const, diagnostics: [] }, limits: { selectedSource: 'not-attested' as const, invocationAuthorization: 'not-attested' as const, configRoot: 'requested-environment-only' as const, managedStartup: 'remains-active' as const } }; }),
       },
     }).pipe(Effect.provide(agentSkillInstaller(options.unavailableInstaller ? undefined : { home: join(m.root, 'home') })), Effect.provideService(RunStore, { ...store, write: r => { if (r.view.intentSaved) options.afterSaved?.(); return options.failReceipt?.(r) ? Effect.fail(new RunStoreError('disk failed')) : store.write(r); } }),
+      Effect.provideService(HistoryStore, { ...history, append: event => { historyAttempts.push(event); return options.failHistory?.(event)
+        ? Effect.fail(new FsFailed({ op: 'append', path: '/isolated/history', reason: 'injected failure' })) : history.append(event); } }),
       Effect.provideService(Processes, { ...processes, run: command => command.cmd !== 'npx' ? processes.run(command) : Effect.gen(function* () {
         installing++; calls.push('installer');
         const backups = readdirSync(m.paths.backups, { recursive: true }).filter(p => String(p).endsWith('overrides.json'));
@@ -60,7 +63,7 @@ const fixture = (options: { failReceipt?: (r: RunReceipt) => boolean; installerC
       }) }));
     return yield* body(session);
   })));
-  return { m, within, calls, started, release, installing: () => installing };
+  return { m, within, calls, historyAttempts, started, release, installing: () => installing };
 };
 const preview = (session: AgentSession, targets: readonly ('claude' | 'codex')[] = ['codex']) => Effect.gen(function* () {
   const found = yield* session.resolveSkillCandidate({ scope: { kind: 'machine' }, source: c.source, name: c.installedName });
@@ -188,3 +191,49 @@ test('source policy changing after intent persistence stops the accepted install
     const done = yield* s.runs.get(run.runId); assert.equal(done.intentSaved, true); assert.equal(done.installation?.state, 'failed');
   })); assert.equal(f.installing(), 0);
 });
+
+for (const sourceUrl of [undefined, 'https://github.com/wrong/source.git']) test(`re-add plans lock identity repair for sourceUrl ${sourceUrl ?? 'absent'}`, async () => {
+  const f = fixture({ alreadyInstalled: true });
+  const path = join(f.m.paths.agentsSkills, '..', '.skill-lock.json');
+  const lock = JSON.parse(f.m.read(path)!); lock.skills[c.selectorName].sourceUrl = sourceUrl;
+  f.m.write(path, JSON.stringify(lock));
+  await f.within(s => Effect.gen(function* () {
+    const p = yield* preview(s);
+    assert.deepEqual(p.plan.steps.map(step => step.key), ['skill-intent:design-review', `skills:install:${c.source}#${c.revision}`, 'skill-verify:design-review']);
+  })); assert.equal(f.installing(), 0);
+});
+
+for (const targets of [['codex'], ['claude', 'codex']] as const)
+for (const nativeDefect of ['defect', 'mixed'] as const) test(`native ${nativeDefect} cleanup cause for ${targets.join('/')} retains needsInspection`, async () => {
+  const f = fixture({ nativeDefect });
+  await f.within(s => Effect.gen(function* () {
+    const p = yield* preview(s, targets); const run = yield* s.runs.submit(request(p.planId)); yield* terminal(s, run.runId);
+    const done = yield* s.runs.get(run.runId);
+    assert.equal(done.intentSaved, true); assert.equal(done.installation?.state, 'needsInspection');
+    assert.ok(done.installation?.retainedDirectory && existsSync(done.installation.retainedDirectory));
+    assert.deepEqual(done.installation.nextActions, []);
+    if (targets.length > 1) {
+      assert.equal(done.installation.claude?.verified, true);
+      assert.equal(done.installation.claude?.limits.invocationAuthorization, 'not-attested');
+    }
+  }));
+});
+
+for (const checkpoint of ['before', 'after'] as const) for (const stores of ['history', 'both'] as const)
+  test(`${stores} checkpoint failure ${checkpoint} intent write stops installer with uncertainty`, async () => {
+    const saved = checkpoint === 'after';
+    const f = fixture({ failHistory: e => e.kind === 'skill-addition' && e.intentSaved === saved,
+      ...(stores === 'both' ? { failReceipt: (r: RunReceipt) => r.view.intentState !== 'pending' && r.view.intentSaved === saved } : {}) });
+    const original = f.m.read(join(f.m.paths.stateRoot, 'overrides.json'));
+    await f.within(s => Effect.gen(function* () {
+      const p = yield* preview(s); const run = yield* s.runs.submit(request(p.planId)); yield* terminal(s, run.runId);
+      const done = yield* s.runs.get(run.runId);
+      assert.equal(done.intentSaved, saved); assert.equal(done.installation?.state, 'needsInspection');
+      assert.equal(done.intentState, saved ? 'saved' : 'needsInspection');
+      assert.equal(done.state, stores === 'both' ? 'interrupted' : 'failed');
+      assert.ok(f.historyAttempts.some(e => e.kind === 'skill-addition' && e.intentSaved === saved));
+      const stored = f.m.read(join(f.m.paths.stateRoot, 'overrides.json'));
+      if (saved) assert.deepEqual(JSON.parse(stored!).skillAdditions, [{ source: c.source, name: c.installedName, targets: ['codex'] }]);
+      else assert.equal(stored, original);
+    })); assert.equal(f.installing(), 0);
+  });

@@ -316,7 +316,7 @@ test('accepted verification binds source selector path and content even when a S
   write(lock);
   const verify = () => Effect.runPromise(verifyAcceptedSkill(candidate).pipe(Effect.provide(Layer.mergeAll(machinePaths(f.paths), nodeFs, f.local))));
   assert.equal((await verify()).verified, true);
-  for (const changed of [{ sourceUrl: 'https://evil.invalid/repo' }, { skillPath: 'skills/design-review/SKILL.md' }, { ref: 'main' }, { skillFolderHash: 'd'.repeat(40) }]) {
+  for (const changed of [{ sourceUrl: 'https://evil.invalid/repo' }, { sourceUrl: undefined }, { skillPath: 'skills/design-review/SKILL.md' }, { ref: 'main' }, { skillFolderHash: 'd'.repeat(40) }]) {
     const count = f.commands.length; write({ ...lock, ...changed }); assert.equal((await verify()).verified, false); assert.equal(f.commands.length, count);
   }
   write(lock);

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { additionRunPlan } from './skill-addition.ts';
 import { Cause, Effect, Exit, Fiber, Layer } from 'effect';
 import {
-  additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, Processes, readSkillCandidates,
+  acceptedSkillLockMatches, additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, Processes, readSkillCandidates,
   sourceOf, skillLockPath, agentSkillsDirs, inspectSkills, type Plan, type SkillCandidate,
 } from '@nortuscc/machine';
 import {
@@ -202,13 +202,10 @@ export const makeSkillOperations = (options: {
     if (affectedSkills.length > 256 || affectedSkills.some(s => s.length > 500)) return yield* refuse('OVERSIZED', 'Source policy impact exceeds the supported preview bounds');
     const report = { desired: exact, ...yield* inspectSkills(exact).pipe(Effect.provide(machinePaths(inspection.paths))) };
     if (report.probeErrors.length) return yield* refuse('INSPECT_FAILED', 'Skill store or exposure is unreadable; repair machine access before adding skills');
-    const native = additionLockEntry(lock, c.installedName);
-    const meta = native?.meta as Record<string, unknown> | undefined;
-    const path = c.sourceDir === '.' ? 'SKILL.md' : `${c.sourceDir}/SKILL.md`;
     const currentContent = acceptedTree && canonicalDestination !== undefined
       ? (yield* verifyInstalledSkillTree(c.installedName, acceptedTree, c.revision)).length === 0 : false;
     const needsInstall = report.items.some(i => i.label === c.installedName && i.disposition === 'apply')
-      || !currentContent || native?.selectorName !== c.selectorName || meta?.ref !== c.revision || meta?.skillPath !== path || meta?.skillFolderHash !== c.tree;
+      || !currentContent || !acceptedSkillLockMatches(lock, c);
     const selectedPlan: Plan = { kind: 'apply', skipped: [], steps: needsInstall ? [{
       key: `skills:install:${c.source}#${c.revision}`, domain: 'skills', action: 'install-skills',
       summary: `install ${c.installedName} at the accepted revision`, touches: [`skills/${c.installedName}`], interruptible: true, targets: after.targets,
