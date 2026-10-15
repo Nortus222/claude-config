@@ -130,7 +130,7 @@ async function runForeground(): Promise<number> {
       }
       return yield* runAgent({
         ...(process.env.NORTUSCC_HOSTED_URL === undefined ? {} : { hosted: { url: process.env.NORTUSCC_HOSTED_URL, platform: process.platform } }),
-        paths, domains, source: setupSourceLayer(paths), dialogue: nodeProcessDialogue({ env: process.env }), skillInstaller: agentSkillInstaller({ home: homedir(), xdgStateHome: process.env.XDG_STATE_HOME }), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
+        paths, domains, source: setupSourceLayer(paths), dialogue: nodeProcessDialogue({ env: process.env }), sourceEnv:process.env, skillInstaller: agentSkillInstaller({ home: homedir(), xdgStateHome: process.env.XDG_STATE_HOME }), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
         ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
         onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
       }).pipe(

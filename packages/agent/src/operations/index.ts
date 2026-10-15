@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
+  WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
   InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
   InspectUpdatesInputSchema, UpdatesInspectionResultSchema, InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
@@ -18,6 +19,10 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  watchSources: define('watchSources',WatchSourcesInputSchema,WatchSourcesResultSchema),
+  inspectSourceDiff: define('inspectSourceDiff',InspectSourceDiffInputSchema,SourceDiffResultSchema),
+  pinImpact: define('pinImpact',PinImpactInputSchema,PinImpactResultSchema),
+  draftChangelog: define('draftChangelog',DraftChangelogInputSchema,ChangelogResultSchema),
   inspectSetups: define('inspectSetups',InspectSetupsInputSchema,SetupInspectionResultSchema),
   incomingChanges: define('incomingChanges',IncomingChangesInputSchema,IncomingChangesResultSchema),
   prepareTrustRequest: define('prepareTrustRequest',PrepareTrustRequestInputSchema,TrustRequestResultSchema),

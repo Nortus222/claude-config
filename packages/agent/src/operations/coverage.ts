@@ -39,11 +39,11 @@ export const engineCapabilityCoverage = {
   heldConfiguration: available('sync/compose.ts and setup-source.ts', ['inspectSetups','incomingChanges'], 'Known trusted setup and verified incoming item inspection; no repository document projection.'),
   setupTrust: available('agent/setups.ts and operations/sync.ts', ['prepareTrustRequest'], 'Returns only the existing app-local trust action and bounded repository identity; no consent write.'),
   setupFollowTrust: remaining('sync/setups.ts and source.ts', 'Independent follow and primary selection', 'No independent follow or select-primary owner exists; known trusted setup access is available separately.', 'prerequisite'),
-  sourceWatch: remaining('source-watch/watch.ts', parity, 'Upstream/local skill diffs and commits require an authenticated bounded read adapter.'),
-  sourcePinImpact: remaining('source-watch/impact.ts', parity, 'Source-wide pin impact preview must retain the resolved revision.'),
+  sourceWatch: available('source-watch/upstream.ts', ['watchSources','inspectSourceDiff'], 'Bounded declared-source observations and exact revision skill diffs; no intent writes.'),
+  sourcePinImpact: available('source-watch/impact.ts', ['pinImpact'], 'Source-wide impact retains resolved revisions and every declared skill.'),
   sourcePinUnpin: remaining('source-watch/pins.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
   sourceIgnoreUnignore: remaining('source-watch/ignores.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
-  changelogDraft: remaining('source-watch/changelog.ts', parity, 'Expose selected accepted revision drafts without publication.'),
+  changelogDraft: available('source-watch/changelog.ts', ['draftChangelog'], 'Read-only accepted revision draft with validated added and ignored selections.'),
   captureCommitPush: remaining('src/commands/capture.ts and push.ts', 'Author publication workflow', 'Existing CLI capture/commit/push is not reusable profile publication; explicit publication authority remains necessary.'),
   hostedAccount: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Sign-in/out, recovery and sync retain credential ownership and app device-flow actions.'),
   hostedMachineMetadata: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Machine name/reporting and durable outbox are metadata, not personal configuration sharing.'),
@@ -60,6 +60,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
+  watchSources: {state:'available'}, inspectSourceDiff: {state:'available'}, pinImpact: {state:'available'}, draftChangelog: {state:'available'},
   inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
   addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },

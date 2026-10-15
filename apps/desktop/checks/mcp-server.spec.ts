@@ -1,8 +1,10 @@
+import { sourceEnvironment } from '../../../packages/agent/src/operations/sources.ts';
+import { makeRepo, tempDir } from '../../../packages/source-watch/checks/fixtures.ts';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { before, after, test } from 'node:test';
@@ -34,7 +36,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = { inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -86,7 +88,32 @@ function output(operation: OperationName, reply: any) {
   assert.deepEqual(JSON.parse(reply.result.content[0].text), reply.result.structuredContent);
   return decodeOperationOutput(operation, reply.result.structuredContent) as any;
 }
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
+// Only fixture-owned Git may reach the real process owner. Installer commands require the explicit fake.
+function fixtureProcesses(delegate: Processes['Service'], root: string, sourceUrl?: string): Processes['Service'] {
+  const roots=[resolve(root),existsSync(root)?realpathSync(root):resolve(root)];
+  const inside=(path:string)=>roots.some(owned=>resolve(path)===owned||resolve(path).startsWith(owned+sep));
+  return {run:command=>Effect.suspend(()=>{
+    if(command.cmd!=='git') return Effect.die(new Error('Unfaked external command refused by MCP fixture'));
+    const args=command.args.map(arg=>sourceUrl && arg==='https://github.com/owner/repo.git'?sourceUrl:arg);
+    const at=args.indexOf('-C');
+    const directory=command.cwd??(at>=0?args[at+1]:args.includes('clone')?args.at(-1):undefined);
+    if(!directory || !inside(directory)) return Effect.die(new Error('Git outside fixture-owned paths refused'));
+    if(args.some(arg=>arg.startsWith('file:') && arg!==sourceUrl && !inside(fileURLToPath(arg)))) return Effect.die(new Error('Non-fixture file remote refused'));
+    if(args.some(arg=>/^(?:https?:|git@|ssh:)/.test(arg))) return Effect.die(new Error('Unrouted Git remote refused'));
+    return delegate.run({...command,args,envAllow:[],env:{...command.env,PATH:process.env.PATH!,HOME:root,USERPROFILE:root,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_ALLOW_PROTOCOL:'file'}});
+  })};
+}
+test('MCP fixture refuses unfaked installers and non-fixture Git before the real process owner',async()=>{
+  let launches=0;
+  const guard=fixtureProcesses({run:()=>{launches++;return Effect.succeed({code:0,stdout:''});}},'/tmp/owned-fixture');
+  for(const command of [{cmd:'npx',args:['--yes','skills@1.7.2','add','owner/repo'],output:'capture' as const,cwd:'/tmp/owned-fixture'},
+    {cmd:'codex',args:['exec'],output:'capture' as const,cwd:'/tmp/owned-fixture'},
+    {cmd:'git',args:['status'],output:'capture' as const,cwd:'/private/other'}]) {
+    const result=await Effect.runPromise(Effect.exit(guard.run(command)));assert.ok(Exit.isFailure(result));
+  }
+  assert.equal(launches,0);
+});
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
   const fixture = setupFixture(join(m.root, 'setup'), { headFiles: {
@@ -95,6 +122,7 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: s
     ] }) }),
     ...(profileJson === undefined ? {} : { 'claude/settings.keys.json': profileJson }),
     ...(pinsJson === undefined ? {} : { 'skill-pins.json': pinsJson }),
+    ...(inputs.sourceReads ? {'skills-manifest.txt':'[owner/repo]\none\ntwo\n','skill-pins.json':JSON.stringify({version:1,pins:{'owner/repo':inputs.sourceReads.from}})}:{}),
   } });
   m.write(join(m.paths.claude, 'settings.json'), '{"theme":"dark"}\n');
   await m.trust();
@@ -128,22 +156,40 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: s
   }) : fixture.source;
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
-    const handle = yield* startAgent(domains);
-    const processes = yield* Processes;
-    const make = makeSession(handle, { signal: new AbortController().signal, domains, skillCandidates: inputs.skillCandidates, skillVerification: inputs.skillVerification }).pipe(
-      Effect.provide(agentSkillInstaller({ home: join(m.root, 'home') })),
+    const processes=fixtureProcesses(yield* Processes,m.root,inputs.sourceReads?.url);
+    const handle = yield* startAgent(domains).pipe(Effect.provideService(Processes,processes));
+    const sessionProcesses:Processes['Service']={run:command=>inputs.addition && command.cmd==='npx' ? Effect.gen(function*(){
+      yield* Deferred.succeed(started,undefined);yield* Deferred.await(release);return {code:0,stdout:''};
+    }) : processes.run(command)};
+    const session=yield* makeSession(handle,{signal:new AbortController().signal,domains,skillCandidates:inputs.skillCandidates,skillVerification:inputs.skillVerification}).pipe(
+      Effect.provide(agentSkillInstaller({home:join(m.root,'home')})),
+      Effect.provide(sourceEnvironment({PATH:process.env.PATH!,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_ALLOW_PROTOCOL:'file'})),
+      Effect.provideService(Processes,sessionProcesses),
     );
-    const session = yield* (inputs.addition ? make.pipe(Effect.provideService(Processes, { run: command => command.cmd !== 'npx' ? processes.run(command) : Effect.gen(function* () {
-      yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return { code: 0, stdout: '' };
-    }) })) : make);
     yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), source);
-  return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); } };
+  return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); assert.equal(existsSync(m.root),false); } };
 }
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} four source reads use authenticated MCP`, {timeout:30000}, async t => {
+    const root=tempDir(t),repo=makeRepo(root);
+    const from=repo.commit('baseline',{'skills/one/SKILL.md':'old','skills/two/SKILL.md':'same'});
+    const to=repo.commit('update',{'skills/one/SKILL.md':'new','skills/added/SKILL.md':'added'});
+    const s=await agent('app',{sourceReads:{url:repo.url,from}});t.after(s.close);
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    output('inspect',await client.call('inspect'));
+    const watch=output('watchSources',await client.call('watchSources'));
+    assert.equal(watch.items[0].toRevision,to);assert.equal(watch.state,'complete');
+    const impact=output('pinImpact',await client.call('pinImpact',{sourceId:'owner/repo',revision:to}));assert.equal(impact.skills.length,2);
+    const pair={sourceId:'owner/repo',fromRevision:from,toRevision:to};
+    const diff=output('inspectSourceDiff',await client.call('inspectSourceDiff',{...pair,skillId:'skill:owner/repo/one'}));assert.match(diff.text,/new/);
+    const draft=output('draftChangelog',await client.call('draftChangelog',{accepted:[{...pair,ignored:['one'],added:['added']}]}));assert.match(draft.text,/Also updated: `one`/);assert.match(draft.text,/Added `added`/);
+    assert.equal((await client.call('watchSources',{path:'/private'})).result.isError,true);
+    assert.equal((await client.call('pinImpact',{sourceId:'unknown/repo',revision:to})).result.isError,true);
+  });
   test(`${runtime}: ${modern ? 'modern 2026' : 'legacy 2025'} opening, shared tools and reconnectable agent runs`, { timeout: 30_000 }, async t => {
     const s = await agent(); t.after(s.close);
     const client = open(runtime, s.m.paths.stateRoot, modern); t.after(client.close);

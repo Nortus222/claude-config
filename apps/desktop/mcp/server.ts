@@ -4,6 +4,7 @@ import { AgentError, AgentUnavailable } from '../../../src/agent-client.ts';
 import type { AppAgentClient } from './client.ts';
 
 export const toolNames = {
+  watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',
   inspectSetups: 'nortuscc_inspect_setups', incomingChanges: 'nortuscc_incoming_changes', prepareTrustRequest: 'nortuscc_prepare_trust_request',
   inspectUpdates: 'nortuscc_inspect_updates',
   inspectIntent: 'nortuscc_inspect_intent',
@@ -13,6 +14,11 @@ export const toolNames = {
   cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
 } as const;
 const descriptions: Record<OperationName, string> = {
+  watchSources: 'Read up to eight declared source observations with SHA-bound cursors. Limited or unavailable results never authorize a mutation. Continue with nextCursor for additional known sources.',
+  inspectSourceDiff: 'Read a bounded skill diff between exact observed source revisions with continuation. Source and skill IDs must be declared; no caller paths.',
+  pinImpact: 'Read source-wide pin impact for every declared skill and the resolved target revision. This read changes no pin.',
+  draftChangelog: 'Draft a bounded changelog for up to eight accepted source revision pairs with report-validated ignored and added selections. No publication or intent writes.',
+
   inspectSetups: 'Read known setup identities and local trust without granting consent.',
   incomingChanges: 'Read verified exact setup revisions and incoming item identities without repository contents.',
   prepareTrustRequest: 'Prepare the existing app-local repository trust action. This read grants no trust and writes no consent.',

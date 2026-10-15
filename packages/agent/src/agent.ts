@@ -235,6 +235,7 @@ export const runAgent = (input: {
   readonly clock?: Layer.Layer<AgentClock>;
   readonly processes?: Layer.Layer<Processes>;
   readonly dialogue?: Layer.Layer<ProcessDialogue>;
+  readonly sourceEnv?: Readonly<Record<string,string|undefined>>;
   readonly skillInstaller?: Layer.Layer<AgentSkillInstaller>;
   readonly ipc?: boolean;
   readonly notifications?: { readonly platform: string; readonly timeoutMs?: number };
@@ -292,7 +293,7 @@ export const runAgent = (input: {
     yield* observe('running', 'started');
     yield* untilAborted(signal);
   }).pipe(Effect.onExit(() => observe('shutdown', 'started')))).pipe(
-    Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, dialogue: input.dialogue, skillInstaller: input.skillInstaller, clock: input.clock }), input.source)),
+    Effect.provide(Layer.merge(agentLayer(input.paths, { processes: input.processes, dialogue: input.dialogue, sourceEnv:input.sourceEnv, skillInstaller: input.skillInstaller, clock: input.clock }), input.source)),
     Effect.onExit((exit) => observe('stopped', outcome(exit))),
   );
 };

@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { guardedCacheRead, ordinaryFallback } from './services.ts';
+import { Fs, nodeFs } from '@nortuscc/machine';
 import { Data, Effect } from 'effect';
 import { skillFolders } from './discover.ts';
 import { Git, type GitFailed } from './git.ts';
@@ -25,16 +26,16 @@ const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 // pin (or HEAD, which an unpinned source installs). Pins are per source, so one skill's update
 // moves them all. Reuses the watcher's cache, cloning it when absent and never refreshing it,
 // except to fetch a full-sha target or baseline by id.
-export const pinImpact = (
+export const pinImpactWithServices = (
   source: WatchedSource,
   ref: string,
   options: { readonly cacheDir: string },
-): Effect.Effect<PinImpact, GitFailed | RefMissing, Git> =>
-  Effect.gen(function* () {
+): Effect.Effect<PinImpact, GitFailed | RefMissing, Git | Fs> =>
+  guardedCacheRead(cacheFolder(options.cacheDir,source.url),Effect.gen(function* () {
     const git = yield* Git;
     const dir = cacheFolder(options.cacheDir, source.url);
     const run: Run = (args, ok) => git.run(args, ok === undefined ? { cwd: dir } : { cwd: dir, ok });
-    if (!existsSync(dir)) yield* git.run(['clone', '--bare', '--filter=blob:none', '--quiet', '--', source.url, dir]);
+    if (!(yield* (yield* Fs).exists(dir))) yield* git.run(['clone', '--bare', '--filter=blob:none', '--quiet', '--', source.url, dir]);
 
     const resolve = (rev: string) =>
       findCommit(run, rev).pipe(
@@ -58,7 +59,7 @@ export const pinImpact = (
       to: { ref, sha: to },
       skills,
     } satisfies PinImpact;
-  });
+  }));
 
 // The watcher's rule: a ref git could read as an option is never passed to it, and a full sha
 // the cache lacks is fetched by id once.
@@ -70,7 +71,7 @@ const findCommit = (run: Run, ref: string): Effect.Effect<string | undefined, Gi
     );
     let sha = yield* resolve;
     if (sha === '' && FULL_SHA.test(ref)) {
-      yield* run(['fetch', '--quiet', 'origin', ref]).pipe(Effect.ignore);
+      yield* run(['fetch', '--quiet', 'origin', ref]).pipe(ordinaryFallback(() => undefined));
       sha = yield* resolve;
     }
     return sha === '' ? undefined : sha;
@@ -95,3 +96,6 @@ const move = (
     const tree = (sha: string, path: string) => run(['rev-parse', `${sha}:${path}`]).pipe(Effect.map((out) => out.trim()));
     return (yield* tree(from, before)) === (yield* tree(to, after)) ? 'unchanged' : 'changed';
   });
+
+// Standalone convenience adapter preserves existing callers.
+export const pinImpact = (...args: Parameters<typeof pinImpactWithServices>) => pinImpactWithServices(...args).pipe(Effect.provide(nodeFs));

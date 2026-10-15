@@ -6,7 +6,7 @@ export { DIFF_FLAGS, Git, GitFailed, LOG_FORMAT, nodeGit, parseLog } from './git
 export type { RunOptions } from './git.ts';
 export { cacheFolder, watchUpstream } from './upstream.ts';
 export { parseStatus, watchCheckout } from './local.ts';
-export { watchSource, watchSources } from './watch.ts';
+export { watchSource, watchSources, watchSourceWithServices, watchSourcesWithServices } from './watch.ts';
 export type { WatchOptions } from './watch.ts';
 export { DocumentInvalid, IGNORES_FILE, PINS_FILE, WriteFailed, editEntry } from './documents.ts';
 export type { Edited, Field, WriteOptions, Written } from './documents.ts';
@@ -17,3 +17,8 @@ export { RefMissing, pinImpact } from './impact.ts';
 export type { PinImpact, SkillMove } from './impact.ts';
 export { draftChangelog } from './changelog.ts';
 export type { AcceptedSource, ChangelogDraft, SkippedSource } from './changelog.ts';
+
+export { machineGit } from './git.ts';
+export { joinedDeadline, SourceCleanupFailed, SourceDeadline } from './services.ts';
+export { watchUpstreamWithServices } from './upstream.ts';
+export { pinImpactWithServices } from './impact.ts';

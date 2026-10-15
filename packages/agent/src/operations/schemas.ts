@@ -84,7 +84,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -274,3 +274,21 @@ const IncomingItemSchema = Schema.Union([
 ]);
 export const IncomingChangesResultSchema = Schema.Struct({generation:IdSchema,setupId:IdSchema,revision:SyncRevisionIdentitySchema,items:Schema.Array(IncomingItemSchema).check(Schema.isMaxLength(100)),nextCursor:syncCursor});
 export const TrustRequestResultSchema = Schema.Struct({generation:IdSchema,setupId:IdSchema,repository:Schema.NullOr(Text),trusted:Schema.Boolean,action:Schema.Literal('open-app-repository-trust')});
+
+const SourceIdentitySchema = Schema.String.check(Schema.isMinCodePoints(1),Schema.isMaxCodePoints(500));
+const sourcePage = {scope,cursor:syncPage.cursor,limit:Schema.Int.check(Schema.isBetween({minimum:1,maximum:8})).pipe(Schema.withDecodingDefaultKey(Effect.succeed(8)))};
+const SourceRevision = SyncCommitSchema;
+const sourcePair = {sourceId:SourceIdentitySchema,fromRevision:SourceRevision,toRevision:SourceRevision};
+const sourceNames = Schema.Array(SkillNameSchema).check(Schema.isMaxLength(100));
+export const WatchSourcesInputSchema = Schema.Struct({...sourcePage,sourceIds:Schema.optionalKey(Schema.Array(SourceIdentitySchema).check(Schema.isMaxLength(8)))});
+export const InspectSourceDiffInputSchema = Schema.Struct({...syncPage,...sourcePair,skillId:KeySchema});
+export const PinImpactInputSchema = Schema.Struct({scope,sourceId:SourceIdentitySchema,revision:Schema.String.check(Schema.isMinCodePoints(1),Schema.isMaxCodePoints(200),Schema.isPattern(/^(?!-)[^\s\x00-\x1f]+$(?![\s\S])/u))});
+export const DraftChangelogInputSchema = Schema.Struct({scope,accepted:Schema.Array(Schema.Struct({...sourcePair,ignored:Schema.optionalKey(sourceNames),added:Schema.optionalKey(sourceNames)})).check(Schema.isMaxLength(8))});
+const sourceState = Schema.Literals(['complete','limited','unavailable']);
+const sourceReason = Schema.optionalKey(Schema.Literals(['read-unavailable','deadline','cleanup-failed','unsafe-owner-data','result-bytes','source-retention']));
+const sourceSkill = Schema.Struct({skillId:KeySchema,name:SkillNameSchema,status:Schema.Literals(['unchanged','changed','removed','missing'])});
+const sourceRow = Schema.Struct({sourceId:SourceIdentitySchema,status:Schema.Literals(['up-to-date','ahead','diverged','unpinned','baseline-missing','unreachable']),fromRevision:Schema.NullOr(SourceRevision),toRevision:Schema.NullOr(SourceRevision),skills:Schema.Array(sourceSkill).check(Schema.isMaxLength(256)),added:sourceNames});
+export const WatchSourcesResultSchema = Schema.Struct({generation:IdSchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),items:Schema.Array(sourceRow).check(Schema.isMaxLength(8)),nextCursor:syncCursor});
+export const SourceDiffResultSchema = Schema.Struct({generation:IdSchema,...sourcePair,skillId:KeySchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),text:Schema.String.check(Schema.isMaxCodePoints(32768)),nextCursor:syncCursor});
+export const PinImpactResultSchema = Schema.Struct({generation:IdSchema,sourceId:SourceIdentitySchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),fromRevision:Schema.NullOr(SourceRevision),toRevision:Schema.NullOr(SourceRevision),skills:Schema.Array(sourceSkill).check(Schema.isMaxLength(256))});
+export const ChangelogResultSchema = Schema.Struct({generation:IdSchema,state:sourceState,reason:sourceReason,retainedCache:Schema.optionalKey(Schema.Literal(true)),text:Schema.String.check(Schema.isMaxCodePoints(32768))});

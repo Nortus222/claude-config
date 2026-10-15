@@ -1,3 +1,4 @@
+import { readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
@@ -46,6 +47,10 @@ export type AgentSession = {
   // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
   readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
   readonly skillOperations: SkillOperations;
+  readonly watchSources: (input: OperationInput<'watchSources'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'watchSources'>, SessionError>;
+  readonly inspectSourceDiff: (input: OperationInput<'inspectSourceDiff'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSourceDiff'>, SessionError>;
+  readonly pinImpact: (input: OperationInput<'pinImpact'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'pinImpact'>, SessionError>;
+  readonly draftChangelog: (input: OperationInput<'draftChangelog'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftChangelog'>, SessionError>;
   readonly inspectSetups: (input: OperationInput<'inspectSetups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSetups'>, SessionError>;
   readonly incomingChanges: (input: OperationInput<'incomingChanges'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'incomingChanges'>, SessionError>;
   readonly prepareTrustRequest: (input: OperationInput<'prepareTrustRequest'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'prepareTrustRequest'>, SessionError>;
@@ -544,7 +549,32 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return result;
         }),
       );
+    const sourceCache=sourceReadCache();
+    let sourceInspection:JobInspection|undefined;
+    yield* Effect.addFinalizer(() => Effect.sync(() => { sourceCache.cursors.clear(); sourceCache.observations.clear(); }));
+    const sourceRead = <N extends SourceOperation>(name:N,input:OperationInput<N>) => handle.exclusive(Effect.gen(function* () {
+      const generation=yield* (handle.generation ?? Effect.succeed(0));
+      const inspection=yield* handle.inspection;
+      if(sourceInspection!==inspection) { sourceCache.cursors.clear(); sourceCache.observations.clear(); sourceInspection=inspection; }
+      const setup=handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE','Configured source trust is unavailable'))) : undefined;
+      if(setup && !setup.trusted) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE','Open the app repository trust action before reading sources'));
+      const setupIdentity=JSON.stringify(setup && {setupId:setup.setupId,accountId:setup.accountId,repository:setup.repository,trusted:setup.trusted});
+      const unchanged=Effect.gen(function* () {
+        const current=handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE','Configured source trust is unavailable'))) : undefined;
+        if(setupIdentity!==JSON.stringify(current && {setupId:current.setupId,accountId:current.accountId,repository:current.repository,trusted:current.trusted})) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Configured source trust changed; inspect again'));
+        if((yield* (handle.generation ?? Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)
+          return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Source observation changed; inspect again'));
+      });
+      yield* unchanged;
+      const result=yield* readSourceOperation(name,input,inspection,generation,sourceCache).pipe(Effect.provideContext(context));
+      yield* unchanged;
+      return result;
+    }));
     const session: AgentSession = {
+      watchSources: input => sourceRead('watchSources',input),
+      inspectSourceDiff: input => sourceRead('inspectSourceDiff',input),
+      pinImpact: input => sourceRead('pinImpact',input),
+      draftChangelog: input => sourceRead('draftChangelog',input),
       inspectSetups: input => syncRead('inspectSetups', input),
       incomingChanges: input => syncRead('incomingChanges', input),
       prepareTrustRequest: input => syncRead('prepareTrustRequest', input),

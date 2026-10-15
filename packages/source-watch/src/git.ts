@@ -1,3 +1,5 @@
+import { Processes } from '@nortuscc/machine';
+import { joinedDeadline, SourceCleanupFailed } from './services.ts';
 import { spawn } from 'node:child_process';
 import { Context, Data, Effect, Layer } from 'effect';
 import type { Commit } from './model.ts';
@@ -16,12 +18,12 @@ export class Git extends Context.Service<
 >()('source-watch/Git') {}
 
 // Variables a parent git process (a hook, say) may export that would redirect our commands.
-const INHERITED = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR'];
+const INHERITED = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM'];
 
 // The environment for every git command: no prompts, stable messages, literal pathspecs, and
 // log.showSignature off so signature text never lands in `git log --format` output.
-function environment(allowProtocols: string | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_LITERAL_PATHSPECS: '1' };
+function environment(input: Readonly<Record<string, string | undefined>>, allowProtocols: string | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...input, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_LITERAL_PATHSPECS: '1' };
   for (const name of INHERITED) delete env[name];
   // Config appended after any the parent passes via GIT_CONFIG_COUNT, so user config survives.
   const count = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0;
@@ -49,7 +51,7 @@ export const nodeGit = (options: { readonly allowProtocols?: string } = {}) =>
       Effect.callback<string, GitFailed>((resume) => {
         const child = spawn('git', [...args], {
           cwd,
-          env: environment(options.allowProtocols),
+          env: environment(process.env, options.allowProtocols),
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         const out: Buffer[] = [];
@@ -90,3 +92,21 @@ export function parseLog(out: string): Commit[] {
 
 // Plain unified diffs, whatever diff drivers or colour the user configured.
 export const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv'] as const;
+
+// Agent callers supply the complete environment. Credential helpers remain configured.
+export const machineGit = (input: { readonly env: Readonly<Record<string,string>>; readonly timeoutMs:number; readonly maxBytes:number }): Layer.Layer<Git,never,Processes> =>
+  Layer.effect(Git, Effect.map(Processes, processes => ({
+    run: (args: ReadonlyArray<string>, {cwd,ok=[0]}: RunOptions = {}) => Effect.suspend(() => {
+      if(!Number.isSafeInteger(input.timeoutMs)||input.timeoutMs<1||!Number.isSafeInteger(input.maxBytes)||input.maxBytes<1) return Effect.fail(new GitFailed({reason:'Invalid source read bounds'}));
+      let uncertain = false;
+      const stderrBytes=Math.min(16384,Math.floor(input.maxBytes/4));
+      const env = Object.fromEntries(Object.entries(environment(input.env, undefined)).filter((entry): entry is [string,string] => entry[1] !== undefined));
+      return joinedDeadline(processes.run({cmd:'git',args,...(cwd ? {cwd} : {}),env,envAllow:[],output:'capture',stderr:'capture',
+        captureLimit:{stdout:input.maxBytes-stderrBytes,stderr:stderrBytes},onCleanup: outcome => { if (!outcome.joined) uncertain=true; }}),input.timeoutMs).pipe(
+        Effect.mapError(() => new GitFailed({reason:'Source Git read unavailable'})),
+        Effect.flatMap(result => ok.includes(result.code) && Buffer.byteLength(result.stdout)+Buffer.byteLength(result.stderr ?? '')<=input.maxBytes
+          ? Effect.succeed(result.stdout) : Effect.fail(new GitFailed({reason:'Source Git read unavailable'}))),
+        Effect.ensuring(Effect.suspend(() => uncertain ? Effect.die(new SourceCleanupFailed({...(cwd ? {retainedDirectory:cwd} : args[0]==='clone' ? {retainedDirectory:args.at(-1)} : {})})) : Effect.void)),
+      );
+    }),
+  })));

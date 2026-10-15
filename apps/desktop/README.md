@@ -29,7 +29,7 @@ owned registrations through the app lifecycle. The installed app is required for
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
 packaging targets are unvalidated, and Windows has no supported agent IPC.
 
-The app exposes ten machine operations:
+The app exposes eighteen machine operations:
 
 | MCP tool | Behavior |
 | --- | --- |
@@ -38,6 +38,10 @@ The app exposes ten machine operations:
 | `nortuscc_inspect_setups` | Known setup identities and trust status |
 | `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
 | `nortuscc_prepare_trust_request` | Existing app repository trust action; grants no consent |
+| `nortuscc_watch_sources` | Up to eight declared sources with bounded observations and SHA-bound continuation |
+| `nortuscc_inspect_source_diff` | Exact source revision and skill diff with bounded text continuation |
+| `nortuscc_pin_impact` | Source-wide read-only pin impact with resolved revisions |
+| `nortuscc_draft_changelog` | Read-only draft with validated added and ignored selections |
 | `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |
 | `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
@@ -47,6 +51,14 @@ The app exposes ten machine operations:
 | `nortuscc_list_runs` | List retained runs with bounded pagination |
 | `nortuscc_cancel_run` | Cancel an authorized run at a safe boundary |
 | `nortuscc_history` | Read bounded History with MCP actor, request, scope and run attribution |
+
+Source reads use declared identities only. Public GitHub names stay readable; other declared URLs
+and the trusted configured file checkout use stable opaque IDs. An extra local checkout requires
+an existing owner/trust mapping. Source pages contain at most eight sources with two concurrent
+readers. Cursors expire after ten minutes and invalidate after a conflicting observation or machine
+inspection; pages do not promise an atomic snapshot of several remotes. Diff and changelog text
+are bounded to 32 KiB. A limited or unavailable read never authorizes a source edit. Cleanup
+uncertainty retains the source cache's ownership marker and refuses reuse until it is inspected.
 
 Machine scope is the default. Review the preview before applying, retain the same `requestId`
 when acceptance is uncertain, and query runs after reconnecting. Reconciliation repairs existing
@@ -135,7 +147,7 @@ npm run smoke:mcp -w apps/desktop -- "$app"
 The desktop Node checks cover v3 schemas, renderer event ordering and recovery, lifecycle ownership and upgrades with fake Processes, and the login environment. `DESKTOP_AGENT_RESOURCES` enables the resource and smoke checks after bundling; without it these checks skip. `test:bun` runs schemas and controller checks under Bun, then runs `test:resources` against a temporary bundled Bun fixture. Rust tests use fake Unix socket servers and helpers for handshake, framing, timeouts, disconnect and generation behavior.
 
 Installed MCP acceptance uses the exact app's native `--mcp` entry and bundled foreground agent
-with a temporary HOME, local Git origin and inert file copies. It verifies all fourteen tools, durable
+with a temporary HOME, local Git origin and inert file copies. It verifies all eighteen tools, durable
 acceptance/retry, disconnect recovery, MCP History attribution, terminal cancellation lookup and
 unavailable-agent diagnostics, then joins its owned subprocesses before deleting the fixture. It installs no service
 and opens no GUI. This smoke does not establish host reload, natural-language skill addition,
