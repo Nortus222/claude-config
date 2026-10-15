@@ -17,6 +17,18 @@ const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions 
 type IntentChange = Extract<OperationInput<'previewChange'>['change'], { kind: 'machineIntent' }>;
 type IntentItem = OperationOutput<'inspectIntent'>['items'][number];
 const safeString = (value: string) => value.length > 0 && [...value].length <= 500 && !settingsComplaints({ value }).length;
+// Reads and previews share one safety contract for every projected owner row.
+const intentItemProblem = (item: IntentItem): NonNullable<OperationOutput<'inspectIntent'>['limitReason']> | undefined => {
+  if (item.kind === 'setting') {
+    if (intentValueProblem(item.value)) return 'value-limit';
+    if (settingsComplaints({ [item.key]: item.value }).length) return 'unsafe-value';
+  }
+  const strings = item.kind === 'setting' ? [item.fileId, item.key, item.from.source] : item.kind === 'integration' ? [item.id, item.from.source, ...item.prerequisites]
+    : item.kind === 'file' ? [item.id, item.from.source] : item.kind === 'skill' ? [item.source, item.name, item.from.source, item.declaredFrom.source, ...(item.revision ? [item.revision] : [])]
+    : [item.kind === 'issue' ? item.source : item.from.source];
+  if (strings.some(value => !safeString(value))) return 'identity-limit';
+  if (Buffer.byteLength(JSON.stringify(item)) > 64 * 1024) return 'record-bytes';
+};
 const origin = (value: Origin): Origin => ({ layer: value.layer, source: value.source });
 const baseOrigin = { layer: 'base' as const, source: 'built-in' };
 const routingIds: readonly McpRoutingFileId[] = ['claude:CLAUDE.md', 'codex:AGENTS.md'];
@@ -86,15 +98,8 @@ export const makeIntentOperations = (options: {
     const limited = (limitReason: NonNullable<OperationOutput<'inspectIntent'>['limitReason']>) => ({ generation, items: [], nextCursor: null, limitReason });
     const page: IntentItem[] = [];
     for (const item of items.slice(offset, offset + args.limit)) {
-      if (item.kind === 'setting') {
-        if (intentValueProblem(item.value)) return limited('value-limit');
-        if (settingsComplaints({ [item.key]: item.value }).length) return limited('unsafe-value');
-      }
-      const strings = item.kind === 'setting' ? [item.fileId, item.key, item.from.source] : item.kind === 'integration' ? [item.id, item.from.source]
-        : item.kind === 'file' ? [item.id, item.from.source] : item.kind === 'skill' ? [item.source, item.name, item.from.source, item.declaredFrom.source]
-        : [item.kind === 'issue' ? item.source : item.from.source];
-      if (strings.some(value => !safeString(value))) return limited('identity-limit');
-      if (Buffer.byteLength(JSON.stringify(item)) > 64 * 1024) return limited('record-bytes');
+      const problem = intentItemProblem(item);
+      if (problem) return limited(problem);
       page.push(item);
       const nextCursor = offset + page.length < items.length ? Buffer.from(JSON.stringify({ binding, offset: offset + page.length })).toString('base64url') : null;
       if (Buffer.byteLength(JSON.stringify({ generation, items: page, nextCursor })) > 64 * 1024) { page.pop(); break; }
@@ -127,7 +132,7 @@ export const makeIntentOperations = (options: {
     }
     const source = 'source' in change.patch ? change.patch.source : undefined;
     const impacted = source === undefined ? [] : after.skills.filter(s => normalizeSkillSource(s.source) === source);
-    const affectedNames = [...new Set([...before.skills, ...after.skills].filter(s => normalizeSkillSource(s.source) === source).map(s => s.name))];
+    const affectedNames = source === undefined ? [] : [...new Set([...before.skills, ...after.skills].filter(s => normalizeSkillSource(s.source) === source).map(s => s.name))];
     if (affectedNames.length > 256) return yield* Effect.fail(refused('OVERSIZED', 'Source impact exceeds the supported preview limit'));
     const keys = ['intent:overrides', ...routes.map(r => `intent:routing:${r.id}`)];
     const plan = { kind: 'operation' as const, steps: keys.map(key => ({ key, domain: 'intent' as const, action: 'save-intent' as const,
@@ -139,8 +144,13 @@ export const makeIntentOperations = (options: {
         : patch.kind === 'integration' ? item.kind === 'integration' && item.id === patch.id
         : patch.kind === 'skill' || patch.kind === 'removeSkillDeclaration' ? item.kind === 'skill' && item.name === patch.name && item.source === patch.source
         : item.kind === patch.kind) ?? null;
+    const beforeItem = selected(before, current);
+    const afterItem = selected(after, tentative);
+    const ownerStrings = [...(source === undefined ? [] : [source]), ...affectedNames, ...plan.steps.flatMap(step => step.touches)];
+    if ([beforeItem, afterItem].some(item => item !== null && intentItemProblem(item) !== undefined) || ownerStrings.some(value => !safeString(value)))
+      return yield* Effect.fail(refused('OVERSIZED', 'Intent preview contains unsafe or oversized owner data'));
     const preview: ChangePreview = yield* Effect.try({ try: () => decodeOperationOutput('previewChange', { planId: randomUUID(), scope: { kind: 'machine' }, generation, change, plan, nextActions: [], machineIntent: {
-      intentChanges: [{ kind: 'machine-choice', action: change.patch.kind === 'removeSkillDeclaration' ? 'removeSkillDeclaration' : change.patch.action, message: 'Save the selected explicit machine choice; reset reveals inherited intent', before: selected(before, current), after: selected(after, tentative) }],
+      intentChanges: [{ kind: 'machine-choice', action: change.patch.kind === 'removeSkillDeclaration' ? 'removeSkillDeclaration' : change.patch.action, message: 'Save the selected explicit machine choice; reset reveals inherited intent', before: beforeItem, after: afterItem }],
       installationEffects: ['No content is installed or physically removed by this operation', 'Targets require availability and do not restrict shared-store visibility', 'Later reconciliation uses the saved enablement and target choices'],
       sourceImpact: source === undefined ? [] : [{ source, skills: affectedNames, policy: !impacted[0]?.pin ? 'upstream' : impacted[0].pin.from.layer === 'machine' ? 'personal-pin' : 'source-pin' }],
     } }), catch: () => refused('OVERSIZED', 'Intent preview identities or values exceed the supported limits') });

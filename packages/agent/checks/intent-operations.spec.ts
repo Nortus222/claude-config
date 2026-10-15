@@ -6,8 +6,8 @@ import { RunStore, RunStoreError, type RunReceipt } from '../src/run-store.ts';
 import { AgentSkillInstaller } from '../src/skill-installer.ts';
 import { join } from 'node:path';
 import { Deferred, Effect } from 'effect';
-import { configDomain, OverridesStore, Fs, FsFailed, HistoryStore, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, StateStore, validMcpRouting } from '@nortuscc/machine';
-import { startAgent, makeSession, SetupSource, type AgentSession } from '../src/index.ts';
+import { configDomain, OverridesStore, Fs, FsFailed, HistoryStore, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, MachinePaths, StateStore, validMcpRouting } from '@nortuscc/machine';
+import { startAgent, makeSession, SetupSource, type AgentSession, type JobInspection } from '../src/index.ts';
 import { decodeOperationInput, decodeOperationOutput } from '../src/operations/index.ts';
 import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -42,7 +42,7 @@ test('effective read pages refuse old generations and intent apply recovers the 
 });
 
 
-type Injection = { fs?: (fs: Fs['Service']) => Fs['Service']; state?: (state: StateStore['Service']) => StateStore['Service']; receipt?: (r: RunReceipt) => boolean; history?: boolean; overrides?: (store: OverridesStore['Service']) => OverridesStore['Service'] };
+type Injection = { fs?: (fs: Fs['Service']) => Fs['Service']; state?: (state: StateStore['Service']) => StateStore['Service']; receipt?: (r: RunReceipt) => boolean; history?: boolean; overrides?: (store: OverridesStore['Service']) => OverridesStore['Service']; inspection?: (value: JobInspection) => JobInspection; paths?: (paths: MachinePaths['Service']) => MachinePaths['Service'] };
 const finishIntent = (session: AgentSession, id: string) => Effect.callback<void>(resume => {
   const off = session.runs.subscribe(id, run => { if (run.result) resume(Effect.void); }); return Effect.sync(off);
 });
@@ -59,7 +59,7 @@ const intentFixture = (routes = false, legacy = false) => {
   }
   let installs = 0;
   const within = <A, E>(body: (session: AgentSession) => Effect.Effect<A, E>, injection: Injection = {}) => m.run(Effect.scoped(Effect.gen(function* () {
-    const store = yield* OverridesStore; const fs = yield* Fs; const state = yield* StateStore; const receipts = yield* RunStore; const history = yield* HistoryStore;
+    const rawStore = yield* OverridesStore; const store = injection.overrides?.(rawStore) ?? rawStore; const paths = yield* MachinePaths; const fs = yield* Fs; const state = yield* StateStore; const receipts = yield* RunStore; const history = yield* HistoryStore;
     const compose = <T extends { repo: string }>(snapshot: T) => Effect.gen(function* () {
       return { ...snapshot, desired: yield* loadProfile(snapshot.repo, { overrides: yield* store.read }).pipe(Effect.provide(nodeFiles)) };
     }).pipe(Effect.orDie);
@@ -67,8 +67,9 @@ const intentFixture = (routes = false, legacy = false) => {
     return yield* Effect.gen(function* () {
       const handle = yield* startAgent(() => [], { deferStart: true });
       const installer = yield* AgentSkillInstaller;
-      const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [] }).pipe(
-        Effect.provideService(Fs, injection.fs?.(fs) ?? fs), Effect.provideService(StateStore, injection.state?.(state) ?? state), Effect.provideService(OverridesStore, injection.overrides?.(store) ?? store),
+      const session = yield* makeSession({ ...handle, inspection: handle.inspection.pipe(Effect.map(value => value && injection.inspection ? injection.inspection(value) : value)) }, { signal: new AbortController().signal, domains: () => [] }).pipe(
+        Effect.provideService(MachinePaths, injection.paths?.(paths) ?? paths),
+        Effect.provideService(Fs, injection.fs?.(fs) ?? fs), Effect.provideService(StateStore, injection.state?.(state) ?? state), Effect.provideService(OverridesStore, store),
         Effect.provideService(AgentSkillInstaller, { prepare: (...args) => { installs++; return installer.prepare(...args); } }),
         Effect.provideService(RunStore, { ...receipts, write: r => injection.receipt?.(r) ? Effect.fail(new RunStoreError('injected receipt failure')) : receipts.write(r) }),
         Effect.provideService(HistoryStore, { ...history, append: e => injection.history && e.kind === 'operation-checkpoint' && e.committedKeys.length > 0 ? Effect.fail(new FsFailed({ op: 'write', path: 'history', reason: 'injected failure' })) : history.append(e) }),
@@ -250,5 +251,75 @@ test('declaration removal re-resolves source-wide pin policy before accepting a 
     assert.equal(skills.items[0]!.kind, 'skill'); assert.equal(skills.items[0]!.kind === 'skill' && skills.items[0].revision, 'a'.repeat(40));
     const failure = yield* Effect.flip(session.previewChange({ kind: 'machineIntent', patch: { kind: 'removeSkillDeclaration', source: 'a/b', name: 'personal' } }));
     assert.equal(failure.code, 'PROFILE_INVALID'); assert.equal(f.m.read(f.overridePath), before);
+  }));
+});
+
+const unsafePreviewRefusal = (session: AgentSession, change: Parameters<AgentSession['previewChange']>[0]) => Effect.gen(function* () {
+  const error = yield* Effect.flip(session.previewChange(change));
+  assert.equal(error.code, 'OVERSIZED');
+  assert.equal(error.message, 'Intent preview contains unsafe or oversized owner data');
+  assert.doesNotMatch(error.message, /sk-/);
+  assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
+});
+
+test('intent preview refuses a credential-shaped sibling in source impact before retaining a plan', async () => {
+  const f = intentFixture();
+  f.m.write(join(f.setup.dirs['b'.repeat(40)]!, 'skills-manifest.txt'), '[a/b]\nsafe\nsk-reviewfixture\n');
+  const bytes = f.m.read(f.overridePath);
+  await f.within(session => Effect.gen(function* () {
+    const read = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'skills' }));
+    assert.equal(read.limitReason, 'identity-limit');
+    yield* unsafePreviewRefusal(session, { kind: 'machineIntent', patch: { kind: 'skill', source: 'a/b', name: 'safe', action: 'disable' } });
+    assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
+  }));
+});
+
+test('intent preview refuses unsafe before provenance using the read safety contract', async () => {
+  const f = intentFixture(); f.m.write(f.overridePath, '{"version":2,"settings":{"claude:settings.json":{"theme":"light"}}}');
+  const bytes = f.m.read(f.overridePath);
+  await f.within(session => Effect.gen(function* () {
+    const read = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'settings' }));
+    assert.equal(read.limitReason, 'identity-limit');
+    yield* unsafePreviewRefusal(session, { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'claude:settings.json', key: 'theme', action: 'reset' } });
+    assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
+  }), { overrides: store => ({ ...store, read: store.read.pipe(Effect.map(input => ({ ...input, source: '/owner/sk-beforefixture/overrides.json' }))) }) });
+});
+
+test('intent preview refuses unsafe future provenance before retaining a plan', async () => {
+  const f = intentFixture(); const bytes = f.m.read(f.overridePath);
+  await f.within(session => Effect.gen(function* () {
+    const read = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'settings' }));
+    assert.equal(read.limitReason, undefined);
+    yield* unsafePreviewRefusal(session, { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'claude:settings.json', key: 'theme', action: 'set', value: 'light' } });
+    assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
+  }), { inspection: value => ({ ...value, paths: { ...value.paths, stateRoot: '/owner/sk-afterfixture' } }) });
+});
+
+test('intent preview refuses an unsafe destination independently of before and after provenance', async () => {
+  const f = intentFixture(); const bytes = f.m.read(f.overridePath);
+  await f.within(session => Effect.gen(function* () {
+    const read = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'configuration' }));
+    assert.equal(read.limitReason, undefined);
+    yield* unsafePreviewRefusal(session, { kind: 'machineIntent', patch: { kind: 'manageConfig', action: 'reset' } });
+    assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
+  }), { paths: paths => ({ ...paths, stateRoot: join(f.m.root, 'sk-destinationfixture') }) });
+});
+
+test('intent preview preserves safe selected and sibling identities exactly', async () => {
+  const f = intentFixture();
+  f.m.write(join(f.setup.dirs['b'.repeat(40)]!, 'skills-manifest.txt'), '[a/b]\nsafe\nordinary-sibling\n');
+  const bytes = f.m.read(f.overridePath);
+  await f.within(session => Effect.gen(function* () {
+    const p = yield* session.previewChange({ kind: 'machineIntent', patch: { kind: 'skill', source: 'a/b', name: 'safe', action: 'disable' } });
+    assert.equal(p.change.kind, 'machineIntent');
+    assert.ok('machineIntent' in p);
+    assert.deepEqual(p.machineIntent.sourceImpact, [{ source: 'a/b', skills: ['safe', 'ordinary-sibling'], policy: 'upstream' }]);
+    const change = p.machineIntent.intentChanges[0]!;
+    assert.equal(change.before?.kind, 'skill'); assert.equal(change.after?.kind, 'skill');
+    if (change.before?.kind === 'skill' && change.after?.kind === 'skill') {
+      assert.equal(change.before.source, 'a/b'); assert.equal(change.before.name, 'safe'); assert.equal(change.before.enabled, true);
+      assert.equal(change.after.source, 'a/b'); assert.equal(change.after.name, 'safe'); assert.equal(change.after.enabled, false);
+    }
+    assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
   }));
 });
