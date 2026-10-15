@@ -1,13 +1,16 @@
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { AgentClock } from '../clock.ts';
-import { join } from 'node:path';
-import { Context, Effect, Exit, Layer } from 'effect';
+import { basename, join } from 'node:path';
+import { Cause, Context, Effect, Exit, Layer } from 'effect';
 import { normalizeRepoUrl } from '@nortuscc/sync';
-import { settingsComplaints } from '@nortuscc/profile-engine';
-import { authorDigest, MachinePaths, canonical } from '@nortuscc/machine';
+import { buildBaseProfile, normalizeSkillSource, parsePins, parseSkillsManifest, resolveProfile, settingsComplaints } from '@nortuscc/profile-engine';
+import { authorDigest, Backups, backupsForRun, bindAuthorCheckout, executeAuthorEdit, Fs, MachinePaths, OverridesStore, validateAuthorBinding, canonical, type MachinePathsValue } from '@nortuscc/machine';
 import {
   draftChangelog,
+  prepareSourceEdit,
+  readIgnores,
+  DocumentInvalid,
   joinedDeadline,
   machineGit,
   pinImpactWithServices,
@@ -21,7 +24,9 @@ import {
 import { SessionError } from '../ipc/session.ts';
 import type { JobInspection } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
-import { decodeOperationInput, decodeOperationOutput, type OperationInput, type OperationOutput } from './index.ts';
+import { decodeOperationInput, decodeOperationOutput, type OperationChange, type OperationInput, type OperationOutput, type ParityRunEvidence } from './index.ts';
+import type { RunLifecycle } from '../runs.ts';
+import type { PreparedParityChange } from './parity.ts';
 import { safeOwnerString } from './safety.ts';
 
 export class AgentSourceEnvironment extends Context.Service<
@@ -81,6 +86,14 @@ const skillRows = (
   source: string,
   skills: readonly { name: string; status: 'changed' | 'unchanged' | 'removed' | 'missing' }[],
 ) => skills.map((skill) => ({ skillId: `skill:${source}/${skill.name}`, name: skill.name, status: skill.status }));
+// The engine normalizes source policy when machine additions participate; legacy declarations stay exact.
+const policyIdentity = (inspection: JobInspection) => inspection.desired.skills.some(skill => skill.targets !== undefined)
+  ? (source: string) => normalizeSkillSource(source) ?? source
+  : (source: string) => source;
+const affectedSkills = (inspection: JobInspection, source: string) => {
+  const identity = policyIdentity(inspection);
+  return inspection.desired.skills.filter(skill => identity(skill.source) === identity(source));
+};
 const relativeOwnerPath = (path: string) =>
   safeOwnerString(path) && !/^[\\/]|[\x00-\x1f\x7f]/.test(path) && !path.split(/[\\/]/).includes('..');
 const safeLocal = (local: LocalReport) =>
@@ -295,14 +308,19 @@ export const readSourceOperation = <N extends SourceOperation>(
           try: () => known(a.sourceId),
           catch: (error) => (error instanceof SessionError ? error : invalid()),
         });
-        const result = yield* pinImpactWithServices(source, a.revision, { cacheDir });
+        const affected = affectedSkills(inspection, source.source);
+        if (affected.length > 256 || affected.some(skill => !safeOwnerString(skill.name))) return unavailable('unsafe-owner-data');
+        const result = yield* pinImpactWithServices({ ...source, skills: [...new Set(affected.map(skill => skill.name))] }, a.revision, { cacheDir });
         return {
           ...base,
           sourceId: a.sourceId,
           state: 'complete',
           fromRevision: result.from?.sha ?? null,
           toRevision: result.to.sha,
-          skills: skillRows(a.sourceId, result.skills),
+          skills: [...new Map(affected.map(skill => {
+            const skillId = `skill:${sourceIdentity(skill.source)}/${skill.name}`;
+            return [skillId, { skillId, name: skill.name, status: result.skills.find(move => move.name === skill.name)!.status }] as const;
+          })).values()],
         };
       }
       if (name === 'inspectSourceDiff' && 'localObservation' in args) {
@@ -420,3 +438,127 @@ export const readSourceOperation = <N extends SourceOperation>(
       catch: () => new SessionError('OVERSIZED', 'Source observation contains unsupported owner data'),
     });
   });
+
+type SourceDecision = Extract<OperationChange, { kind: 'sourceDecision' }>;
+const sourceFiles = ['skills-manifest.txt', 'skill-pins.json', 'source-ignores.json'] as const;
+const sourceChanged = () => new SessionError('UNKNOWN_PLAN', 'Source revision or author inputs changed; inspect and preview again');
+const sourceFailed = () => new SessionError('INTERNAL', 'Source decision stopped; inspect recorded effects and backups');
+
+// The session owns the lock and durable lifecycle. Only already declared identities reach this adapter.
+export const prepareSourceDecision = (change: SourceDecision, inspection: JobInspection, configured: MachinePathsValue): Effect.Effect<PreparedParityChange, SessionError, AgentServices> => Effect.gen(function* () {
+  if (!inspection.trusted) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Trust this repository in the app before editing source policy'));
+  const context = yield* Effect.context<AgentServices>();
+  const fs = yield* Fs, clock = yield* AgentClock, environment = yield* AgentSourceEnvironment;
+  if (environment.env === undefined) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Source decisions require an explicitly configured process environment'));
+  const selected = sourcesFrom(inspection.desired).find(source => sourceIdentity(source.source) === change.sourceId);
+  if (!selected) return yield* Effect.fail(invalid());
+  if (!/^(?:https?:|ssh:|git:|git@)/.test(selected.url) && selected.url !== pathToFileURL(configured.repo).href)
+    return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'This local source requires an already trusted configured checkout; no owner records another local checkout'));
+  const author = yield* bindAuthorCheckout(configured, sourceFiles);
+  const read = (path: string) => Effect.gen(function* () {
+    const bytes = yield* fs.readBytes(join(author.realCheckout, path));
+    if (author.files.find(file => file.path === path)?.sha256 !== authorDigest(bytes)) return yield* Effect.fail(sourceChanged());
+    return bytes === undefined ? undefined : yield* Effect.try({ try: () => new TextDecoder('utf-8', { fatal: true }).decode(bytes), catch: sourceChanged });
+  });
+  const manifest = yield* read('skills-manifest.txt'), pins = yield* read('skill-pins.json'), ignores = yield* read('source-ignores.json');
+  const groups = parseSkillsManifest(manifest);
+  const declaration = groups.filter(group => group.source === selected.source);
+  if (!declaration.length) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'This source has no declaration in the configured author manifest; add its author declaration before editing source policy'));
+  const overridesPath = join(configured.stateRoot, 'overrides.json');
+  const overridesDigest = authorDigest(yield* fs.readBytes(overridesPath));
+  const overrides = yield* (yield* OverridesStore).read;
+  if (overrides.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Repair machine choices before editing source policy'));
+  const identity = policyIdentity(inspection);
+  const machineSkills = affectedSkills(inspection, selected.source);
+  const authorGroups = groups.filter(group => identity(group.source) === identity(selected.source));
+  const declarations = [...new Map([
+    ...authorGroups.flatMap(group => group.skills.map(name => ({ skillId: `skill:${sourceIdentity(group.source)}/${name}`, name }))),
+    ...machineSkills.map(skill => ({ skillId: `skill:${sourceIdentity(skill.source)}/${skill.name}`, name: skill.name })),
+  ].map(skill => [skill.skillId, skill])).values()];
+  const source = { ...selected, skills: [...new Set(declarations.map(skill => skill.name))] };
+  const strings = [change.sourceId, author.checkout, author.realCheckout, author.gitDir, ...author.files.map(file => file.path), ...source.skills,
+    ...declarations.map(skill => skill.skillId)];
+  if (declarations.length > 256 || machineSkills.length > 256 || strings.some(value => !safeOwnerString(value)))
+    return yield* Effect.fail(new SessionError('OVERSIZED', 'Source decision contains unsafe or oversized owner identities'));
+  const withGit = <A, E>(effect: Effect.Effect<A, E, import('@nortuscc/source-watch').Git | Fs>) => joinedDeadline(effect.pipe(Effect.provide(machineGit({ env: environment.env!, timeoutMs: 15000, maxBytes: 1048576 }))), 20000, clock.sleep);
+  const observe = Effect.gen(function* () {
+    const [report] = yield* watchSourcesWithServices([source], { cacheDir: join(configured.stateRoot, 'source-watch') });
+    if (!report || !safeReport(report) || !report.latest || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(report.latest.sha) || ['unreachable', 'baseline-missing'].includes(report.status))
+      return yield* Effect.fail(sourceChanged());
+    return report.latest.sha;
+  });
+  const observedRevision = yield* withGit(observe);
+  if (change.action === 'ignore' && change.revision !== observedRevision) return yield* Effect.fail(sourceChanged());
+  const prepared = yield* prepareSourceEdit({ author, source, action: change.action, ...('revision' in change ? { revision: change.revision } : {}) }).pipe(Effect.provide(machineGit({env:environment.env,timeoutMs:15000,maxBytes:1048576})));
+  const nextPins = prepared.documents.find(document => document.path === 'skill-pins.json')?.text ?? pins;
+  // Include machine additions when validating source-wide policy; personal revisions stay separate.
+  const resolved = resolveProfile({ base: buildBaseProfile({ skillsManifest: manifest }, () => false), pins: parsePins(nextPins), overrides });
+  if (resolved.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'The proposed author source policy conflicts with declared machine choices'));
+  const target = change.action === 'pin' ? change.revision : change.action === 'unpin' ? observedRevision : undefined;
+  const impact = target === undefined ? [] : (yield* withGit(pinImpactWithServices(source, target, { cacheDir: join(configured.stateRoot, 'source-watch') }))).skills;
+  if (impact.some(skill => !safeOwnerString(skill.name)) || (target !== undefined && impact.length !== source.skills.length))
+    return yield* Effect.fail(new SessionError('OVERSIZED', 'Source impact contains unsupported owner data'));
+  const before = change.action === 'pin' || change.action === 'unpin' ? parsePins(pins).value[source.source] : readIgnores(ignores).ignores[source.source];
+  const after = 'revision' in change ? change.revision : undefined;
+  const key = `source:${change.sourceId}/${change.action}`;
+  if (!safeOwnerString(key)) return yield* Effect.fail(new SessionError('OVERSIZED', 'Source decision key exceeds supported bounds'));
+  const keys = prepared.documents.length ? [key] : [];
+  const plan = { kind: 'operation' as const, steps: keys.map(key => ({ key, domain: 'sources' as const, action: 'edit-source' as const,
+    summary: 'Edit the selected source policy in the configured author document', touches: prepared.documents.map(document => document.path), interruptible: false })), skipped: [] };
+  const preview = yield* Effect.try({ try: () => decodeOperationOutput('previewChange', { planId: randomUUID(), scope: { kind: 'machine' }, generation: '0', change, plan, nextActions: [],
+    sourceDecision: { sourceId: change.sourceId, observedRevision, checkout: author.checkout, head: author.head, redacted: true,
+      documents: prepared.documents.map(({path,beforeSha256,afterSha256}) => ({path,beforeSha256,afterSha256})),
+      authorIntent: { before: before?.toLowerCase() ?? null, after: after ?? null },
+      machinePolicy: machineSkills.map(skill => ({ skillId: `skill:${sourceIdentity(skill.source)}/${skill.name}`, revision: skill.pin?.ref ?? null, enabled: skill.install })),
+      impact: target === undefined ? [] : declarations.map(skill => ({ skillId: skill.skillId, status: impact.find(move => move.name === skill.name)!.status })),
+    }, actionEffects: [
+      'Edits author-document intent; the current machine policy above remains a separate observation',
+      'Pin policy affects every declared skill from this source, including machine additions; publication and sync are separate prerequisites',
+      'Ignore suppresses this source revision notification only; it never disables or removes machine skills',
+      'The source document is reserialized with its indentation and line endings; private bodies are redacted and exact old bytes are backed up',
+    ] }), catch: () => new SessionError('OVERSIZED', 'Source decision preview exceeds supported bounds') });
+  if (Buffer.byteLength(JSON.stringify(preview)) > 65536) return yield* Effect.fail(new SessionError('OVERSIZED', 'Source decision preview exceeds supported bounds'));
+  const acceptance = { kind: 'sourceDecision' as const, author, sourceId: change.sourceId, observedRevision, generation: '0',
+    baselineDigest: digest({ author, observedRevision, overridesDigest }), planDigest: digest(plan), plannedKeys: keys };
+  const revalidate = Effect.gen(function* () {
+    yield* validateAuthorBinding(author);
+    if (authorDigest(yield* fs.readBytes(overridesPath)) !== overridesDigest || (yield* withGit(observe)) !== observedRevision) return yield* Effect.fail(sourceChanged());
+    yield* validateAuthorBinding(author);
+  }).pipe(Effect.provideContext(context), Effect.mapError(() => sourceChanged()));
+  yield* revalidate;
+  return { preview, acceptance, revalidate, afterRelease: 'inspect' as const,
+    execute: (lifecycle: RunLifecycle, signal: AbortSignal) => Effect.flatMap(clock.now, at => Effect.gen(function* () {
+      const backups = yield* Backups;
+      let evidence: ParityRunEvidence = { kind: 'sourceDecision', state: 'needsInspection', committedKeys: [], remainingKeys: keys, backupIds: [] };
+      const checkpoint = () => Effect.gen(function* () {
+        const folder = yield* backups.dir;
+        evidence = { ...evidence, backupIds: folder ? [basename(folder)] : evidence.backupIds };
+        yield* lifecycle.parity(evidence);
+      });
+      const result = yield* Effect.exit(executeAuthorEdit(prepared, signal, {
+        pending: path => Effect.gen(function* () {
+          if (!prepared.documents.some(document => document.path === path) || signal.aborted) return yield* Effect.fail(sourceFailed());
+          yield* revalidate;
+          yield* checkpoint();
+          yield* lifecycle.progress({ type: 'started', index: 0, total: keys.length, step: plan.steps[0]! });
+        }),
+        committed: path => Effect.gen(function* () {
+          if (!prepared.documents.some(document => document.path === path)) return yield* Effect.fail(sourceFailed());
+          // Immutable semantic key, never the raw document path, is the accepted effect identity.
+          evidence = { ...evidence, state: 'partial', committedKeys: keys, remainingKeys: [] };
+          yield* checkpoint();
+          yield* lifecycle.progress({ type: 'finished', index: 0, total: keys.length, key, outcome: 'ok', note: 'Author source decision observed' });
+        }),
+      }).pipe(Effect.provideService(Fs, { ...fs, writeTextAtomic: (path, text) => Effect.andThen(revalidate, Effect.suspend(() => fs.writeTextAtomic(path, text))) })));
+      // Backups may exist even when replacement or the committed checkpoint fails.
+      const saved = yield* Effect.exit(checkpoint());
+      if (Exit.isFailure(result)) return yield* Effect.failCause(result.cause);
+      if (Exit.isFailure(saved)) return yield* Effect.failCause(saved.cause);
+    }).pipe(Effect.provide(backupsForRun(at)), Effect.provideService(MachinePaths, configured), Effect.provideContext(context), Effect.catchCause(() => Effect.fail(sourceFailed())))),
+  };
+}).pipe(Effect.catchCause(cause => {
+  const error = Cause.squash(cause);
+  return Effect.fail(error instanceof SessionError ? error : error instanceof DocumentInvalid
+    ? new SessionError('PROFILE_INVALID', 'Author source documents are invalid; repair their declarations and policy before previewing')
+    : new SessionError('APP_UNAVAILABLE', 'A usable configured author checkout and complete source observation are required'));
+}));

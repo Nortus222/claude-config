@@ -283,3 +283,16 @@ test('source diff schemas retain committed pairs and strictly separate local obs
     assert.equal((() => { try { decodeOperationOutput('inspectSourceDiff', result); return true; } catch { return false; } })(), valid);
   }
 });
+
+test('source decisions retain equivalent strict SHA/reset JSON contracts and kind-paired durable evidence', () => {
+  const change={kind:'sourceDecision',sourceId:'Owner/Repo',action:'pin',revision:'a'.repeat(40)};
+  for(const [selected,valid] of [[change,true],[{...change,revision:'a'.repeat(40)+'\n'},false],[{...change,revision:'A'.repeat(40)},false],[{...change,revision:'a'.repeat(64)},false],[{...change,path:'/private'},false],[{...change,action:'unpin'},false],[{kind:'sourceDecision',sourceId:'Owner/Repo',action:'unpin'},true]] as const) {
+    assert.equal(acceptsOperation('previewChange',{change:selected}),valid);assert.equal(acceptsJsonInput('previewChange',{change:selected}),valid);
+  }
+  const author={checkout:'/author',realCheckout:'/author',gitDir:'/author/.git',head:'c'.repeat(40),files:[{path:'skill-pins.json',kind:'file',sha256:'d'.repeat(64),indexBlob:'e'.repeat(64)}]};
+  const parity={kind:'sourceDecision',generation:'1',baselineDigest:'b'.repeat(64),planDigest:'c'.repeat(64),plannedKeys:['source:Owner/Repo/pin'],author,sourceId:'Owner/Repo',observedRevision:'f'.repeat(40)};
+  const receipt={...run,intent:{...run.intent,change,parity},parity:{kind:'sourceDecision',state:'needsInspection',committedKeys:[],remainingKeys:parity.plannedKeys,backupIds:[]}};
+  assert.equal(decodeRunView(receipt).intent.change.kind,'sourceDecision');
+  assert.equal(decodeRunView({...receipt,intent:{...receipt.intent,change:{kind:'sourceDecision',sourceId:'Owner/Repo',action:'unignore'},parity:{...parity,observedRevision:'f'.repeat(64)}}}).intent.change.kind,'sourceDecision');
+  for(const bad of [{...receipt,intent:{...receipt.intent,parity:{...parity,kind:'capture'}}},{...receipt,parity:{...receipt.parity,kind:'syncDecision'}},{...receipt,intent:{...receipt.intent,parity:{...parity,sourcePath:'/private'}}}])assert.throws(()=>decodeRunView(bad));
+});

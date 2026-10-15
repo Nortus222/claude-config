@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { DocumentInvalid, readEntries, type WriteOptions, type Written, WriteFailed, writeEntry } from './documents.ts';
+import { DocumentInvalid, readEntries, type WriteOptions, type Written, WriteFailed, writeEntry, writeEntryWithServices } from './documents.ts';
 import { redact } from './redact.ts';
 import type { SourceReport } from './model.ts';
 
@@ -38,3 +38,9 @@ export const ignoreRevision = (
   sha !== undefined && !FULL_SHA.test(sha)
     ? Effect.fail(new DocumentInvalid({ reason: redact(`'${sha}' is not a full commit sha`) }))
     : writeEntry(repoDir, 'ignored', source, sha, options);
+
+// Explicit clock/Fs boundary; ignore only records notification intent.
+export const ignoreRevisionWithServices = (repoDir: string, source: string, sha: string | undefined, options: WriteOptions, at: Date) =>
+  sha !== undefined && !FULL_SHA.test(sha)
+    ? Effect.fail(new DocumentInvalid({ reason: 'Ignored revision must be a full commit SHA' }))
+    : writeEntryWithServices(repoDir, 'ignored', source, sha, options, at);

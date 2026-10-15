@@ -113,9 +113,14 @@ test('MCP fixture refuses unfaked installers and non-fixture Git before the real
   }
   assert.equal(launches,0);
 });
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?: boolean; localSource?: boolean; sourceReads?: {url:string;from:string}; nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
+  if(inputs.sourceDecisions) {
+    assert.ok(inputs.sourceReads);
+    commitFiles(m.paths.repo,'source author',{'skills-manifest.txt':'[owner/repo]\none\ntwo\n','skill-pins.json':JSON.stringify({version:1,pins:{'owner/repo':inputs.sourceReads.from}}),'source-ignores.json':'{"version":1,"ignored":{},"note":"keep"}\n'});
+    m.write(join(m.paths.repo,'skill-pins.json'),'{\r\n  "version": 1,\r\n  "pins": {"owner/repo": "'+inputs.sourceReads.from+'"}\r\n}\r\n');
+  }
   if(inputs.localSource) {
     const base=commitFiles(m.paths.repo,'local baseline',{'skills/one/SKILL.md':'old','skills-manifest.txt':'# author manifest\n','skill-pins.json':'{"version":1,"pins":{}}\n','source-ignores.json':'{}\n'});
     const branch=gitSync(m.paths.repo,'symbolic-ref','--short','HEAD');
@@ -218,6 +223,36 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     const draft=output('draftChangelog',await client.call('draftChangelog',{accepted:[{...pair,ignored:['one'],added:['added']}]}));assert.match(draft.text,/Also updated: `one`/);assert.match(draft.text,/Added `added`/);
     assert.equal((await client.call('watchSources',{path:'/private'})).result.isError,true);
     assert.equal((await client.call('pinImpact',{sourceId:'unknown/repo',revision:to})).result.isError,true);
+  });
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} backed-up source decisions use authenticated MCP`, {timeout:60000}, async t => {
+    const root=tempDir(t),repo=makeRepo(root);
+    const from=repo.commit('source baseline',{'skills/one/SKILL.md':'old','skills/two/SKILL.md':'same'}),to=repo.commit('source changed',{'skills/one/SKILL.md':'new'});
+    const s=await agent('app',{sourceDecisions:true,sourceReads:{url:repo.url,from}});t.after(s.close);
+    const original=s.m.read(join(s.m.paths.repo,'skill-pins.json')),index=readFileSync(join(s.m.paths.repo,'.git/index')),head=gitSync(s.m.paths.repo,'rev-parse','HEAD');
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    assert.equal(output('getContext',await client.call('getContext')).capabilities.sourceDecision.available,true);
+    for(const action of ['pin','unpin','ignore','unignore']) {
+      output('inspect',await client.call('inspect'));
+      const change={kind:'sourceDecision',sourceId:'owner/repo',action,...(['pin','ignore'].includes(action)?{revision:to}:{})};
+      const p=output('previewChange',await client.call('previewChange',{change}));
+      assert.equal(p.sourceDecision.observedRevision,to);assert.equal(p.sourceDecision.redacted,true);assert.equal(p.sourceDecision.machinePolicy.length,2);
+      if(action==='pin')assert.equal(p.sourceDecision.impact.length,2);
+      const request={planId:p.planId,requestId:'source-'+action};
+      const accepted=output('applyChange',await client.call('applyChange',request));let run=accepted.run;
+      for(let n=0;n<300 && !run.result;n++){await new Promise(resolve=>setTimeout(resolve,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
+      assert.equal(run.state,'succeeded');assert.equal(run.parity.kind,'sourceDecision');assert.equal(run.intent.parity.author.head,head);assert.equal(run.parity.committedKeys[0],`source:owner/repo/${action}`);
+      assert.equal(output('applyChange',await client.call('applyChange',request)).run.runId,run.runId);
+      if(action==='pin')assert.equal(s.m.read(join(s.m.paths.backups,run.parity.backupIds[0],'author/skill-pins.json')),original);
+      assert.equal(s.m.read(join(s.m.root,'setup/head/skill-pins.json')),JSON.stringify({version:1,pins:{'owner/repo':from}}));
+    }
+    assert.equal(JSON.parse(s.m.read(join(s.m.paths.repo,'source-ignores.json'))!).note,'keep');
+    assert.deepEqual(readFileSync(join(s.m.paths.repo,'.git/index')),index);assert.equal(gitSync(s.m.paths.repo,'rev-parse','HEAD'),head);
+    assert.equal((await client.call('previewChange',{change:{kind:'sourceDecision',sourceId:'owner/repo',action:'unpin',revision:to}})).result.isError,true);
+    output('inspect',await client.call('inspect'));
+    const stale=output('previewChange',await client.call('previewChange',{change:{kind:'sourceDecision',sourceId:'owner/repo',action:'pin',revision:to}}));
+    repo.commit('moving source',{'skills/one/SKILL.md':'newer'});
+    const refused=await client.call('applyChange',{planId:stale.planId,requestId:'source-stale'});assert.equal(refused.result.isError,true);assert.equal(refused.result.structuredContent.error.code,'UNKNOWN_PLAN');
+    assert.doesNotMatch(JSON.stringify(refused),/file:|upstream|source-watch-/);
   });
   test(`${runtime}: ${modern ? 'modern 2026' : 'legacy 2025'} opening, shared tools and reconnectable agent runs`, { timeout: 30_000 }, async t => {
     const s = await agent(); t.after(s.close);

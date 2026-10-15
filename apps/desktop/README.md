@@ -103,10 +103,15 @@ combinations. The packaged MCP smoke checks inert reconciliation and connection 
 native skill installation or model conversations.
 
 The [checked engine inventory](../../packages/agent/src/operations/coverage.ts) maps every audited
-behavior to the implemented operations or its remaining workstream. Current-engine parity still
-needs capture/uninstall/update, target/category/force choices, overrides, incoming sync decisions,
-source watch/pin/ignore/changelog, account/policy/metadata operations, richer History and backup
-pruning. Author commit/push, general restoration, personal sharing and owned-profile publication
+behavior to the implemented operations or its remaining workstream. Source inspection, diffs,
+pin impact and changelog drafts have bounded reads.
+`previewChange(sourceDecision)` and `applyChange` support backed-up pin/unpin/ignore/unignore
+edits in the configured author checkout. They bind fresh source revisions and exact dirty document,
+HEAD and index evidence. Previews distinguish author intent from current machine policy and include
+all affected declared skills. Ignore suppresses a source notification without disabling a skill.
+A source that exists only as a machine addition needs an author declaration before author policy edits.
+Account/policy/metadata operations, richer History and backup pruning remain pending. Author
+commit/push, general restoration, personal sharing and owned-profile publication
 require their owning workflows and separate authority. New registry operations and advertised
 capabilities must update the checked inventory before claiming availability.
 

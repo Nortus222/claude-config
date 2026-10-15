@@ -1,4 +1,4 @@
-import { readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
+import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
@@ -231,9 +231,14 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
-    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' | 'update' }>, inspection: JobInspection) => Effect.gen(function* () {
-      const prepared = yield* (change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
+    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' | 'update' | 'sourceDecision' }>, inspection: JobInspection) => Effect.gen(function* () {
+      const sourceGeneration = yield* (handle.generation ?? Effect.succeed(0));
+      const setup = change.kind === 'sourceDecision' && handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE', 'Configured source trust is unavailable'))) : undefined;
+      if (setup && !setup.trusted) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Trust this repository in the app before editing source policy'));
+      const setupIdentity = JSON.stringify(setup);
+      const prepared = yield* (change.kind === 'sourceDecision' ? prepareSourceDecision(change, inspection, configuredPaths) : change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
       const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
+      if (change.kind === 'sourceDecision' && (generation !== String(sourceGeneration) || (yield* handle.inspection) !== inspection)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Source observation changed; inspect again'));
       return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
         execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {
           const successful = new Set<string>();
@@ -251,6 +256,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             })).pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
         },
         revalidate: Effect.gen(function* () {
+          if (change.kind === 'sourceDecision' && handle.selectOperationSetup && JSON.stringify(yield* handle.selectOperationSetup('local')) !== setupIdentity) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Configured source trust changed; inspect again'));
           const fresh = yield* (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.provideContext(context));
           if (!fresh.inspection || canonical(fresh.inspection.desired) !== canonical(inspection.desired) || canonical(fresh.inspection.revision) !== canonical(inspection.revision))
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));

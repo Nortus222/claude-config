@@ -1,6 +1,6 @@
 import { isCommitSha } from '@nortuscc/profile-engine';
 import { Effect } from 'effect';
-import { DocumentInvalid, type WriteOptions, type Written, WriteFailed, writeEntry } from './documents.ts';
+import { DocumentInvalid, type WriteOptions, type Written, WriteFailed, writeEntry, writeEntryWithServices } from './documents.ts';
 import { redact } from './redact.ts';
 
 // Brings a revision into the setup: pins `source` to `ref` in skill-pins.json, or unpins it when
@@ -15,3 +15,9 @@ export const pinSource = (
   ref !== undefined && !isCommitSha(ref)
     ? Effect.fail(new DocumentInvalid({ reason: redact(`'${ref}' is not a full commit sha; pin impact.to.sha`) }))
     : writeEntry(repoDir, 'pins', source, ref, options);
+
+// Explicit clock/Fs boundary for callers that already own mutation coordination.
+export const pinSourceWithServices = (repoDir: string, source: string, ref: string | undefined, options: WriteOptions, at: Date) =>
+  ref !== undefined && !isCommitSha(ref)
+    ? Effect.fail(new DocumentInvalid({ reason: 'Pin revision must be a full lowercase commit SHA' }))
+    : writeEntryWithServices(repoDir, 'pins', source, ref, options, at);

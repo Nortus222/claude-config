@@ -41,8 +41,8 @@ export const engineCapabilityCoverage = {
   setupFollowTrust: remaining('sync/setups.ts and source.ts', 'Independent follow and primary selection', 'No independent follow or select-primary owner exists; known trusted setup access is available separately.', 'prerequisite'),
   sourceWatch: available('source-watch/watch.ts', ['watchSources','inspectSourceDiff'], 'Bounded declared-source and trusted configured checkout observations; exact revision or local-observation skill diffs; no intent writes.'),
   sourcePinImpact: available('source-watch/impact.ts', ['pinImpact'], 'Source-wide impact retains resolved revisions and every declared skill.'),
-  sourcePinUnpin: remaining('source-watch/pins.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
-  sourceIgnoreUnignore: remaining('source-watch/ignores.ts', parity, 'Adapt existing backed-up writes to explicit services, common lock, preview and history.'),
+  sourcePinUnpin: available('source-watch/documents.ts and operations/sources.ts', ['previewChange','applyChange','getRun'], 'Exact configured author pin/unpin edits retain source-wide impact, fresh source and document guards, backups and durable recovery.'),
+  sourceIgnoreUnignore: available('source-watch/documents.ts and operations/sources.ts', ['previewChange','applyChange','getRun'], 'Author ignore/unignore edits only suppress source notifications; machine installation policy remains separate.'),
   changelogDraft: available('source-watch/changelog.ts', ['draftChangelog'], 'Read-only accepted revision draft with validated added and ignored selections.'),
   captureCommitPush: remaining('src/commands/capture.ts and push.ts', 'Author publication workflow', 'Existing CLI capture/commit/push is not reusable profile publication; explicit publication authority remains necessary.'),
   hostedAccount: remaining('hosted-client/client.ts', 'Account and metadata operation parity', 'Sign-in/out, recovery and sync retain credential ownership and app device-flow actions.'),
@@ -60,7 +60,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
-  watchSources: {state:'available'}, inspectSourceDiff: {state:'available'}, pinImpact: {state:'available'}, draftChangelog: {state:'available'},
+  sourceDecision: {state:'available'}, watchSources: {state:'available'}, inspectSourceDiff: {state:'available'}, pinImpact: {state:'available'}, draftChangelog: {state:'available'},
   inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
   addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },

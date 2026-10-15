@@ -1,3 +1,4 @@
+import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { appendFile, chmod, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -16,8 +17,8 @@ export class Fs extends Context.Service<
     // Appends `text` in one write, creating the file and its parents.
     readonly appendText: (path: string, text: string) => Effect.Effect<void, FsFailed>;
     readonly exists: (path: string) => Effect.Effect<boolean>;
-    // A link is copied as a link unless `follow`, which copies what it points at.
-    readonly copy: (from: string, to: string, options?: { readonly follow?: boolean }) => Effect.Effect<void, FsFailed>;
+    // A link is copied as a link unless `follow`, which copies what it points at. Exclusive copies refuse existing destinations.
+    readonly copy: (from: string, to: string, options?: { readonly follow?: boolean; readonly exclusive?: boolean }) => Effect.Effect<void, FsFailed>;
     readonly move: (from: string, to: string) => Effect.Effect<void, FsFailed>;
     // Exclusively creates one directory by default. Recursive mode creates missing parents and accepts existing directories.
     readonly createDirectory: (path: string, options?: { readonly recursive?: boolean }) => Effect.Effect<void, FsFailed>;
@@ -64,9 +65,9 @@ const writeTarget = async (path: string): Promise<string> => {
 const kindOf = (info: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
   info.isSymbolicLink() ? 'symlink' : info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other';
 
-const copyTree = (from: string, to: string, follow = false) => async () => {
+const copyTree = (from: string, to: string, follow = false, exclusive = false) => async () => {
   await mkdir(dirname(to), { recursive: true });
-  await cp(from, to, follow ? { recursive: true, dereference: true } : { recursive: true, verbatimSymlinks: true });
+  await cp(from, to, { ...(follow ? { recursive: true, dereference: true } : { recursive: true, verbatimSymlinks: true }), ...(exclusive ? { mode: constants.COPYFILE_EXCL, force: false, errorOnExist: true } : {}) });
 };
 
 // Windows can deny replacement briefly even when both files are writable. Keep the old file
@@ -117,7 +118,7 @@ export const nodeFs = Layer.succeed(Fs, {
     }),
   exists: (path) => Effect.promise(() => lstat(path).then(() => true, () => false)),
   createDirectory: (path, options) => attempt('mkdir', path, async () => { await mkdir(path, { recursive: options?.recursive ?? false }); }),
-  copy: (from, to, options) => attempt('copy', from, copyTree(from, to, options?.follow)),
+  copy: (from, to, options) => attempt('copy', from, copyTree(from, to, options?.follow, options?.exclusive)),
   // rename fails across volumes; copy then remove covers that.
   move: (from, to) =>
     attempt('move', from, async () => {
