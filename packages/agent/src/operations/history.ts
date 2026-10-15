@@ -8,6 +8,14 @@ const safe = (value: unknown): boolean => typeof value === 'string'
   ? (value === '' || safeOwnerString(value)) && !value.includes('nmt_')
   : Array.isArray(value) ? value.every(safe)
   : value !== null && typeof value === 'object' ? Object.values(value).every(safe) : true;
+const outcomeNote = (outcome: unknown): string => {
+  switch (outcome) {
+    case 'ok': return 'Step completed';
+    case 'failed': return 'Step failed';
+    case 'cancelled': return 'Step cancelled';
+    default: throw new Error('Unsupported historical outcome');
+  }
+};
 const backupId = (path: unknown): string => {
   if (typeof path !== 'string' || backupFolderTime(basename(path)) === undefined) throw new Error('Unsupported backup');
   return basename(path);
@@ -52,7 +60,7 @@ export function projectHistoryEvent(raw: unknown): typeof OperationHistoryEventS
         event.detail = { kind: 'policy', from: e.from, to: e.to, origin: e.origin };
         break;
       case 'paused': case 'resumed':
-        event.detail = { kind: 'pause', reason: e.reason };
+        event.detail = { kind: 'pause', reason: e.kind === 'paused' ? 'Automatic application paused' : 'Application pause cleared' };
         break;
       case 'backups-pruned':
         event.detail = { kind: 'backups', ids: array(e.folders).map(backupId), pruned: true,
@@ -61,7 +69,7 @@ export function projectHistoryEvent(raw: unknown): typeof OperationHistoryEventS
       case 'apply-finished':
         event.steps = array(e.steps).map(value => {
           const step = record(value);
-          return { key: step.key, outcome: step.outcome, note: step.note };
+          return { key: step.key, outcome: step.outcome, note: outcomeNote(step.outcome) };
         });
         if (e.backup !== null) event.detail = { kind: 'backups',
           ids: [backupId(e.backup === 'pruned' ? e.prunedFolder : e.backup)], pruned: e.backup === 'pruned' };

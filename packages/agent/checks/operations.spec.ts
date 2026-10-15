@@ -296,3 +296,18 @@ test('source decisions retain equivalent strict SHA/reset JSON contracts and kin
   assert.equal(decodeRunView({...receipt,intent:{...receipt.intent,change:{kind:'sourceDecision',sourceId:'Owner/Repo',action:'unignore'},parity:{...parity,observedRevision:'f'.repeat(64)}}}).intent.change.kind,'sourceDecision');
   for(const bad of [{...receipt,intent:{...receipt.intent,parity:{...parity,kind:'capture'}}},{...receipt,parity:{...receipt.parity,kind:'syncDecision'}},{...receipt,intent:{...receipt.intent,parity:{...parity,sourcePath:'/private'}}}])assert.throws(()=>decodeRunView(bad));
 });
+
+test('History diagnostic schemas accept only paired outcome summaries and closed pause facts', () => {
+  const base={at:'2026-10-15T00:00:00.000Z',actor:'agent'};
+  const result=(event:unknown)=>({events:[event],nextBefore:null});
+  for(const [outcome,note] of [['ok','Step completed'],['failed','Step failed'],['cancelled','Step cancelled']]) {
+    const event={...base,kind:'apply-finished',steps:[{key:'config:one',outcome,note}]};
+    assert.doesNotThrow(()=>decodeOperationOutput('history',result(event)));
+    assert.throws(()=>decodeOperationOutput('history',result({...event,steps:[{key:'config:one',outcome,note:'password=fixture-only-value'}]})));
+  }
+  assert.throws(()=>decodeOperationOutput('history',result({...base,kind:'apply-finished',steps:[{key:'config:one',outcome:'failed',note:'Step completed'}]})));
+  for(const [kind,reason] of [['paused','Automatic application paused'],['resumed','Application pause cleared']]) {
+    assert.doesNotThrow(()=>decodeOperationOutput('history',result({...base,kind,detail:{kind:'pause',reason}})));
+    assert.throws(()=>decodeOperationOutput('history',result({...base,kind,detail:{kind:'pause',reason:'password=fixture-only-value'}})));
+  }
+});

@@ -288,15 +288,21 @@ const HistoryDetailSchema = Schema.Union([
   Schema.Struct({kind:Schema.Literal('setup'),setupId:Schema.NullOr(IdSchema)}),
   Schema.Struct({kind:Schema.Literal('revision'),setupId:IdSchema,revision:Schema.Union([IdSchema,CountSchema]),accepted:Schema.Boolean}),
   Schema.Struct({kind:Schema.Literal('policy'),from:Schema.Literals(POLICIES),to:Schema.Literals(POLICIES),origin:Schema.Literals(['local','synced'])}),
-  Schema.Struct({kind:Schema.Literal('pause'),reason:Text}),
+  Schema.Struct({kind:Schema.Literal('pause'),reason:Schema.Literals(['Automatic application paused','Application pause cleared'])}),
   Schema.Struct({kind:Schema.Literal('backups'),ids:Schema.Array(BackupFolderIdSchema).check(Schema.isMaxLength(100)),pruned:Schema.Boolean,limited:Schema.optionalKey(Schema.Boolean)}),
 ]);
-const historyFields = {at:OperationTimeSchema.check(Schema.isMaxCodePoints(100)),actor:Schema.Literals(['agent','cli','app','sync','mcp'])};
+export const HistoryTimeSchema = OperationTimeSchema.check(Schema.isMaxCodePoints(100));
+const HistoryStepSchema = Schema.Union([
+  Schema.Struct({key:KeySchema,outcome:Schema.Literal('ok'),note:Schema.Literal('Step completed')}),
+  Schema.Struct({key:KeySchema,outcome:Schema.Literal('failed'),note:Schema.Literal('Step failed')}),
+  Schema.Struct({key:KeySchema,outcome:Schema.Literal('cancelled'),note:Schema.Literal('Step cancelled')}),
+]);
+const historyFields = {at:HistoryTimeSchema,actor:Schema.Literals(['agent','cli','app','sync','mcp'])};
 export const OperationHistoryEventSchema = Schema.Union([
   Schema.Struct({...historyFields,kind:Schema.Literal('unknown'),message:Schema.Literal('Unsupported historical event')}),
   Schema.Struct({...historyFields,kind:Schema.Literals(['apply-started','apply-finished','operation-checkpoint','skill-addition','held','ready','decided','policy-changed','setup-trusted','paused','resumed','revision-verified','revision-rejected','backups-pruned','outbox-dropped']),
     operation:Schema.optionalKey(Schema.Literal('applyChange')),scope:Schema.optionalKey(OperationScopeSchema),requestId:Schema.optionalKey(IdSchema),runId:Schema.optionalKey(IdSchema),
-    keys:Schema.optionalKey(list(KeySchema)),steps:Schema.optionalKey(list(StepOutcomeSchema)),message:Schema.optionalKey(Text),detail:Schema.optionalKey(HistoryDetailSchema)}),
+    keys:Schema.optionalKey(list(KeySchema)),steps:Schema.optionalKey(list(HistoryStepSchema)),message:Schema.optionalKey(Text),detail:Schema.optionalKey(HistoryDetailSchema)}),
 ]);
 export const OperationHistoryResultSchema = Schema.Struct({ events: Schema.Array(OperationHistoryEventSchema).check(Schema.isMaxLength(MAX_HISTORY)), nextBefore: Schema.NullOr(OperationHistoryCursorSchema) });
 const scope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ kind: 'machine' } as const)));

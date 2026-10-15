@@ -5,7 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
-import { Cause, Data, Effect, FiberSet } from 'effect';
+import { Cause, Data, Effect, FiberSet, Schema } from 'effect';
 import { Fs, HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
@@ -14,7 +14,7 @@ import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
 import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
-import { operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext } from '../operations/index.ts';
+import { operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema } from '../operations/index.ts';
 import { operationDigest, RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
 import {
@@ -291,12 +291,15 @@ export const serveIpc = (input: {
     const wire = <R>(effect: Effect.Effect<AgentStatus, unknown, R>): Effect.Effect<Handled, unknown, R> =>
       Effect.flatMap(effect, (status) => Effect.map(liveStatus(status), (result) => ({ result })));
 
+    const decodeHistoryTime = Schema.decodeUnknownSync(HistoryTimeSchema);
     const historyPage = (request: { readonly before?: HistoryResult['nextBefore']; readonly limit: number }) => Effect.gen(function* () {
       const events = yield* (yield* HistoryStore).read;
       // Per-instant append order stays stable when a clock rollback adds an older month.
       const sequences = new Map<number, number>();
       const ordered = events.flatMap((event) => {
-        const at = Date.parse(event.at);
+        let at: number;
+        try { at = Date.parse(decodeHistoryTime(event.at)); }
+        catch { return []; }
         if (!Number.isFinite(at)) return [];
         const seq = sequences.get(at) ?? 0;
         sequences.set(at, seq + 1);

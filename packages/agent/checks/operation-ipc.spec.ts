@@ -4,11 +4,12 @@ import { readFileSync, rmSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Deferred, Effect, Exit, Scope } from 'effect';
-import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
+import { configDomain, DecisionsStore, HistoryStore, integrationsDomain } from '@nortuscc/machine';
 import {
   AgentStateStore, makeSession, MAX_RECORD_BYTES, serveIpc, startAgent,
   type AgentDomain, type AgentDomains,
 } from '../src/index.ts';
+import { pause, resume } from '../src/pause.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from './support/setup-fixture.ts';
 
@@ -271,5 +272,54 @@ test('concurrent app and MCP acceptance share the same apply coordination and lo
     let run=await operation(mcp,'getRun',{runId:accepted.result.run.runId});
     while(run.result.result===null) { await new Promise(resolve=>setTimeout(resolve,1)); run=await operation(mcp,'getRun',{runId:accepted.result.run.runId}); }
     assert.equal(run.result.state,'succeeded'); assert.equal(calls,1);
+  });
+});
+
+test('authenticated shared History replaces private failed-step and pause diagnostics with closed summaries', async () => {
+  await withServer({}, async s => {
+    const diagnostic = 'Failed to parse private input: password=fixture-only-value';
+    await s.m.run(HistoryStore.use(history => history.append({kind:'apply-finished',actor:'agent',runId:'private-diagnostic',backup:null,result:'done',
+      steps:[{key:'config:one',outcome:'failed',note:diagnostic},{key:'config:two',outcome:'ok',note:diagnostic},{key:'config:three',outcome:'cancelled',note:diagnostic}],
+    })));
+    await s.m.run(Effect.andThen(pause(diagnostic), resume('app')));
+    const stored = await s.m.events();
+    assert.ok(JSON.stringify(stored).includes(diagnostic));
+    const c = await s.open();
+    const reply = await operation(c,'history',{limit:100});assert.equal(reply.ok,true);
+    assert.doesNotMatch(JSON.stringify(reply.result),/fixture-only-value|password=|Failed to parse private input/);
+    assert.deepEqual(reply.result.events.find((e:Wire)=>e.runId==='private-diagnostic').steps,[
+      {key:'config:one',outcome:'failed',note:'Step failed'},
+      {key:'config:two',outcome:'ok',note:'Step completed'},
+      {key:'config:three',outcome:'cancelled',note:'Step cancelled'},
+    ]);
+    assert.deepEqual(reply.result.events.filter((e:Wire)=>e.kind==='paused'||e.kind==='resumed').map((e:Wire)=>e.detail.reason),
+      ['Application pause cleared','Automatic application paused']);
+  });
+});
+
+test('authenticated shared History skips raw malformed timestamps and preserves duplicate same-time occurrences', async () => {
+  await withServer({}, async s => {
+    const at='2099-10-15T00:00:00.000Z';
+    const policy={kind:'policy-changed',from:'manual',to:'notify',origin:'local'};
+    const malformed=[{toString:0},[at],null,0,'2099-02-30T00:00:00Z','2099-10-15T25:00:00Z',' '+at,at+'\n'];
+    s.m.write(join(s.m.paths.stateRoot,'history','2099-10.jsonl'),[
+      {kind:'future-first',at:'2099-10-14T00:00:00.000Z'},
+      ...malformed.map(value=>({kind:'future-invalid',at:value})),
+      {kind:'future-duplicate-one',at,private:'fixture-only-value'},
+      {...policy,at},
+      {kind:'future-duplicate-two',at,private:'another-fixture-only-value'},
+      {kind:'future-last',at:'2099-10-16T00:00:00.000Z'},
+    ].map(event=>JSON.stringify({v:1,actor:'cli',...event})).join('\n')+'\n');
+    assert.equal((await s.m.events()).filter(e=>e.kind.startsWith('future')).length,12);
+    const c=await s.open();const events:Wire[]=[];const cursors:Wire[]=[];let before;
+    for(let i=0;i<5;i++){
+      const reply=await operation(c,'history',{limit:1,...(before?{before}:{})});
+      assert.equal(reply.ok,true,JSON.stringify(reply));events.push(...reply.result.events);before=reply.result.nextBefore;cursors.push(before);
+    }
+    assert.deepEqual(events.map(e=>e.kind),['unknown','unknown','policy-changed','unknown','unknown']);
+    assert.deepEqual(cursors.slice(1,4).map(c=>c.seq),[2,1,0]);
+    assert.deepEqual(events[1],events[3]);
+    assert.deepEqual(events.map(e=>e.at),['2099-10-16T00:00:00.000Z',at,at,at,'2099-10-14T00:00:00.000Z']);
+    assert.doesNotMatch(JSON.stringify(events),/fixture-only-value|future-invalid/);
   });
 });

@@ -189,6 +189,31 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} safe historical diagnostics and malformed timestamps use authenticated MCP`, {timeout:30000}, async t => {
+    const s=await agent();t.after(s.close);
+    const at='2099-10-15T00:00:00.000Z', diagnostic='Failed to parse private input: password=fixture-only-value';
+    const raw=[
+      {kind:'future-one',at,private:diagnostic},
+      {kind:'paused',at,reason:diagnostic},
+      {kind:'future-malformed',at:{toString:0},private:diagnostic},
+      {kind:'future-bad-calendar',at:'2099-02-30T00:00:00Z'},
+      {kind:'resumed',at,reason:`was paused: ${diagnostic}`},
+      {kind:'apply-finished',at,runId:'safe-history',backup:null,result:'done',steps:[{key:'config:one',outcome:'failed',note:diagnostic}]},
+      {kind:'future-two',at,private:diagnostic},
+    ].map(event=>({v:1,actor:'cli',...event}));
+    s.m.write(join(s.m.paths.stateRoot,'history','2099-10.jsonl'),raw.map(e=>JSON.stringify(e)).join('\n')+'\n');
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    const events:any[]=[],sequences:number[]=[];let before;
+    for(let i=0;i<5;i++){
+      const page=output('history',await client.call('history',{limit:1,...(before?{before}:{})}));
+      events.push(...page.events);before=page.nextBefore;sequences.push(before.seq);
+    }
+    assert.deepEqual(events.map(e=>e.kind),['unknown','apply-finished','resumed','paused','unknown']);
+    assert.deepEqual(sequences,[4,3,2,1,0]);assert.deepEqual(events[0],events[4]);
+    assert.deepEqual(events[1].steps,[{key:'config:one',outcome:'failed',note:'Step failed'}]);
+    assert.equal(events[2].detail.reason,'Application pause cleared');assert.equal(events[3].detail.reason,'Automatic application paused');
+    assert.doesNotMatch(JSON.stringify(events),/fixture-only-value|password=|Failed to parse private input|was paused:/);
+  });
   test(`${runtime}: ${modern ? 'modern' : 'legacy'} History and retention use authenticated MCP`, {timeout:30000}, async t => {
     const s=await agent();t.after(s.close);
     const folder=(i:number)=>`nortuscc-${new Date(Date.UTC(2020,0,1)-i*86400000).toISOString().replace(/[:.]/g,'-')}`;
