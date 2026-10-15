@@ -29,13 +29,14 @@ owned registrations through the app lifecycle. The installed app is required for
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
 packaging targets are unvalidated, and Windows has no supported agent IPC.
 
-The app exposes twenty machine operations:
+The app exposes twenty-one machine operations:
 
 | MCP tool | Behavior |
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
 | `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
 | `nortuscc_agent_status` | Bounded status, pending, drift and conflicts |
+| `nortuscc_list_backups` | Generated backup dates, IDs and latest History reference; exact retention cleanup uses preview/apply, at most 100 folders per batch |
 | `nortuscc_account_state` | Account, setups and machine metadata with queued versus confirmed persistence |
 | `nortuscc_inspect_setups` | Known setup identities and trust status |
 | `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
@@ -52,7 +53,7 @@ The app exposes twenty machine operations:
 | `nortuscc_get_run` | Recover a run's attributed intent, installation evidence, terminal outcome and follow-up prerequisites |
 | `nortuscc_list_runs` | List retained runs with bounded pagination |
 | `nortuscc_cancel_run` | Cancel an authorized run at a safe boundary |
-| `nortuscc_history` | Read bounded History with MCP actor, request, scope and run attribution |
+| `nortuscc_history` | Read bounded safe decision, setup, revision, policy, pause and backup details with actor, request, scope and run attribution |
 
 Source reads use declared identities only. Public GitHub names stay readable; other declared URLs
 and the trusted configured file checkout use stable opaque IDs. An extra local checkout requires

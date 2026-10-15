@@ -32,9 +32,9 @@ export const engineCapabilityCoverage = {
   skillAdoptionPruning: available('operations/updates.ts and machine/skills/domain.ts', ['previewChange', 'applyChange', 'getRun'], 'Selected adoption and pruning retain configured native destination prerequisites, backups and partial outcomes.'),
   additionUpdateRepair: available('agent/skill-operations.ts and skill-addition.ts', ['resolveSkillCandidate', 'previewChange', 'applyChange'], 'Addition-touched update/repair requires the existing audited native selector, explicit environment, accepted content and catalog verification route.'),
   machineOverrides: available('machine/intent.ts', ['previewChange', 'applyChange'], 'Semantic machine choices and explicit declaration removal with backed-up intent persistence and routing release; no installer or physical content deletion.'),
-  historyDetail: remaining('agent/ipc/server.ts History projection', parity, 'Expose bounded decision/setup/revision, policy from/to, pause and backup/pruning facts currently omitted by the operation projection.'),
-  backupPruning: remaining('machine/prune.ts', parity, 'Existing retention pruning needs a bounded operation and common mutation contract.'),
-  backupInventoryRestore: remaining('machine/backups.ts', 'Backup inventory and selected restoration', 'No public typed inventory or general selected-backup restoration exists.'),
+  historyDetail: available('operations/history.ts', ['history'], 'Discriminated safe decision, setup, revision, policy, pause and backup facts; constant unknown fallback.'),
+  backupPruning: available('machine/prune.ts and operations/backups.ts', ['listBackups','previewChange','applyChange','getRun'], 'Exact bounded retention batches bind generated contained directories, inventory, latest reference and fixed evaluation time under the common lock; observed partial deletions persist without backup-of-backups.'),
+  backupInventoryRestore: remaining('machine/backups.ts', 'Backup inventory and selected restoration', 'Validated folder date/ID/reference inventory is available through listBackups; general selected-backup restoration has no owner.'),
   incomingSyncDecisions: available('sync/decisions.ts and operations/sync.ts', ['incomingChanges','previewChange','applyChange'], 'Exact local or hosted per-item accept, hold, release and take-theirs retain backups, partial facts and post-lock policy scheduling.'),
   heldConfiguration: available('sync/compose.ts and setup-source.ts', ['inspectSetups','incomingChanges'], 'Known trusted setup and verified incoming item inspection; no repository document projection.'),
   setupTrust: available('agent/setups.ts and operations/sync.ts', ['prepareTrustRequest'], 'Returns only the existing app-local trust action and bounded repository identity; no consent write.'),
@@ -60,6 +60,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
+  listBackups: {state:'available'}, pruneBackups: {state:'available'},
   agentStatus: {state:'available'}, accountState: {state:'available'},
   setPolicy: {state:'available'}, resume: {state:'available'}, signIn: {state:'available'}, signOut: {state:'available'}, syncAccount: {state:'available'}, patchMachineMetadata: {state:'available'},
   sourceDecision: {state:'available'}, watchSources: {state:'available'}, inspectSourceDiff: {state:'available'}, pinImpact: {state:'available'}, draftChangelog: {state:'available'},

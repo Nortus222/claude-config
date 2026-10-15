@@ -1,7 +1,10 @@
 import { basename, dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { acquireApplyLock } from './apply-lock.ts';
+import { FsFailed } from './errors.ts';
 import { Effect, Exit } from 'effect';
 import { Fs } from './fs.ts';
-import { HistoryStore, type Actor, type HistoryEvent } from './history.ts';
+import { HistoryStore, type Actor, type HistoryEvent, type MutationObserver } from './history.ts';
 import { MachinePaths } from './paths.ts';
 
 export const PRUNE_AFTER_DAYS = 90;
@@ -14,7 +17,7 @@ export const backupFolderTime = (name: string): number | undefined => {
   const m = FOLDER.exec(name);
   if (!m) return undefined;
   const time = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
-  return Number.isNaN(time) ? undefined : time;
+  return Number.isNaN(time) || `nortuscc-${new Date(time).toISOString().replace(/[:.]/g, '-')}` !== name ? undefined : time;
 };
 
 // Folders both older than 90 days and outside the newest 20, never `keep`, newest first. Names
@@ -33,27 +36,77 @@ export const backupsToPrune = (names: ReadonlyArray<string>, now: Date, keep?: s
 const latestReferenced = (events: ReadonlyArray<HistoryEvent>): string | undefined => {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
-    if (e.kind === 'apply-finished' && e.backup !== null && e.backup !== 'pruned') return e.backup;
+    if (e.kind === 'apply-finished' && typeof e.backup === 'string' && e.backup !== 'pruned') return e.backup;
   }
   return undefined;
 };
 
-// Removes old run folders under MachinePaths.backups and names each one removed in a
-// `backups-pruned` event. Deleting a backup is the retention policy itself, so nothing backs it up.
-export const pruneBackups = (now: Date, actor: Actor) =>
-  Effect.gen(function* () {
-    const paths = yield* MachinePaths;
-    const fs = yield* Fs;
-    const history = yield* HistoryStore;
-    const latest = latestReferenced(yield* history.read);
-    const keep = latest !== undefined && dirname(latest) === paths.backups ? basename(latest) : undefined;
-    const removed: string[] = [];
-    for (const name of backupsToPrune((yield* fs.list(paths.backups)) ?? [], now, keep)) {
-      const path = join(paths.backups, name);
-      // Stop at the first failure; what was removed is still recorded.
-      if (Exit.isFailure(yield* Effect.exit(fs.remove(path)))) break;
-      removed.push(path);
+export type BackupFolder = { readonly id: string; readonly createdAt: string; readonly latestReferenced: boolean };
+export type BackupPrunePlan = { readonly folderIds: readonly string[]; readonly inventoryDigest: string; readonly keepId: string | null; readonly evaluatedAt: string; readonly limited: boolean };
+export type BackupPruneResult = { readonly removed: readonly string[]; readonly remaining: readonly string[]; readonly failedId?: string };
+
+export const inspectBackupFolders = (): Effect.Effect<readonly BackupFolder[], FsFailed, Fs | MachinePaths | HistoryStore> => Effect.gen(function* () {
+  const paths = yield* MachinePaths, fs = yield* Fs;
+  const latest = latestReferenced(yield* (yield* HistoryStore).read);
+  const keep = typeof latest === 'string' && dirname(latest) === paths.backups ? basename(latest) : undefined;
+  if ((yield* fs.stat(paths.backups))?.kind !== 'directory') return [];
+  const root = yield* fs.realPath(paths.backups);
+  if (!root) return [];
+  const folders: BackupFolder[] = [];
+  for (const id of (yield* fs.list(paths.backups)) ?? []) {
+    const time = backupFolderTime(id);
+    if (time === undefined) continue;
+    const path = join(paths.backups, id);
+    if ((yield* fs.stat(path))?.kind !== 'directory' || (yield* fs.realPath(path)) !== join(root, id)) continue;
+    folders.push({ id, createdAt: new Date(time).toISOString(), latestReferenced: id === keep });
+  }
+  return folders.sort((a,b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+});
+
+export const planBackupPrune = (now: Date): Effect.Effect<BackupPrunePlan, FsFailed, Fs | MachinePaths | HistoryStore> => Effect.gen(function* () {
+  const folders = yield* inspectBackupFolders();
+  const paths = yield* MachinePaths, fs = yield* Fs;
+  const keepId = folders.find(f => f.latestReferenced)?.id ?? null;
+  const eligible = backupsToPrune(folders.map(f => f.id), now, keepId ?? undefined);
+  const inventoryDigest = createHash('sha256').update(JSON.stringify({root: yield* fs.realPath(paths.backups), folders})).digest('hex');
+  return { folderIds: eligible.slice(0,100), inventoryDigest, keepId, evaluatedAt: now.toISOString(), limited: eligible.length > 100 };
+});
+
+// Called under apply.lock. Retention intentionally does not back up the backups it removes.
+export const executeBackupPrune = (plan: BackupPrunePlan, actor: Actor, observer: MutationObserver): Effect.Effect<BackupPruneResult, unknown, Fs | MachinePaths | HistoryStore> => Effect.gen(function* () {
+  const paths = yield* MachinePaths, fs = yield* Fs, history = yield* HistoryStore;
+  const fresh = yield* planBackupPrune(new Date(plan.evaluatedAt));
+  if (JSON.stringify(fresh) !== JSON.stringify(plan)) return yield* Effect.fail(new FsFailed({op:'prune',path:paths.backups,reason:'Backup inventory changed; preview again'}));
+  const root = yield* fs.realPath(paths.backups);
+  const removed: string[] = [];
+  let failedId: string | undefined;
+  const execution = yield* Effect.exit(Effect.gen(function* () {
+    for (const id of plan.folderIds) {
+      yield* observer.pending(id);
+      const path = join(paths.backups,id);
+      if (!root || (yield* fs.stat(paths.backups))?.kind !== 'directory' || (yield* fs.realPath(paths.backups)) !== root
+        || (yield* fs.stat(path))?.kind !== 'directory' || (yield* fs.realPath(path)) !== join(root,id)) {failedId=id;break;}
+      const removal = yield* Effect.exit(fs.remove(path));
+      if (Exit.isFailure(removal) || (yield* fs.exists(path))) { failedId = id; break; }
+      removed.push(id);
+      yield* observer.committed(id);
     }
-    if (removed.length > 0) yield* history.append({ kind: 'backups-pruned', actor, folders: removed });
-    return removed as ReadonlyArray<string>;
+  }));
+  const record = yield* Effect.exit(removed.length ? history.append({kind:'backups-pruned',actor,folders:removed.map(id=>join(paths.backups,id)),...(plan.limited?{limited:true}:{})}) : Effect.void);
+  if (Exit.isFailure(execution)) return yield* Effect.failCause(execution.cause);
+  if (Exit.isFailure(record)) return yield* Effect.failCause(record.cause);
+  return {removed,remaining:plan.folderIds.filter(id=>!removed.includes(id)),...(failedId ? {failedId} : {})};
+});
+
+// Automatic cleanup joins the common fence; a busy run is retried at its next existing opportunity.
+export const pruneBackups = (now: Date, actor: Actor, options?: {readonly lockHeld?: boolean}) => {
+  const cleanup = Effect.gen(function* () {
+    const paths = yield* MachinePaths;
+    const plan = yield* planBackupPrune(now);
+    const result = yield* executeBackupPrune(plan,actor,{pending:()=>Effect.void,committed:()=>Effect.void});
+    return result.removed.map(id=>join(paths.backups,id)) as readonly string[];
   });
+  return options?.lockHeld ? cleanup : Effect.scoped(Effect.andThen(acquireApplyLock,cleanup)).pipe(
+    Effect.catchIf(error=> typeof error === 'object' && error !== null && '_tag' in error && (error._tag === 'LockHeld' || error._tag === 'MaintenancePending'),()=>Effect.succeed([] as readonly string[])),
+  );
+};

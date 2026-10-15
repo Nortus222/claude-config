@@ -1,3 +1,4 @@
+import { prepareBackupOperation, readBackupOperation } from '../operations/backups.ts';
 import { isAccountChange, prepareAccountOperation, readAccountOperation } from '../operations/account.ts';
 import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -44,6 +45,7 @@ type Client = 'app' | 'cli' | 'mcp';
 
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
+  readonly listBackups: (input: OperationInput<'listBackups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'listBackups'>, SessionError>;
   readonly agentStatus: (input: OperationInput<'agentStatus'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'agentStatus'>, SessionError>;
   readonly accountState: (input: OperationInput<'accountState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'accountState'>, SessionError>;
   readonly runs: AgentRuns;
@@ -273,6 +275,16 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'pruneBackups') {
+        if (active) return yield* Effect.fail(busy);
+        return yield* handle.exclusive(Effect.gen(function* () {
+          const generation = yield* (handle.generation ?? Effect.succeed(0));
+          const prepared = yield* prepareBackupOperation(generation).pipe(Effect.provideContext(context));
+          if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation)
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Backup observation changed'));
+          return yield* retainParityChange(prepared);
+        }));
+      }
       if (isAccountChange(input.change)) {
         if(active)return yield* Effect.fail(busy);
         const change=input.change;
@@ -598,6 +610,13 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       return result;
     }));
     const session: AgentSession = {
+      listBackups: input => handle.exclusive(Effect.gen(function* () {
+        const generation = yield* (handle.generation ?? Effect.succeed(0)), inspection = yield* handle.inspection;
+        const result = yield* readBackupOperation(input, generation).pipe(Effect.provideContext(context));
+        if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection)
+          return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Backup observation changed'));
+        return result;
+      })),
       agentStatus: input=>accountRead('agentStatus',input),
       accountState: input=>accountRead('accountState',input),
       watchSources: input => sourceRead('watchSources',input),

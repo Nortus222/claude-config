@@ -1,7 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
-  AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
+  ListBackupsInputSchema, ListBackupsResultSchema, AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
   WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
   InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
   InspectUpdatesInputSchema, UpdatesInspectionResultSchema, InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
@@ -20,6 +20,7 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  listBackups: define('listBackups',ListBackupsInputSchema,ListBackupsResultSchema),
   agentStatus: define('agentStatus',AgentStatusInputSchema,AgentStatusResultSchema),
   accountState: define('accountState',AccountStateInputSchema,AccountStateResultSchema),
   watchSources: define('watchSources',WatchSourcesInputSchema,WatchSourcesResultSchema),

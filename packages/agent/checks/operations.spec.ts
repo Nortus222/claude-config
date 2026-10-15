@@ -25,7 +25,7 @@ const run = {
 };
 
 test('machine scope is normalized for every operation and explicit scopes survive decoding', () => {
-  const inputs = { getContext: {}, inspect: {}, previewChange: { change }, applyChange: { planId: 'p', requestId: 'q' }, getRun: { runId: 'r' }, listRuns: { limit: 10 }, cancelRun: { runId: 'r' }, history: { limit: 10 } };
+  const inputs = { listBackups:{limit:1},getContext: {}, inspect: {}, previewChange: { change }, applyChange: { planId: 'p', requestId: 'q' }, getRun: { runId: 'r' }, listRuns: { limit: 10 }, cancelRun: { runId: 'r' }, history: { limit: 10 } };
   for (const [name, input] of Object.entries(inputs)) {
     assert.deepEqual(decodeOperationInput(name as keyof typeof operationDefinitions, input), { ...input, scope: { kind: 'machine' } });
   }
@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);

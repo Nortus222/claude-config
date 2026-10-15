@@ -2,6 +2,7 @@ import { Schema } from 'effect';
 import { ContextResultSchema } from './schemas.ts';
 
 export const capabilityInventory = {
+  listBackups: {available:true}, pruneBackups: {available:true},
   agentStatus: {available:true}, accountState: {available:true},
   setPolicy: {available:true}, resume: {available:true}, signIn: {available:true}, signOut: {available:true}, syncAccount: {available:true}, patchMachineMetadata: {available:true},
   sourceDecision: {available:true}, watchSources: {available:true}, inspectSourceDiff: {available:true}, pinImpact: {available:true}, draftChangelog: {available:true},

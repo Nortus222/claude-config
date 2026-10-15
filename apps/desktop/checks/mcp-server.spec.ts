@@ -36,7 +36,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -189,6 +189,54 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { sourceDecisions?
 
 const runtimes = [...(nativeRuntime && packagedResources ? [expectedApp] : []), process.execPath, process.env.DESKTOP_MCP_BUN_RUNTIME ?? execFileSync('bun', ['-e', 'console.log(process.execPath)'], { encoding: 'utf8' }).trim()];
 for (const runtime of runtimes) for (const modern of [false, true]) {
+  test(`${runtime}: ${modern ? 'modern' : 'legacy'} History and retention use authenticated MCP`, {timeout:30000}, async t => {
+    const s=await agent();t.after(s.close);
+    const folder=(i:number)=>`nortuscc-${new Date(Date.UTC(2020,0,1)-i*86400000).toISOString().replace(/[:.]/g,'-')}`;
+    const ids=Array.from({length:24},(_,i)=>folder(i));
+    for(const id of ids.slice(0,22))mkdirSync(join(s.m.paths.backups,id),{recursive:true});
+    const at='2099-10-15T00:00:00.000Z';
+    const raw=[
+      {kind:'decided',setupId:'setup',itemId:'skill:owner/repo/name',revision:2,commit:null,decision:'accept'},
+      {kind:'policy-changed',from:'manual',to:'notify',origin:'local'},
+      {kind:'paused',reason:'fixture pause'},
+      {kind:'future',message:'PRIVATE-HISTORY',runId:'PRIVATE-HISTORY',userCode:'PRIVATE-HISTORY'},
+      {kind:'decided',setupId:{token:'PRIVATE-HISTORY'},decision:'accept'},
+      {kind:'apply-finished',runId:'historic',steps:[],backup:join(s.m.paths.backups,ids[21]!),result:'done'},
+    ].map(event=>({v:1,at,actor:'mcp',...event}));
+    s.m.write(join(s.m.paths.stateRoot,'history','2099-10.jsonl'),raw.map(e=>JSON.stringify(e)).join('\n')+'\n');
+    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
+    const first=output('listBackups',await client.call('listBackups',{limit:1}));assert.equal(first.folders[0].id,ids[0]);assert.ok(first.nextCursor);
+    const second=output('listBackups',await client.call('listBackups',{limit:1,cursor:first.nextCursor}));assert.equal(second.folders[0].id,ids[1]);
+    assert.equal(output('listBackups',await client.call('listBackups',{limit:100})).folders.find((f:any)=>f.id===ids[21]).latestReferenced,true);
+    assert.equal((await client.call('listBackups',{limit:101})).result.isError,true);
+    assert.equal((await client.call('listBackups',{limit:1,path:'/private'})).result.isError,true);
+    const history:any[]=[];let before;
+    for(let i=0;i<6;i++){
+      const page=output('history',await client.call('history',{limit:1,...(before?{before}:{})}));
+      history.push(...page.events);before=page.nextBefore;
+    }
+    assert.deepEqual(history.map(e=>e.kind),['apply-finished','unknown','unknown','paused','policy-changed','decided']);
+    assert.deepEqual(history.at(-1).detail,{kind:'decision',setupId:'setup',itemId:'skill:owner/repo/name',revision:2,commit:null,choice:'accept'});
+    assert.doesNotMatch(JSON.stringify(history),/PRIVATE-HISTORY|userCode|pendingId|signInFlow/);
+    mkdirSync(join(s.m.paths.backups,ids[22]!));
+    assert.equal((await client.call('listBackups',{limit:1,cursor:first.nextCursor})).result.isError,true);
+    const stale=output('previewChange',await client.call('previewChange',{change:{kind:'pruneBackups'}}));
+    mkdirSync(join(s.m.paths.backups,ids[23]!));
+    assert.equal((await client.call('applyChange',{planId:stale.planId,requestId:'stale-retention'})).result.isError,true);
+    for(const id of ids)assert.ok(existsSync(join(s.m.paths.backups,id)));
+    const preview=output('previewChange',await client.call('previewChange',{change:{kind:'pruneBackups'}}));
+    assert.deepEqual(preview.retention.folderIds,[ids[20],ids[22],ids[23]]);assert.equal(preview.retention.keepId,ids[21]);
+    const request={planId:preview.planId,requestId:'exact-retention'};
+    let run=output('applyChange',await client.call('applyChange',request)).run;
+    for(let i=0;i<200&&!run.result;i++){await new Promise(r=>setTimeout(r,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
+    assert.equal(run.state,'succeeded');assert.deepEqual(run.parity.committedKeys,preview.retention.folderIds);
+    for(const id of ids)assert.equal(existsSync(join(s.m.paths.backups,id)),!preview.retention.folderIds.includes(id));
+    const next=open(runtime,s.m.paths.stateRoot,modern);t.after(next.close);await next.initialize();
+    assert.equal(output('applyChange',await next.call('applyChange',request)).run.runId,run.runId);
+    const after=output('history',await next.call('history',{limit:100}));
+    const pruned=after.events.find((e:any)=>e.kind==='backups-pruned');assert.equal(pruned.runId,run.runId);assert.equal(pruned.requestId,request.requestId);
+    assert.deepEqual(pruned.detail,{kind:'backups',ids:preview.retention.folderIds,pruned:true});
+  });
   test(`${runtime}: ${modern ? 'modern' : 'legacy'} account and policy operations use authenticated MCP`, {timeout:30000}, async t => {
     const s=await agent();t.after(s.close);
     const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
@@ -289,7 +337,7 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     assert.deepEqual(listed.result.tools.map((tool: any) => tool.name).sort(), Object.values(names).sort());
     for (const [operation, name] of Object.entries(names)) {
       const tool = listed.result.tools.find((tool: any) => tool.name === name);
-      assert.deepEqual(tool.inputSchema, operationJsonSchemas[operation as OperationName].input);
+      assert.deepEqual(tool.inputSchema, { type: 'object', ...operationJsonSchemas[operation as OperationName].input });
       assert.deepEqual(tool.outputSchema, { type: 'object', ...operationJsonSchemas[operation as OperationName].output });
     }
     assert.equal(output('getContext', await client.call('getContext')).app.ownership, 'app');

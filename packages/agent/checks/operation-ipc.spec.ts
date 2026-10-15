@@ -210,6 +210,8 @@ test('MCP authentication reads a fresh token and rejects incorrect runtime ident
   await withServer({}, async s => {
     const unauthenticated = await connect(s.socketPath);
     assert.equal((await operation(unauthenticated, 'inspect')).error.code, 'UNAUTHORIZED'); await unauthenticated.closed;
+    const unauthenticatedBackups = await connect(s.socketPath);
+    assert.equal((await operation(unauthenticatedBackups, 'listBackups', {limit:1})).error.code, 'UNAUTHORIZED'); await unauthenticatedBackups.closed;
     const bad = await connect(s.socketPath);
     assert.equal((await ask(bad, {command:'hello',client:'mcp',runtimeId:'9.9.9',token:'wrong'})).error.code, 'UNAUTHORIZED'); await bad.closed;
     const mismatch = await connect(s.socketPath); s.clients.push(mismatch);
@@ -226,14 +228,14 @@ test('MCP authentication reads a fresh token and rejects incorrect runtime ident
 test('all shared operations refuse unsupported scopes and nested unknown fields', async () => {
   await withServer({}, async s => {
     const c = await s.open();
-    const requests = { getContext:{},inspect:{},previewChange:{change:{kind:'reconcile',only:[]}},applyChange:{planId:'p',requestId:'i'},getRun:{runId:'r'},listRuns:{limit:10},cancelRun:{runId:'r'},history:{limit:10} };
+    const requests = { listBackups:{limit:1},getContext:{},inspect:{},previewChange:{change:{kind:'reconcile',only:[]}},applyChange:{planId:'p',requestId:'i'},getRun:{runId:'r'},listRuns:{limit:10},cancelRun:{runId:'r'},history:{limit:10} };
     for (const [name,args] of Object.entries(requests)) {
       for (const scope of [{kind:'user'},{kind:'profile',profileId:'p'}]) assert.equal((await operation(c,name,{...args,scope})).error.code,'UNSUPPORTED_SCOPE');
       assert.equal((await operation(c,name,{...args,scope:{kind:'machine',path:'/tmp'}})).error.code,'INVALID_REQUEST');
     }
     assert.equal((await operation(c,'listRuns',{limit:501})).error.code,'INVALID_REQUEST');
     assert.equal((await operation(c,'previewChange',{change:{kind:'reconcile',only:['k'.repeat(501)]}})).error.code,'INVALID_REQUEST');
-    assert.equal((await operation(c,'previewChange',{change:{kind:'reconcile',only:[],force:true}})).error.code,'INVALID_REQUEST');
+    assert.equal((await operation(c,'previewChange',{change:{kind:'reconcile',only:[],force:'true'}})).error.code,'INVALID_REQUEST');
     assert.deepEqual(JSON.parse(readFileSync(join(s.m.paths.claude,'settings.json'),'utf8')), {theme:'dark'});
   });
 });

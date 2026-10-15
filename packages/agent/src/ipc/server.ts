@@ -1,3 +1,4 @@
+import { projectHistoryEvent } from '../operations/history.ts';
 import { HostedFailure } from '@nortuscc/hosted-client';
 import { disabledHostedState } from '../hosted.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -332,6 +333,7 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'listBackups': result = yield* session.listBackups(request.input); break;
             case 'agentStatus': result = yield* session.agentStatus(request.input); break;
             case 'accountState': result = yield* session.accountState(request.input); break;
             case 'watchSources': result = yield* session.watchSources(request.input); break;
@@ -366,13 +368,10 @@ export const serveIpc = (input: {
             case 'history': {
               const history = request.input;
               const legacy = yield* historyPage(history);
-              result = { ...legacy, events:legacy.events.map(event => ({ kind:event.kind, at:event.at, actor:event.actor,
-                ...('operation' in event ? {operation:event.operation,scope:event.scope,requestId:event.requestId} : {}),
-                ...('runId' in event ? {runId:event.runId} : {}),
-                ...('keys' in event ? {keys:event.keys} : {}),
-                ...('steps' in event ? {steps:event.steps.map(step => ({...step,note:[...step.note].slice(0,500).join('')}))} : {}),
-                ...('message' in event ? {message:[...String(event.message)].slice(0,500).join('')} : {}),
-              })) }; break;
+              result = { ...legacy, events: legacy.events.flatMap(event => {
+                const projected = projectHistoryEvent(event);
+                return projected ? [projected] : [];
+              }) }; break;
             }
           }
           return { result: decodeOperationOutput(name, result) };

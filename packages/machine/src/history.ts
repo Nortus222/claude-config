@@ -37,7 +37,7 @@ export type HistoryEventBody =
   | { readonly kind: 'paused'; readonly reason: string; readonly runId?: string }
   | { readonly kind: 'resumed'; readonly reason: string }
   | { readonly kind: 'revision-verified' | 'revision-rejected'; readonly setupId: string; readonly revision: string | number; readonly error?: string }
-  | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> }
+  | { readonly kind: 'backups-pruned'; readonly runId?: string; readonly limited?: boolean; readonly folders: ReadonlyArray<string> }
   | { readonly kind: 'outbox-dropped'; readonly accountId: string; readonly count: number; readonly code: 'invalid' };
 
 export type OperationMetadata = {
@@ -76,7 +76,7 @@ const parseLines = (text: string): HistoryEvent[] =>
 
 const markPruned = (events: ReadonlyArray<HistoryEvent>): HistoryEvent[] => {
   const prunedAt = new Map<string, string>();
-  for (const e of events) if (e.kind === 'backups-pruned') for (const folder of e.folders) prunedAt.set(folder, e.at);
+  for (const e of events) if (e.kind === 'backups-pruned' && Array.isArray(e.folders)) for (const folder of e.folders) if (typeof folder === 'string') prunedAt.set(folder, e.at);
   return events.map((e): HistoryEvent =>
     e.kind === 'apply-finished' && e.backup !== null && prunedAt.has(e.backup)
       ? { ...e, backup: 'pruned', prunedFolder: e.backup, prunedAt: prunedAt.get(e.backup)! }
