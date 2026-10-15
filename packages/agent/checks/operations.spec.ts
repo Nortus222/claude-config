@@ -5,7 +5,7 @@ import {
   operationDefinitions, operationJsonSchemas, decodeOperationInput, decodeOperationOutput,
   ReconcilePreviewSchema, decodeOperationScope, decodeContextResult, decodeRunView, projectContext, capabilityInventory,
 } from '../src/operations/index.ts';
-import { InspectResultSchema, PreviewResultSchema, decodeInspectResult, decodePreviewResult, decodeMessage, decodeRequest } from '../src/ipc/protocol.ts';
+import { InspectResultSchema, PreviewResultSchema, decodeInspectResult, decodePreviewResult, decodeMessage, decodeRequest, type Message } from '../src/ipc/protocol.ts';
 
 const change = { kind: 'reconcile', only: ['skill:x'] } as const;
 const preview = { planId: 'p', scope: { kind: 'machine' }, change, generation: 'g', plan: { kind: 'apply', steps: [], skipped: [] }, nextActions: [] };
@@ -316,4 +316,10 @@ test('semantic discovery notifications contain only a bounded run ID', () => {
   const event = { version: 3, event: 'operation-run', runId: 'r' };
   assert.deepEqual(decodeMessage(event), event);
   for (const fields of [{ runId: '' }, {runId:'x'.repeat(101)}, {userCode:'SECRET'}, {signInFlow:'private'}, {receipt:run}]) assert.throws(() => decodeMessage({...event,...fields}));
+});
+
+// Every decoded wire variant must remain assignable to the public message contract.
+const publicMessage = (decoded: ReturnType<typeof decodeMessage>): Message => decoded;
+test('semantic notification is part of the exported Message contract', () => {
+  assert.deepEqual(publicMessage(decodeMessage({ version: 3, event: 'operation-run', runId: 'r' })), { version: 3, event: 'operation-run', runId: 'r' });
 });

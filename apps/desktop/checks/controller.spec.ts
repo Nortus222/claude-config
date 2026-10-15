@@ -5,7 +5,7 @@ import { skillRun } from './support/skill-run.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
 
 const step = (key: string) => ({ key, domain: 'config', action: 'write-file', summary: `write ${key}`, touches: [key], interruptible: false });
-const status = (fields = {}) => ({ at: 'now', policy: 'notify', paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 }, ...fields });
+const status = (fields = {}) => ({ at: 'now', policy: 'notify' as const, paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 }, ...fields });
 const inspection = (keys: string[]) => ({
   profile: { repo: '/r', revision: 'abc', overrides: '/s/overrides.json', issues: [] },
   items: keys.map((key) => ({ key, domain: 'config', target: 'claude', label: key, group: 'Files', state: 'repo-ahead', disposition: 'apply' })),
@@ -1178,4 +1178,117 @@ test('receipt invalidations refresh completed effects after a partial snapshot',
  run=skillRun({steps:[{key:'first',outcome:'ok',note:'First committed'},{key:'second',outcome:'ok',note:'Second committed'}]});
  f.emit({generation:1,version:3,event:'operation-run',runId:run.runId});await new Promise(resolve=>setTimeout(resolve,0));
  assert.deepEqual(c.state.run?.steps.map(step=>step.key),['first','second']);c.dispose();
+});
+
+import { decodeRunView } from '@nortuscc/agent/operations';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { ReviewView } from '../src/review-view.tsx';
+
+const signInRun = (id = 'authorization', state: 'awaiting-user' | 'needsInspection' | 'expired' = 'awaiting-user', expiresAt = new Date(Date.now() + 60_000).toISOString()) => decodeRunView({
+  runId: id, actor: 'mcp', state: 'succeeded', operation: 'applyChange', scope: { kind: 'machine' },
+  intent: { requestId: id, inputDigest: 'a'.repeat(64), planId: id, change: { kind: 'signIn' },
+    parity: { kind: 'signIn', generation: '1', baselineDigest: 'a'.repeat(64), planDigest: 'b'.repeat(64), plannedKeys: [] } },
+  intentSaved: false, steps: [], result: { status: 'done', ok: 0, failed: 0 },
+  parity: { kind: 'signIn', state: 'committed', committedKeys: [], remainingKeys: [], backupIds: [],
+    signIn: { kind: 'signIn', state, expiresAt, ...(state === 'awaiting-user' ? { userCode: 'ABCD-EFGH', verificationUri: 'https://github.com/login/device' } : {}) } },
+});
+const paintChallenge = (controller: MachineController) => renderToStaticMarkup(createElement(ReviewView, { controller, state: controller.state }));
+const settleReceipt = () => new Promise(resolve => setTimeout(resolve, 0));
+
+for (const prior of ['none', 'settled'] as const) test(`old receipt scrub cannot supersede pending running discovery with ${prior} prior view`, async t => {
+  const pending = deferred<unknown>();
+  const old = signInRun('old', 'needsInspection');
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: prior === 'settled' ? [old] : [], nextBefore: null }),
+    get_operation_run: args => args?.runId === 'new' ? pending.promise : old });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'new' });
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'old' });
+  await settleReceipt(); pending.resolve(skillRun({ runId: 'new', state: 'running', result: null })); await settleReceipt();
+  assert.deepEqual(f.calls.filter(([name]) => name === 'get_operation_run').map(([, args]) => args), [{ runId: 'new' }, { runId: 'old' }]);
+  assert.equal(c.state.run?.runId, 'new'); assert.equal(c.state.run?.outcome, 'running');
+});
+
+for (const transition of ['pending', 'completed', 'replaced', 'signed-out', 'read-failed'] as const) test(`sign-in status rechecks safe authority after ${transition}`, async t => {
+  const pending = deferred<unknown>();
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [signInRun()], nextBefore: null }), get_operation_run: () => pending.promise });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  assert.match(paintChallenge(c), /ABCD-EFGH/);
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() });
+  assert.doesNotMatch(paintChallenge(c), /ABCD-EFGH|https:\/\/github.com\/login\/device/);
+  assert.equal(f.calls.filter(([name]) => name === 'get_operation_run').length, 1);
+  if (transition === 'read-failed') pending.reject(new Error('fixture unavailable'));
+  else pending.resolve(signInRun('authorization', transition === 'pending' ? 'awaiting-user' : 'needsInspection'));
+  await settleReceipt();
+  if (transition === 'pending') assert.match(paintChallenge(c), /ABCD-EFGH/);
+  else assert.doesNotMatch(paintChallenge(c), /ABCD-EFGH|https:\/\/github.com\/login\/device/);
+});
+
+test('sign-in expiry updates rendered challenge without an unrelated event', async t => {
+  const expiresAt = new Date(Date.now() + 200).toISOString();
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [signInRun('expiring', 'awaiting-user', expiresAt)], nextBefore: null }) });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  let markup = paintChallenge(c); let renders = 0;
+  c.subscribe(() => { renders++; markup = paintChallenge(c); });
+  assert.match(markup, /ABCD-EFGH/);
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(expiresAt) - Date.now()) + 30));
+  assert.ok(renders > 0); assert.doesNotMatch(markup, /ABCD-EFGH|https:\/\/github.com\/login\/device/);
+});
+
+test('sign-in refresh cannot restore a challenge after reconnect or disposal', async t => {
+  const pending = deferred<unknown>(); let lists = 0;
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [++lists === 1 ? signInRun() : skillRun({ runId: 'current' })], nextBefore: null }), get_operation_run: () => pending.promise });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() });
+  await c.connect(); pending.resolve(signInRun()); await settleReceipt();
+  assert.equal(c.state.run?.runId, 'current'); assert.doesNotMatch(paintChallenge(c), /ABCD-EFGH/);
+  c.dispose(); const disposed = c.state; await settleReceipt(); assert.equal(c.state, disposed);
+});
+
+test('sign-in replacement invalidates the previous safe read and expiry timer', async t => {
+  const pending = deferred<unknown>();
+  const expiresAt = new Date(Date.now() + 200).toISOString();
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [signInRun('old', 'awaiting-user', expiresAt)], nextBefore: null }),
+    get_operation_run: args => args?.runId === 'old' ? pending.promise : signInRun('new') });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() });
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'new' }); await settleReceipt();
+  pending.resolve(signInRun('old', 'awaiting-user', expiresAt)); await settleReceipt();
+  assert.equal(c.state.run?.runId, 'new'); assert.match(paintChallenge(c), /ABCD-EFGH/);
+  let renders = 0; c.subscribe(() => renders++);
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(expiresAt) - Date.now()) + 30));
+  assert.equal(renders, 0); assert.match(paintChallenge(c), /ABCD-EFGH/);
+});
+
+test('sign-in superseded safe reads and disconnect cannot redisplay a challenge', async t => {
+  const pending = deferred<unknown>(); let reads = 0;
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: [signInRun()], nextBefore: null }),
+    get_operation_run: () => ++reads === 1 ? pending.promise : signInRun('authorization', 'needsInspection') });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() });
+  f.emit({ generation: 1, version: 3, event: 'status', status: status() }); await settleReceipt();
+  pending.resolve(signInRun()); await settleReceipt();
+  assert.doesNotMatch(paintChallenge(c), /ABCD-EFGH/);
+  await c.connect(); assert.match(paintChallenge(c), /ABCD-EFGH/);
+  f.emit({ generation: 1, event: 'disconnected', detail: 'fixture disconnected' });
+  assert.doesNotMatch(paintChallenge(c), /ABCD-EFGH/);
+});
+
+for (const prior of ['none', 'settled'] as const) for (const firstReply of ['new', 'old'] as const) test(`terminal discovery survives old scrub with ${prior} prior view and ${firstReply} reply first`, async t => {
+  const newer = deferred<unknown>(); const older = deferred<unknown>(); const old = signInRun('old', 'needsInspection');
+  const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
+    list_operation_runs: () => ({ runs: prior === 'settled' ? [old] : [], nextBefore: null }),
+    get_operation_run: args => args?.runId === 'new' ? newer.promise : older.promise });
+  const c = new MachineController(f.bridge); t.after(() => c.dispose()); await c.connect();
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'new' });
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'old' });
+  if (firstReply === 'new') { newer.resolve(skillRun({ runId: 'new' })); await settleReceipt(); older.resolve(old); }
+  else { older.resolve(old); await settleReceipt(); newer.resolve(skillRun({ runId: 'new' })); }
+  await settleReceipt(); assert.equal(c.state.run?.runId, 'new'); assert.equal(c.state.run?.outcome, 'done');
 });

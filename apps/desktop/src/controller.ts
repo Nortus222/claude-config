@@ -10,6 +10,7 @@ export type StepView = { readonly key: string; readonly summary: string; readonl
 export type RunView = {
   readonly runId: string;
   readonly receipt?: OperationRunView;
+  readonly challengeCurrent?: boolean;
   readonly steps: ReadonlyArray<StepView>;
   readonly outcome: 'running' | 'done' | 'cancelled' | 'failed';
   readonly summary: string;
@@ -37,6 +38,7 @@ export const canCancel = (state: ViewState) => state.connection === 'connected'
   && (state.run?.outcome === 'running' || state.status?.applying === true);
 
 const MAX_EARLY_EVENTS = 10_000;
+const MAX_OPERATION_READS = 32;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
@@ -90,6 +92,8 @@ export class MachineController {
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
   private operationRead = 0;
+  private operationReads = new Map<string, { read: number; discover: boolean }>();
+  private challengeTimer?: ReturnType<typeof setTimeout>;
   private runDiscovery: { readonly read: number; readonly terminalRunIds: Set<string>; overflow: boolean } | null = null;
 
   constructor(bridge: Bridge | null) {
@@ -115,9 +119,42 @@ export class MachineController {
 
   private update(update: Partial<ViewState>) {
     if (this.disposed) return;
+    if ('run' in update && this.state.run && update.run?.runId !== this.state.run.runId) this.operationReads.delete(this.state.run.runId);
     this.state = { ...this.state, ...update };
+    if (this.state.connection !== 'connected') {
+      this.operationReads.clear();
+      if (this.state.run) this.state = { ...this.state, run: { ...this.state.run, challengeCurrent: false } };
+    }
+    if ('run' in update || 'connection' in update) this.scheduleChallengeExpiry();
     for (const listener of this.listeners) listener();
     if (update.pending === false) this.refreshReview();
+  }
+
+  // A cached challenge is displayable only while its safe read and deadline remain current.
+  private scheduleChallengeExpiry() {
+    clearTimeout(this.challengeTimer);
+    this.challengeTimer = undefined;
+    const run = this.state.run;
+    const signIn = run?.receipt?.parity?.kind === 'signIn' ? run.receipt.parity.signIn : undefined;
+    if (this.state.connection !== 'connected' || !run || run.challengeCurrent === false || signIn?.state !== 'awaiting-user') return;
+    const token = this.sessionToken();
+    const remaining = Date.parse(signIn.expiresAt) - Date.now();
+    if (remaining <= 0) {
+      this.state = { ...this.state, run: { ...run, challengeCurrent: false } };
+      return;
+    }
+    this.challengeTimer = setTimeout(() => {
+      if (!this.ownsSession(token) || this.state.run !== run) return;
+      this.update({ run: { ...run, challengeCurrent: Date.now() < Date.parse(signIn.expiresAt) } });
+    }, Math.min(remaining, 2_147_483_647));
+  }
+
+  private concealChallenge() {
+    const run = this.state.run;
+    if (run?.receipt?.parity?.kind === 'signIn' && run.receipt.parity.signIn?.state === 'awaiting-user') {
+      if (run.challengeCurrent !== false) this.update({ run: { ...run, challengeCurrent: false } });
+      return run.runId;
+    }
   }
   private owns(revision: number) {
     return !this.disposed && this.revision === revision;
@@ -181,13 +218,24 @@ export class MachineController {
   private async refreshRun(runId?: string, completionObserved = false) {
     if (!this.bridge || this.state.hello?.operations?.available !== true) return;
     const token = this.sessionToken();
+    if (runId && !this.operationReads.has(runId) && this.operationReads.size >= MAX_OPERATION_READS) {
+      this.update({ connection: 'disconnected', detail: 'Run activity exceeded the read limit. Reconnect to read current runs.' });
+      return;
+    }
     const read = ++this.operationRead;
+    // An overlapping settled invalidation must not replace the run already being discovered.
+    const discover = !runId || (this.operationReads.get(runId)?.discover
+      ?? ![...this.operationReads.keys()].some(id => id !== this.state.run?.runId));
+    if (runId) {
+      this.operationReads.set(runId, { read, discover });
+      if (this.state.run?.runId === runId) this.concealChallenge();
+    }
     const discovery = runId ? null : { read, terminalRunIds: new Set<string>(), overflow: false };
     if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
         : await this.bridge.invoke('list_operation_runs', { limit: 1 });
-      if (!this.ownsSession(token, reply) || read !== this.operationRead) return;
+      if (!this.ownsSession(token, reply) || read !== (runId ? this.operationReads.get(runId)?.read : this.operationRead)) return;
       if (discovery?.overflow) {
         if (this.state.run) return;
         const detail = 'Run activity exceeded the discovery limit. Reconnect to read current runs.';
@@ -200,6 +248,7 @@ export class MachineController {
       if (!receipt || runId && receipt.runId !== runId) return;
       const current = this.state.run;
       if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
+      if (!discover && current?.runId !== receipt.runId && receipt.state !== 'accepted' && receipt.state !== 'running') return;
       // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
       if (discovery?.terminalRunIds.has(receipt.runId)) {
         await this.refreshRun(receipt.runId, true);
@@ -217,10 +266,11 @@ export class MachineController {
         return completed ? { ...step, status: completed.outcome, note: completed.note } : step;
       });
       for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
-      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt }, detail: summary });
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: true }, detail: summary });
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
     } finally {
+      if (runId && this.operationReads.get(runId)?.read === read) this.operationReads.delete(runId);
       if (this.runDiscovery === discovery) this.runDiscovery = null;
     }
   }
@@ -257,6 +307,8 @@ export class MachineController {
   }
 
   private showStatus(status: WireStatus) {
+    const challengeRun = this.concealChallenge();
+    if (challengeRun) void this.refreshRun(challengeRun);
     const detail = status.error ? `${status.error}${status.detail ? `: ${status.detail}` : ''}`
       : status.applying ? 'The agent is applying changes'
       : status.paused ? `Automatic apply paused: ${status.paused.reason}` : undefined;

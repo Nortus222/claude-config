@@ -56,7 +56,7 @@ const domainText = {
   addSkill: ['Add a machine skill', 'Required targets verify usability; they do not promise exclusive visibility.'],
 } as const satisfies Record<OperationChange['kind'], readonly [string, string]>;
 
-function SemanticRunResult({ run }: { run: OperationRunView }) {
+function SemanticRunResult({ run, challengeCurrent }: { run: OperationRunView; challengeCurrent?: boolean }) {
   if (run.intent.change.kind === 'addSkill') return null;
   const change = run.intent.change;
   const [title, meaning] = domainText[change.kind];
@@ -64,7 +64,7 @@ function SemanticRunResult({ run }: { run: OperationRunView }) {
   const evidence = run.parity;
   const author = accepted && 'author' in accepted ? accepted.author : undefined;
   const signIn = evidence?.kind === 'signIn' ? evidence.signIn : undefined;
-  const challenge = signIn?.state === 'awaiting-user' && Date.parse(signIn.expiresAt) > Date.now() ? signIn : undefined;
+  const challenge = challengeCurrent !== false && signIn?.state === 'awaiting-user' && Date.parse(signIn.expiresAt) > Date.now() ? signIn : undefined;
   const keys = (label: string, values: readonly string[]) => <details><summary>{label}: {values.length}</summary><ul>{values.map(value => <li key={value}><code>{value}</code></li>)}</ul></details>;
   return <div className="pad">
     <h3>{title}</h3><p>{meaning}</p>
@@ -257,7 +257,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
                 ))}
               </ol>
             ) : null}
-            {state.run?.receipt ? <><SkillAdditionResult run={state.run.receipt} /><SemanticRunResult run={state.run.receipt} /></> : null}
+            {state.run?.receipt ? <><SkillAdditionResult run={state.run.receipt} /><SemanticRunResult run={state.run.receipt} challengeCurrent={state.run.challengeCurrent} /></> : null}
             {state.run?.backups ? <p className="pad">Backups: <code>{state.run.backups}</code></p> : null}
             <p className="detail" role="status" aria-live="polite">{state.detail}</p>
             <div className="actions">

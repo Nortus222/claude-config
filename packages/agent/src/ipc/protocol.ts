@@ -142,7 +142,7 @@ export type StatusErrorCode = NonNullable<WireStatus['error']>;
 export type StatusEvent = typeof StatusEventSchema.Type;
 export type Response = typeof ResponseSchema.Type;
 export type NotificationEvent = typeof NotificationEventSchema.Type;
-export type Message = RunEvent | StatusEvent | NotificationEvent | Response;
+export type Message = OperationRunEvent | RunEvent | StatusEvent | NotificationEvent | Response;
 
 // A job's status for clients: verdicts flattened, the pause without its run id, no auto-apply
 // outcome, and counts. `ready` counts inert pending items this machine leaves to a person: on
