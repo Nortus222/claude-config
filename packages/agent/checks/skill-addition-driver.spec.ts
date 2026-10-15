@@ -377,6 +377,7 @@ for (const outcome of ['returned', 'defect', 'mixed'] as const)
       const accepted = (yield* ops.acceptedPlan(p.planId))!;
       const updates: Parameters<RunLifecycle['addition']>[0][] = [];
       const lifecycle: RunLifecycle = { actor: 'mcp', runId: 'direct-run', requestId: 'direct-request',
+        bindSignInFlow: () => Effect.die('unexpected sign-in binding'),
         accepted: () => Effect.void, parity: () => Effect.void, progress: () => Effect.void, finished: () => Effect.void,
         addition: update => Effect.sync(() => { updates.push(structuredClone(update)); }),
       };

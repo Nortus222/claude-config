@@ -160,6 +160,9 @@ export const prepareAccountOperation = (
         case 'signIn': {
           const at = (yield* clock.now).getTime();
           const started = yield* bodies.hosted!.signIn(change.name, change.reportStatus);
+          const flow = yield* (handle.signInFlow ?? Effect.succeed(null));
+          if (flow === null) return yield* Effect.fail(failed());
+          yield* lifecycle.bindSignInFlow(flow);
           const challenge = yield* Effect.try({
             try: () => decodeHosted(DeviceStartResponseSchema, { pendingId: 'display', ...started }), catch: failed,
           });

@@ -405,6 +405,7 @@ test('real hosted selector verifies tagged repository and account consent before
           const overrides = yield* OverridesStore,
             decisions = yield* DecisionsStore;
           const client: HostedClient = {
+            signInFlow: Effect.succeed(null),
             state: Effect.sync(() => state),
             revisions: () => Effect.sync(() => records),
             recover: () => Effect.sync(() => state),

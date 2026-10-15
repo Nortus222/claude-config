@@ -43,6 +43,7 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly signInFlow?: HostedRuntime['signInFlow'];
   readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
   readonly operationSetupIds?: Effect.Effect<readonly string[],unknown>;
   readonly mutationBodies: AgentMutationBodies;
@@ -179,6 +180,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       setPolicy: (policy, actor) => mutation(mutationBodies.setPolicy(policy, actor)).pipe(Effect.andThen(scheduler.request('policy'))),
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
+        signInFlow: hosted.signInFlow,
         freshInspection: hosted.inspectPrimary,
         afterPerson: hosted.afterPerson,
         hosted: {

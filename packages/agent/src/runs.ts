@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Semaphore } from 'effect';
 import type { OperationProgress as Progress, ParityAcceptance, ParityRunEvidence } from './operations/index.ts';
 import { decodeOperationInput, decodeRunView, type RunView, type ChangePreview, type OperationChange } from './operations/index.ts';
-import { MAX_RUN_BYTES, RunStore, type RunActor, type RunReceipt } from './run-store.ts';
+import { MAX_RUN_BYTES, RunStore, validSignInFlow, type RunActor, type RunReceipt } from './run-store.ts';
 
 export class RunError extends Error {
   readonly code: string;
@@ -30,6 +30,7 @@ export type RunLifecycle = {
   readonly runId: string;
   readonly requestId: string;
   readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition'], parity?: ParityAcceptance) => Effect.Effect<void, RunError>;
+  readonly bindSignInFlow: (flow: string) => Effect.Effect<void, RunError>;
   readonly parity: (update: ParityRunEvidence) => Effect.Effect<void, RunError>;
   readonly addition: (update: Pick<RunView, 'intentSaved' | 'intentState' | 'installation'>) => Effect.Effect<void, RunError>;
   readonly progress: (progress: Progress) => Effect.Effect<void, RunError>;
@@ -55,6 +56,7 @@ const notificationView = (receipt: RunReceipt): RunView => {
 // Created once alongside the shared session. The session retains lock and execution ownership.
 export const makeAgentRuns = (driver: {
   readonly now?: Effect.Effect<Date>;
+  readonly signInFlow?: Effect.Effect<string | null>;
   readonly start: (input: SubmitRun, lifecycle: RunLifecycle) => Effect.Effect<
     { readonly status: 'started'; readonly runId: string } | { readonly status: 'stale'; readonly preview: ChangePreview }, unknown>;
   readonly cancel: (runId: string) => Effect.Effect<void>;
@@ -87,31 +89,36 @@ export const makeAgentRuns = (driver: {
     requests.set(receipt.view.intent.requestId, receipt.view.runId);
     publish(receipt);
   })));
-  const save = (receipt: RunReceipt) => Effect.gen(function* () {
+  const invalidChallenge = (receipt: RunReceipt, restart = false) => Effect.gen(function* () {
     const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
-    if (!hidden.has(receipt.view.runId) && challenge?.state === 'awaiting-user'
-      && (yield* now).getTime() >= Date.parse(challenge.expiresAt)) hidden.set(receipt.view.runId, 'expired');
-    const reason = hidden.get(receipt.view.runId);
-    yield* persist(reason ? conceal(receipt, reason) : receipt);
+    if (challenge?.state !== 'awaiting-user') return undefined;
+    if (restart) return 'needsInspection' as const;
+    if ((yield* now).getTime() >= Date.parse(challenge.expiresAt)) return 'expired' as const;
+    const current = yield* (driver.signInFlow ?? Effect.succeed(null));
+    return !receipt.signInFlow || receipt.signInFlow !== current ? 'needsInspection' as const : undefined;
+  });
+  const hide = (receipt: RunReceipt, reason: 'expired' | 'needsInspection') => {
+    const id = receipt.view.runId;
+    hidden.set(id, reason); dirtyScrubs.add(id);
+    const clean = conceal(receipt, reason);
+    // Hide before I/O. A failed write cannot reveal a challenge through reads or retries.
+    receipts.set(id, copy(clean));
+    return clean;
+  };
+  const save = (receipt: RunReceipt) => Effect.gen(function* () {
+    const reason = hidden.get(receipt.view.runId) ?? (yield* invalidChallenge(receipt));
+    yield* persist(reason ? hide(receipt, reason) : receipt);
+    dirtyScrubs.delete(receipt.view.runId);
   }).pipe(writes.withPermit);
   const scrub = (runId: string, restart = false) => Effect.gen(function* () {
     const receipt = receipts.get(runId)!;
-    const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
-    if (!challenge) return receipt;
-    if (challenge.state === 'awaiting-user' && (restart || (yield* now).getTime() >= Date.parse(challenge.expiresAt))) {
-      hidden.set(runId, restart ? 'needsInspection' : 'expired');
-      dirtyScrubs.add(runId);
-    }
+    const reason = yield* invalidChallenge(receipt, restart);
+    if (reason) hide(receipt, reason);
     if (!dirtyScrubs.has(runId)) return receipt;
-    const clean = conceal(receipt, hidden.get(runId) ?? 'needsInspection');
-    // Hide before I/O. A failed scrub cannot reveal a challenge through reads or retries.
-    receipts.set(runId, copy(clean));
+    const clean = hide(receipts.get(runId)!, hidden.get(runId) ?? 'needsInspection');
     yield* persist(clean).pipe(Effect.match({
       onSuccess: () => { dirtyScrubs.delete(runId); },
-      onFailure: () => {
-        hidden.set(runId, 'needsInspection');
-        receipts.set(runId, conceal(clean, 'needsInspection'));
-      },
+      onFailure: () => { hide(clean, 'needsInspection'); },
     }));
     return receipts.get(runId)!;
   }).pipe(writes.withPermit);
@@ -164,6 +171,14 @@ export const makeAgentRuns = (driver: {
           noteLimit = Math.min(500, Math.floor(64 * 1024 / Math.max(1, keys.length) / 4));
           yield* save({ version: 1, sequence: ++sequence, actor: input.actor, view, inFlight: null });
         }),
+        bindSignInFlow: flow => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          if (receipt.view.intent.change.kind !== 'signIn' || !validSignInFlow(flow)
+            || receipt.signInFlow !== undefined && receipt.signInFlow !== flow) {
+            return yield* Effect.fail(new RunError('INVALID_INPUT', 'Invalid sign-in flow binding'));
+          }
+          yield* save({ ...receipt, signInFlow: flow });
+        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         parity: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
           const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, parity: copy(update), ...(update.kind === 'machineIntent' ? { intentSaved: update.intentState === 'saved', intentState: update.intentState } : {}) }), catch: () => new RunError('INVALID_INPUT', 'Invalid operation evidence') });

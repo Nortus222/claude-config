@@ -534,6 +534,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     yield* Effect.addFinalizer(() => Effect.sync(() => progressListeners.clear()));
     const agentRuns = yield* makeAgentRuns({
       now: clock.now,
+      signInFlow: handle.signInFlow,
       start: (input, lifecycle) => apply(input.planId, input.actor, (runId, progress) => {
         for (const listener of progressListeners) { try { listener(runId, progress); } catch {} }
       }, lifecycle).pipe(Effect.map(result =>

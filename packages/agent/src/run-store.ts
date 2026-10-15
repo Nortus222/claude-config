@@ -6,6 +6,8 @@ import { decodeRunView, type RunView } from './operations/index.ts';
 
 export type RunActor = 'app' | 'cli' | 'mcp';
 export type RunReceipt = {
+  // Private local flow binding, excluded from RunView and History.
+  readonly signInFlow?: string;
   readonly version: 1;
   readonly sequence: number;
   readonly actor: RunActor;
@@ -22,16 +24,19 @@ export class RunStore extends Context.Service<RunStore, {
   readonly write: (receipt: RunReceipt) => Effect.Effect<void, RunStoreError>;
 }>()('agent/RunStore') {}
 
+export const validSignInFlow = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+
 const decode = (text: string): RunReceipt => {
   if (Buffer.byteLength(text) > MAX_RUN_BYTES) throw new RunStoreError('Run receipt is too large');
   const raw = JSON.parse(text);
   const view = decodeRunView(raw.view);
   if (raw.version !== 1 || !Number.isSafeInteger(raw.sequence) || raw.sequence < 1
+    || (raw.signInFlow !== undefined && (!validSignInFlow(raw.signInFlow) || view.intent.change.kind !== 'signIn'))
     || !['app', 'cli', 'mcp'].includes(raw.actor)
     || !(raw.inFlight === null || typeof raw.inFlight === 'string' && [...raw.inFlight].length <= 500)) {
     throw new RunStoreError('Invalid run receipt');
   }
-  return { version: 1, sequence: raw.sequence, actor: raw.actor, view, inFlight: raw.inFlight };
+  return { version: 1, sequence: raw.sequence, actor: raw.actor, view, inFlight: raw.inFlight, ...(raw.signInFlow === undefined ? {} : { signInFlow: raw.signInFlow }) };
 };
 const failure = (error: unknown) => new RunStoreError(error instanceof Error ? error.message : String(error));
 
@@ -65,6 +70,7 @@ export const runStore = Layer.effect(RunStore, Effect.gen(function* () {
           r.view.intent.requestId, r.view.intent.inputDigest, r.view.intent.planId,
           r.view.intent.change, r.view.intent.skillAddition, r.view.intent.parity,
         ]);
+        if (previous.signInFlow !== undefined && previous.signInFlow !== receipt.signInFlow) return yield* Effect.fail(new RunStoreError('A sign-in flow binding cannot change'));
         if ((receipt.view.intent.change.kind === 'reconcile' && receipt.view.intentSaved) || (previous.view.intentSaved && !receipt.view.intentSaved) || binding(previous) !== binding(receipt)) return yield* Effect.fail(new RunStoreError('A run receipt binding cannot change'));
       }
       yield* fs.writeTextAtomic(path, text + '\n');

@@ -184,6 +184,8 @@ export const makeHostedRuntime = (client: HostedClient, input: {
       return { setupId, accountId: current.accountId, repository: normalizeRepoUrl(offered.repoUrl) ?? null,
         trusted: selected !== undefined, source: selected?.source };
     }).pipe(Effect.mapError(safe)),
+    // A pending client flow is usable only while this runtime still polls it.
+    signInFlow: Effect.suspend(() => signingIn ? client.signInFlow : Effect.succeed(null)),
     state, generation: Effect.sync(() => generation), runJobs, inspectPrimary,
     afterPerson: (inspection: JobInspection, successful: ReadonlyArray<string>) => Effect.flatMap(select, (selection) => report(selection, { inspection, successful })).pipe(Effect.ignore),
     decide: (decision: Decision, actor: Actor) => remember(Effect.gen(function* () {

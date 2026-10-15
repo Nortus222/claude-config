@@ -606,3 +606,52 @@ test('machine persistence projection keeps exact pending patches separate from c
   assert.equal(state.machinePersistence,'confirmed');assert.deepEqual(state.pendingMachinePatches,[]);assert.equal(state.confirmedMachine!.reportStatus,false);
   assert.doesNotMatch(JSON.stringify(state),/nmt_|pendingId|userCode/);
 });
+
+test('private flow identity tracks replacement, pending and backoff without exposing pending IDs', async (t) => {
+  const f = await fixture(t);
+  assert.equal(await run(f.client.signInFlow), null);
+  const first = await run(f.client.startSignIn({ os: 'macos', agents: [] }));
+  const binding = await run(f.client.signInFlow);
+  assert.match(binding!, /^[0-9a-f-]{36}$/);
+  assert.notEqual(binding, 'pending');
+  assert.equal((await run(f.client.pollSignIn())).status, 'pending');
+  assert.equal(await run(f.client.signInFlow), binding);
+  f.advance(5000);
+  f.actions.push(() => Effect.succeed({ status: 202, body: { interval: 10 } }));
+  await run(f.client.pollSignIn());
+  assert.equal(await run(f.client.signInFlow), binding);
+  f.advance(10000);
+  f.actions.push(() => Effect.fail(new HostedFailure({ code: 'network' })));
+  await assert.rejects(run(f.client.pollSignIn()), /network/);
+  assert.equal(await run(f.client.signInFlow), binding);
+  const second = await run(f.client.startSignIn({ os: 'macos', agents: [] }));
+  assert.deepEqual(second, first);
+  assert.notEqual(await run(f.client.signInFlow), binding);
+  assert.doesNotMatch(JSON.stringify({ first, state: await run(f.client.state), history: await run(f.services.history.read) }), /signInFlow|pendingId|nmt_/);
+  await f.restart();
+  assert.equal(await run(f.client.signInFlow), null);
+});
+
+for (const transition of ['complete', 'partial-complete', 'sign-out', 'partial-sign-out', 'expired'] as const) {
+  test(`private flow identity clears after ${transition}`, async (t) => {
+    const f = await fixture(t);
+    await run(f.client.startSignIn({ os: 'macos', agents: [] }));
+    assert.ok(await run(f.client.signInFlow));
+    if (transition === 'complete' || transition === 'partial-complete') {
+      f.advance(5000);
+      if (transition === 'partial-complete') {
+        f.failWrite('/decisions.json');
+        await assert.rejects(run(f.client.pollSignIn()), /storage/);
+        assert.ok(f.token);
+      } else await run(f.client.pollSignIn());
+    } else if (transition === 'expired') {
+      f.advance(120000);
+      await assert.rejects(run(f.client.pollSignIn()), /sign_in_expired/);
+    } else {
+      f.failRemove(transition === 'partial-sign-out');
+      if (transition === 'partial-sign-out') await assert.rejects(run(f.client.signOut()), /credential_storage/);
+      else await run(f.client.signOut());
+    }
+    assert.equal(await run(f.client.signInFlow), null);
+  });
+}

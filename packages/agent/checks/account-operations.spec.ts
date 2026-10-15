@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Effect } from 'effect';
@@ -68,11 +69,14 @@ const syncOwnerType:Equal<ReturnType<NonNullable<AgentMutationBodies['hosted']>[
 const resumeOwnerType:Equal<Effect.Success<ReturnType<AgentMutationBodies['resume']>>,boolean>=true;
 void syncOwnerType;void resumeOwnerType;
 const baseState:HostedState={accountId:'account1',login:'person',machineId:'machine1',auth:'signed-in',setups:[],machine:{policy:'notify',reportStatus:true},confirmedMachine:{policy:'notify',reportStatus:true},machinePersistence:'confirmed',lastSyncAt:null,retryAt:'9999-01-01T00:00:00Z',pollAfter:900,error:null};
-const fakeClient=(calls:string[],get:()=>HostedState,expiresIn=3600):HostedClient=>({
+const fakeClient=(calls:string[],get:()=>HostedState,expiresIn=3600):HostedClient=>{
+ let flow:string|null=null;
+ return {
+  signInFlow:Effect.sync(()=>flow),
   state:Effect.sync(get),recover:()=>Effect.sync(get),sync:()=>Effect.sync(()=>{calls.push('sync');return get()}),revisions:()=>Effect.succeed([]),
-  startSignIn:()=>Effect.sync(()=>{calls.push('signIn');return {userCode:'ABCD-EFGH',verificationUri:'https://github.com/login/device',interval:5,expiresIn}}),
-  pollSignIn:()=>Effect.sync(()=>{calls.push('poll');return {status:'pending',pollAfter:5}}),signOut:()=>Effect.sync(()=>{calls.push('signOut')}),enqueueMachine:()=>Effect.void,enqueueDecision:()=>Effect.void,reportStatus:()=>Effect.void,
-});
+  startSignIn:()=>Effect.sync(()=>{flow=randomUUID();calls.push('signIn');return {userCode:'ABCD-EFGH',verificationUri:'https://github.com/login/device',interval:5,expiresIn}}),
+  pollSignIn:()=>Effect.sync(()=>{calls.push('poll');return {status:'pending',pollAfter:5}}),signOut:()=>Effect.sync(()=>{flow=null;calls.push('signOut')}),enqueueMachine:()=>Effect.void,enqueueDecision:()=>Effect.void,reportStatus:()=>Effect.void,
+}};
 test('sign-in is initiation only, retries never restart it, expiry and scrub-save failure hide all public codes',async()=>{
   for(const failScrub of [false,true]){
     const m=agentMachine(),f=setupFixture(m.root),calls:string[]=[];
@@ -117,7 +121,8 @@ test('startup scrubs even completed unexpired initiation and a failed scrub cann
       const h=yield* startAgent(()=>m.domains,{deferStart:true,hosted:runtime}),s=yield* makeSession(h,{domains:()=>m.domains,signal:new AbortController().signal});
       const p=yield* s.previewChange({kind:'signIn'});yield* submit(s,p.planId,'restart');saved=yield* (yield* RunStore).read;
     })).pipe(Effect.provideService(AgentClock,clock)),f.source);
-    for(const failed of [false,true]){
+    for(const legacy of [false,true])for(const failed of [false,true]){
+      const restored=legacy?saved.map(({signInFlow:_flow,...receipt})=>receipt):saved;
       let written:RunReceipt|undefined;
       await Effect.runPromise(Effect.scoped(Effect.gen(function*(){
         const runs=yield* makeAgentRuns({now:clock.now,start:()=>Effect.die('must not replay'),cancel:()=>Effect.void});
@@ -126,7 +131,7 @@ test('startup scrubs even completed unexpired initiation and a failed scrub cann
           assert.doesNotMatch(JSON.stringify(view),/ABCD-EFGH|github.com\/login\/device/);
           assert.equal(view.parity?.kind==='signIn'&&view.parity.signIn?.state,'needsInspection');
         }
-      })).pipe(Effect.provideService(RunStore,{read:Effect.succeed(saved),write:r=>failed?Effect.fail(new RunStoreError('PRIVATE')):Effect.sync(()=>{written=r})})));
+      })).pipe(Effect.provideService(RunStore,{read:Effect.succeed(restored),write:r=>failed?Effect.fail(new RunStoreError('PRIVATE')):Effect.sync(()=>{written=r})})));
       if(!failed)assert.doesNotMatch(JSON.stringify(written),/ABCD-EFGH/);
     }
   }finally{rmSync(m.root,{recursive:true,force:true})}
@@ -197,3 +202,90 @@ test('sign-in display schemas bound the URI and forbid retained codes after expi
  assert.throws(()=>decode({...value,verificationUri:'https://example.com/login/device'}));
  assert.throws(()=>decode({...value,token:'nmt_private'}));
 });
+
+for (const transition of ['operation-replacement', 'app-replacement', 'tick-completion', 'tick-partial-completion', 'sign-out', 'partial-sign-out', 'runtime-stopped-sign-out', 'pending-poll'] as const) {
+  for (const failScrub of [false, true]) test(`current sign-in flow: ${transition}, failed scrub ${failScrub}`, async () => {
+    const m = agentMachine(), fixture = setupFixture(m.root);
+    let now = Date.parse('2026-10-15T00:00:00Z'), flow: string | null = null, starts = 0, failWrite = false;
+    let state: HostedState = { ...baseState, accountId: null, auth: 'signed-out' };
+    const clock = { now: Effect.sync(() => new Date(now)), sleep: () => Effect.never, random: Effect.succeed(.5) };
+    const client = {
+      ...fakeClient([], () => state),
+      signInFlow: Effect.sync(() => flow),
+      startSignIn: () => Effect.sync(() => {
+        flow = randomUUID(); starts++;
+        return { userCode: `CODE-${transition === 'app-replacement' ? 1 : starts}`, verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 };
+      }),
+      pollSignIn: () => Effect.suspend((): ReturnType<HostedClient['pollSignIn']> => {
+        if (transition === 'pending-poll') return Effect.succeed({ status: 'pending' as const, pollAfter: 5 });
+        flow = null; state = { ...baseState };
+        return transition === 'tick-partial-completion' ? Effect.fail(new HostedFailure({ code: 'storage' }))
+          : Effect.succeed({ status: 'success' as const, accountId: 'account1', machineId: 'machine1', login: 'person' });
+      }),
+      signOut: () => Effect.suspend(() => {
+        if (transition === 'runtime-stopped-sign-out') return Effect.fail(new HostedFailure({ code: 'storage' }));
+        flow = null; state = { ...state, auth: 'signed-out' };
+        return transition === 'partial-sign-out' ? Effect.fail(new HostedFailure({ code: 'network' })) : Effect.void;
+      }),
+    };
+    try {
+      await m.run(Effect.scoped(Effect.gen(function* () {
+        const store = yield* RunStore;
+        const runtime = yield* makeHostedRuntime(client, { domains: () => m.domains, os: 'macos' });
+        const handle = yield* startAgent(() => m.domains, { deferStart: true, hosted: runtime });
+        const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(
+          Effect.provideService(RunStore, { read: store.read, write: receipt => failWrite
+            ? Effect.fail(new RunStoreError('PRIVATE scrub failure')) : store.write(receipt) }),
+        );
+        const preview = yield* session.previewChange({ kind: 'signIn' });
+        const first = yield* submit(session, preview.planId, 'first-flow');
+        assert.match(JSON.stringify(first.run), /CODE-1/);
+        const initialReceipt = (yield* store.read).find(r => r.view.runId === first.run.runId)!;
+        assert.equal(initialReceipt.signInFlow, flow);
+        if (transition === 'pending-poll' && !failScrub) {
+          for (const binding of [undefined, null, 'pending-private', randomUUID()]) {
+            yield* Effect.flip(store.write({ ...initialReceipt, signInFlow: binding as string | undefined }));
+          }
+          assert.equal((yield* store.read).find(r => r.view.runId === first.run.runId)!.signInFlow, flow);
+        }
+        const expiry = first.run.parity?.kind === 'signIn' ? first.run.parity.signIn?.expiresAt : undefined;
+        if (transition === 'operation-replacement') {
+          const replacement = yield* session.previewChange({ kind: 'signIn' });
+          const next = yield* submit(session, replacement.planId, 'next-flow');
+          assert.match(JSON.stringify(next.run), /CODE-2/);
+        } else if (transition === 'app-replacement') yield* handle.hosted!.signIn();
+        else if (transition.startsWith('tick-') || transition === 'pending-poll') {
+          now += 5000;
+          yield* Effect.scoped(Effect.andThen(acquireApplyLock, handle.withJobMutation(runtime.tick, false)));
+        } else if (transition === 'partial-sign-out' || transition === 'runtime-stopped-sign-out') yield* Effect.flip(handle.hosted!.signOut());
+        else yield* handle.hosted!.signOut();
+        failWrite = failScrub;
+        const views = [yield* session.runs.get(first.run.runId),
+          (yield* session.runs.list({ limit: 10 })).runs.find(r => r.runId === first.run.runId)!,
+          yield* session.runs.submit(first.request)];
+        for (const view of views) {
+          assert.equal(view.runId, first.run.runId);
+          assert.equal(view.parity?.kind, 'signIn');
+          if (view.parity?.kind !== 'signIn') throw new Error('Missing sign-in evidence');
+          assert.equal(view.parity.signIn?.expiresAt, expiry);
+          assert.equal(view.parity.signIn?.state, transition === 'pending-poll' ? 'awaiting-user' : 'needsInspection');
+          if (transition === 'pending-poll') assert.match(JSON.stringify(view), /CODE-1/);
+          else assert.doesNotMatch(JSON.stringify(view), /CODE-1|github.com\/login\/device/);
+          assert.doesNotMatch(JSON.stringify(view), /signInFlow|PRIVATE|nmt_|pendingId/);
+        }
+        const notifications: unknown[] = [];
+        session.runs.subscribe(first.run.runId, view => notifications.push(view))();
+        assert.ok(notifications.length > 0);
+        assert.doesNotMatch(JSON.stringify(notifications), /CODE-|github.com\/login\/device|signInFlow/);
+        assert.equal(starts, transition.endsWith('replacement') ? 2 : 1);
+        assert.doesNotMatch(JSON.stringify(yield* mHistory()), /CODE-|signInFlow|pendingId|nmt_/);
+        failWrite = false;
+        yield* session.runs.get(first.run.runId);
+        if (transition !== 'pending-poll') {
+          const saved = (yield* store.read).find(r => r.view.runId === first.run.runId)!;
+          assert.doesNotMatch(JSON.stringify(saved.view), /CODE-1|github.com\/login\/device/);
+        }
+      })).pipe(Effect.provideService(AgentClock, clock)), fixture.source);
+    } finally { rmSync(m.root, { recursive: true, force: true }); }
+  });
+}
