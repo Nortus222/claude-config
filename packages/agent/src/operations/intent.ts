@@ -4,6 +4,7 @@ import { Effect, Exit, Layer } from 'effect';
 import { loadProfile, normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
 import { Backups, backupsForRun, canonical, Fs, inspectMcpRouting, mcpRoutingEvidence, MachinePaths, machinePaths, OverridesStore, overridesPath, peekMachineState, persistMachineIntent, proposeMachineIntent, releasedRouting, setMcpRouting, StateStore, type McpRoutingFileId } from '@nortuscc/machine';
 import { AgentClock } from '../clock.ts';
+import { safeOwnerString } from './safety.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { RunLifecycle } from '../runs.ts';
 import type { JobInspection } from '../job.ts';
@@ -16,7 +17,7 @@ const invalid = () => refused('PROFILE_INVALID', 'Machine intent conflicts with 
 const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions changed; inspect and preview again');
 type IntentChange = Extract<OperationInput<'previewChange'>['change'], { kind: 'machineIntent' }>;
 type IntentItem = OperationOutput<'inspectIntent'>['items'][number];
-const safeString = (value: string) => value.length > 0 && [...value].length <= 500 && !settingsComplaints({ value }).length;
+const safeString = safeOwnerString;
 // Reads and previews share one safety contract for every projected owner row.
 const intentItemProblem = (item: IntentItem): NonNullable<OperationOutput<'inspectIntent'>['limitReason']> | undefined => {
   if (item.kind === 'setting') {

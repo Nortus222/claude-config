@@ -29,3 +29,5 @@ export type ParityRunEvidence = typeof import('./schemas.ts').ParityRunEvidenceS
 
 export type MachineIntentChange = typeof import('./schemas.ts').MachineIntentChangeSchema.Type;
 export type MachineIntentPatch = typeof import('./schemas.ts').MachineIntentPatchSchema.Type;
+
+export type ActionChange = Extract<OperationChange, { kind: 'reconcile' | 'uninstallConfig' }>;

@@ -157,7 +157,7 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     }
     assert.equal(output('getContext', await client.call('getContext')).app.ownership, 'app');
     output('inspect', await client.call('inspect'));
-    const invalid = await client.call('previewChange', { change: { kind: 'reconcile', only: [], force: true } });
+    const invalid = await client.call('previewChange', { change: { kind: 'reconcile', only: [], force: 'invalid' } });
     assert.equal(invalid.result.isError, true); assert.ok(invalid.result.content[0].text.length < 600);
     const refused = await client.call('inspect', { scope: { kind: 'user' } });
     assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'UNSUPPORTED_SCOPE');
@@ -376,4 +376,33 @@ test('dedicated MCP intent read and reset recover one shared run after a lost ac
   assert.equal(output('applyChange', await next.call('applyChange', args)).run.runId, run.runId);
   assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 1);
   const saved = JSON.parse(s.m.read(join(s.m.paths.stateRoot, 'overrides.json'))!); assert.equal(saved.settings?.['claude:settings.json']?.theme, undefined);
+});
+
+test('selected MCP reconciliation and document restoration recover after a lost acceptance reply', { timeout: 30_000 }, async t => {
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  output('inspect', await client.call('inspect'));
+  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'reconcile', only: ['config:claude:settings.json#effortLevel'], targets: ['claude'], declined: ['hooks', 'mcp', 'plugins', 'skills'], force: false } }));
+  assert.deepEqual(preview.plan.steps.map((step: any) => step.key), ['config:claude:settings.json#effortLevel']);
+  Deferred.doneUnsafe(s.release, Effect.void);
+  const first = output('applyChange', await client.call('applyChange', { planId: preview.planId, requestId: 'selected-reconcile' })).run;
+  let applied = output('getRun', await client.call('getRun', { runId: first.runId }));
+  while (!applied.result) applied = output('getRun', await client.call('getRun', { runId: first.runId }));
+  assert.equal(applied.state, 'succeeded');
+  output('inspect', await client.call('inspect'));
+  const restore = output('previewChange', await client.call('previewChange', { change: { kind: 'uninstallConfig', only: ['config:claude:settings.json#effortLevel'], targets: ['claude'], force: false } }));
+  assert.deepEqual(restore.plan.steps.map((step: any) => step.key), ['config:claude:settings.json']);
+  assert.match(restore.actionEffects.join(' '), /all its recorded keys/);
+  const args = { planId: restore.planId, requestId: 'restore-selected-document' };
+  client.loseNextReply(); const lost = client.call('applyChange', args).catch(() => undefined);
+  for (let n = 0; n < 100 && client.droppedReplies() === 0; n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(client.droppedReplies(), 1); await client.terminate(); await lost;
+  const next = open(process.execPath, s.m.paths.stateRoot); t.after(next.close); await next.initialize();
+  let done = output('applyChange', await next.call('applyChange', args)).run;
+  while (!done.result) done = output('getRun', await next.call('getRun', { runId: done.runId }));
+  assert.equal(done.state, 'succeeded'); assert.equal(done.parity.kind, 'uninstallConfig');
+  assert.deepEqual(done.parity.committedKeys, ['config:claude:settings.json']);
+  assert.equal(output('applyChange', await next.call('applyChange', args)).run.runId, done.runId);
+  assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 2);
+  assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
 });

@@ -38,6 +38,7 @@ export const recordedRun = <E = never>(
     readonly onProgress?: (progress: Progress) => Effect.Effect<void>;
     readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E>;
     readonly operation?: OperationMetadata;
+    readonly projectProgress?: (progress: Progress) => Progress;
   },
 ) =>
   Effect.gen(function* () {
@@ -47,12 +48,14 @@ export const recordedRun = <E = never>(
     const steps: StepRecord[] = [];
     let result: RunRecord['result'] = 'done';
     let backup: string | null = null;
-    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true, checkpoint: options.checkpoint }), (event) =>
-      Effect.andThen(Effect.sync(() => {
+    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true, checkpoint: options.checkpoint }), (rawEvent) => {
+      const event = options.projectProgress?.(rawEvent) ?? rawEvent;
+      return Effect.andThen(Effect.sync(() => {
         if (event.type === 'finished') steps.push({ key: event.key, outcome: event.outcome, note: event.note });
         if (event.type === 'cancelled') result = 'cancelled';
         if (event.type === 'cancelled' || event.type === 'done') backup = event.backups ?? null;
-      }), options.onProgress?.(event) ?? Effect.void));
+      }), options.onProgress?.(event) ?? Effect.void);
+    });
     const ran: RunRecord = { steps, result, backup };
     yield* history.append({ kind: 'apply-finished', actor, runId, ...options.operation, ...ran });
     return ran;

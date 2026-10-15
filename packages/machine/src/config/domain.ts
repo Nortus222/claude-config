@@ -23,3 +23,8 @@ export const configDomain: Domain<MachinePaths | Fs | StateStore | Backups> = {
       : SYNC_ACTIONS.has(step.action) ? syncFile(step, report)
       : Effect.succeed<StepResult>({ ok: false, note: `config does not run ${step.action}` }),
 };
+
+// Observe the irreversible routing release even when a later restoration write fails.
+export const configDomainWithObserver = (observer: import('../history.ts').MutationObserver): typeof configDomain => ({
+  ...configDomain, run: (step, report) => step.action === 'restore' ? restoreFile(step, report, observer) : configDomain.run(step, report),
+});

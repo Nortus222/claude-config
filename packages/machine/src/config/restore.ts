@@ -4,6 +4,7 @@ import type { ResolvedFile } from '@nortuscc/profile-engine';
 import { Backups } from '../backups.ts';
 import { Fs } from '../fs.ts';
 import type { MachineReport, Step, StepResult } from '../model.ts';
+import type { MutationObserver } from '../history.ts';
 import { MachinePaths } from '../paths.ts';
 import { StateStore, withoutBaseline } from '../state.ts';
 import { configFileId, filePaths, parseDocument, readCopy, sameCopyEvidence } from './observe.ts';
@@ -99,7 +100,7 @@ const restoreMerged = (file: ResolvedFile, dest: string, origin: string | undefi
   });
 
 // uninstall: put one recorded file back as it was before nortuscc, then forget its baselines.
-export const restoreFile = (step: Step, report: MachineReport) =>
+export const restoreFile = (step: Step, report: MachineReport, observer?: MutationObserver) =>
   Effect.gen(function* () {
     const file = report.desired.files.find((f) => f.id === configFileId(step.key));
     if (!file) return { ok: false, note: 'not in the inspected report' } satisfies StepResult;
@@ -147,6 +148,7 @@ export const restoreFile = (step: Step, report: MachineReport) =>
       }
       // Release first. A crash must not authorize later reconciliation to recreate guidance.
       yield* store.update(s => releasedRouting(s, file.id));
+      yield* observer?.committed(step.key) ?? Effect.void;
       const persisted = yield* store.read;
       if ((yield* fs.readText(dest)) !== current.localText
         || JSON.stringify(persisted.mcpRouting) !== JSON.stringify(releasedRouting(freshState, file.id).mcpRouting)

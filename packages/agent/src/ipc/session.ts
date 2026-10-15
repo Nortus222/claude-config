@@ -14,6 +14,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
 import type { ParityAcceptance } from '../operations/index.ts';
@@ -153,8 +154,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       for (const [id, item] of parityPlans) if (item.expires <= now || item.prepared.acceptance.generation !== generation) parityPlans.delete(id);
       return parityPlans.get(planId)?.prepared;
     });
-    const retainParityChange: AgentSession['retainParityChange'] = prepared => Effect.gen(function* () {
-      if (active) return yield* Effect.fail(busy);
+    const retainPrepared = (prepared: PreparedParityChange, replacing = false) => Effect.gen(function* () {
+      if (active && !replacing) return yield* Effect.fail(busy);
       yield* retainedParity('');
       if (prepared.preview.scope.kind !== 'machine' || prepared.preview.change.kind !== prepared.acceptance.kind || prepared.preview.generation !== prepared.acceptance.generation
         || prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0)))
@@ -166,6 +167,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       parityPlans.set(prepared.preview.planId, { prepared: retained, expires: (yield* clock.now).getTime() + 600_000 });
       return structuredClone(retained.preview);
     });
+
+    const retainParityChange: AgentSession['retainParityChange'] = prepared => retainPrepared(prepared);
 
     const inspect: AgentSession['inspect'] = () =>
       Effect.gen(function* () {
@@ -215,6 +218,34 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
+    const prepareAction = (change: import('../operations/index.ts').ActionChange, inspection: JobInspection) => Effect.gen(function* () {
+      const prepared = yield* prepareActionChange(change, inspection, options.domains).pipe(Effect.provideContext(context));
+      const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
+      return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
+        execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {
+          const successful = new Set<string>();
+          return prepared.execute({ ...lifecycle, progress: event => {
+            if (event.type === 'finished' && event.outcome === 'ok') successful.add(event.key);
+            return lifecycle.progress(event);
+          } }, signal).pipe(Effect.onExit(() => change.kind === 'reconcile' && handle.afterPerson
+            ? handle.afterPerson(inspection, [...successful].flatMap(key => {
+              const id = itemIdOf(key, inspection.desired);
+              if (id) return [id];
+              return prepared.preview.plan.steps.filter(step => step.key === key).flatMap(step => step.touches.filter(path => path.startsWith('skills/')).flatMap(path => {
+                const skill = inspection.desired.skills.find(skill => skill.name === path.slice('skills/'.length));
+                return skill ? [`skill:${skill.source}/${skill.name}`] : [];
+              }));
+            })).pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
+        },
+        revalidate: Effect.gen(function* () {
+          const fresh = yield* (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.provideContext(context));
+          if (!fresh.inspection || canonical(fresh.inspection.desired) !== canonical(inspection.desired) || canonical(fresh.inspection.revision) !== canonical(inspection.revision))
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+          yield* prepared.revalidate;
+        }).pipe(Effect.mapError(error => error instanceof SessionError ? error : new SessionError('INSPECT_FAILED', 'Selected configuration could not be revalidated'))),
+      };
+    });
+
     const previewChange: AgentSession['previewChange'] = change => Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => decodeOperationInput('previewChange', { change }),
@@ -228,7 +259,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         if (active) return yield* Effect.fail(busy);
         return yield* skillOperations.previewAddSkill({ scope: input.scope, candidateId: input.change.candidateId, targets: input.change.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
       }
-      return operationPreview(yield* makePreview([], input.change));
+      if (active) return yield* Effect.fail(busy);
+      const inspection = yield* handle.inspection;
+      if (!inspection) return yield* Effect.fail(new SessionError('NO_REPORT', 'Inspect the machine before previewing'));
+      return yield* retainParityChange(yield* prepareAction(input.change, inspection));
     });
 
     // The re-inspection runs outside the scheduler but never beside a scheduled job: it waits for the
@@ -280,11 +314,21 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
           }
           if (prepared) {
-            yield* handle.withJobMutation(Effect.gen(function* () {
+            const validation = yield* Effect.exit(handle.withJobMutation(Effect.gen(function* () {
               if (prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0))))
                 return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
               yield* prepared.revalidate;
-            }), false);
+            }), false));
+            if (Exit.isFailure(validation)) {
+              const error = Cause.squash(validation.cause);
+              if (prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0)))
+                || prepared.preview.change.kind !== 'reconcile' || !(error instanceof SessionError) || error.code !== 'UNKNOWN_PLAN')
+                return yield* Effect.failCause(validation.cause);
+              const job = yield* handle.withJobMutation(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true }), false).pipe(Effect.provideContext(context), Effect.mapError(() => new SessionError('INSPECT_FAILED', 'Selected configuration could not be inspected')));
+              if (!job.inspection) return yield* Effect.fail(new SessionError('NO_REPORT', 'Inspect the machine before previewing'));
+              const replacement = yield* retainPrepared(yield* prepareAction(prepared.preview.change, job.inspection), true);
+              return { status: 'stale' as const, planId: replacement.planId, plan: replacement.plan as WirePlan, preview: replacement };
+            }
             const run = Effect.gen(function* () {
               const observer = yield* parityObserver(lifecycle!, prepared.acceptance);
               const observed: RunLifecycle = { ...lifecycle!, parity: update => observer.checkpoint(update) };
