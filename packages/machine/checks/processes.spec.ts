@@ -282,3 +282,29 @@ test('bounded capture reports an explicit cleanup deadline if group disappearanc
   assert.match(String(exit.cause), /capture cleanup deadline exceeded/);
   assert.ok(Date.now() - started >= 2000 && Date.now() - started < 3000);
 });
+
+test('command envAllow removes inherited executable configuration while retaining explicit command values', async () => {
+  const exit = await Effect.runPromiseExit(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write(JSON.stringify([process.env.PATH, process.env.GIT_EXEC_PATH ?? null, process.env.GIT_TEMPLATE_DIR ?? null, process.env.SSH_ASKPASS ?? null, process.env.EXPLICIT]))'], output: 'capture', envAllow: ['PATH'], env: { EXPLICIT: 'safe' } }))
+    .pipe(Effect.provide(nodeProcesses({ env: { PATH: 'fixture-path', GIT_EXEC_PATH: 'fixture-helper', GIT_TEMPLATE_DIR: 'fixture-template', SSH_ASKPASS: 'fixture-askpass' } }))));
+  assert.ok(Exit.isSuccess(exit)); assert.deepEqual(JSON.parse(exit.value.stdout), ['fixture-path', null, null, null, 'safe']);
+});
+
+test('bounded cancellation reports its unconfirmed shutdown to the cleanup observer', { skip: process.platform === 'win32' }, async t => {
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && pid < 0 ? true : kill(pid, signal));
+  const outcomes: boolean[] = [];
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(Processes.use(p => p.run({ cmd: node, args: ['-e', 'setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 }, onCleanup: outcome => outcomes.push(outcome.joined) })));
+    yield* Effect.sleep(100);
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses())));
+  assert.deepEqual(outcomes, [false]);
+});
+
+test('cleanup observer exceptions cannot change a confirmed owned-group shutdown', async () => {
+  let observed = 0;
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("x".repeat(2000)); setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 }, onCleanup: () => { observed++; throw new Error('observer-fixture-secret'); } })));
+  assert.ok(Exit.isFailure(exit)); assert.match(String(exit.cause), /capture byte limit exceeded/);
+  assert.doesNotMatch(String(exit.cause), /observer-fixture-secret/);
+  assert.equal(observed, 1);
+});

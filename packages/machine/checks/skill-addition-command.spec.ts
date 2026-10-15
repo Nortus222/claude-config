@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { additionCommand, addCommand } from '../src/skills/installer.ts';
 
-test('new additions use the fixed native installer and metadata selector at the accepted revision', () => {
+test('new additions supply the accepted ref and metadata selector to the fixed installer', () => {
   const revision = 'a'.repeat(40);
   assert.deepEqual(additionCommand({ source: 'fixture/source', revision, selectorName: 'Design Review', targets: ['claude', 'codex'] }), {
     cmd: 'npx', args: ['-y', 'skills@1.7.2', 'add', `https://github.com/fixture/source/tree/${revision}`, '--skill', 'Design Review', '--agent', 'claude-code', 'codex', '--global', '--yes'], output: 'inherit',

@@ -11,6 +11,8 @@ export type Command = {
   readonly cwd?: string;
   // Merged over the layer's environment for this command only.
   readonly env?: Readonly<Record<string, string>>;
+  // Opt-in inherited variable allowlist, applied before Command.env overrides.
+  readonly envAllow?: ReadonlyArray<string>;
   // Sent only through the child's stdin pipe, which is closed after the input.
   readonly input?: string;
   readonly output: 'inherit' | 'capture';
@@ -18,6 +20,8 @@ export type Command = {
   readonly stderr?: 'capture';
   // Opt-in raw byte bounds. Overflow stops the group, with a two-second cleanup deadline.
   readonly captureLimit?: { readonly stdout?: number; readonly stderr?: number };
+  // Trusted local observer of bounded forced shutdown, including interruption. Exceptions are ignored.
+  readonly onCleanup?: (outcome: { readonly joined: boolean }) => void;
 };
 // `stderr` is present only when the command asked to capture it.
 export type Completed = { readonly code: number; readonly stdout: string; readonly stderr?: string };
@@ -82,8 +86,11 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
     run: (command) =>
       Effect.callback<Completed, LaunchFailed>((resume) => {
         const base: Env = options.env ?? process.env;
-        const env = withVariables(options.path === undefined ? base
-          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path }, command.env);
+        const configured = options.path === undefined ? base
+          : { ...Object.fromEntries(Object.entries(base).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: options.path };
+        const allowed = command.envAllow === undefined ? configured : Object.fromEntries(Object.entries(configured)
+          .filter(([key]) => command.envAllow!.some(name => process.platform === 'win32' ? name.toUpperCase() === key.toUpperCase() : name === key)));
+        const env = withVariables(allowed, command.env);
         const batch = process.platform === 'win32' ? batchFile(command.cmd, command.cwd, env) : undefined;
         if (batch !== undefined && command.args.some((arg) => /[\r\n]/.test(arg))) {
           resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'a batch file cannot take an argument with a line break' })));
@@ -145,6 +152,10 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
           return false;
         };
+        const beginCleanup = () => stopCapturedGroup().then(joined => {
+          try { command.onCleanup?.({ joined }); } catch { /* Observers cannot change ownership cleanup. */ }
+          return joined;
+        });
         // Decoded as one stream each, so a character split across chunks is not mangled.
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
@@ -157,7 +168,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
             if (limit !== undefined && bytes > limit) {
               exceeded = true;
               stdout = ''; stderr = '';
-              cleanup = stopCapturedGroup();
+              cleanup = beginCleanup();
               void cleanup.then(joined => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd,
                 reason: joined ? 'capture byte limit exceeded' : 'capture cleanup deadline exceeded' }))));
               return;
@@ -186,7 +197,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           if (cleanup !== undefined) { void cleanup.then(() => done()); return; }
           if (closed) return done();
           if (command.captureLimit !== undefined) {
-            cleanup = stopCapturedGroup();
+            cleanup = beginCleanup();
             void cleanup.then(() => done());
             return;
           }

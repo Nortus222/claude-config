@@ -1,22 +1,24 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { Effect, Layer } from 'effect';
+import { Cause, Effect, Exit, Fiber, Layer, Result } from 'effect';
+import * as candidateApi from '../src/skills/candidates.ts';
 import { Processes, machinePaths, nodeFs, nodeProcesses } from '../src/index.ts';
+import { additionCommand } from '../src/skills/installer.ts';
 import { readSkillCandidates } from '../src/skills/candidates.ts';
 
 const md = (name: string, extra = '') => `---\nname: ${name}\ndescription: A useful skill\n${extra}---\n# body\n`;
 type Command = Parameters<Processes['Service']['run']>[0];
-const fixture = (t: TestContext, files: Record<string, string>, intercept?: (command: Command, home: string) => Command) => {
+const fixture = (t: TestContext, files: Record<string, string>, intercept?: (command: Command, home: string) => Command, inherited: Readonly<Record<string, string | undefined>> = {}) => {
   const home = mkdtempSync(join(tmpdir(), 'skill-candidates-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const repo = join(home, 'source');
   mkdirSync(repo);
-  const git = (args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).trim();
+  const git = (args: string[]) => execFileSync('git', ['-c', `core.hooksPath=${join(home, 'no-hooks')}`, '-c', 'init.templateDir=', ...args], { cwd: repo, encoding: 'utf8', env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: home, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
   git(['init', '--quiet']);
   for (const [path, text] of Object.entries(files)) { mkdirSync(dirname(join(repo, path)), { recursive: true }); writeFileSync(join(repo, path), text); }
   git(['add', '.']);
@@ -24,14 +26,15 @@ const fixture = (t: TestContext, files: Record<string, string>, intercept?: (com
   const revision = git(['rev-parse', 'HEAD']);
   const paths = { repo, claude: join(home, 'claude'), codex: join(home, 'codex'), codexOpenRouter: join(home, 'glm'), agentsSkills: join(home, 'skills'), stateRoot: join(home, 'state'), backups: join(home, 'backups') };
   const commands: Array<Parameters<Processes['Service']['run']>[0]> = [];
-  const real = nodeProcesses({ env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  const real = nodeProcesses({ env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...inherited } });
   const local = Layer.effect(Processes, Processes.use(p => Effect.succeed({ run: (command: Parameters<typeof p.run>[0]) => {
     commands.push(command);
     const localCommand = { ...command, args: command.args.map(a => a === 'https://github.com/fixture/source.git' ? pathToFileURL(repo).href : a) };
     return p.run(intercept?.(localCommand, home) ?? localCommand);
   } }))).pipe(Layer.provide(real));
-  const run = (pin?: string) => Effect.runPromise(readSkillCandidates({ source: 'fixture/source', ...(pin ? { revision: pin } : {}) }).pipe(Effect.provide(Layer.mergeAll(machinePaths(paths), nodeFs, local))));
-  return { run, git, revision, commands, paths };
+  const read = (pin?: string) => readSkillCandidates({ source: 'fixture/source', ...(pin ? { revision: pin } : {}) }).pipe(Effect.provide(Layer.mergeAll(machinePaths(paths), nodeFs, local)));
+  const run = (pin?: string) => Effect.runPromise(read(pin));
+  return { run, read, git, revision, commands, paths, home };
 };
 
 test('binds metadata selector, canonical installed name, blob and tree to an accepted full commit', async t => {
@@ -159,7 +162,7 @@ test('bounds aggregate SKILL data at 8 MiB', async t => {
 });
 
 test('bounds Git tree capture at 2 MiB through a real child and cleans the source', async t => {
-  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, command => command.args[0] === 'ls-tree'
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, command => command.args.includes('ls-tree')
     ? { ...command, cmd: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(2 * 1024 * 1024 + 1)); setInterval(() => {}, 1000);'] }
     : command);
   const r = await f.run(); assert.equal(r.ok, false); if (!r.ok) assert.equal(r.reason, 'limit-exceeded');
@@ -169,7 +172,7 @@ test('bounds Git tree capture at 2 MiB through a real child and cleans the sourc
 test('the whole source read has a 30-second deadline and joins its child before temporary cleanup', { timeout: 35000 }, async t => {
   let marker = '';
   const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, (command, home) => {
-    if (command.args[0] !== 'ls-tree') return command;
+    if (!command.args.includes('ls-tree')) return command;
     marker = join(home, 'pid');
     return { ...command, cmd: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`] };
   });
@@ -189,4 +192,93 @@ test('refuses a symlinked priority container that could change native discovery'
   const f = fixture(t, { 'content/a/SKILL.md': md('safe') });
   symlinkSync('content', join(f.paths.repo, 'skills')); commit(f);
   const r = await f.run(); assert.equal(r.ok, false); if (!r.ok) assert.equal(r.reason, 'unsupported-layout');
+});
+
+test('reader disables inherited template hooks and ambient executable Git configuration on every command', { skip: process.platform === 'win32' }, async t => {
+  const template = mkdtempSync(join(tmpdir(), 'untrusted-git-template-'));
+  t.after(() => rmSync(template, { recursive: true, force: true }));
+  const marker = join(template, 'executed');
+  mkdirSync(join(template, 'hooks'));
+  const hook = join(template, 'hooks/reference-transaction');
+  writeFileSync(hook, `#!/bin/sh\nprintf inert > '${marker}'\n`); chmodSync(hook, 0o755);
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, undefined, { GIT_TEMPLATE_DIR: template });
+  const r = await f.run(); assert.ok(r.ok);
+  assert.equal(existsSync(marker), false);
+  assert.ok(f.commands.every(c => c.envAllow !== undefined && c.args.includes('init.templateDir=')
+    && c.args.some(arg => arg.startsWith('core.hooksPath=')) && c.args.includes('core.fsmonitor=false')));
+});
+
+test('source timeout surfaces unconfirmed group cleanup and retains its owned temporary source', { skip: process.platform === 'win32', timeout: 35000 }, async t => {
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && pid < 0 ? true : kill(pid, signal));
+  let marker = '';
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, (command, home) => {
+    if (!command.args.includes('ls-tree')) return command;
+    marker = join(home, 'pid');
+    return { ...command, cmd: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`] };
+  });
+  const r = await f.run(); assert.equal(r.ok, false); if (!r.ok) { assert.equal(r.reason, 'cleanup-failed'); assert.match(r.retainedDirectory!, /candidates-/); }
+  assert.throws(() => kill(Number(readFileSync(marker, 'utf8')), 0), { code: 'ESRCH' });
+  const retained = readdirSync(join(f.paths.stateRoot, 'tmp'));
+  assert.equal(retained.length, 1); assert.match(retained[0]!, /^candidates-/);
+  assert.equal(existsSync(join(f.paths.stateRoot, 'tmp', retained[0]!, '.git')), true);
+});
+
+test('source cancellation exposes an explicit cleanup defect and retains unresolved temporary ownership', { skip: process.platform === 'win32' }, async t => {
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && pid < 0 ? true : kill(pid, signal));
+  let marker = '';
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, (command, home) => {
+    if (!command.args.includes('ls-tree')) return command;
+    marker = join(home, 'pid');
+    return { ...command, cmd: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`] };
+  });
+  const exit = await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(f.read());
+    while (!marker || !existsSync(marker)) yield* Effect.sleep(10);
+    yield* Fiber.interrupt(fiber);
+    return yield* Fiber.await(fiber);
+  }));
+  assert.ok(Exit.isFailure(exit));
+  assert.match(String(exit.cause), /SkillCandidateCleanupFailed/);
+  assert.equal(Exit.hasInterrupts(exit), true);
+  const defect = Cause.findDefect(exit.cause); assert.ok(Result.isSuccess(defect));
+  assert.ok(defect.success instanceof candidateApi.SkillCandidateCleanupFailed);
+  assert.equal(defect.success.temporaryDirectory, join(f.paths.stateRoot, 'tmp', readdirSync(join(f.paths.stateRoot, 'tmp'))[0]!));
+  assert.throws(() => kill(Number(readFileSync(marker, 'utf8')), 0), { code: 'ESRCH' });
+  assert.equal(readdirSync(join(f.paths.stateRoot, 'tmp')).length, 1);
+});
+
+for (const refKind of ['branch', 'tag']) {
+  test(`accepted-ref arguments require later content verification when a SHA-looking ${refKind} moves checkout`, async t => {
+    const f = fixture(t, { 'skills/a/SKILL.md': md('same-skill') });
+    const accepted = await f.run(); assert.ok(accepted.ok);
+    writeFileSync(join(f.paths.repo, 'skills/a/SKILL.md'), md('same-skill') + 'different content'); commit(f);
+    const different = f.git(['rev-parse', 'HEAD']);
+    f.git([refKind, accepted.revision, different]);
+    const command = additionCommand({ source: accepted.source, revision: accepted.revision, selectorName: accepted.candidates[0]!.selectorName, targets: ['claude'] });
+    assert.equal(command.args[3], `https://github.com/fixture/source/tree/${accepted.revision}`);
+    const cloned = join(f.home, 'vendor-ref-clone');
+    // Reproduce the pinned vendor's branch/tag-first Git resolution without executing the installer.
+    f.git(['clone', '--quiet', '--depth', '1', '--no-checkout', '--branch', accepted.revision, pathToFileURL(f.paths.repo).href, cloned]);
+    assert.equal(f.git(['-C', cloned, 'rev-parse', 'HEAD']), different);
+    assert.notEqual(f.git(['-C', cloned, 'rev-parse', 'HEAD:skills/a']), accepted.candidates[0]!.tree);
+  });
+}
+
+test('confirmed source cancellation cleans its temporary state without a cleanup defect', async t => {
+  let marker = '';
+  const f = fixture(t, { 'skills/a/SKILL.md': md('safe') }, (command, home) => {
+    if (!command.args.includes('ls-tree')) return command;
+    marker = join(home, 'pid');
+    return { ...command, cmd: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`] };
+  });
+  const exit = await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(f.read());
+    while (!marker || !existsSync(marker)) yield* Effect.sleep(10);
+    yield* Fiber.interrupt(fiber); return yield* Fiber.await(fiber);
+  }));
+  assert.ok(Exit.isFailure(exit)); assert.equal(Exit.hasInterrupts(exit), true); assert.doesNotMatch(String(exit.cause), /SkillCandidateCleanupFailed/);
+  assert.throws(() => process.kill(Number(readFileSync(marker, 'utf8')), 0), { code: 'ESRCH' });
+  assert.deepEqual(readdirSync(join(f.paths.stateRoot, 'tmp')), []);
 });

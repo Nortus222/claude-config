@@ -8,7 +8,8 @@ import { isSkillCandidateSelector } from './candidates.ts';
 // The only place `npx skills` is spelled. nortuscc's target names are not the installer's agent ids.
 export const SKILL_AGENTS: Record<Target, string> = { claude: 'claude-code', codex: 'codex' };
 
-// New additions select audited metadata at an accepted commit; legacy commands retain their version.
+// Supplies the accepted ref to the audited vendor. SHA-looking branches/tags can win its checkout;
+// the driver must verify accepted path/content before success. Legacy commands retain their version.
 export const additionCommand = (input: {
   readonly source: string;
   readonly revision: string;

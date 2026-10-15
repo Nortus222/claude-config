@@ -29,7 +29,14 @@ export type SkillCandidatesFailure = 'invalid-source' | 'invalid-revision' | 'so
   | 'unsupported-layout' | 'unsupported-metadata' | 'ambiguous-selection' | 'limit-exceeded' | 'timed-out' | 'cleanup-failed';
 export type SkillCandidatesResult =
   | { readonly ok: true; readonly source: string; readonly revision: string; readonly candidates: ReadonlyArray<SkillCandidate> }
-  | { readonly ok: false; readonly reason: SkillCandidatesFailure };
+  | { readonly ok: false; readonly reason: SkillCandidatesFailure; readonly retainedDirectory?: string };
+
+// Effect cancellation remains interrupted; this defect preserves an unconfirmed shutdown receipt.
+export class SkillCandidateCleanupFailed extends Data.TaggedError('SkillCandidateCleanupFailed')<{
+  readonly temporaryDirectory: string;
+}> {
+  override get message() { return 'source cleanup failed; temporary source ownership remains unresolved'; }
+}
 
 class CandidateReadFailed extends Data.TaggedError('CandidateReadFailed')<{ readonly reason: SkillCandidatesFailure }> {}
 const fail = (reason: SkillCandidatesFailure) => new CandidateReadFailed({ reason });
@@ -97,11 +104,19 @@ export const readSkillCandidates = (input: { readonly source: string; readonly r
     const fs = yield* Fs;
     const processes = yield* Processes;
     const dir = join((yield* MachinePaths).stateRoot, 'tmp', `candidates-${randomUUID()}`);
+    let shutdownUnconfirmed = false;
     const run = (args: readonly string[], maxBytes = SKILL_CANDIDATE_LIMITS.treeBytes, cwd = dir) =>
-      processes.run({ cmd: 'git', args, cwd, output: 'capture', stderr: 'capture', captureLimit: { stdout: maxBytes, stderr: 16 * 1024 },
-        env: { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '0', GIT_CONFIG_PARAMETERS: '' },
-      }).pipe(Effect.catch(error => Effect.fail(fail(error.reason === 'capture byte limit exceeded' ? 'limit-exceeded'
-        : error.reason === 'capture cleanup deadline exceeded' ? 'cleanup-failed' : 'source-unavailable'))),
+      processes.run({ cmd: 'git', args: ['-c', `core.hooksPath=${join(dir, 'disabled-hooks')}`, '-c', 'init.templateDir=',
+        '-c', 'core.fsmonitor=false', ...args], cwd, output: 'capture', stderr: 'capture', captureLimit: { stdout: maxBytes, stderr: 16 * 1024 },
+        envAllow: ['PATH', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP'],
+        env: { HOME: dir, USERPROFILE: dir, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_COUNT: '0', GIT_CONFIG_PARAMETERS: '' },
+        onCleanup: outcome => { if (!outcome.joined) shutdownUnconfirmed = true; },
+      }).pipe(Effect.catch(error => {
+        if (error.reason === 'capture cleanup deadline exceeded') shutdownUnconfirmed = true;
+        return Effect.fail(fail(error.reason === 'capture byte limit exceeded' ? 'limit-exceeded'
+          : error.reason === 'capture cleanup deadline exceeded' ? 'cleanup-failed' : 'source-unavailable'));
+      }),
         Effect.flatMap(result => result.code === 0 ? Effect.succeed(result.stdout) : Effect.fail(fail('source-unavailable'))));
     const body = Effect.gen(function* () {
       yield* fs.writeTextAtomic(join(dir, '.prepare'), '');
@@ -201,8 +216,12 @@ export const readSkillCandidates = (input: { readonly source: string; readonly r
     // Clone creates its parent through Fs; cleanup follows process timeout/cancellation finalizers.
     let cleanupFailed = false;
     return yield* body.pipe(Effect.timeout(SKILL_CANDIDATE_LIMITS.timeoutMs),
-      Effect.ensuring(fs.remove(dir).pipe(Effect.catch(() => Effect.sync(() => { cleanupFailed = true; })))),
+      Effect.ensuring(Effect.suspend(() => shutdownUnconfirmed ? Effect.void
+        : fs.remove(dir).pipe(Effect.catch(() => Effect.sync(() => { cleanupFailed = true; }))))),
+      Effect.onInterrupt(() => shutdownUnconfirmed || cleanupFailed
+        ? Effect.die(new SkillCandidateCleanupFailed({ temporaryDirectory: dir })) : Effect.void),
       Effect.catch(error => Effect.succeed({ ok: false, reason: error instanceof CandidateReadFailed ? error.reason
         : error._tag === 'TimeoutError' ? 'timed-out' : 'source-unavailable' } as const)),
-      Effect.map(result => cleanupFailed ? { ok: false, reason: 'cleanup-failed' } as const : result));
+      Effect.map(result => shutdownUnconfirmed || cleanupFailed
+        ? { ok: false, reason: 'cleanup-failed', retainedDirectory: dir } as const : result));
   }).pipe(Effect.catch(() => Effect.succeed({ ok: false, reason: 'source-unavailable' } as const)));
