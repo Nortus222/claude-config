@@ -40,3 +40,5 @@ export { verifyClaudeSkill, type ClaudeSkillEvidence, type ClaudeVerificationFai
   type ClaudeRestrictionEvidence, type ClaudeRestrictionDiagnostic } from './skills/claude-catalog.ts';
 
 export * from './intent.ts';
+export * from './author.ts';
+export * from './capture.ts';

@@ -9,6 +9,7 @@ import { StateStore, withBaseline, withoutBaseline, type MachineState } from '..
 import { hashValue } from './file-state.ts';
 import { configFileId, contentHash, filePaths, parseDocument, readCopy, readMerge, sameCopyEvidence, settingsKeyOf } from './observe.ts';
 import { outcomeNote } from './outcome.ts';
+import { replaceOwnedJsonValue } from './json-value.ts';
 import { splitProjectTrust } from './project-trust.ts';
 
 const MOVED: StepResult = { ok: false, note: 'changed since it was inspected; inspect again' };
@@ -44,7 +45,7 @@ const syncCopy = (step: Step, file: ResolvedFile, expected: Observed) =>
         yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
       }
       if (!(yield* fresh)) return MOVED;
-      const backedUp = yield* backups.moveAside(src, `${file.dest}.repo`, file.target);
+      const backedUp = yield* backups.preserve(src, `${file.dest}.repo`, file.target);
       yield* fs.writeTextAtomic(src, now.localBody);
       yield* store.update((s) => withBaseline(s, file.id, contentHash(file, now.localBody)!));
       return { ok: true, note: outcomeNote('copied', backedUp) };
@@ -101,7 +102,7 @@ const syncKey = (step: Step, file: ResolvedFile, desired: DesiredConfig, expecte
     const issues = parseSettingsKeys(json(next), file.src).issues;
     if (issues.length) return { ok: false, note: `refused: ${issues.map((i) => i.message).join('; ')}` };
     const backedUp = yield* backups.preserve(src, `${file.dest}.repo`, file.target);
-    yield* fs.writeTextAtomic(src, json(next));
+    yield* fs.writeTextAtomic(src, replaceOwnedJsonValue(now.repoText!, key, value));
     yield* record(hashValue(value)!);
     return { ok: true, note: outcomeNote('copied', backedUp) };
   });

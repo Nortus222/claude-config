@@ -14,6 +14,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { prepareCaptureChange } from '../operations/capture.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
@@ -127,7 +128,8 @@ const planFor = (inspection: JobInspection, exclude: ReadonlyArray<string>, only
 export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates']; readonly skillVerification?: Parameters<typeof makeAdditionDriver>[3] }) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<AgentServices | SetupSource>();
-    const { repo, stateRoot } = yield* MachinePaths;
+    const configuredPaths = yield* MachinePaths;
+    const { repo, stateRoot } = configuredPaths;
     const installer = yield* AgentSkillInstaller;
     const fs = yield* Fs;
     // Runs live in a child scope, closed after the abort below: finalizers run in reverse.
@@ -218,8 +220,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
-    const prepareAction = (change: import('../operations/index.ts').ActionChange, inspection: JobInspection) => Effect.gen(function* () {
-      const prepared = yield* prepareActionChange(change, inspection, options.domains).pipe(Effect.provideContext(context));
+    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' }>, inspection: JobInspection) => Effect.gen(function* () {
+      const prepared = yield* (change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
       const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
       return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
         execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {

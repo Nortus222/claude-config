@@ -10,6 +10,7 @@ export type FileKind = 'file' | 'directory' | 'symlink' | 'other';
 export class Fs extends Context.Service<
   Fs,
   {
+    readonly readBytes: (path: string) => Effect.Effect<Uint8Array | undefined, FsFailed>;
     readonly readText: (path: string) => Effect.Effect<string | undefined, FsFailed>;
     readonly writeTextAtomic: (path: string, text: string) => Effect.Effect<void, FsFailed>;
     // Appends `text` in one write, creating the file and its parents.
@@ -84,6 +85,10 @@ const replaceFile = async (from: string, to: string, signal: AbortSignal) => {
 };
 
 export const nodeFs = Layer.succeed(Fs, {
+  readBytes: (path) => attempt('read', path, () => readFile(path).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return undefined;
+    throw err;
+  })),
   readText: (path) =>
     attempt('read', path, () =>
       readFile(path, 'utf8').catch((err: NodeJS.ErrnoException) => {

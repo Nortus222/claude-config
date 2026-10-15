@@ -26,7 +26,7 @@ export const engineCapabilityCoverage = {
   cancellation: available('agent/ipc/session.ts', ['cancelRun'], 'Cancel a retained authorized machine run at existing safe boundaries.'),
   history: available('machine/history.ts', ['history'], 'Bounded pagination and MCP actor, operation, scope, request and run attribution.'),
   targetCategoryForceSelection: available('operations/actions.ts and machine/model.ts Selection', ['previewChange', 'applyChange'], 'Typed selected reconciliation retains target/category/force rules and owner guards.'),
-  configCapture: remaining('machine/config/steps.ts plan(capture)', parity, 'Capture only permitted declarations with semantic preview and backed-up execution.'),
+  configCapture: available('operations/capture.ts and machine/capture.ts', ['previewChange', 'applyChange', 'getRun'], 'Selected capture binds the configured author checkout, current allowlist, exact bytes and index entries; backed-up writes preserve observation snapshots and per-file baselines.'),
   configUninstall: available('operations/actions.ts and machine/config/restore.ts plan(uninstall)', ['previewChange', 'applyChange', 'getRun'], 'Restore selected recorded documents through the existing owner, retaining document-wide guards, trusted-original cutoff, backups and partial routing-release evidence. Integration and skill removal remain unavailable.'),
   skillUpdates: remaining('machine/skills/upstream.ts plan(update)', parity, 'Discover and refresh upstream skills with existing source-wide pin rules.'),
   skillAdoptionPruning: remaining('machine/skills/domain.ts plan(update)', parity, 'Existing source adoption and selected gone-upstream pruning need typed selection and retained outcomes.'),

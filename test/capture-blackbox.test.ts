@@ -282,3 +282,19 @@ test('an invalid overrides.json refuses capture with exit 1 and writes nothing t
   assert.match(result.stderr, /overrides\.json is not valid, so nothing was changed; fix it by hand and re-run\./);
   assert.deepEqual(changed(m), []);
 });
+
+test('selected settings capture retains author formatting, staged unrelated content and exact index bytes', async () => {
+  const m = await applied();
+  const file = join(m.repo, 'claude/settings.keys.json');
+  const settings = JSON.parse(read(file));
+  const author = '{  ' + Object.entries(settings).map(([key,value]) => JSON.stringify(key) + ' : ' + JSON.stringify(value)).join(',  ') + '  }\r\n';
+  writeFileSync(file, author);
+  writeFileSync(join(m.repo, 'unrelated'), 'staged\0bytes'); git(m.repo, 'add', 'unrelated');
+  writeFileSync(join(m.repo, 'unrelated'), 'dirty\0bytes');
+  const index = readFileSync(join(m.repo, '.git/index'));
+  const local = JSON.parse(read(join(m.claude, 'settings.json'))); local.theme = 'light';
+  writeFileSync(join(m.claude, 'settings.json'), JSON.stringify(local));
+  const result = await capture(m, '--target', 'claude'); assert.equal(result.code, 0, result.stderr + result.stdout);
+  assert.equal(read(file), author.replace('"theme" : ' + JSON.stringify(settings.theme), '"theme" : "light"'));
+  assert.equal(read(join(m.repo, 'unrelated')), 'dirty\0bytes'); assert.deepEqual(readFileSync(join(m.repo, '.git/index')), index);
+});

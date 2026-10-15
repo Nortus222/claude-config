@@ -406,3 +406,24 @@ test('selected MCP reconciliation and document restoration recover after a lost 
   assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 2);
   assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
 });
+
+test('MCP capture from an arbitrary cwd binds the configured author and preserves the observation snapshot', { timeout: 30_000 }, async t => {
+  const s = await agent(); t.after(s.close);
+  s.m.write(join(s.m.paths.repo, 'claude/settings.keys.json'), '{  "theme": "dark"  }\r\n');
+  const git = (...args: string[]) => execFileSync('git', ['-C', s.m.paths.repo, ...args], { env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+  git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'author');
+  s.m.write(join(s.m.paths.claude, 'settings.json'), '{"theme":"light"}\n');
+  const snapshot = s.m.read(join(s.m.root, 'setup/head/claude/settings.keys.json'));
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  output('inspect', await client.call('inspect', {}));
+  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'capture', only: ['config:claude:settings.json#theme'], targets: ['claude'], takeLocal: true, allowShrink: false } }));
+  assert.equal(preview.capture.checkout, s.m.paths.repo); assert.equal(preview.capture.redacted, true);
+  const request = { planId: preview.planId, requestId: 'capture-author' };
+  const accepted = output('applyChange', await client.call('applyChange', request)).run;
+  let run = accepted;
+  for (let attempt = 0; attempt < 200 && !run.result; attempt++) { await new Promise(resolve => setTimeout(resolve, 10)); run = output('getRun', await client.call('getRun', { runId: accepted.runId })); }
+  assert.equal(run.state, 'succeeded'); assert.equal(run.intent.parity.author.checkout, s.m.paths.repo);
+  assert.equal(output('applyChange', await client.call('applyChange', request)).run.runId, run.runId);
+  assert.equal(s.m.read(join(s.m.paths.repo, 'claude/settings.keys.json')), '{  "theme": "light"  }\r\n');
+  assert.equal(s.m.read(join(s.m.root, 'setup/head/claude/settings.keys.json')), snapshot);
+});

@@ -127,6 +127,12 @@ export class StateStore extends Context.Service<
   }
 >()('machine/StateStore') {}
 
+// Exact bytes written by the state owner, also used to bind its observed capture replacements.
+export const serializeMachineState = (state: MachineState): string => {
+  const { version, repo, files, applied } = state;
+  return JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}), ...(Object.hasOwn(state, 'mcpRouting') ? { mcpRouting: state.mcpRouting } : {}) }, null, 2) + '\n';
+};
+
 // state.json: nortuscc's own bookkeeping (the repo, per-file baselines and the applied setup commit),
 // in the format earlier releases wrote plus optional applied commit and local routing ownership.
 export const stateStore = Layer.effect(
@@ -137,10 +143,7 @@ export const stateStore = Layer.effect(
     const statePath = join(paths.stateRoot, 'state.json');
     const overridesPath = join(paths.stateRoot, 'overrides.json');
 
-    const saveState = (state: MachineState) => {
-      const { version, repo, files, applied } = state;
-      return fs.writeTextAtomic(statePath, JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}), ...(Object.hasOwn(state, 'mcpRouting') ? { mcpRouting: state.mcpRouting } : {}) }, null, 2) + '\n');
-    };
+    const saveState = (state: MachineState) => fs.writeTextAtomic(statePath, serializeMachineState(state));
 
     // Migrate choices only into an absent document. Preserve the old state before dropping them.
     const write = (state: MachineState) => Effect.gen(function* () {
