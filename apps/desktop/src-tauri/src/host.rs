@@ -1853,7 +1853,9 @@ pub enum ConnectionTarget { Codex, Claude }
 pub enum ConnectionAction { Inspect {}, Connect { target: ConnectionTarget }, Disconnect { target: ConnectionTarget } }
 pub fn mcp_connections(resources: &Path, action: ConnectionAction) -> Result<Value, String> {
     let input = serde_json::to_string(&action).map_err(|_| "Invalid connection action")?;
-    let value = run_json_helper(helper_command(resources, Setup::McpConnections, None)?, HELPER_TIMEOUT, Some(input.into_bytes()))?;
+    let mut command = helper_command(resources, Setup::McpConnections, None)?;
+    command.stdin(Stdio::piped());
+    let value = run_json_helper(command, HELPER_TIMEOUT, Some(input.into_bytes()))?;
     // Host registration/configuration output stays private; only the bounded public schema crosses IPC.
     validate_connections(value)
 }
@@ -1884,6 +1886,42 @@ fn validate_connections(value: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[test]
+    fn connection_helper_delivers_actions_and_validates_public_results() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resources(PathBuf);
+        impl Drop for Resources {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let root = Resources(std::env::temp_dir().join(format!("nortuscc-connection-input-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::write(root.0.join("agent.mjs"), "fixture").unwrap();
+        // This finite fake exits on EOF even when the caller panics before writing stdin.
+        // Drop removes only this test's owned resources on success or unwinding.
+        let result = json!({"connections":[{"target":"codex","registration":"configured",
+            "routing":{"status":"installed","intent":"active","blockStatus":"present","offeredText":"fixed guidance"},
+            "session":"unobserved","reload":"recommended","observation":"local-registration","note":""}]});
+        for (literal, action) in [
+            (r#"{"action":"inspect"}"#, ConnectionAction::Inspect {}),
+            (r#"{"action":"connect","target":"codex"}"#, ConnectionAction::Connect { target: ConnectionTarget::Codex }),
+            (r#"{"action":"disconnect","target":"claude"}"#, ConnectionAction::Disconnect { target: ConnectionTarget::Claude }),
+        ] {
+            let source = format!(r#"#!/bin/sh
+[ "$2" = --mcp-connections ] && [ "$3" = --app ] && [ "$#" = 4 ] || exit 8
+input=$(/bin/cat)
+printf '%s' "$input" > received
+[ "$input" = '{}' ] || exit 9
+printf '%s\n' '{}'
+"#, literal, result);
+            std::fs::write(root.0.join("bun"), source).unwrap();
+            std::fs::set_permissions(root.0.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(mcp_connections(&root.0, action).unwrap(), result);
+            assert_eq!(std::fs::read_to_string(root.0.join("received")).unwrap(), literal);
+        }
+        std::fs::write(root.0.join("bun"), "#!/bin/sh\n/bin/cat > received\nprintf '%s' '{\"connections\":[],\"secret\":\"private\"}'\n").unwrap();
+        assert!(mcp_connections(&root.0, ConnectionAction::Inspect {}).is_err());
+    }
     #[test]
     fn connection_actions_reject_paths_commands_and_unknown_targets() {
         for value in [json!({"action":"connect","target":"codex","appPath":"/foreign"}),
