@@ -9,7 +9,7 @@ import { MachinePaths } from '../paths.ts';
 import { Processes, type Command } from '../processes.ts';
 import type { SkillLock } from './manifest.ts';
 import { lockRef, offPinNote, pinsBySource, short } from './pins.ts';
-import { additionLockEntry, installedSkillNames, readSkillLock } from './store.ts';
+import { additionLockEntry, installedSkillNames, readSkillLockEvidence } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -97,7 +97,7 @@ export type UpdatePlan = {
   gone: { name: string; source: string; path: string }[];
   unknown: { name: string; source: string }[];
   local: string[];
-  available: { name: string; source: string }[];
+  available: { name: string; source: string; tree?: string }[];
   // Skills whose lock ref disagrees with the pin: a pinned skill at another ref (or none), or an unpinned
   // skill still at a ref (`to: null`). Present when planUpdates was given pins or found such a skill.
   offPin?: { name: string; source: string; from: string | null; to: string | null }[];
@@ -242,7 +242,8 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
         const root = yield* processes.run({ cmd: 'git', args: ['rev-parse', 'HEAD^{tree}'], cwd: dir, output: 'capture' });
         if (root.code === 0) treeAt.set('.', root.stdout.trim());
       }
-      const trees = new Map(paths.map((p) => [p, treeAt.get(p) ?? null] as const));
+      const trees = new Map<string,string | null>(treeAt);
+      for (const path of paths) if (!trees.has(path)) trees.set(path, null);
       return { trees, skillPaths: discover ? skillPaths : [] } satisfies Upstream;
     });
     return yield* body.pipe(
@@ -253,9 +254,9 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
 
 // Sources are checked one after another: each clone is a network round trip git already parallelises.
 // A pinned source is never cloned: its skills are judged against the pin, and it offers nothing to adopt.
-export const checkUpdates = (desired: DesiredConfig): Effect.Effect<UpdatePlan, FsFailed, Processes | Fs | MachinePaths> =>
+export const checkUpdates = (desired: DesiredConfig, options?: { readonly maxSources: number }): Effect.Effect<UpdatePlan, FsFailed, Processes | Fs | MachinePaths> =>
   Effect.gen(function* () {
-    const lock = yield* readSkillLock;
+    const { lock } = yield* readSkillLockEvidence;
     const installed = yield* installedSkillNames;
     const exact = new Set(desired.skills.filter(s => s.exact && s.declaredFrom?.layer !== 'machine').map(s => s.source));
     for (const skill of desired.skills) if (skill.declaredFrom?.layer === 'machine' && !desired.skills.some(s => s.source === skill.source && s.declaredFrom?.layer !== 'machine')) exact.add(skill.source);
@@ -263,13 +264,18 @@ export const checkUpdates = (desired: DesiredConfig): Effect.Effect<UpdatePlan, 
     const pins = pinsBySource(desired);
     const remoteTrees = new Map<string, Map<string, string | null>>();
     const upstreamBySource = new Map<string, { path: string; name: string }[]>();
-    for (const check of sourcesOf(updatableSkills(lock, installed, additions).filter((e) => !pins.has(e.source)), exact)) {
+    for (const check of sourcesOf(updatableSkills(lock, installed, additions).filter((e) => !pins.has(e.source)), exact).slice(0,options?.maxSources)) {
       const found = yield* inspectSource(check.sourceUrl, check.paths, !check.exact);
       if (!found) continue;
       remoteTrees.set(check.sourceUrl, found.trees);
       upstreamBySource.set(check.source, upstreamSkills(found.skillPaths));
     }
-    return { ...planUpdates({ lock, installed, remoteTrees, pins, additions }), available: availableSkills({ upstreamBySource, installed }) };
+    return { ...planUpdates({ lock, installed, remoteTrees, pins, additions }), available: availableSkills({ upstreamBySource, installed }).map(skill => {
+      const path = upstreamBySource.get(skill.source)?.find(s => s.name === skill.name)?.path;
+      const check = sourcesOf(updatableSkills(lock, installed, additions), exact).find(s => s.source === skill.source);
+      const tree = path && check ? remoteTrees.get(check.sourceUrl)?.get(path) : undefined;
+      return { ...skill, ...(tree ? { tree } : {}) };
+    }) };
   });
 
 // Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names.
@@ -287,19 +293,19 @@ export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[
   };
   return [
     ...plan.current.map((s) => item(s.name, s.source, 'current', 'in-sync')),
-    ...plan.outdated.map((s) => item(s.name, s.source, 'outdated', 'apply', `${short(s.from)} -> ${short(s.to)}`)),
+    ...plan.outdated.map((s) => ({ ...item(s.name, s.source, 'outdated', 'apply', `${short(s.from)} -> ${short(s.to)}`), facts: [`offered-tree:${s.to}`] })),
     ...(plan.offPin ?? []).map((s) => item(s.name, s.source, 'off-pin', 'apply', offPinNote(s.from, s.to))),
     ...plan.gone.map((s) => item(s.name, s.source, 'gone', 'apply', 'gone upstream')),
     ...plan.unknown.map((s) => item(s.name, s.source, 'unknown', 'blocked', 'source unreachable')),
     ...plan.local.map((name) => item(name, '', 'local', 'excluded', 'no recorded source')),
-    ...plan.available.map((s) => item(s.name, s.source, 'available', 'excluded', 'available')),
+    ...plan.available.map((s) => ({ ...item(s.name, s.source, 'available', 'excluded', 'available'), ...(s.tree ? { facts: [`offered-tree:${s.tree}`] } : {}) })),
   ];
 }
 
 export const inspectUpdates = (
-  desired: DesiredConfig,
+  desired: DesiredConfig, options?: { readonly maxSources: number },
 ): Effect.Effect<{ items: Observed[]; probeErrors: string[] }, never, Processes | Fs | MachinePaths> =>
-  checkUpdates(desired).pipe(
+  checkUpdates(desired, options).pipe(
     Effect.map((plan) => ({ items: updateItems(plan, desired), probeErrors: [] as string[] })),
     Effect.catch((error: FsFailed) =>
       Effect.succeed({ items: [] as Observed[], probeErrors: [`skills: ${error.op} ${error.path}: ${error.reason}`] }),

@@ -284,8 +284,8 @@ test('inspectUpdates turns the plan into skill items', async () => {
   assert.deepEqual(items, [
     { key: 'skill:a', domain: 'skills', label: 'a', group: 'o/r', state: 'current', disposition: 'in-sync', from },
     { key: 'skill:stale', domain: 'skills', label: 'stale', group: 'o/r', state: 'outdated', disposition: 'apply',
-      note: `old0000 -> ${src.tree('s/b').slice(0, 7)}` },
-    { key: 'skill:b', domain: 'skills', label: 'b', group: 'o/r', state: 'available', disposition: 'excluded', note: 'available' },
+      note: `old0000 -> ${src.tree('s/b').slice(0, 7)}`, facts: [`offered-tree:${src.tree('s/b')}`] },
+    { key: 'skill:b', domain: 'skills', label: 'b', group: 'o/r', state: 'available', disposition: 'excluded', note: 'available', facts: [`offered-tree:${src.tree('s/b')}`] },
   ]);
 });
 

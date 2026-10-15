@@ -43,8 +43,8 @@ export const addCommand = (input: {
 export const updateCommand = (names: ReadonlyArray<string>): Command =>
   ({ cmd: 'npx', args: ['-y', 'skills', 'update', ...names, '--global', '--yes'], output: 'inherit' });
 
-export const removeCommand = (names: ReadonlyArray<string>): Command =>
-  ({ cmd: 'npx', args: ['-y', 'skills', 'remove', ...names, '--global', '--yes'], output: 'inherit' });
+export const removeCommand = (names: ReadonlyArray<string>, targets?: ReadonlyArray<Target>): Command =>
+  ({ cmd: 'npx', args: ['-y', 'skills', 'remove', ...names, ...(targets ? ['--agent', ...targets.map(t => SKILL_AGENTS[t])] : []), '--global', '--yes'], output: 'inherit' });
 
 // The installer's own output is inherited, so a failure explains itself there; the note only names the exit.
 export const runInstaller = (command: Command): Effect.Effect<StepResult, LaunchFailed, Processes> =>

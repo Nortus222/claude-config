@@ -108,11 +108,13 @@ try {
   await until(() => { if (agent.error) throw agent.error; assert.equal(agent.child.exitCode, null); return existsSync(join(agentDir, 'agent.sock')) && existsSync(join(agentDir, 'agent.token')); });
   let client = open();
   const toolsReply = await client.ask('tools/list');
-  assert.deepEqual(toolsReply.tools.map(tool => tool.name).sort(), ['nortuscc_resolve_skill_candidate', 'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_inspect', 'nortuscc_preview_change', 'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history'].sort());
+  assert.deepEqual(toolsReply.tools.map(tool => tool.name).sort(), ['nortuscc_inspect_updates', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_inspect', 'nortuscc_preview_change', 'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_history'].sort());
   const context = await client.call('getContext', 'nortuscc_get_context', {});
   assert.equal(context.app.ownership, 'app'); assert.equal(context.capabilities.addSkill.available, true);
   const inspected = await client.call('inspect', 'nortuscc_inspect', {});
   assert.ok(inspected.items.length > 0); assert.deepEqual(inspected.profile.issues, []); assert.deepEqual(inspected.probeErrors, []);
+  const updateOffers = await client.call('inspectUpdates', 'nortuscc_inspect_updates', { limit: 5 });
+  assert.deepEqual(updateOffers.items, []); assert.equal(updateOffers.unavailable, false);
   const preview = await client.call('previewChange', 'nortuscc_preview_change', { change: { kind: 'reconcile', only: inspected.items.filter(item => item.key === 'config:claude:CLAUDE.md').map(item => item.key) } });
   assert.ok(preview.plan.steps.length > 0); assert.ok(preview.plan.steps.every(step => step.domain === 'config'));
   const started = await client.call('applyChange', 'nortuscc_apply_change', { planId: preview.planId, requestId: 'packaged-smoke-apply' });

@@ -21,3 +21,11 @@ test('missing explicit home refuses and default native roots are supported', asy
   const command = await Effect.runPromise(AgentSkillInstaller.use(s => s.prepare({ ...paths, claude: '/selected/.claude', codex: '/selected/.codex' }, input)).pipe(Effect.provide(agentSkillInstaller({ home: '/selected' }))));
   assert.equal(command.env?.CLAUDE_CONFIG_DIR, '/selected/.claude'); assert.equal(command.env?.XDG_STATE_HOME, '');
 });
+
+test('scoped legacy adoption and pruning reuse configured environment with the audited native version', async () => {
+ for (const verb of ['add','remove']) {
+  const command = await Effect.runPromise(AgentSkillInstaller.use(s => s.prepareLegacy!(paths,{ cmd: 'npx',args: ['-y','skills',verb,'one','--agent','claude-code','--global','--yes'],output:'inherit' })).pipe(Effect.provide(agentSkillInstaller({ home: '/selected' }))));
+  assert.equal(command.args[1],'skills@1.7.2'); assert.equal(command.env?.HOME,'/selected'); assert.equal(command.env?.CLAUDE_CONFIG_DIR,'/custom/claude');
+ }
+ assert.equal((await Effect.runPromise(Effect.result(AgentSkillInstaller.use(s => s.prepareLegacy!(paths,{ cmd: 'npx',args: ['-y','skills','update','one'],output:'inherit' }))).pipe(Effect.provide(agentSkillInstaller({ home:'/selected' })))))._tag,'Failure');
+});

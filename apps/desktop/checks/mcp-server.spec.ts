@@ -34,7 +34,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = { inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = { inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -157,6 +157,8 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     }
     assert.equal(output('getContext', await client.call('getContext')).app.ownership, 'app');
     output('inspect', await client.call('inspect'));
+    const updates = output('inspectUpdates', await client.call('inspectUpdates', { limit: 1 }));
+    assert.deepEqual(updates.items, []); assert.equal(updates.unavailable, false);
     const invalid = await client.call('previewChange', { change: { kind: 'reconcile', only: [], force: 'invalid' } });
     assert.equal(invalid.result.isError, true); assert.ok(invalid.result.content[0].text.length < 600);
     const refused = await client.call('inspect', { scope: { kind: 'user' } });
@@ -426,4 +428,22 @@ test('MCP capture from an arbitrary cwd binds the configured author and preserve
   assert.equal(output('applyChange', await client.call('applyChange', request)).run.runId, run.runId);
   assert.equal(s.m.read(join(s.m.paths.repo, 'claude/settings.keys.json')), '{  "theme": "light"  }\r\n');
   assert.equal(s.m.read(join(s.m.root, 'setup/head/claude/settings.keys.json')), snapshot);
+});
+
+
+test('dedicated MCP update read and explicit machine-only update recover a lost acceptance reply', { timeout: 30_000 }, async t => {
+  const s = await agent('app',{ addition: true }); t.after(s.close);
+  s.m.write(join(s.m.paths.agentsSkills,'known','SKILL.md'),'# local known\n');
+  s.m.write(join(s.m.paths.agentsSkills,'..','.skill-lock.json'),JSON.stringify({ skills: { known: { source: 'owner/repo',sourceUrl: `file://${join(s.m.root,'unavailable-source')}`,skillPath:'s/known/SKILL.md',skillFolderHash:'a'.repeat(40) } } }));
+  const client = open(process.execPath,s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  output('inspect',await client.call('inspect'));
+  const read = output('inspectUpdates',await client.call('inspectUpdates',{ limit: 5 })); assert.equal(read.items[0].id,'skill:owner/repo/known'); assert.equal(read.items[0].state,'unknown'); assert.equal(read.items[0].repairRoute,'unavailable'); assert.equal(read.items[0].offered,null); assert.equal(read.unavailable,false);
+  assert.doesNotMatch(JSON.stringify(read),/file:|unavailable-source|SKILL\.md/);
+  const p = output('previewChange',await client.call('previewChange',{ change: { kind: 'update',only: [],authorManifest: false } }));
+  const args = { planId: p.planId,requestId: 'lost-update-acceptance' }; client.loseNextReply(); const lost = client.call('applyChange',args).catch(() => undefined);
+  for (let n=0;n<100 && !client.droppedReplies();n++) await new Promise(resolve => setTimeout(resolve,10)); assert.equal(client.droppedReplies(),1); await client.terminate(); await lost;
+  const next = open(process.execPath,s.m.paths.stateRoot); t.after(next.close); await next.initialize();
+  let run = output('applyChange',await next.call('applyChange',args)).run;
+  for (let n=0;n<100 && !run.result;n++) { await new Promise(resolve => setTimeout(resolve,10)); run = output('getRun',await next.call('getRun',{ runId: run.runId })); }
+  assert.equal(run.state,'succeeded'); assert.equal(run.parity.kind,'update'); assert.equal(output('listRuns',await next.call('listRuns',{ limit: 10 })).runs.length,1);
 });

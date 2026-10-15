@@ -14,6 +14,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
 import { prepareCaptureChange } from '../operations/capture.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
@@ -44,6 +45,7 @@ export type AgentSession = {
   // Internal owner seam. Retains only validated, service-captured plans; never accepts wire callbacks.
   readonly retainParityChange: (prepared: PreparedParityChange) => Effect.Effect<ChangePreview, SessionError>;
   readonly skillOperations: SkillOperations;
+  readonly inspectUpdates: (input: OperationInput<'inspectUpdates'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectUpdates'>, SessionError>;
   readonly inspectIntent: (input: OperationInput<'inspectIntent'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectIntent'>, SessionError>;
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
@@ -220,8 +222,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
-    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' }>, inspection: JobInspection) => Effect.gen(function* () {
-      const prepared = yield* (change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
+    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' | 'update' }>, inspection: JobInspection) => Effect.gen(function* () {
+      const prepared = yield* (change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
       const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
       return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
         execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {
@@ -504,7 +506,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }),
     });
     const session: AgentSession = {
-      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectIntent: intentOperations.inspectIntent,
+      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => Effect.gen(function* () { return yield* inspectUpdateOperations(yield* handle.inspection, yield* (handle.generation ?? Effect.succeed(0)), input).pipe(Effect.provideContext(context)); }), inspectIntent: intentOperations.inspectIntent,
       onProgress: listener => { progressListeners.add(listener); return () => void progressListeners.delete(listener); },
       inspect,
       preview,

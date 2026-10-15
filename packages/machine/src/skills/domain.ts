@@ -1,15 +1,15 @@
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
+import { parseSkillsManifest, type SkillGroup, TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import { Backups } from '../backups.ts';
 import type { Domain, MachineReport, Observed, PlanKind, Selection, Skipped, Step, StepResult } from '../model.ts';
 import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
 import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
-import { MANIFEST_FILE, emitManifest, groupsOf, installedGroups, manifestOutcome, sourceOf } from './manifest.ts';
+import { MANIFEST_FILE, emitManifest, groupsOf, manifestOutcome, sourceOf, updateManifestGroups } from './manifest.ts';
 import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
-import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, skillExposure } from './store.ts';
+import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, readSkillLockEvidence, skillLockPath, skillExposure } from './store.ts';
 import { verifyPinned } from './verify.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
@@ -129,6 +129,7 @@ const applySteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: 
 // An off-pin skill is reinstalled with `add`: `update` reinstalls at the lock's recorded ref, never at a new pin,
 // and an unpinned off-pin skill's ref-less `add` installs upstream latest and drops the recorded ref.
 const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: ReadonlyMap<string, string>) => {
+  if (selection.declined.includes('skills')) return { steps: [], skipped: items.map(i => ({ key: i.key, reason: 'skills declined' })) };
   const named = (state: string) => items.filter((i) => i.state === state).map((i) => i.label);
   const gone = named('gone');
   const outdated = named('outdated');
@@ -162,7 +163,7 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins:
 
 const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) => {
   const additions = new Set(desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
-  const blocked = items.filter(i => additions.has(i.label) && i.disposition === 'apply');
+  const blocked = items.filter(i => additions.has(i.label) && (kind === 'update' || i.disposition === 'apply'));
   const legacy = items.filter(i => !additions.has(i.label));
   const result = kind === 'apply' ? applySteps(legacy, selection, pinsBySource(desired))
     : kind === 'update' ? updateSteps(legacy, selection, pinsBySource(desired)) : { steps: [], skipped: [] };
@@ -172,16 +173,20 @@ const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: 
 
 // Copies each named store folder to the run's backups before the installer touches it.
 const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
-  const store = (yield* MachinePaths).agentsSkills;
+  const paths = yield* MachinePaths;
   const backups = yield* Backups;
-  for (const name of names) yield* backups.preserve(join(store, name), join('skills', name));
+  yield* backups.preserve(skillLockPath(paths), 'skill-lock.json');
+  for (const name of names) {
+    yield* backups.preserve(join(paths.agentsSkills, name), join('skills', name));
+    for (const target of TARGETS) yield* backups.preserve(join(paths[target], 'skills', name), join(target, 'skills', name));
+  }
 });
 
 // Installs at a pin, then verifies the install against the commit: the installer may resolve the sha as a
 // branch or tag of that name. A mismatch is removed again; the backup taken first keeps the previous version.
 // `review` names the bundled scripts of a verified install. When the installer fails, the skills whose lock now
 // records the sha are still verified (it may have written them) and a mismatch removed; the rest are left alone.
-const installPinned = (source: string, sha: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
+const installPinned = (source: string, sha: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>, scopedRemoval = false) =>
   Effect.gen(function* () {
     yield* preserveAll(names);
     const installed = yield* runInstaller(addCommand({ source: pinnedSource(source, sha), skills: names, targets }));
@@ -191,7 +196,7 @@ const installPinned = (source: string, sha: string, names: ReadonlyArray<string>
     let removal = '';
     if (failed.size > 0) {
       const bad = sortedUnique(failed.keys());
-      const removed = yield* runInstaller(removeCommand(bad));
+      const removed = yield* runInstaller(removeCommand(bad, scopedRemoval ? targets : undefined));
       const problems = bad.map((n) => failed.get(n)![0]).join('; ');
       removal = `${removed.ok ? 'removed' : 'could not remove'} ${bad.join(', ')}: does not match ${short(sha)} (${problems})`;
     }
@@ -214,10 +219,10 @@ const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: Rea
 
 // Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
 // An unreadable target is reported, never repaired.
-const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () {
+const reExpose = (step: Step, report: MachineReport, scopedRemoval = false) => Effect.gen(function* () {
   const installed = new Set(yield* installedSkillNames);
   const additions = new Set(report.desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
-  const scope = sortedUnique([...report.desired.skills.map((s) => s.name), ...skillNamesOf(step)]).filter(n => installed.has(n) && !additions.has(n));
+  const scope = sortedUnique(scopedRemoval ? skillNamesOf(step) : [...report.desired.skills.map(s => s.name),...skillNamesOf(step)]).filter(n => installed.has(n) && !additions.has(n));
   const lock = yield* readSkillLock;
   const pins = pinsBySource(report.desired);
   const exposure = yield* readExposure(step.targets ?? TARGETS);
@@ -236,7 +241,7 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
     const skills = bySource.get(source)!;
     const sha = pins.get(source);
     const result: { ok: boolean; note?: string; review?: string } = sha
-      ? yield* installPinned(source, sha, skills, readable)
+      ? yield* installPinned(source, sha, skills, readable, scopedRemoval)
       : yield* addUnpinned(source, skills, readable);
     if (result.ok) {
       count += skills.length;
@@ -255,44 +260,62 @@ const reExpose = (step: Step, report: MachineReport) => Effect.gen(function* () 
   return { ok, note: parts.join('; ') };
 });
 
-// Regenerates the manifest from what is installed, behind the shrink guard. Writes only into `paths.repo`.
-const writeManifest = (report: MachineReport) => Effect.gen(function* () {
+// Regenerates with the shrink guard at the explicitly supplied author root, or the legacy repo root.
+const writeManifest = (report: MachineReport, author?: { readonly repo: string; readonly heldManifestGroups: readonly SkillGroup[]; readonly heldItemIds?: readonly string[] }) => Effect.gen(function* () {
   const fs = yield* Fs;
   const paths = yield* MachinePaths;
-  const lock = yield* readSkillLock;
+  const { lock } = yield* readSkillLockEvidence;
   const installed = yield* installedSkillNames;
   const present = new Set(installed);
   const personal = new Set(report.desired.skills.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
-  const before = groupsOf(report.desired.skills.filter(s => !personal.has(s.name)));
+  const before = author ? parseSkillsManifest(yield* fs.readText(join(author.repo, MANIFEST_FILE))) : groupsOf(report.desired.skills.filter(s => !personal.has(s.name)));
   const pruned = report.items.filter((i) => i.domain === 'skills' && i.state === 'gone' && !present.has(i.label)).map((i) => i.label);
-  const declared = before
-    .map((g) => (g.optional ? { ...g, skills: g.skills.filter((n) => !pruned.includes(n)) } : g))
-    .filter((g) => g.skills.length > 0);
-  const groups = installedGroups(lock, installed.filter(name => !personal.has(name)), declared);
+  const groups = updateManifestGroups({ desired: report.desired.skills, lock, installed, prunedNames: pruned, heldManifestGroups: author?.heldManifestGroups, heldItemIds: author?.heldItemIds });
   const outcome = manifestOutcome({ before, groups, prunedNames: pruned });
   if (!outcome.write) return { ok: true, note: `left alone — ${outcome.reason}` };
-  yield* fs.writeTextAtomic(join(paths.repo, MANIFEST_FILE), emitManifest(groups));
+  const target = join(author?.repo ?? paths.repo, MANIFEST_FILE);
+  yield* (yield* Backups).preserve(target, join('author', MANIFEST_FILE));
+  yield* fs.writeTextAtomic(target, emitManifest(groups));
   return { ok: true, note: `written — ${outcome.reason}` };
 });
 
-const runSkillStep = (step: Step, report: MachineReport): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>
+const runSkillStep = (step: Step, report: MachineReport, scopedTargets?: readonly Target[]): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>
   Effect.gen(function* () {
     const names = skillNamesOf(step);
     switch (step.action) {
       case 'remove':
         yield* preserveAll(names);
-        return yield* runInstaller(removeCommand(names));
+        {
+          const removed = yield* runInstaller(removeCommand(names, scopedTargets));
+          if (scopedTargets && removed.ok) {
+            const installed = yield* installedSkillNames;
+            if (names.some(name => installed.includes(name))) return { ok: false, note: 'Selected exposure removal ran; another native agent may retain shared content and lock metadata. Global pruning is incomplete' };
+          }
+          return removed;
+        }
       case 'update-skills':
+        if (scopedTargets) {
+          const { lock } = yield* readSkillLockEvidence;
+          const bySource = new Map<string,string[]>();
+          for (const name of names) {
+            const entry = additionLockEntry(lock,name); const source = sourceOf(lock.skills[name]);
+            if (!entry || entry.selectorName !== name || !source || !/^[a-z0-9._-]+\/[a-z0-9._-]+$/.test(source)) return { ok: false, note: 'Exact legacy source and native selector evidence is required; resolve and preview this skill addition' };
+            bySource.set(source,[...(bySource.get(source) ?? []),name]);
+          }
+          let ok = true;
+          for (const [source,skills] of bySource) { const result = yield* addUnpinned(source,skills,scopedTargets); ok = ok && result.ok; }
+          return { ok };
+        }
         yield* preserveAll(names);
         return yield* runInstaller(updateCommand(names));
       case 'install-skills':
-        if (step.key === SKILL_STEP.expose) return yield* reExpose(step, report);
+        if (step.key === SKILL_STEP.expose) return yield* reExpose(step, report, scopedTargets !== undefined);
         if (step.key.startsWith(SKILL_STEP.install)) {
           const source = step.key.slice(SKILL_STEP.install.length);
           const targets = step.targets ?? TARGETS;
           const pinned = splitPinned(source);
           if (pinned.sha) {
-            const { ok, note } = yield* installPinned(pinned.source, pinned.sha, names, targets);
+            const { ok, note } = yield* installPinned(pinned.source, pinned.sha, names, targets, scopedTargets !== undefined);
             return { ok, note };
           }
           // A ref-less `add` also reinstalls an off-pin skill, replacing its folder.
@@ -311,3 +334,15 @@ export const skillsDomain: Domain<Fs | MachinePaths | Processes | Backups> = {
   steps: skillSteps,
   run: runSkillStep,
 };
+
+// A selected shared update uses the same owners with explicit native exposure targets and no snapshot write.
+export const skillsUpdateDomain = (targets: readonly Target[]): typeof skillsDomain => ({
+  ...skillsDomain,
+  steps: (items, selection, kind, desired) => { const result = skillSteps(items,selection,kind,desired); return { ...result, steps: result.steps.filter(step => step.key !== SKILL_STEP.manifest) }; },
+  run: (step,report) => runSkillStep(step,report,targets),
+});
+
+// CLI composition supplies its author root and adapted held declarations without writing the snapshot.
+export const skillsDomainWithManifest = (author: { readonly repo: string; readonly heldManifestGroups: readonly SkillGroup[]; readonly heldItemIds?: readonly string[] }): typeof skillsDomain => ({
+  ...skillsDomain, run: (step,report) => step.action === 'write-manifest' ? writeManifest(report,author) : skillsDomain.run(step,report),
+});

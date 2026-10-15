@@ -42,3 +42,4 @@ export { verifyClaudeSkill, type ClaudeSkillEvidence, type ClaudeVerificationFai
 export * from './intent.ts';
 export * from './author.ts';
 export * from './capture.ts';
+export * from './update-manifest.ts';

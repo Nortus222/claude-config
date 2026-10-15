@@ -35,6 +35,7 @@ The app exposes ten machine operations:
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
 | `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
+| `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |
 | `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
 | `nortuscc_preview_change` | Preview explicit reconcile keys, a reviewed skill addition, or a semantic `machineIntent` patch |

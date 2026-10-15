@@ -437,7 +437,7 @@ test('routine manifest regeneration excludes personal declarations even when ena
   writeLock(m.paths, { base: { source: 'o/r' }, personal: { source: 'o/r' }, adopted: { source: 'o/r' } });
   const desired = desiredWith([skill('base', 'o/r'), skill('personal', 'o/r', { declaredFrom: { layer: 'machine', source: 'overrides.json' } })]);
   const report: MachineReport = { desired, items: [], probeErrors: [] };
-  await m.run(skillsDomain.run({ key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: 'write', touches: ['skills-manifest.txt'], interruptible: false }, report));
+  await m.run(skillsDomain.run({ key: 'skills:manifest', domain: 'skills', action: 'write-manifest', summary: 'write', touches: ['skills-manifest.txt'], interruptible: false }, report).pipe(Effect.provide(backupsForRun().pipe(Layer.provideMerge(machinePaths(m.paths))))));
   const manifest = readFileSync(join(m.paths.repo, 'skills-manifest.txt'), 'utf8');
   assert.match(manifest, /base/); assert.match(manifest, /adopted/); assert.doesNotMatch(manifest, /personal/);
 });

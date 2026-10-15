@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { Effect, Layer, Stream } from 'effect';
 import { loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, emitManifest, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
-  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
+  backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
+  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain, skillsDomainWithManifest,
   type Observed, type Processes, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
 import { checkoutGroups, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
@@ -288,7 +288,10 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // Reported after the run, once the manifest has reached the checkout.
     let manifestNote: string | undefined;
 
-    yield* Stream.runForEach(execute(p, report, [skillsDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
+    const authorRepo = holds?.checkout ?? (yield* MachinePaths).repo;
+    const authorGroups = parseSkillsManifest(yield* (yield* Fs).readText(join(authorRepo, MANIFEST_FILE)));
+    const updateDomain = skillsDomainWithManifest({ repo: authorRepo, heldItemIds: Object.keys(holds?.held ?? {}), heldManifestGroups: holds ? checkoutGroups([], authorGroups, holds.held) : [] });
+    yield* Stream.runForEach(execute(p, report, [updateDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
       switch (event.type) {
         case 'started': {
           const key = event.step.key;
@@ -316,28 +319,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
       }
     })).pipe(Effect.provide(backupsForRun()));
 
-    // The skills domain writes the manifest into paths.repo, which is the composed copy when items are
-    // held: carry it to the checkout with each held skill as the checkout declares it, so the held
-    // value is never published as an upstream change.
-    // The note then counts what reached the checkout, or says why nothing did.
-    let manifestWritten = manifestNote?.startsWith('written') ?? false;
-    if (manifestWritten && holds) {
-      const checkout = holds;
-      // Skills are already installed by now, so a failed carry-back is reported here, not thrown:
-      // the closing report and the backup path still print.
-      manifestNote = yield* Effect.gen(function* () {
-        const fs = yield* Fs;
-        const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
-        const target = join(checkout.checkout, MANIFEST_FILE);
-        const groups = checkoutGroups(composed, parseSkillsManifest(yield* fs.readText(target)), checkout.held);
-        yield* fs.writeTextAtomic(target, emitManifest(groups));
-        return `written — ${groups.reduce((n, g) => n + g.skills.length, 0)} skill(s)`;
-      }).pipe(Effect.catch((error: unknown) => Effect.sync(() => {
-        manifestWritten = false;
-        anyFailed = true;
-        return `failed — ${messageOf(error)}`;
-      })));
-    }
+    const manifestWritten = manifestNote?.startsWith('written') ?? false;
     if (manifestNote !== undefined) {
       write(`\nskills-manifest.txt ${manifestNote}\n`);
       if (manifestWritten) write('Run: nortuscc push -m "..."   to share it\n');

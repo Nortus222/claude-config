@@ -28,8 +28,9 @@ export const engineCapabilityCoverage = {
   targetCategoryForceSelection: available('operations/actions.ts and machine/model.ts Selection', ['previewChange', 'applyChange'], 'Typed selected reconciliation retains target/category/force rules and owner guards.'),
   configCapture: available('operations/capture.ts and machine/capture.ts', ['previewChange', 'applyChange', 'getRun'], 'Selected capture binds the configured author checkout, current allowlist, exact bytes and index entries; backed-up writes preserve observation snapshots and per-file baselines.'),
   configUninstall: available('operations/actions.ts and machine/config/restore.ts plan(uninstall)', ['previewChange', 'applyChange', 'getRun'], 'Restore selected recorded documents through the existing owner, retaining document-wide guards, trusted-original cutoff, backups and partial routing-release evidence. Integration and skill removal remain unavailable.'),
-  skillUpdates: remaining('machine/skills/upstream.ts plan(update)', parity, 'Discover and refresh upstream skills with existing source-wide pin rules.'),
-  skillAdoptionPruning: remaining('machine/skills/domain.ts plan(update)', parity, 'Existing source adoption and selected gone-upstream pruning need typed selection and retained outcomes.'),
+  skillUpdates: available('operations/updates.ts and machine/skills/upstream.ts', ['inspectUpdates', 'previewChange', 'applyChange'], 'Bounded source-qualified update discovery; selected machine actions and separately reviewed author manifests retain existing policy and native prerequisites.'),
+  skillAdoptionPruning: available('operations/updates.ts and machine/skills/domain.ts', ['previewChange', 'applyChange', 'getRun'], 'Selected adoption and pruning retain configured native destination prerequisites, backups and partial outcomes.'),
+  additionUpdateRepair: available('agent/skill-operations.ts and skill-addition.ts', ['resolveSkillCandidate', 'previewChange', 'applyChange'], 'Addition-touched update/repair requires the existing audited native selector, explicit environment, accepted content and catalog verification route.'),
   machineOverrides: available('machine/intent.ts', ['previewChange', 'applyChange'], 'Semantic machine choices and explicit declaration removal with backed-up intent persistence and routing release; no installer or physical content deletion.'),
   historyDetail: remaining('agent/ipc/server.ts History projection', parity, 'Expose bounded decision/setup/revision, policy from/to, pause and backup/pruning facts currently omitted by the operation projection.'),
   backupPruning: remaining('machine/prune.ts', parity, 'Existing retention pruning needs a bounded operation and common mutation contract.'),
@@ -58,7 +59,7 @@ export const engineCapabilityCoverage = {
 } as const satisfies Record<string, Coverage>;
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
-  inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
+  inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
   addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
 };

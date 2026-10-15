@@ -139,3 +139,25 @@ test('manifestOutcome writes growth, a pure prune, and an adopt with no misses',
   assert.equal(manifestOutcome({ before, groups: [g('o/r', ['a'])], prunedNames: ['b', 'c'] }).write, true);
   assert.equal(manifestOutcome({ before: [g('o/r', ['a', 'b'])], groups: [g('o/r', ['a', 'b', 'wizard'])] }).write, true);
 });
+
+import { updateManifestGroups, bindAuthorCheckout, prepareUpdateManifest, plan, selectAll, skillsDomain } from '../src/index.ts';
+import { join } from 'node:path';
+import { authorMachine } from './author-machine.ts';
+const resolved = (name: string, extra: Partial<ResolvedSkill> = {}): ResolvedSkill => ({ name, source: 'o/r', exact: true, optional: false, install: true, from: { layer: 'base', source: 'skills-manifest.txt' }, ...extra });
+test('routine update manifests preserve held and optional declarations without publishing additions or changing their base declaration', () => {
+ const desired = [resolved('base', { targets: ['claude'], declaredFrom: { layer: 'base', source: 'skills-manifest.txt' } }), resolved('personal', { targets: ['codex'], declaredFrom: { layer: 'machine', source: 'overrides.json' } }), resolved('optional', { source: 'optional/repo', optional: true, install: false })];
+ const groups = updateManifestGroups({ desired, lock: { skills: { base: { source: 'other/source' }, personal: { source: 'o/r' }, new: { source: 'o/r' } } }, installed: ['base','personal','new'], heldManifestGroups: [g('held/source',['held'])] });
+ assert.deepEqual(groups.find(g => g.source === 'o/r')?.skills,['base','new']); assert.deepEqual(groups.find(g => g.source === 'optional/repo')?.skills,['optional']); assert.ok(!groups.some(g => g.skills.includes('personal'))); assert.deepEqual(groups.find(g => g.source === 'held/source')?.skills,['held']); assert.ok(!groups.some(g => g.source === 'other/source'));
+});
+test('author update proposal binds dirty author bytes and preserves unselected declarations with the shrink guard', async () => {
+ const m = authorMachine(); m.write(join(m.paths.repo,'skills-manifest.txt'),'[o/r] exact\none\ngone\n');
+ for (const name of ['one','gone']) m.write(join(m.paths.agentsSkills,name,'SKILL.md'),'# installed');
+ m.write(join(m.paths.agentsSkills,'..','.skill-lock.json'),JSON.stringify({ skills: { one: { source: 'o/r' }, gone: { source: 'o/r' } } }));
+ const desired = { files: [], skills: [resolved('one'),resolved('gone')], integrations: [], allow: {}, issues: [] };
+ const report = { desired, probeErrors: [], items: [{ key:'skill:gone',domain:'skills' as const,label:'gone',group:'o/r',state:'gone',disposition:'apply' as const }] };
+ const selected = plan('update',report,{ ...selectAll,only:['skill:gone'] },[skillsDomain]);
+ const author = await m.run(bindAuthorCheckout(m.paths,['skills-manifest.txt']));
+ const prepared = await m.run(prepareUpdateManifest({ author,desired,report,selected,heldManifestGroups:[g('o/r',['held'])] }));
+ assert.match(prepared.documents[0]!.text,/held\none/); assert.doesNotMatch(prepared.documents[0]!.text,/gone/);
+ m.write(join(m.paths.repo,'skills-manifest.txt'),'external'); await assert.rejects(m.run(prepareUpdateManifest({ author,desired,report,selected })));
+});

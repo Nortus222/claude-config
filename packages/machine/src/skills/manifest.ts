@@ -94,3 +94,29 @@ export function manifestOutcome(input: {
   }
   return { write: true, reason: `${afterCount} skill(s)` };
 }
+
+// Routine regeneration never publishes machine additions, including additions overlaid on base intent.
+export function updateManifestGroups(input: {
+  desired: readonly ResolvedSkill[]; lock: SkillLock; installed: readonly string[];
+  prunedNames?: readonly string[]; heldManifestGroups?: readonly SkillGroup[]; heldItemIds?: readonly string[];
+}): SkillGroup[] {
+  const pruned = new Set(input.prunedNames ?? []);
+  const personal = new Set(input.desired.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
+  const additions = new Set(input.desired.filter(s => s.targets !== undefined).map(s => s.name));
+  const declared = groupsOf(input.desired.filter(s => !personal.has(s.name))).map(g => ({ ...g, skills: g.skills.filter(n => !pruned.has(n)) })).filter(g => g.skills.length);
+  const groups = installedGroups(input.lock, input.installed.filter(n => !personal.has(n) && !additions.has(n)), declared);
+  const retain = (declarations: readonly SkillGroup[]) => { for (const group of declarations) {
+    for (const name of group.skills) for (const existing of groups) existing.skills = existing.skills.filter(n => n !== name);
+    let target = groups.find(g => g.source === group.source);
+    if (!target) { target = { ...group, skills: [] }; groups.push(target); }
+    target.skills = [...new Set([...target.skills, ...group.skills])].sort(byCodePoint);
+    target.exact = group.exact; target.optional = group.optional;
+  } };
+  retain(groupsOf(input.desired.filter(s => additions.has(s.name) && !personal.has(s.name))));
+  for (const id of input.heldItemIds ?? []) {
+    const identity = /^skill:([^/]+\/[^/]+)\/([^/]+)$/.exec(id);
+    if (identity) for (const group of groups) if (group.source === identity[1]) group.skills = group.skills.filter(name => name !== identity[2]);
+  }
+  retain(input.heldManifestGroups ?? []);
+  return groups.filter(g => g.skills.length).sort((a,b) => byCodePoint(a.source,b.source));
+}

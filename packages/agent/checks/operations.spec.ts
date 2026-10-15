@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['resolveSkillCandidate', 'getContext', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
