@@ -30,6 +30,8 @@ pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 pub enum Request {
     Status,
     Inspect,
+    GetOperationRun { run_id: String },
+    ListOperationRuns { limit: u16 },
     Preview { exclude: Vec<String> },
     Apply { plan_id: String },
     Cancel,
@@ -51,6 +53,7 @@ impl Request {
         match self {
             Self::Status => "status",
             Self::Inspect => "inspect",
+            Self::GetOperationRun { .. } | Self::ListOperationRuns { .. } => "operation",
             Self::Preview { .. } => "preview",
             Self::Apply { .. } => "apply",
             Self::Cancel => "cancel",
@@ -80,6 +83,16 @@ impl Request {
     fn record(&self, id: &str) -> Result<String, String> {
         let mut record = json!({"version": 3, "id": id, "command": self.command()});
         match self {
+            Self::GetOperationRun { run_id } => {
+                if run_id.is_empty() || run_id.chars().count() > 100 { return Err("Invalid operation run id".into()); }
+                record["operation"] = json!("getRun");
+                record["input"] = json!({"scope":{"kind":"machine"},"runId":run_id});
+            }
+            Self::ListOperationRuns { limit } => {
+                if !(1..=500).contains(limit) { return Err("Invalid operation run limit".into()); }
+                record["operation"] = json!("listRuns");
+                record["input"] = json!({"scope":{"kind":"machine"},"limit":limit});
+            }
             Self::Preview { exclude } => {
                 if exclude.len() > MAX_EXCLUDED || exclude.iter().any(|key| key.is_empty() || key.encode_utf16().count() > MAX_KEY) {
                     return Err("Invalid item keys".into());
@@ -140,6 +153,12 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OperationRunArgs { pub run_id: String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationRunsArgs { pub limit: u16 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SignInArgs {
@@ -929,6 +948,21 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_operation_reads_use_shared_bounds_and_machine_scope() {
+        let record: Value = serde_json::from_str(&Request::GetOperationRun {run_id:"😀".repeat(100)}.record("1").unwrap()).unwrap();
+        assert_eq!(record["command"], "operation"); assert_eq!(record["operation"], "getRun");
+        assert_eq!(record["input"], json!({"scope":{"kind":"machine"},"runId":"😀".repeat(100)}));
+        for id in [String::new(), "😀".repeat(101)] { assert!(Request::GetOperationRun {run_id:id}.record("1").is_err()); }
+        for limit in [1,500] {
+            let record: Value = serde_json::from_str(&Request::ListOperationRuns {limit}.record("2").unwrap()).unwrap();
+            assert_eq!(record["operation"], "listRuns"); assert_eq!(record["input"], json!({"scope":{"kind":"machine"},"limit":limit}));
+        }
+        for limit in [0,501] { assert!(Request::ListOperationRuns {limit}.record("2").is_err()); }
+        assert!(decode_args::<OperationRunArgs>(json!({"runId":"r","operation":"inspect"})).is_err());
+        assert!(decode_args::<OperationRunsArgs>(json!({"limit":1,"scope":{"kind":"user"}})).is_err());
+    }
+
     #[test]
     fn v3_replies_and_status_events_are_accepted() {
         assert!(validate(&json!({"version":3,"id":"1","ok":true,"result":null})).is_ok());

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { skillRun } from './support/skill-run.ts';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -268,4 +269,30 @@ test('startup updates stay compact until a real update needs attention or a fail
     assert.doesNotMatch(render(failed), /private transport detail/);
     failed.dispose();
   } finally { setup.dispose(); c.dispose(); }
+});
+
+
+test('addition view separates saved intent, native evidence limits and blocked suggestions', () => {
+  const c = machine(); const receipt = skillRun();
+  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'done', summary: '', receipt } };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c }));
+  for (const text of ['Machine intent: saved', 'Installation: verified', 'owner/repo', 'design-review', 'claude', 'Codex also scans', 'does not attest the selected source or invocation authorization', 'Managed startup remains active', 'Do you want to share it with your other machines?', 'Promote to profile', 'personal sharing workflow', 'profile publication workflow', 'Required destination: user', 'Required destination: profile']) assert.ok(markup.includes(text), text);
+  assert.doesNotMatch(markup, /Requested via/);
+  assert.doesNotMatch(markup, /<button[^>]*>.*?(Share|Promote)/);
+});
+for (const intentState of ['saved', 'needsInspection'] as const) for (const installationState of ['failed', 'cancelled', 'needsInspection', undefined] as const) test(`addition view preserves ${intentState} intent without success or suggestions for ${installationState}`, () => {
+  const c = machine(); const original = skillRun();
+  const receipt = skillRun({ state: 'failed', intentSaved: intentState === 'saved', intentState, installation: installationState ? { ...original.installation!, state: installationState, nextActions: [] } : undefined });
+  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'failed', summary: '', receipt } };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c }));
+  assert.match(markup, new RegExp(`Machine intent: ${intentState === 'saved' ? 'saved' : 'needs inspection'}`));
+  assert.match(markup, new RegExp(`Installation: ${installationState === 'needsInspection' ? 'needs inspection' : installationState ?? 'not verified'}`));
+  assert.doesNotMatch(markup, /Do you want to share|Promote to profile|Installation: verified/);
+});
+
+
+test('addition view displays the receipt owner actor when present', () => {
+  const c = machine(); const receipt = skillRun({ actor: 'mcp' });
+  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'done', summary: '', receipt } };
+  assert.match(renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c })), /Requested via mcp/);
 });

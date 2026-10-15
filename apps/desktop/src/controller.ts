@@ -2,12 +2,14 @@ import {
   decodeApplyResult, decodeInspectResult, decodePreviewResult, decodeHelloResult, decodeWireStatus,
   type HelloResult, type InspectResult, type PreviewResult, type RunEvent, type RunProgress, type WireStatus,
 } from '@nortuscc/agent/ipc/protocol';
+import { decodeRunView, decodeOperationOutput, type RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'cancelled';
 export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string; readonly index?: number };
 export type RunView = {
   readonly runId: string;
+  readonly receipt?: OperationRunView;
   readonly steps: ReadonlyArray<StepView>;
   readonly outcome: 'running' | 'done' | 'cancelled' | 'failed';
   readonly summary: string;
@@ -87,6 +89,7 @@ export class MachineController {
   private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
+  private operationRead = 0;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
@@ -173,6 +176,30 @@ export class MachineController {
     return true;
   }
 
+  // Durable reads share this controller's session and never replace a different observed run.
+  private async refreshRun(runId?: string) {
+    if (!this.bridge || this.state.hello?.operations?.available !== true) return;
+    const token = this.sessionToken();
+    const read = ++this.operationRead;
+    try {
+      const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
+        : await this.bridge.invoke('list_operation_runs', { limit: 1 });
+      if (!this.ownsSession(token, reply) || read !== this.operationRead) return;
+      const receipt = runId ? checkedReply(decodeRunView, reply.data)
+        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
+      if (!receipt || runId && receipt.runId !== runId) return;
+      const current = this.state.run;
+      if (current && current.runId !== receipt.runId || !current && this.state.status?.applying && receipt.result !== null) return;
+      const outcome = receipt.state === 'accepted' || receipt.state === 'running' ? 'running'
+        : receipt.state === 'succeeded' ? 'done' : receipt.state === 'cancelled' ? 'cancelled' : 'failed';
+      const summary = receipt.installation?.message ?? (receipt.result && 'message' in receipt.result ? receipt.result.message : `Run ${receipt.state}`);
+      const steps = current?.steps.length ? current.steps : receipt.steps.map(step => ({ ...step, summary: step.key, status: step.outcome }));
+      this.update({ run: { ...current, runId: receipt.runId, steps, outcome, summary, receipt }, detail: summary });
+    } catch {
+      // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
+    }
+  }
+
   async connect() {
     if (!this.bridge) return;
     const revision = ++this.revision;
@@ -193,7 +220,9 @@ export class MachineController {
       this.unlisten = unlisten;
       if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision, true)) await this.load(revision);
+      const canInspect = await this.loadStatus(revision, true);
+      await this.refreshRun();
+      if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
@@ -385,7 +414,9 @@ export class MachineController {
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision, true)) await this.load(revision);
+      const canInspect = await this.loadStatus(revision, true);
+      await this.refreshRun();
+      if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
@@ -444,6 +475,7 @@ export class MachineController {
       return;
     }
     let run = this.state.run;
+    const discoversRun = event.progress.type === 'started' && run?.outcome !== 'running';
     if (event.progress.type === 'started' && run?.outcome !== 'running') {
       run = { runId: event.runId, steps: [], outcome: 'running', summary: 'Applying machine changes' };
       this.update({ preview: null, status: this.state.status ? { ...this.state.status, applying: true } : null });
@@ -452,10 +484,12 @@ export class MachineController {
     const next = advance(run, event.progress);
     if (next.outcome === 'running') {
       this.update({ run: next, detail: next.summary });
+      if (discoversRun || event.progress.type === 'finished' && event.progress.key.startsWith('skill-intent:')) void this.refreshRun(event.runId);
       return;
     }
     // The preview is spent and the machine has changed: look again.
     this.update({ run: next, detail: next.summary, preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null });
+    void this.refreshRun(event.runId);
     void this.inspect();
   }
 }

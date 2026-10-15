@@ -1,9 +1,43 @@
 import React, { type Ref } from 'react';
+import type { RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
 import { MachineController, canCancel, type StepStatus, type ViewState } from './controller.ts';
 const DOMAINS = [['config', 'Configuration'], ['integrations', 'Integrations'], ['skills', 'Skills']] as const;
 const MARK: Record<StepStatus, string> = { pending: '·', running: '…', ok: '✓', failed: '✕', cancelled: '–' };
 const provenance = (item: WireObserved) => (item.from ? `${item.from.layer} · ${item.from.source}` : '—');
+function SkillAdditionResult({ run }: { run: OperationRunView }) {
+  const skill = run.intent.skillAddition;
+  if (!skill) return null;
+  const installation = run.installation;
+  const intent = run.intentState === 'needsInspection' ? 'needs inspection' : run.intentState ?? (run.intentSaved ? 'saved' : 'unknown');
+  const status = installation?.state === 'needsInspection' ? 'needs inspection' : installation?.state ?? 'not verified';
+  return <div className="pad">
+    <h3>{skill.installedName}</h3>
+    {run.actor ? <p>Requested via {run.actor}</p> : null}
+    <p>Machine intent: {intent}</p>
+    <p>Source: <code>{skill.source}</code> · <code>{skill.sourceDir}</code></p>
+    <p>Required targets: {skill.declaration.targets.join(', ')}. Revision policy: {skill.policy}.</p>
+    <details><summary>Accepted revision and declaration</summary><p><code>{skill.acceptedRevision}</code></p><pre>{JSON.stringify(skill.declaration, null, 2)}</pre></details>
+    <p>Installation: {status}</p>
+    {installation ? <p>{installation.message}</p> : null}
+    <p>Codex also scans the shared skill store. Selected targets require usable exposure and do not make visibility exclusive.</p>
+    {installation?.retainedDirectory ? <p>Verification directory retained for inspection: <code>{installation.retainedDirectory}</code></p> : null}
+    {installation?.codex ? <p>Codex catalog: {installation.codex.verified ? <>verified, enabled · <code>{installation.codex.path}</code></> : installation.codex.reason}</p> : null}
+    {installation?.claude ? <>
+      <p>Claude catalog: {installation.claude.catalog.status}. Restrictions: {installation.claude.restrictions.status}.</p>
+      {installation.claude.reason ? <p>Claude verification: {installation.claude.reason}</p> : null}
+      <p>Claude catalog discovery does not attest the selected source or invocation authorization. Evidence covers only the requested environment. Managed startup remains active.</p>
+    </> : null}
+    {installation?.state === 'verified' && installation.nextActions.length ? <ul>{installation.nextActions.map(action => <li key={action.kind}>
+      <p>{action.kind === 'share_with_my_machines' ? 'Do you want to share it with your other machines?' : 'Promote to profile'}</p>
+      <p>Readiness: {action.capability.available ? 'ready' : 'blocked'}. Required destination: {action.requiredDestination}{action.destinationId ? ` (${action.destinationId})` : ''}.</p>
+      {action.capability.reason ? <p>{action.capability.reason}</p> : null}
+      <p>Requires a user request for this declaration.</p>
+    </li>)}</ul> : null}
+    {installation?.state !== 'verified' ? <p>To repair, ask your coding agent to resolve this skill again, review the machine addition and apply it. Inspect retained intent and installed files before retrying.</p> : null}
+  </div>;
+}
+
 export function ReviewView({ controller, state, reviewTarget }: { controller: MachineController; state: ViewState; reviewTarget?: Ref<HTMLHeadingElement> }) {
   const running = state.run?.outcome === 'running';
   const applying = running || state.status?.applying === true;
@@ -170,6 +204,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
                 ))}
               </ol>
             ) : null}
+            {state.run?.receipt ? <SkillAdditionResult run={state.run.receipt} /> : null}
             {state.run?.backups ? <p className="pad">Backups: <code>{state.run.backups}</code></p> : null}
             <p className="detail" role="status" aria-live="polite">{state.detail}</p>
             <div className="actions">

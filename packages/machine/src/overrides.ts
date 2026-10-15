@@ -3,9 +3,11 @@ import { Context, Effect, Layer } from 'effect';
 import { decodeOverrides, serializeOverrides, overridesFromLegacyState, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
 import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
-import { MachinePaths } from './paths.ts';
+import { MachinePaths, type MachinePathsValue } from './paths.ts';
 import { canonical } from './config/file-state.ts';
 import { Backups } from './backups.ts';
+
+export const overridesPath = (paths: Pick<MachinePathsValue, 'stateRoot'>): string => join(paths.stateRoot, 'overrides.json');
 
 // overrides.json is the only record of this machine's choices. A machine whose choices are still
 // in state.json's legacy skillsOnly/configTargets has them moved here by the first state write
@@ -25,7 +27,7 @@ export const overridesStore = Layer.effect(
   Effect.gen(function* () {
     const paths = yield* MachinePaths;
     const fs = yield* Fs;
-    const path = join(paths.stateRoot, 'overrides.json');
+    const path = overridesPath(paths);
     const statePath = join(paths.stateRoot, 'state.json');
 
     const read = Effect.gen(function* () {

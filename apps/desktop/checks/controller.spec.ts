@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MachineController, advance, canCancel, type RunView } from '../src/controller.ts';
+import { skillRun } from './support/skill-run.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
 
 const step = (key: string) => ({ key, domain: 'config', action: 'write-file', summary: `write ${key}`, touches: [key], interruptible: false });
@@ -913,4 +914,61 @@ test('reconnecting during a run keeps only observed steps and renders subsequent
   assert.deepEqual(run.steps.map(step=>[step.key,step.status]),[['config:b','ok'],['config:c','running']]);
   run=advance(run,{type:'finished',index:2,total:3,key:'config:c',outcome:'failed',note:'failed c'});
   assert.deepEqual(run.steps.map(step=>[step.key,step.status,step.note]),[['config:b','ok','applied b'],['config:c','failed','failed c']]);
+});
+
+
+const operationHello = { hello: { agentVersion: 'fixture', protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, operations: { available: true } } };
+test('reconnect restores an addition receipt independently of first inspection and follows its terminal result', async () => {
+  let run = skillRun({ state: 'running', result: null, installation: undefined });
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying: true }),
+    list_operation_runs: () => ({ runs: [run], nextBefore: null }), get_operation_run: () => run,
+    inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); await c.connect();
+  assert.equal(c.state.run?.receipt?.intentState, 'saved');
+  assert.equal(c.state.run?.outcome, 'running');
+  assert.equal(c.state.inspection, null);
+  run = skillRun();
+  f.emit(event(run.runId, { type: 'done', ok: 3, failed: 0 })); await settle();
+  assert.equal(c.state.run?.receipt?.installation?.state, 'verified');
+  assert.equal(c.state.run?.outcome, 'done');
+  assert.deepEqual(f.calls.find(([n]) => n === 'list_operation_runs')?.[1], { limit: 1 });
+  assert.deepEqual(f.calls.find(([n]) => n === 'get_operation_run')?.[1], { runId: run.runId });
+});
+
+test('a delayed durable terminal receipt cannot replace a different live legacy run', async () => {
+  const held = deferred<unknown>();
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => held.promise, inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); const connecting = c.connect(); await settle();
+  f.emit(event('legacy-run', { type: 'started', index: 0, total: 1, step: step('config:a') }));
+  held.resolve({ runs: [skillRun()], nextBefore: null }); await connecting;
+  assert.equal(c.state.run?.runId, 'legacy-run'); assert.equal(c.state.run?.receipt, undefined);
+});
+
+test('durable lookup replies from a previous session cannot restore stale receipts', async () => {
+  const held = deferred<unknown>(); let requests = 0;
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ++requests === 1 ? held.promise : { runs: [], nextBefore: null }, inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); const first = c.connect(); await settle();
+  await c.connect(); held.resolve({ runs: [skillRun()], nextBefore: null }); await first;
+  assert.equal(c.state.run, null);
+});
+
+
+test('durable failed installation overrides a completed progress count without sharing suggestions', async () => {
+  let run = skillRun({ state: 'running', installation: undefined, result: null });
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ({ runs: [run], nextBefore: null }),
+    get_operation_run: () => run, inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); await c.connect();
+  run = skillRun({ state: 'failed', installation: { ...skillRun().installation!, state: 'failed', message: 'Native catalog unavailable', nextActions: [] } });
+  f.emit(event(run.runId, { type: 'done', ok: 3, failed: 0 })); await settle();
+  assert.equal(c.state.run?.outcome, 'failed');
+  assert.equal(c.state.run?.summary, 'Native catalog unavailable');
+  assert.deepEqual(c.state.run?.receipt?.installation?.nextActions, []);
+});
+
+test('a mismatched run lookup cannot attach another receipt to live progress', async () => {
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ({ runs: [], nextBefore: null }),
+    get_operation_run: () => skillRun({ runId: 'other' }), inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); await c.connect();
+  f.emit(event('live', { type: 'started', index: 0, total: 1, step: step('config:a') })); await settle();
+  assert.equal(c.state.run?.runId, 'live'); assert.equal(c.state.run?.receipt, undefined); assert.equal(c.state.run?.outcome, 'running');
 });

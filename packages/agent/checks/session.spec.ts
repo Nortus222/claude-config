@@ -280,7 +280,9 @@ test('a person applies while auto-apply is paused, and a failed step does not pa
   assert.equal(m.agentJson().paused.reason, 'test pause');
 });
 
-test('a listener that throws never stops the run: History still brackets it and the lock is released', async () => {
+test('a listener that throws never stops the run: History still brackets it and the lock is released', async t => {
+  let diagnostics = '';
+  t.mock.method(process.stderr, 'write', (chunk: string | Uint8Array) => { diagnostics += String(chunk); return true; });
   const { m, within, lock } = await sessionMachine();
   const settled = await within((session) => Effect.gen(function* () {
     const { planId } = yield* session.preview(yield* configOnly(session));
@@ -298,6 +300,9 @@ test('a listener that throws never stops the run: History still brackets it and 
   assert.equal(finished.result, 'done');
   assert.equal(finished.steps.length, 3);
   assert.equal(existsSync(lock), false);
+  const lines = diagnostics.trim().split('\n');
+  assert.equal(lines.length, 7);
+  for (const line of lines) assert.match(line, /^apply run [0-9a-f-]+: a progress listener failed: listener gone$/);
 });
 
 test('a scheduled job and an apply\'s re-inspection never run a job at the same time', async () => {

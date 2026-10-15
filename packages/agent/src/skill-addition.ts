@@ -55,8 +55,8 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   const result = (state: Installation['state'], message: string, evidence: Pick<Installation, 'claude' | 'codex'> = {}): Installation => ({
     state, message: [...message].slice(0, 500).join(''), ...(neutralDirectory ? { retainedDirectory: neutralDirectory } : {}), sharedStore: { codexScans: true, visibility: 'shared' }, ...evidence,
     nextActions: state === 'verified' ? [
-      { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing requires a user destination.' }, requiredDestination: 'user' },
-      { kind: 'promote_to_profile', capability: { available: false, reason: 'Promotion requires an owned profile destination.' }, requiredDestination: 'profile' },
+      { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing requires the personal sharing workflow and a user destination.' }, requiredDestination: 'user' },
+      { kind: 'promote_to_profile', capability: { available: false, reason: 'Promotion requires the profile publication workflow and an owned profile destination.' }, requiredDestination: 'profile' },
     ] : [],
   });
   const domain: AgentDomain = {

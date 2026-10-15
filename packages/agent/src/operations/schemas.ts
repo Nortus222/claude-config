@@ -112,6 +112,7 @@ export const SkillInstallationSchema = Schema.Struct({
 });
 const intentFields = { requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema };
 export const RunViewSchema = Schema.Struct({
+  actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
   intent: Schema.Union([

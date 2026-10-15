@@ -13,9 +13,9 @@ const descriptions: Record<OperationName, string> = {
   resolveSkillCandidate: 'Resolve an exact native selector or canonical installed name in a public GitHub source. Without source, search bounded configured and installed sources. Ambiguous candidates require source selection before preview.',
   getContext: 'Read the installed app, agent, setup and operation capabilities. Start here. Machine scope is the default.',
   inspect: 'Inspect current machine configuration and available reconcile keys.',
-  previewChange: 'Preview reconciliation for explicitly selected inspected keys, or an exact addSkill candidate. For skill additions select the current coding host target unless the user names another target or both; check getContext targets and clarify unavailable target setup in the app. Always send explicit targets. Host identity does not grant permission. Review declaration enablement, source revision and shared-store Codex visibility. Skill installation is currently unavailable.',
+  previewChange: 'Preview reconciliation for explicitly selected inspected keys, or an exact addSkill candidate. For skill additions select the current coding host target unless the user names another target or both; check getContext targets and clarify unavailable target setup in the app. Always send explicit targets. Host identity does not grant permission. Review the exact declaration, revision policy, selected native model catalogs and shared-store visibility: Codex also scans the shared store. Targets require usable exposure; they do not promise exclusive visibility.',
   applyChange: 'Apply a reviewed plan and return its durable run immediately. Keep the same caller-chosen requestId when retrying uncertain acceptance; query the run for completion.',
-  getRun: 'Read a durable operation run, including its outcomes, after reconnecting.',
+  getRun: 'Read a durable operation run after reconnecting. Saved machine intent is separate from installation. Only after installation is verified, ask: Do you want to share it with your other machines? Also mention promotion to an owned profile. Follow nextActions readiness, destination and prerequisite reasons. Never share or promote without a user request. Failed, cancelled or incomplete installation offers neither. Claude catalog discovery does not attest selected source or invocation authorization.',
   listRuns: 'List durable operation runs with bounded pagination.',
   cancelRun: 'Request cancellation of a machine operation run and read its settled receipt.',
   history: 'Read bounded operation History, including actor and durable intent attribution.',
@@ -41,7 +41,7 @@ function safeError(error: unknown) {
   if (error instanceof AgentError) {
     const messages: Record<string, string> = {
       TARGET_UNAVAILABLE: 'A selected skill target is unavailable in setup context. Check getContext targets and configure that target in Nortuscc before previewing it.',
-      SKILL_INSTALL_UNAVAILABLE: 'Skill installation requires the durable verified-addition driver. Discovery and preview are available.',
+      SKILL_INSTALL_UNAVAILABLE: 'Skill installation prerequisites are unavailable. Open Nortuscc to check the explicit native destination, shared-store and lock mapping before resolving and previewing again.',
       APP_UNAVAILABLE: 'Open Nortuscc and finish setup or repair its app-owned agent, then reconnect.',
       MALFORMED: 'The agent returned an invalid reply. Open Nortuscc to check runtime compatibility, then reconnect.',
       UNAUTHORIZED: 'The agent refused authentication. Open Nortuscc to check its app-owned agent, then reconnect.',

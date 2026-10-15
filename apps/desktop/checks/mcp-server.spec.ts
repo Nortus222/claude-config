@@ -7,10 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { before, after, test } from 'node:test';
 import { build } from 'esbuild';
-import { Deferred, Effect, Exit, Scope } from 'effect';
-import { AgentStateStore, makeSession, serveIpc, startAgent, type AgentDomain } from '@nortuscc/agent';
-import { configDomain, DecisionsStore, integrationsDomain, Processes } from '@nortuscc/machine';
+import { Deferred, Effect, Exit, Scope, Layer } from 'effect';
+import { AgentStateStore, makeSession, serveIpc, startAgent, SetupSource, type AgentDomain } from '@nortuscc/agent';
+import { configDomain, DecisionsStore, integrationsDomain, Processes, skillsDomain, OverridesStore } from '@nortuscc/machine';
 import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
+import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
 
@@ -38,7 +40,7 @@ const names: Record<OperationName, string> = { resolveSkillCandidate: 'nortuscc_
 function open(runtime: string, stateRoot: string, modern = false) {
   const child = spawn(runtime, runtime === expectedApp ? ['--mcp'] : [join(bundle, 'mcp.mjs'), '--app', expectedApp], { cwd: '/', env: { HOME: fixtureRoot, SHELL: shell, NORTUSCC_STATE_DIR: stateRoot, PATH: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
   const records: any[] = [];
-  let buffer = '', stderr = '', id = 0, terminated = false;
+  let buffer = '', stderr = '', id = 0, terminated = false, loseNext = false, lostReplyId: number | undefined, dropped = 0;
   const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   child.stderr.on('data', chunk => { stderr += chunk; });
   child.stdout.on('data', chunk => {
@@ -47,7 +49,9 @@ function open(runtime: string, stateRoot: string, modern = false) {
     while ((newline = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
       try {
-        const record = JSON.parse(line); records.push(record);
+        const record = JSON.parse(line);
+        if (record.id === lostReplyId) { dropped++; continue; }
+        records.push(record);
         const p = pending.get(record.id); if (p) { clearTimeout(p.timer); pending.delete(record.id); p.resolve(record); }
       } catch { for (const p of pending.values()) p.reject(new Error(`non-MCP stdout: ${line}`)); }
     }
@@ -55,11 +59,12 @@ function open(runtime: string, stateRoot: string, modern = false) {
   const exited = new Promise<void>(done => child.once('close', () => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error(`MCP exited: ${stderr}`)); } done(); }));
   const ask = (method: string, params: object = {}) => new Promise<any>((resolve, reject) => {
     const requestId = ++id;
+    if (loseNext) { lostReplyId = requestId; loseNext = false; }
     const timer = setTimeout(() => { pending.delete(requestId); reject(new Error(`MCP timeout: ${stderr}`)); }, 10_000);
     pending.set(requestId, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params: { ...params, ...(modern ? { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } : {}) } }) + '\n');
   });
-  return { records, diagnostics: () => stderr, ask, call: (operation: OperationName, args: object = {}) => ask('tools/call', { name: names[operation], arguments: args }),
+  return { records, loseNextReply: () => { loseNext = true; }, droppedReplies: () => dropped, diagnostics: () => stderr, ask, call: (operation: OperationName, args: object = {}) => ask('tools/call', { name: names[operation], arguments: args }),
     initialize: async () => {
       if (modern) return ask('tools/list');
       const result = await ask('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } });
@@ -81,7 +86,7 @@ function output(operation: OperationName, reply: any) {
   assert.deepEqual(JSON.parse(reply.result.content[0].text), reply.result.structuredContent);
   return decodeOperationOutput(operation, reply.result.structuredContent) as any;
 }
-async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates'] } = {}) {
+async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: string; profileJson?: string; pinsJson?: string; skillCandidates?: Parameters<typeof makeSession>[1]['skillCandidates']; addition?: boolean; skillVerification?: Parameters<typeof makeSession>[1]['skillVerification'] } = {}) {
   const m = agentMachine('/tmp');
   const { nativeOutput, profileJson, pinsJson } = inputs;
   const fixture = setupFixture(join(m.root, 'setup'), { headFiles: {
@@ -100,20 +105,40 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { nativeOutput?: s
   const config: AgentDomain = { ...configDomain, run: (step, report) => Effect.gen(function* () { yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return yield* configDomain.run(step, report); }) };
   const domains = (paths: typeof m.paths) => {
     const integrations = integrationsDomain({ paths, env: {} });
-    return [config, nativeOutput === undefined ? integrations : {
+    return [...(inputs.addition ? [skillsDomain] : []), config, nativeOutput === undefined ? integrations : {
       ...integrations,
       inspect: (desired: Parameters<typeof integrations.inspect>[0]) => integrations.inspect(desired).pipe(
         Effect.provideService(Processes, { run: () => Effect.succeed({ code: 0, stdout: nativeOutput, stderr: 'FAKE_STDERR' }) }),
       ),
     }];
   };
+  // The older source fixture returns static profiles. Addition fixtures must compose fresh overrides,
+  // as the production SetupSource does, so a saved declaration is visible to the driver's reinspection.
+  const compose = <T extends { repo: string }>(snapshot: T) => Effect.gen(function* () {
+    const overrides = yield* Effect.promise(() => m.run(OverridesStore.use(store => store.read)));
+    const desired = yield* loadProfile(snapshot.repo, { overrides }).pipe(Effect.provide(nodeFiles));
+    return { ...snapshot, desired };
+  }).pipe(Effect.orDie);
+  const source = inputs.addition ? Layer.succeed(SetupSource, { ...fixture.service,
+    current: fixture.service.current.pipe(Effect.flatMap(compose)),
+    load: revision => fixture.service.load(revision).pipe(Effect.flatMap(compose)),
+    effective: decisions => fixture.service.effective(decisions).pipe(Effect.flatMap(value => Effect.gen(function* () {
+      return { ...value, applied: yield* compose(value.applied), effective: yield* compose(value.effective) };
+    }))),
+  }) : fixture.source;
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
     const handle = yield* startAgent(domains);
-    const session = yield* makeSession(handle, { signal: new AbortController().signal, domains, skillCandidates: inputs.skillCandidates });
+    const processes = yield* Processes;
+    const make = makeSession(handle, { signal: new AbortController().signal, domains, skillCandidates: inputs.skillCandidates, skillVerification: inputs.skillVerification }).pipe(
+      Effect.provide(agentSkillInstaller({ home: join(m.root, 'home') })),
+    );
+    const session = yield* (inputs.addition ? make.pipe(Effect.provideService(Processes, { run: command => command.cmd !== 'npx' ? processes.run(command) : Effect.gen(function* () {
+      yield* Deferred.succeed(started, undefined); yield* Deferred.await(release); return { code: 0, stdout: '' };
+    }) })) : make);
     yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
-  }).pipe(Scope.provide(scope)), fixture.source);
+  }).pipe(Scope.provide(scope)), source);
   return { m, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); } };
 }
 
@@ -169,7 +194,7 @@ test('malformed replies and private failure codes are redacted and an identical-
   const registration = { version: 1, installedBy: 'app', agentVersion: expectedRuntime, appPath: expectedApp };
   writeFileSync(join(root, 'agent/agent.json'), JSON.stringify(registration));
   let operations = 0;
-  let privateFailure = false;
+  let privateFailure: false | string = false;
   const sockets = new Set<Socket>();
   const server = createServer(socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket));
@@ -181,7 +206,7 @@ test('malformed replies and private failure codes are redacted and an identical-
         if (request.command === 'operation') operations++;
         const result = request.command === 'hello' ? { agentVersion: expectedRuntime, protocol: 3, policy: 'manual', paused: null, operationsProtocol: 1, app: { ownership: 'app', version: '0.1.6', runtimeId: expectedRuntime }, operations: { available: true } } : { rawSecret: 'fixture-private-path-token' };
         const reply = request.command === 'operation' && privateFailure
-          ? { version: 3, id: request.id, ok: false, error: { code: 'PRIVATE_SECRET_VALUE', message: 'fixture-private-failure-message' } }
+          ? { version: 3, id: request.id, ok: false, error: { code: privateFailure, message: 'fixture-private-failure-message' } }
           : { version: 3, id: request.id, ok: true, result };
         socket.write(JSON.stringify(reply) + '\n');
       }
@@ -194,7 +219,7 @@ test('malformed replies and private failure codes are redacted and an identical-
   assert.equal(reply.result.isError, true); assert.equal(reply.result.structuredContent.error.code, 'MALFORMED');
   assert.ok(!JSON.stringify(client.records).includes('fixture-private-path-token'));
   assert.ok(!JSON.stringify(client.records).includes('fixture-secret-token'));
-  privateFailure = true;
+  privateFailure = 'PRIVATE_SECRET_VALUE';
   const failure = await client.call('getRun', { runId: 'r' });
   assert.equal(failure.result.isError, true);
   assert.equal(failure.result.structuredContent.error.code, 'OPERATION_FAILED');
@@ -203,10 +228,15 @@ test('malformed replies and private failure codes are redacted and an identical-
     assert.ok(!JSON.stringify(client.records).includes(secret));
     assert.ok(!client.diagnostics().includes(secret));
   }
+  privateFailure = 'SKILL_INSTALL_UNAVAILABLE';
+  const unavailable = await client.call('applyChange', { planId: 'p', requestId: 'r' });
+  assert.equal(unavailable.result.structuredContent.error.code, 'SKILL_INSTALL_UNAVAILABLE');
+  assert.match(unavailable.result.structuredContent.error.message, /native destination.*lock mapping/);
+  assert.doesNotMatch(unavailable.result.structuredContent.error.message, /requires the durable/);
   writeFileSync(join(root, 'agent/agent.json'), JSON.stringify({ ...registration, appPath: '/tmp/Relocated.app/Contents/MacOS/Test' }));
   const relocated = await client.call('getContext');
   assert.equal(relocated.result.structuredContent.error.code, 'APP_UNAVAILABLE');
-  assert.equal(operations, 2, 'the old MCP process must not reach an identical-version relocated agent');
+  assert.equal(operations, 3, 'the old MCP process must not reach an identical-version relocated agent');
   assert.ok(!JSON.stringify(client.records).includes(expectedApp));
   assert.ok(!JSON.stringify(client.records).includes('Relocated.app'));
 });
@@ -264,4 +294,61 @@ test('MCP exposes bounded discovery and source-specific preview; a stale mutatio
   const refused = await next.call('applyChange', { planId: preview.planId, requestId: 'stale-addition' }); assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error.code, 'UNKNOWN_PLAN');
   assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.stateRoot, 'overrides.json'))!), { version: 2, skills: { changed: false } }); assert.deepEqual(output('listRuns', await next.call('listRuns', { limit: 10 })).runs, []);
   assert.equal(existsSync(s.m.paths.backups), false); assert.deepEqual(output('history', await next.call('history', { limit: 10 })), beforeHistory);
+});
+
+
+test('MCP addition guidance offers sharing and promotion only after verified completion', async t => {
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close);
+  const listed = await client.initialize();
+  const description = (name: OperationName) => listed.result.tools.find((tool: any) => tool.name === names[name]).description;
+  assert.doesNotMatch(description('previewChange'), /currently unavailable/);
+  assert.match(description('previewChange'), /selected native model catalogs/);
+  assert.match(description('getRun'), /Do you want to share it with your other machines\?/);
+  assert.match(description('getRun'), /promot.*profile/i);
+  assert.match(description('getRun'), /only after.*verified/i);
+  assert.match(description('getRun'), /user request/);
+});
+
+
+for (const runtime of runtimes) test(`${runtime}: MCP addition from arbitrary cwd retains one intent after a lost reply and offers blocked scope follow-ups`, { timeout: 15_000 }, async t => {
+  const source = 'owner/repo', revision = 'a'.repeat(40);
+  const candidate = { source, revision, installedName: 'design-review', selectorName: 'Design Review', sourceDir: 'skills/layout', description: 'Review design', tree: 'b'.repeat(40), blob: 'c'.repeat(40), internal: false, metadata: {} };
+  const s = await agent('app', { addition: true,
+    skillCandidates: () => Effect.succeed({ ok: true, source, revision, candidates: [candidate] }),
+    skillVerification: { content: () => Effect.succeed({ verified: true, problems: [] }), codex: () => Effect.succeed({ verified: true, path: '/isolated/SKILL.md', enabled: true }) },
+  }); t.after(s.close);
+  const client = open(runtime, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const found = output('resolveSkillCandidate', await client.call('resolveSkillCandidate', { source, name: 'design-review' }));
+  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'addSkill', candidateId: found.candidates[0].candidateId, targets: ['codex'] } }));
+  assert.deepEqual(preview.nextActions, []);
+  // Drop the caller's acceptance result and kill its transport after the installer has started.
+  client.loseNextReply();
+  const lost = client.call('applyChange', { planId: preview.planId, requestId: 'lost-addition-reply' }).catch(() => undefined);
+  await Effect.runPromise(Deferred.await(s.started).pipe(Effect.timeout('5 seconds')));
+  await client.terminate(); await lost;
+  assert.equal(client.droppedReplies(), 1);
+  const next = open(runtime, s.m.paths.stateRoot); t.after(next.close); await next.initialize();
+  const listed = output('listRuns', await next.call('listRuns', { limit: 10 })); assert.equal(listed.runs.length, 1);
+  const runId = listed.runs[0].runId;
+  const pending = output('getRun', await next.call('getRun', { runId }));
+  assert.equal(pending.intentState, 'saved'); assert.equal(pending.actor, 'mcp'); assert.equal(pending.installation?.nextActions.length ?? 0, 0);
+  const retry = output('applyChange', await next.call('applyChange', { planId: preview.planId, requestId: 'lost-addition-reply' })); assert.equal(retry.run.runId, runId);
+  Deferred.doneUnsafe(s.release, Effect.void);
+  let done = output('getRun', await next.call('getRun', { runId }));
+  while (!done.result) done = output('getRun', await next.call('getRun', { runId }));
+  assert.equal(done.installation.state, 'verified'); assert.equal(done.actor, 'mcp');
+  assert.deepEqual(done.scope, { kind: 'machine' });
+  assert.deepEqual(done.intent.skillAddition.declaration, { source, name: 'design-review', targets: ['codex'] });
+  assert.deepEqual(done.installation.nextActions.map((action: any) => [action.kind, action.capability.available, action.requiredDestination]), [
+    ['share_with_my_machines', false, 'user'], ['promote_to_profile', false, 'profile'],
+  ]);
+  assert.match(done.installation.nextActions[0].capability.reason, /personal sharing workflow/);
+  assert.match(done.installation.nextActions[1].capability.reason, /profile publication workflow/);
+  const before = s.m.read(join(s.m.paths.stateRoot, 'overrides.json'));
+  assert.deepEqual(output('getRun', await next.call('getRun', { runId })), done);
+  assert.equal(s.m.read(join(s.m.paths.stateRoot, 'overrides.json')), before);
+  assert.equal(output('listRuns', await next.call('listRuns', { limit: 10 })).runs.length, 1);
+  const history = output('history', await next.call('history', { limit: 100 }));
+  assert.ok(history.events.some((event: any) => event.kind === 'skill-addition' && event.actor === 'mcp' && event.runId === runId && event.requestId === 'lost-addition-reply'));
 });

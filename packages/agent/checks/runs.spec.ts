@@ -58,7 +58,7 @@ test('disconnect and a lost acceptance reply retain one run and one invocation p
     const request = inputFor(planned.planId);
     // The client scope closes after acceptance, while the enclosing agent scope stays alive.
     const accepted = yield* Effect.scoped(session.runs.submit(request));
-    assert.equal(accepted.intentSaved, false);
+    assert.equal(accepted.intentSaved, false); assert.equal(accepted.actor, 'mcp');
     const unsubscribe = session.runs.subscribe(accepted.runId, () => { throw new Error('socket closed'); });
     unsubscribe();
     yield* Deferred.await(f.started);
@@ -68,11 +68,11 @@ test('disconnect and a lost acceptance reply retain one run and one invocation p
     yield* Deferred.succeed(f.release, undefined);
     yield* terminal(session, accepted.runId);
     const done = yield* session.runs.get(accepted.runId);
-    assert.equal(done.state, 'succeeded');
+    assert.equal(done.state, 'succeeded'); assert.equal(done.actor, 'mcp');
     assert.equal(f.calls(), planned.plan.steps.length);
     assert.equal(done.steps.length, planned.plan.steps.length);
     assert.equal((yield* session.runs.submit(request)).runId, accepted.runId);
-    assert.equal((yield* session.runs.list({ limit: 10 })).runs.length, 1);
+    assert.equal((yield* session.runs.list({ limit: 10 })).runs[0]?.actor, 'mcp');
   }));
   const events = await f.m.events();
   assert.equal(events.find(e => e.kind === 'apply-started')?.actor, 'mcp');
@@ -260,5 +260,28 @@ test('an old unsubscribe cannot remove a newer subscriber set', async () => {
     yield* Deferred.succeed(f.release, undefined);
     while ((yield* session.runs.get(run.runId)).result === null) yield* Effect.sleep('1 millis');
     assert.equal(terminalSeen, true); disposeB();
+  }));
+});
+
+
+for (const embedded of [undefined, 'app'] as const) test(`receipt owner supplies attribution after reconnect despite embedded actor ${embedded}`, async () => {
+  const f = await fixture(); let id = '';
+  await f.within(session => Effect.gen(function* () {
+    const p = yield* preview(session); const run = yield* session.runs.submit(inputFor(p.planId)); id = run.runId;
+    yield* Deferred.succeed(f.release, undefined); yield* terminal(session, id);
+  }));
+  await f.m.run(RunStore.use(store => Effect.gen(function* () {
+    const receipt = (yield* store.read)[0]!;
+    const { actor: _actor, ...legacy } = receipt.view;
+    yield* store.write({ ...receipt, view: embedded ? { ...legacy, actor: embedded } : legacy });
+  })));
+  await f.within(session => Effect.gen(function* () {
+    assert.equal((yield* session.runs.get(id)).actor, 'mcp');
+    assert.equal((yield* session.runs.list({ limit: 1 })).runs[0]?.actor, 'mcp');
+    assert.equal((yield* session.runs.cancel(id)).actor, 'mcp');
+    let observed: string | undefined; const off = session.runs.subscribe(id, run => { observed = run.actor; }); off();
+    assert.equal(observed, 'mcp');
+    const read = yield* session.runs.get(id);
+    assert.equal((yield* session.runs.submit(inputFor(read.intent.planId))).actor, 'mcp');
   }));
 });

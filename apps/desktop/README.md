@@ -29,15 +29,16 @@ owned registrations through the app lifecycle. The installed app is required for
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
 packaging targets are unvalidated, and Windows has no supported agent IPC.
 
-The current foundation exposes eight machine operations:
+The app exposes nine machine operations:
 
 | MCP tool | Behavior |
 | --- | --- |
 | `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
+| `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
 | `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
-| `nortuscc_preview_change` | Preview explicit inspected keys with `change: { kind: "reconcile", only: [...] }` |
+| `nortuscc_preview_change` | Preview explicit reconcile keys or `change: { kind: "addSkill", candidateId, targets }` |
 | `nortuscc_apply_change` | Apply a reviewed `planId` with a caller-chosen durable `requestId` |
-| `nortuscc_get_run` | Recover a run's current state and terminal outcome |
+| `nortuscc_get_run` | Recover a run's attributed intent, installation evidence, terminal outcome and follow-up prerequisites |
 | `nortuscc_list_runs` | List retained runs with bounded pagination |
 | `nortuscc_cancel_run` | Cancel an authorized run at a safe boundary |
 | `nortuscc_history` | Read bounded History with MCP actor, request, scope and run attribution |
@@ -47,11 +48,42 @@ when acceptance is uncertain, and query runs after reconnecting. Reconciliation 
 declarations with their current consent, pin and installer rules. It saves no new declaration.
 stdout contains MCP JSON-RPC records only; bounded results and stderr carry diagnostics.
 
-This foundation is not the design's first usable add-skill milestone. The next workstream adds
-verified machine-local skill declarations, source identity, verified usability for selected targets
-and disclosed shared-store visibility, followed by disposable installed-host acceptance of a
-natural-language add-skill request. Context currently reports `addSkill`, user sharing and profile
-promotion unavailable; they are not callable tools.
+Skill additions resolve a candidate, preview its exact machine declaration and revision policy,
+then apply the reviewed plan. Select explicit required targets from setup context; the current
+coding host is a default hint and grants no permission. Skills use the shared `~/.agents/skills`
+store, which Codex also scans, even for Claude-only requests. Targets require usable exposure,
+not exclusive visibility. The app does not change user-owned Codex enablement settings.
+
+A verified installation requires accepted content integrity and effective native model-catalog
+discovery for every selected target. Claude catalog evidence does not attest invocation
+authorization or the selected source path; it covers the requested environment and managed
+startup remains active. Disabled, restricted, missing, ambiguous or incomplete native evidence
+cannot produce verified success. Supported installer mappings use the canonical home shared
+store and absolute Claude/Codex config roots. Alternate shared stores and nonempty XDG lock
+roots are refused before effects.
+
+Saved intent and observed installation appear separately in the app and MCP run receipts.
+When intent has been saved, a failed, cancelled or interrupted addition retains its declaration
+for inspection and repair, without a success claim or sharing offer. Repair through resolve, preview `addSkill`, and apply;
+generic legacy update/apply plans report a prerequisite for addition-touched entries so required
+targets and source policy survive. Reconnects recover the same durable result; uncertain
+acceptance retries retain the same caller-chosen `requestId`.
+
+Only verified installation returns `share_with_my_machines` and `promote_to_profile` suggestions.
+The coding agent should ask "Do you want to share it with your other machines?" and mention
+promotion to an owned profile. Both actions report readiness, required destination and prerequisite
+reason. They remain blocked until the personal sharing or profile publication workflow and its
+destination are available. Ignoring a suggestion keeps machine scope; neither suggestion
+authorizes publication or promotion. Each concerns only the accepted declaration.
+
+Automated fixtures cover authenticated MCP preview/apply, arbitrary chat working directories,
+lost-reply/reconnect retries, terminal outcomes and shared app result rendering with isolated
+installer/catalog services. Scripted transport success does not establish natural-language model
+routing. Actual Codex and Claude conversation checks require a disposable authorized installed-app
+environment. This milestone does not claim those host/model checks or untested native/platform
+combinations. The packaged MCP smoke checks inert reconciliation and connection recovery, not
+native skill installation or model conversations.
+
 The [checked engine inventory](../../packages/agent/src/operations/coverage.ts) maps every audited
 behavior to the implemented operations or its remaining workstream. Current-engine parity still
 needs capture/uninstall/update, target/category/force choices, overrides, incoming sync decisions,

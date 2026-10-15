@@ -37,6 +37,8 @@ export type RunLifecycle = {
 const bounded = (text: string, limit = 500) => [...text].slice(0, limit).join('');
 const error = (cause: unknown): RunError => cause instanceof RunError ? cause : new RunError('RUN_FAILED', bounded(cause instanceof Error ? cause.message : String(cause)));
 const copy = <T>(value: T): T => structuredClone(value);
+// Attribution comes from the immutable receipt owner, including older receipts without a view actor.
+const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor });
 
 // Created once alongside the shared session. The session retains lock and execution ownership.
 export const makeAgentRuns = (driver: {
@@ -53,7 +55,7 @@ export const makeAgentRuns = (driver: {
   let sequence = 0;
   const publish = (receipt: RunReceipt) => {
     for (const listener of listeners.get(receipt.view.runId) ?? []) {
-      try { listener(copy(receipt.view)); } catch {}
+      try { listener(publicView(receipt)); } catch {}
     }
   };
   const save = (receipt: RunReceipt) => store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
@@ -75,7 +77,7 @@ export const makeAgentRuns = (driver: {
     const receipt = receipts.get(runId);
     return receipt ? Effect.succeed(receipt) : Effect.fail(new RunError('UNKNOWN_RUN', 'No run has that ID'));
   });
-  const get: AgentRuns['get'] = runId => Effect.map(find(runId), r => copy(r.view));
+  const get: AgentRuns['get'] = runId => Effect.map(find(runId), r => publicView(r));
   const submit: AgentRuns['submit'] = original => {
     const input = copy(original);
     return Effect.gen(function* () {
@@ -89,7 +91,7 @@ export const makeAgentRuns = (driver: {
         if (previous.view.intent.inputDigest !== input.inputDigest || previous.view.intent.planId !== input.planId || previous.actor !== input.actor) {
           return yield* Effect.fail(new RunError('REQUEST_CONFLICT', 'This request ID already belongs to different input'));
         }
-        return copy(previous.view);
+        return publicView(previous);
       }
       const runId = randomUUID();
       let noteLimit = 500;
@@ -160,11 +162,11 @@ export const makeAgentRuns = (driver: {
       const page: RunReceipt[] = [];
       let bytes = 100;
       for (const receipt of sorted.slice(offset, offset + input.limit)) {
-        const size = Buffer.byteLength(JSON.stringify(receipt.view)) + 1;
+        const size = Buffer.byteLength(JSON.stringify(publicView(receipt))) + 1;
         if (page.length > 0 && bytes + size > MAX_RUN_BYTES) break;
         page.push(receipt); bytes += size;
       }
-      return { runs: page.map(r => copy(r.view)), nextBefore: offset + page.length < sorted.length ? page.at(-1)!.view.runId : null };
+      return { runs: page.map(r => publicView(r)), nextBefore: offset + page.length < sorted.length ? page.at(-1)!.view.runId : null };
     }),
     cancel: runId => Effect.gen(function* () {
       const receipt = yield* find(runId);
@@ -175,7 +177,7 @@ export const makeAgentRuns = (driver: {
       const set = listeners.get(runId) ?? new Set();
       listeners.set(runId, set); set.add(listener);
       const receipt = receipts.get(runId);
-      if (receipt) { try { listener(copy(receipt.view)); } catch {} }
+      if (receipt) { try { listener(publicView(receipt)); } catch {} }
       let disposed = false;
       return () => {
         if (disposed) return;

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { additionRunPlan } from './skill-addition.ts';
 import { Cause, Effect, Exit, Fiber, Layer } from 'effect';
 import {
-  acceptedSkillLockMatches, additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, Processes, readSkillCandidates,
+  acceptedSkillLockMatches, additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, overridesPath, Processes, readSkillCandidates,
   sourceOf, skillLockPath, agentSkillsDirs, inspectSkills, type Plan, type SkillCandidate,
 } from '@nortuscc/machine';
 import {
@@ -119,7 +119,7 @@ export const makeSkillOperations = (options: {
       ({ status, candidates: found, failures, unsupportedSources, knownSources: sources.length + unsupportedSources, searchedSources: searched ? sources : [], ...(limit ? { limit } : {}), limits: SKILL_OPERATION_LIMITS });
     if (unsupportedSources) return result('limited', [], [], 'unsupported-source-inventory');
     if (sources.length > SKILL_OPERATION_LIMITS.sources) return result('limited', [], [], 'source-inventory');
-    // All bounded sources start together. A loop of 30-second reads would exceed the 30s IPC request.
+    // Concurrent source reads share the deliberate 20s body budget; operation IPC allows 120s.
     searched = true;
     const reads = yield* Effect.forEach(sources, s => reader({ source: s, ...(pinFor(inspection.desired, s) ? { revision: pinFor(inspection.desired, s)! } : {}), timeoutMs: SKILL_OPERATION_LIMITS.sourceTimeoutMs })
       .pipe(Effect.map(read => ({ source: s, read }))), { concurrency: SKILL_OPERATION_LIMITS.sources });
@@ -189,7 +189,8 @@ export const makeSkillOperations = (options: {
     const revision = before.find(a => a.revision !== undefined)?.revision;
     const after: SkillAddition = { source: c.source, name: c.installedName, targets: TARGETS.filter(t => change.targets.includes(t) || before.some(a => a.targets.includes(t))), ...(revision ? { revision } : {}) };
     const enable = overrides.value.skills?.[c.installedName] === false;
-    const tentative: Input<MachineOverrides> = { ...overrides, value: { ...overrides.value,
+    // Saving a first declaration moves legacy choices to overrides.json; preview that future provenance.
+    const tentative: Input<MachineOverrides> = { ...overrides, source: overridesPath(inspection.paths), value: { ...overrides.value,
       skillAdditions: [...(overrides.value.skillAdditions ?? []).filter(a => !(a.source === c.source && a.name === c.installedName)), after],
       ...(enable ? { skills: { ...overrides.value.skills, [c.installedName]: true } } : {}) } };
     const desired = yield* loadProfile(inspection.paths.repo, { overrides: tentative }).pipe(Effect.provide(profileFiles));
