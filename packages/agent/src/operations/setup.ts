@@ -7,7 +7,7 @@ import {
   type MutationObserver,
 } from '@nortuscc/machine';
 import {
-  composeSetupChoices, desiredOfDocuments, itemIdOf, overrideOf, parseItemId, persistSyncDecision, prepareSyncDecision,
+  composeSetupChoices, desiredOfDocuments, entryOf, itemIdOf, itemValues, overrideOf, parseItemId, persistSyncDecision, prepareSyncDecision,
   patchItem, setupPinGroups, revisionSetupId, withoutOverride, SyncStore, validateSetupComposition, validateSetupPinChoices, worktreeDocuments,
   type Documents, type Revision, type SyncDecisionChange,
 } from '@nortuscc/sync';
@@ -265,8 +265,30 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
               const accepted = change.choices.filter(c => c.action !== 'hold').map(c => c.itemId);
               const successful = ran.steps.filter(s => s.outcome === 'ok').map(s => itemIdOf(s.key, first.report.desired)).filter((id): id is string => id !== undefined);
               const observedItems = yield* observedHostedItems(inspection, first.input.observed.offered, accepted, successful);
+              const released: string[] = [];
+              const previouslyOwned = itemValues(first.input.observed.before);
+              if (!fresh.probeErrors.length && !fresh.desired.issues.length) for (const id of accepted) {
+                if (overrideOf(id, first.nextOverrides) !== undefined) continue;
+                const effective = { desired: fresh.desired, repo: first.jobPaths.repo };
+                const actualEntry = yield* entryOf(id, effective);
+                const wantedEntry = yield* entryOf(id, first.input.observed.offered);
+                // Explicitly accepted absence releases this setup's ownership, preserving local files.
+                const absent = [actualEntry, wantedEntry].every(entry => !entry || entry.kind === 'file' && entry.hash === undefined);
+                if (absent && previouslyOwned.has(id)) {
+                  released.push(id);
+                  continue;
+                }
+                const hook = fresh.desired.integrations.find(i => `integration:${i.id}` === id)?.declaration;
+                if (hook?.type !== 'hook' || typeof hook.file !== 'string' || !actualEntry || !wantedEntry
+                  || canonical(actualEntry) !== canonical(wantedEntry)
+                  || !fresh.items.some(row => row.key === id && row.disposition === 'in-sync')) continue;
+                const wanted = yield* fs.readText(join(first.input.observed.offered.repo, hook.file));
+                const installed = yield* fs.readText(join(paths.claude, 'hooks', basename(hook.file)));
+                // Hook registration alone cannot confirm the executable body.
+                if (wanted !== undefined && installed === wanted) observedItems.push(id);
+              }
               if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup apply cancelled'));
-              yield* first.input.selected.source.recordApplied!({ revision: head, decisions: first.nextDecisions, observed: observedItems, released: [] });
+              yield* first.input.selected.source.recordApplied!({ revision: head, decisions: first.nextDecisions, observed: observedItems, released });
             }
             yield* observer.committed('sync:applied');
           }
