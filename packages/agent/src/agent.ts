@@ -155,7 +155,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true, localDecision = false) =>
       Effect.scoped(Effect.andThen(acquireApplyLock, mutateJob(effect, invalidate, localDecision))).pipe(Effect.provideService(MachinePaths, paths),
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
-        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
+        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Nortuscc before changing the machine'))));
     const hosted = options.hosted;
     const setups = yield* SetupsStore;
     const selectOperationSetup = (setupId: string): Effect.Effect<OperationSetup, unknown> =>
