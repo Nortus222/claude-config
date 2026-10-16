@@ -447,6 +447,39 @@ test('a page entered while connecting loads profiles and the review once connect
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 2);
   assert.ok(controller.state.review);
 });
+const inspections = (f: { commands: string[] }) => f.commands.filter(command => command === 'inspect_machine').length;
+test('Reload inspects this Mac again beside re-reading the review', async t => {
+  const f = await setup(t); f.report.items = localItems();
+  const before = inspections(f), reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  await f.controller.reload();
+  assert.equal(inspections(f), before + 1); assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.equal(f.controller.state.inspection?.items.length, 5);
+});
+test('a stale reconcile adopts the replacement and inspects this Mac again', async t => {
+  const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();
+  await f.controller.previewLocal();
+  const replacement = { ...f.controller.state.preview!, planId: 'fresh-local', change: { kind: 'reconcile' as const, only: ['skill:tdd'] } };
+  f.handlers.applyChange = () => ({ status: 'stale', preview: replacement });
+  const before = inspections(f);
+  await f.controller.apply(); await flush();
+  assert.equal(f.controller.state.preview?.planId, 'fresh-local'); assert.equal(f.controller.state.previewNotice, 'This Mac changed. Review the updated plan.');
+  assert.equal(inspections(f), before + 1); assert.equal(f.controller.state.run, null);
+});
+test('Reload after a lost Apply reply shows that run even when it already finished, and re-inspects', async t => {
+  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  f.handlers.applyChange = () => { throw new Error('Reply lost'); }; await f.controller.apply();
+  const requestId = f.calls.find(c => c.name === 'applyChange')!.input.requestId;
+  const done = run({ runId: 'lost-run', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 }, intent: { ...run().intent, requestId } });
+  f.handlers.listRuns = () => ({ runs: [run({ runId: 'other', state: 'succeeded', result: { status: 'done', ok: 2, failed: 0 } }), done], nextBefore: null });
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  await f.controller.reload(); await flush();
+  assert.equal(f.controller.state.run?.runId, 'lost-run'); assert.equal(f.controller.state.run?.state, 'succeeded');
+  assert.equal(f.controller.state.error, null);
+  // The finished setup apply re-reads the review and inspects this Mac like any run this window saw finish.
+  assert.ok(f.calls.filter(c => c.name === 'setupReview').length >= reviews + 2);
+  const after = inspections(f); await f.controller.reload(); await flush();
+  assert.equal(f.controller.state.run?.runId, 'lost-run'); assert.equal(inspections(f), after + 1);
+});
 test('a page left before connecting does not load, and loads when entered later', async t => {
   const f = await fixture({ connect: false }); const controller = new SetupSyncController(f.bridge, f.machine);
   t.after(() => { controller.dispose(); f.machine.dispose(); });

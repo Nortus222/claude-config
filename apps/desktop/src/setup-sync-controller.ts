@@ -66,6 +66,8 @@ export class SetupSyncController {
   private inMaintenance = false;
   // The session the review was last loaded in, so an entered page loads it once per session as soon as it can.
   private loaded: number | null = null;
+  // The request of an Apply whose reply was lost; Reload looks for its run.
+  private lost: string | null = null;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
@@ -143,8 +145,8 @@ export class SetupSyncController {
     this.autoload();
   }
   invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {}, previewError: null, localError: null, previewNotice: null, switchTarget: null }); }
-  // Adopts the newest machine run that is active or interrupted. A finished run found here is history,
-  // not something this window did, so it is not shown.
+  // Adopts the run of an Apply whose reply was lost, whatever its state, else the newest machine run that
+  // is active or interrupted. Another finished run found here is history, not something this window did.
   private async discoverRun() {
     if (!this.bridge || this.machine.state.connection !== 'connected') return;
     const mark = this.mark(), serial = ++this.runRead;
@@ -154,8 +156,10 @@ export class SetupSyncController {
       for (let page = 0; page < MAX_RUN_PAGES; page++) {
         const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: PAGE_SIZE, ...(before ? { before } : {}) });
         if (!result || serial !== this.runRead || active(this.state.run) || this.state.pending) return;
-        const run = result.runs.find(run => MACHINE_KINDS.has(run.intent.change.kind) && (active(run) || run.state === 'interrupted'));
-        if (run) { this.update({ run, ...(active(run) ? { preview: null } : {}) }); await this.readRun(run.runId); return; }
+        const lost = this.lost === null ? undefined : result.runs.find(run => run.intent.requestId === this.lost);
+        if (lost && !active(lost)) { this.lost = null; this.update({ run: lost }); await this.finished(lost); return; }
+        const run = lost ?? result.runs.find(run => MACHINE_KINDS.has(run.intent.change.kind) && (active(run) || run.state === 'interrupted'));
+        if (run) { if (run === lost) this.lost = null; this.update({ run, ...(active(run) ? { preview: null } : {}) }); await this.readRun(run.runId); return; }
         if (!result.nextBefore || cursors.has(result.nextBefore)) return;
         before = result.nextBefore;
         cursors.add(before);
@@ -186,7 +190,11 @@ export class SetupSyncController {
     if (runId && (event.event === 'operation-run' || event.event === 'status' || event.event === 'progress') && event.runId === runId) void this.readRun(runId);
     else if (event.event === 'operation-run' && this.visible && !active(this.state.run)) void this.discoverRun();
   }
-  async reload() { await this.load(false); }
+  // Re-reads incoming changes and inspects this Mac again.
+  async reload() {
+    const loading = this.load(false);
+    await Promise.all([loading, this.machine.inspect()]);
+  }
   async refetch() { if (this.state.eligibility.refetch) await this.load(true); }
   async selectSource(setupId: string) {
     if (!this.state.eligibility.read) return;
@@ -347,18 +355,23 @@ export class SetupSyncController {
     const target = this.state.switchTarget;
     const mark = this.mark(); this.update({ pending: true, preview: null, previewNotice: null, switchTarget: null, error: null });
     let finished: RunView | undefined;
+    const requestId = crypto.randomUUID();
+    this.lost = null;
     try {
-      const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId: crypto.randomUUID() });
+      const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId });
       if (!result) return;
-      // Nothing ran: the agent re-planned against this Mac as it is now.
-      if (result.status === 'stale') this.update({ preview: result.preview, previewNotice: STALE, ...(result.preview.change.kind === 'followProfile' ? { switchTarget: target } : {}) });
-      else {
+      // Nothing ran: the agent re-planned against this Mac as it is now, so "On this Mac" is inspected again.
+      if (result.status === 'stale') {
+        this.update({ preview: result.preview, previewNotice: STALE, ...(result.preview.change.kind === 'followProfile' ? { switchTarget: target } : {}) });
+        if (result.preview.change.kind === 'reconcile') void this.machine.inspect();
+      } else {
         this.update({ run: result.run, ...(preview.change.kind === 'setupApply' ? { choices: [] } : {}), message: '' });
         if (active(result.run)) await this.readRun(result.run.runId);
         else finished = result.run;
       }
-    } catch (error) { if (this.current(mark)) this.update({ error: `${errorText(error)}. It is not known whether it ran. Reload to check before trying again.` }); }
-    finally { if (this.current(mark)) { this.update({ pending: false }); if (finished) await this.finished(finished); } }
+    } catch (error) {
+      if (this.current(mark)) { this.lost = requestId; this.update({ error: `${errorText(error)}. It is not known whether it ran. Reload to check before trying again.` }); }
+    } finally { if (this.current(mark)) { this.update({ pending: false }); if (finished) await this.finished(finished); } }
   }
   // Prepares a fresh preview of an interrupted run's change; a reconcile keeps only what is still waiting.
   async repreview() {
