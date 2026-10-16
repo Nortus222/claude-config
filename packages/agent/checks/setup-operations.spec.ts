@@ -373,7 +373,7 @@ test('hook body-only changes appear in review with both executable bodies', asyn
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
 
-test('an omitted hook refuses settlement when hold replay would replace its retained body', async () => {
+test('an omitted hook refuses settlement when replay cannot preserve its held body', async () => {
   const m = agentMachine();
   const { HEAD_FILES } = await import('./support/setup-fixture.ts');
   const setup = setupFixture(join(m.root, 'snapshots'), { composeStateRoot: m.paths.stateRoot,
@@ -387,8 +387,9 @@ test('an omitted hook refuses settlement when hold replay would replace its reta
       const before = durableFiles(m.paths.stateRoot);
       const error = yield* Effect.flip(session.previewChange(change([{ itemId: EFFORT, action: 'accept' }])));
       assert.equal(error.code, 'INVALID_REQUEST');
-      assert.match(error.message, /hook bytes cannot be retained/);
+      assert.match(error.message, /hook bytes/);
       assert.deepEqual(durableFiles(m.paths.stateRoot), before);
+      assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
     })), setup.source);
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
@@ -446,4 +447,109 @@ test('review without refetch keeps the latest refetched revision instead of an o
     assert.deepEqual(read.revision, fresh.revision);
     assert.deepEqual(read.revision, { kind: 'local', commit: next });
   }));
+});
+
+test('setup review shows a profile file exclusion instead of unchanged file text', async () => {
+  const m = agentMachine();
+  const { SetupSource } = await import('@nortuscc/sync');
+  const files = { 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# same rules\n' };
+  const setup = setupFixture(join(m.root, 'snapshots'), { appliedFiles: files, headFiles: { ...files, 'profiles/child.json': json({ files: { 'claude:CLAUDE.md': null } }) } });
+  await m.trust();
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true, limit: 100 }));
+      const row = review.rows.find(row => row.itemId === 'file:claude:CLAUDE.md')!;
+      assert.equal(row.before, '# same rules\n');
+      assert.deepEqual(JSON.parse(row.after!), { managed: false });
+    })), Layer.succeed(SetupSource, { ...setup.service, profile: 'child' }));
+  } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
+
+test('a stale settings hold does not block accepting an independent item', async () => {
+  const { desiredFor, revisionCommit, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo({ 'claude/settings.keys.json': json({ theme: 'auto' }) });
+  const applied = repo.commit({ 'profiles/child.json': '{}', 'claude/settings.keys.json': json({ theme: 'dark' }), 'claude/CLAUDE.md': '# before\n' });
+  const head = repo.commit({ 'claude/CLAUDE.md': '# accepted\n' });
+  const itemId = 'file:claude:CLAUDE.md';
+  const held = { 'setting:claude:settings.json#theme': repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), json({ version: 1, held }));
+  const snapshot = (commit: string, holds: Record<string, string> = {}) => Effect.promise(() => runSync(desiredFor({
+    repo: repo.dir, profile: commit === repo.first ? 'default' : 'child', head: { kind: 'commit', commit }, held: holds,
+    into: join(m.root, 'snapshots', commit, Object.keys(holds).length ? 'held' : 'plain'),
+  })));
+  const service: SetupSource['Service'] = {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: revision => snapshot(revisionCommit(revision)),
+    current: snapshot(applied, held),
+    effective: (decisions, choices) => Effect.gen(function* () {
+      const holds = choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held;
+      const current = yield* snapshot(applied, holds);
+      const accepted = decisions.some(d => d.itemId === itemId && d.commit === head && d.decision === 'accept');
+      return { applied: { ...current, revision: applied }, effective: yield* snapshot(accepted ? head : applied, holds), conflicts: [] };
+    }),
+  };
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true }));
+      assert.equal(review.rows.find(row => row.itemId === 'setting:claude:settings.json#theme')?.after, '"dark"');
+      const preview = yield* s.previewChange({ kind: 'setupApply', setupId: 'local', revision: { kind: 'local', commit: head }, choices: [{ itemId, action: 'accept' }] });
+      assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
+      assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# accepted\n');
+      assert.deepEqual(yield* (yield* SyncStore).read, held);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, head);
+      const effective = yield* service.effective(yield* (yield* DecisionsStore).read);
+      assert.equal(effective.effective.desired.files.find(file => file.id === 'claude:settings.json')?.keys?.theme?.value, 'dark');
+    })), Layer.succeed(SetupSource, service));
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
+});
+
+test('a hold from before the followed profile stays listed and can be released', async () => {
+  const { desiredFor, SetupSource, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo();
+  const itemId = 'file:claude:CLAUDE.md';
+  const head = repo.commit({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  const held = { [itemId]: repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held }));
+  const snapshot = (holds: Record<string, string>) => Effect.promise(() => runSync(desiredFor({ repo: repo.dir, profile: 'child', head: { kind: 'commit', commit: head }, held: holds, into: join(m.root, 'profile-snapshot') })));
+  const source = Layer.succeed(SetupSource, {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: () => snapshot({}),
+    current: snapshot(held),
+    effective: (_decisions, choices) => Effect.gen(function* () {
+      const current = yield* snapshot(choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held);
+      return { applied: { ...current, revision: head }, effective: current, conflicts: [] };
+    }),
+  });
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => [], { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => [], signal: new AbortController().signal });
+      const incoming = yield* s.incomingChanges(decodeOperationInput('incomingChanges', { setupId: 'local' }));
+      assert.ok(incoming.items.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: false }));
+      assert.ok(review.rows.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const preview = yield* s.previewChange({ kind: 'syncDecision', setupId: 'local', itemId, revision: { kind: 'local', commit: head }, action: 'release' });
+      const run = yield* finish(s, preview.planId);
+      assert.equal(run.state, 'succeeded');
+      assert.deepEqual(yield* (yield* SyncStore).read, {});
+    })), source);
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
 });

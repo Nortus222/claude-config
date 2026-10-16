@@ -132,3 +132,30 @@ test('a setting held at a commit whose settings document was refused is deleted'
   assert.equal(values.has('setting:claude:settings.json#theme'), false);
   assert.equal(values.get('setting:claude:settings.json#effortLevel'), itemValues(BASE).get('setting:claude:settings.json#effortLevel'));
 });
+
+for (const profile of ['default', 'child']) {
+  test(`a ${profile} profile settings hold preserves an unparseable replacement document`, () => {
+    const held = { ...BASE, [`profiles/${profile}.json`]: json({ files: { 'claude:settings.json': 'claude/custom.keys.json' } }), 'claude/custom.keys.json': json({ theme: 'dark' }) };
+    const head = { ...held, 'claude/custom.keys.json': '{ "effortLevel": "high", broken' };
+    assert.deepEqual(patchItem(head, 'setting:claude:settings.json#theme', held, profile), head);
+  });
+
+  test(`a ${profile} profile settings hold removes an empty replacement document`, () => {
+    const held = { ...BASE, [`profiles/${profile}.json`]: json({ files: { 'claude:settings.json': 'claude/custom.keys.json' } }) };
+    const head = { ...held, 'claude/custom.keys.json': json({ model: 'opus' }) };
+    assert.equal(Object.hasOwn(patchItem(head, 'setting:claude:settings.json#model', held, profile), 'claude/custom.keys.json'), false);
+  });
+}
+
+for (const profile of [undefined, 'child']) {
+  test(`a ${profile ?? 'root'} integration hold preserves hook bytes shared with an unheld sibling`, () => {
+    const hook = { id: 'hk', label: 'hook', target: 'claude', type: 'hook', default: true, event: 'SessionStart', file: 'claude/hooks/shared.mjs' };
+    const held = { ...BASE, ...(profile ? { 'profiles/child.json': '{}' } : {}), 'integrations.json': json({ version: 1, integrations: [hook] }), 'claude/hooks/shared.mjs': '// old\n' };
+    const head = { ...held, 'integrations.json': json({ version: 1, integrations: [hook, { ...hook, id: 'sibling', event: 'Stop' }] }), 'claude/hooks/shared.mjs': '// current\n' };
+    const patched = patchItem(head, 'integration:hk', held, profile);
+    assert.equal(patched['claude/hooks/shared.mjs'], '// current\n');
+    assert.equal(itemValues(patched, profile).get('integration:sibling'), itemValues(head, profile).get('integration:sibling'));
+    const missing = withDocuments(head, { 'claude/hooks/shared.mjs': null });
+    assert.equal(patchItem(missing, 'integration:hk', held, profile)['claude/hooks/shared.mjs'], '// old\n');
+  });
+}

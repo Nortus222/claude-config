@@ -17,7 +17,7 @@ const FILE = 'file:claude:CLAUDE.md';
 const initial = { 'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'high' }), 'claude/CLAUDE.md': '# first\n' };
 const accept = (itemId: string, revision = 1): Decision => ({ setupId: 'setup-1', itemId, revision, commit: null, decision: 'accept', decidedAt: '2026-10-07T00:00:00Z', machineId: null, source: 'local' });
 
-const fixture = (base: Readonly<Record<string, string>> = initial) => {
+const fixture = (base: Readonly<Record<string, string>> = initial, profile?: string) => {
   const repo = tempRepo(base);
   const origin = join(repo.root, 'origin.git');
   const checkout = join(repo.root, 'checkout');
@@ -47,7 +47,7 @@ const fixture = (base: Readonly<Record<string, string>> = initial) => {
   const trust = (checkoutValue: string | null = checkout, accountId: string | null = 'account-1', repoUrl = URL) => write(join(paths.stateRoot, 'agent', 'setups.json'), json({ version: 1, setups: [{ setupId: 'setup-1', repoUrl: sync.normalizeRepoUrl(repoUrl), checkout: checkoutValue, trustedAt: '2026-10-07T00:00:00Z', ...(accountId ? { accountId } : {}) }] }));
   const layer = (accountId = 'account-1', repoUrl = URL) => {
     assert.equal(typeof sync.hostedSetupSourceLayer, 'function', 'hosted SetupSource is exported');
-    return sync.hostedSetupSourceLayer(paths, { accountId, currentAccountId: Effect.sync(() => account), setupId: 'setup-1', repoUrl, records: Effect.sync(() => records), processes });
+    return sync.hostedSetupSourceLayer(paths, { accountId, currentAccountId: Effect.sync(() => account), setupId: 'setup-1', repoUrl, profile, records: Effect.sync(() => records), processes });
   };
   const source = <A, E>(f: (source: sync.SetupSource['Service']) => Effect.Effect<A, E>, accountId = 'account-1', repoUrl = URL) => Effect.runPromise(Effect.result(sync.SetupSource.use(f)).pipe(Effect.provide(layer(accountId, repoUrl))));
   let docs: Readonly<Record<string, string>> = {};
@@ -59,7 +59,8 @@ const fixture = (base: Readonly<Record<string, string>> = initial) => {
     const tag = `v${number}`;
     repo.git('tag', ...(annotated ? ['-a', '-m', tag] : []), tag, commitSha);
     repo.git('push', '-q', 'origin', 'main', `refs/tags/${tag}`);
-    const record: SyncRevision = { setupId: 'setup-1', number, commitSha, tag, changelog: '', requiredEnv: [], items: sync.diffItems(sync.itemValues(before), sync.itemValues(docs)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' })) };
+    const values = (documents: Readonly<Record<string, string>>) => profile && profile !== 'default' && !Object.hasOwn(documents, `profiles/${profile}.json`) ? new Map() : sync.itemValues(documents, profile);
+    const record: SyncRevision = { setupId: 'setup-1', number, commitSha, tag, changelog: '', requiredEnv: [], items: sync.diffItems(values(before), values(docs)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' })) };
     records.push(record);
     return record;
   };
@@ -363,4 +364,52 @@ test('I4 incomplete private clone never discovers an ancestor checkout as its re
   assert.equal((await s.source((source) => source.load(r)))._tag, 'Success');
   assert.equal(existsSync(join(clonePath(s), 'HEAD')), true);
   assert.equal(execFileSync('git', ['-C', s.checkout, 'for-each-ref', '--format=%(refname)', 'refs/nortuscc/'], { encoding: 'utf8' }), '');
+});
+
+test('hosted verification uses inherited resolved items and ignores an unrelated profile revision', async (t) => {
+  const s = fixture({ ...initial, 'profiles/base.json': '{}', 'profiles/child.json': json({ extends: 'base' }), 'profiles/other.json': '{}', 'claude/personal.md': '# child\n' }, 'child');
+  t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.trust(null);
+  const first = s.publish();
+  const empty = await s.source(source => source.current);
+  assert.equal(empty._tag, 'Success');
+  const inherited = s.publish({ 'profiles/base.json': json({ files: { 'claude:CLAUDE.md': 'claude/personal.md' } }) });
+  assert.deepEqual(inherited.items, [{ id: FILE, kind: 'file', change: 'changed' }]);
+  const result = await s.source(source => source.load(inherited));
+  assert.equal(result._tag, 'Success');
+  if (result._tag === 'Success') assert.equal(s.textAt(result.success.repo, result.success.desired.files.find(file => file.id === 'claude:CLAUDE.md')!.src), '# child\n');
+  const unrelated = s.publish({ 'profiles/other.json': json({ files: { 'claude:CLAUDE.md': null } }) });
+  assert.deepEqual(unrelated.items, []);
+  assert.equal((await s.source(source => source.load(unrelated)))._tag, 'Success');
+  assert.equal((await s.source(source => source.effective(first.items.map(item => accept(item.id)))))._tag, 'Success');
+});
+
+test('a profile added in a later revision verifies and loads', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  const first = s.publish();
+  assert.deepEqual(first.items, []);
+  const second = s.publish({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# child\n' });
+  const result = await s.source(source => source.load(second));
+  assert.equal(result._tag, 'Success');
+  if (result._tag === 'Success') assert.equal(s.textAt(result.success.repo, 'claude/CLAUDE.md'), '# child\n');
+});
+
+test('a revision whose followed profile is invalid is still rejected', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.publish();
+  const revision = s.publish({ 'profiles/child.json': json({ extends: 'missing' }) });
+  const result = await s.source(source => source.load(revision));
+  fails(result, 'RevisionMismatch');
+  if (result._tag === 'Failure') assert.equal(result.failure.reason, 'published profile is invalid');
+});
+
+test('a linked hosted baseline ignores holds from before its followed profile existed', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.publish();
+  const head = s.publish({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  s.write(join(s.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: head.commitSha, at: '2026-10-07T00:00:00Z' } }));
+  s.write(join(s.paths.stateRoot, 'sync.json'), json({ version: 1, held: { [FILE]: s.first } }));
+  const result = await s.source(source => source.effective([]));
+  assert.equal(result._tag, 'Success');
+  if (result._tag === 'Success') assert.equal(s.textAt(result.success.applied.repo, 'claude/CLAUDE.md'), '# current\n');
 });

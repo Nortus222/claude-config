@@ -92,7 +92,7 @@ test('removing one skill cannot change a retained sibling pin', () => {
   assert.throws(() => composeSetupChoices({ current, offered, accepted: [two], holds: { [one]: 'origin' } }), /share one pin/);
 });
 
-test('independent validation refuses retained hook bytes that hold replay would replace', async () => {
+test('independent validation refuses different hook bytes after composition', async () => {
   const { validateSetupComposition } = await import('../src/setup-choices.ts');
   const current = hook(['one'], 'old\n'), offered = hook(['one'], 'new\n');
   const expected = composeSetupChoices({ current, offered, accepted: [], holds: { 'integration:one': 'origin' } });

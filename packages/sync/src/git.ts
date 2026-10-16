@@ -28,7 +28,7 @@ export const commitDocuments = (repo: string, commit: string): Effect.Effect<Doc
         const blob = yield* git(repo, ['cat-file', 'blob', `${sha}:${path}`]);
         if (blob.code !== 0) return yield* Effect.fail(new RevisionUnavailable({ revision: commit, reason: `${path} could not be read` }));
         return blob.stdout;
-      }));
+      }), [...tree].some(path => path.startsWith('profiles/')) ? [...tree].filter(path => /^profiles\/[^/]+\.json$/.test(path)).map(path => path.slice('profiles/'.length)) : undefined);
   });
 
 // Whether `ancestor` is reachable from `descendant`; undefined when git cannot tell.
