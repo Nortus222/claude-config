@@ -22,6 +22,8 @@ const MAX_CHOICES = 1000;
 const MAX_RUN_PAGES = 5;
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+// A finished setup apply or a successful follow changes what is incoming, so the review is re-read.
+const settles = (run: RunView) => !active(run) && (run.intent.change.kind === 'setupApply' || run.intent.change.kind === 'followProfile' && run.state === 'succeeded');
 
 // Choices survive paging, while connection changes discard every preview and re-read the durable run.
 export class SetupSyncController {
@@ -115,9 +117,9 @@ export class SetupSyncController {
     try {
       const run = await this.call(mark, 'getRun', { scope: SCOPE, runId });
       if (run?.runId === runId && serial === this.runRead && this.state.run?.runId === runId) {
-        const switched = active(this.state.run) && run.state === 'succeeded' && run.intent.change.kind === 'followProfile';
+        const settled = active(this.state.run) && settles(run);
         this.update({ run, preview: null, message: `Run ${run.state}` });
-        if (switched) { this.invalidate(); await this.reload(); }
+        if (settled) { this.invalidate(); await this.reload(); }
       }
     } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: message(error) }); }
   }
@@ -232,18 +234,18 @@ export class SetupSyncController {
     if (!this.state.eligibility.apply || !preview) return;
     this.runRead++;
     const mark = this.mark(); this.update({ pending: true, preview: null, error: null });
-    let switched = false;
+    let settled = false;
     try {
       const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId: crypto.randomUUID() });
       if (!result) return;
       if (result.status === 'stale') this.update({ message: 'Setup changed. Preview again before applying.' });
       else {
         this.update({ run: result.run, choices: [], message: `Run ${result.run.state}` });
-        switched = preview.change.kind === 'followProfile' && result.run.state === 'succeeded';
-        if (!switched) await this.readRun(result.run.runId);
+        settled = settles(result.run);
+        if (!settled) await this.readRun(result.run.runId);
       }
     } catch (error) { if (this.current(mark)) this.update({ error: `${message(error)}. Apply completion is unconfirmed. Reload to inspect runs before retrying.` }); }
-    finally { if (this.current(mark)) { this.update({ pending: false }); if (switched) { this.invalidate(); await this.reload(); } } }
+    finally { if (this.current(mark)) { this.update({ pending: false }); if (settled) { this.invalidate(); await this.reload(); } } }
   }
   async repreview() {
     const run = this.state.run;

@@ -73,6 +73,22 @@ test('a status for another run does not end this run\'s progress', async t => {
   f.emit({ version: 3, event: 'status', runId: 'setup-run', status: { ...f.machine.state.status!, applying: false } }); await flush();
   assert.equal(f.controller.state.run?.state, 'succeeded');
 });
+test('a finished setup Apply reloads the review so applied rows leave it', async t => {
+  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview(); await f.controller.apply();
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  f.handlers.setupReview = () => review({ rows: [] });
+  f.handlers.getRun = () => run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.deepEqual(f.controller.state.review?.rows, []); assert.equal(f.controller.state.run?.state, 'succeeded');
+});
+test('a setup Apply that finished before its reply also reloads the review', async t => {
+  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  f.handlers.applyChange = () => ({ status: 'started', run: run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } }) });
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  await f.controller.apply();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+});
 test('after reconnect the controller shows the run from getRun, not the old preview', async t => {
   const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview(); await f.controller.apply();
   f.emit({ event: 'disconnected', detail: 'lost' });
