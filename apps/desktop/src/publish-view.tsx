@@ -1,11 +1,17 @@
 import React from 'react';
+import type { OperationOutput } from '@nortuscc/agent/operations';
 import type { AuthorController, AuthorIntent, AuthorState } from './author-controller.ts';
 import { RunRecovery } from './run-recovery.tsx';
 
 export type AuthorProps = { state: AuthorState; controller: AuthorController };
-export function AuthorIssues({ value }: { value: unknown }) {
-  if (!value || typeof value !== 'object' || !('issues' in value) || !Array.isArray(value.issues) || !value.issues.length) return null;
-  return <div className="alert" role="alert"><h3>Profile issues</h3><ul>{value.issues.map((issue, index) => <li key={index}>{typeof issue === 'string' ? issue : JSON.stringify(issue)}</li>)}</ul></div>;
+type ProfileIssues = NonNullable<OperationOutput<'authorProfiles'>['issues']>;
+// Lists profile issues as "<profile>: <message> (<path>)". `profile` keeps only that profile's issues
+// and drops the name; `except` leaves one profile to its own section.
+export function AuthorIssues({ issues, profile, except }: { issues: ProfileIssues | undefined; profile?: string; except?: string }) {
+  const groups = (issues ?? []).filter(group => (profile === undefined || group.profile === profile) && group.profile !== except && group.issues.length);
+  if (!groups.length) return null;
+  return <div className="alert" role="alert"><h3>{profile === undefined ? 'Profile issues' : `Issues in ${profile}`}</h3><ul>{groups.flatMap(group => group.issues.map((issue, index) =>
+    <li key={`${group.profile}:${index}`}>{profile === undefined ? <><strong>{group.profile}</strong>: </> : null}{issue.message} (<code>{issue.path}</code>)</li>))}</ul></div>;
 }
 export function AuthorFeedback({ state }: Pick<AuthorProps, 'state'>) {
   return <>

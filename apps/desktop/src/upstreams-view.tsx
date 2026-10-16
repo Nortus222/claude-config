@@ -11,7 +11,7 @@ export function UpstreamsView({ state, controller }: AuthorProps) {
   const [url, setUrl] = useState('');
   return <div className="author-view"><header><div><p className="eyebrow">AUTHOR</p><h1>Upstreams</h1><p className="intro">Browse source skills and choose which profiles include them.</p></div>
     <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload upstreams</button></header>
-    <AuthorFeedback state={state} /><AuthorIssues value={state.upstreams} />
+    <AuthorFeedback state={state} /><AuthorIssues issues={state.upstreams?.issues} />
     <section className="card"><h2>Add source</h2><form onSubmit={e => {e.preventDefault();if (url.trim()) void controller.discover(url.trim());}}>
       <label className="field">Source URL or owner/repo<input type="text" value={url} disabled={!state.canWrite} onChange={e => setUrl(e.target.value)} /></label>
       <button disabled={!state.canWrite || !url.trim()}>Add source</button></form><p>Browsing a source does not publish it. Including one of its skills adds it to the draft.</p></section>

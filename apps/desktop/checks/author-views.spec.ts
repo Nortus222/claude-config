@@ -72,6 +72,16 @@ test('valid profiles remain visible beside per-profile diagnostics', async t => 
   const html = render(ProfilesView,f);
   assert.match(html,/Invalid parent/);assert.match(html,/<option value="base"[^>]*>base<\/option>/);
 });
+test('profile issues read as text and the selected profile shows its own', async t => {
+  const f = await authorFixture(t);
+  const issue = (profile: string, message: string) => ({ profile, issues: [{ layer: 'profile' as const, source: `profiles/${profile}.json`, path: 'extends', message }] });
+  f.controller.state = {...f.controller.state, profiles:{...f.controller.state.profiles!,issues:[issue('broken','Invalid parent'), issue(f.controller.state.selectedProfile,'Unknown skill source')]}};
+  const html = render(ProfilesView,f);
+  assert.doesNotMatch(html,/&quot;layer&quot;|\{&quot;/);
+  assert.match(html,/broken<\/strong>: Invalid parent \(<code>extends<\/code>\)/);
+  assert.match(html,new RegExp(`<h3>${f.controller.state.selectedProfile}</h3>[\\s\\S]*Unknown skill source`));
+  assert.equal(html.match(/Unknown skill source/g)?.length, 1, 'the selected profile\'s issue is listed once, under it');
+});
 test('a succeeded run without push evidence does not claim publication', async t => {
   const f = await authorFixture(t);
   f.controller.state = {...f.controller.state,publicationRun:publicationRun({state:'succeeded',result:{status:'done',ok:1,failed:0}})};

@@ -12,14 +12,14 @@ export function ProfilesView({ state, controller }: AuthorProps) {
   return <div className="author-view">
     <header><div><p className="eyebrow">AUTHOR</p><h1>Profiles</h1><p className="intro">Resolved profile skills and files, with their origins.</p></div>
       <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload profiles</button></header>
-    <AuthorFeedback state={state} /><AuthorIssues value={state.profiles} />
+    <AuthorFeedback state={state} /><AuthorIssues issues={state.profiles?.issues} except={profile?.name} />
     <section className="card"><h2>Profiles</h2>
       {state.profiles ? <p><code>{state.profiles.repoUrl}</code></p> : null}
       <label className="field">Selected profile<select disabled={!state.canRead} value={state.selectedProfile} onChange={e => {setChoice(null); setCopyMessage(''); void controller.selectProfile(e.target.value);}}>
         {!state.profiles?.profiles.length ? <option value="">No profiles available</option> : null}
         {state.profiles?.profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
       </select></label>
-      {profile ? <><h3>{profile.name}</h3><p>{profile.extends ? `Extends ${profile.extends}` : 'No parent profile'}</p><AuthorIssues value={profile} />
+      {profile ? <><h3>{profile.name}</h3><p>{profile.extends ? `Extends ${profile.extends}` : 'No parent profile'}</p><AuthorIssues issues={state.profiles?.issues} profile={profile.name} />
         {shareLink ? <div><p>Share this profile: <code>{shareLink}</code></p>
           <button aria-label={`Copy follow link for ${profile.name}`} onClick={() => { void navigator.clipboard.writeText(shareLink).then(() => setCopyMessage('Link copied'), () => setCopyMessage('Could not copy the link')); }}>Copy</button>
           {copyMessage ? <p role="status">{copyMessage}</p> : null}</div> : null}
@@ -32,7 +32,7 @@ export function ProfilesView({ state, controller }: AuthorProps) {
             {FILES.some(f => f.id === file.fileId && f.capture) ? <button disabled={!state.canWrite} onClick={() => {setChoice(null);setRepoPath('');void controller.captureFile(file.fileId);}}>Capture from this Mac</button> : null}</div>
         </li>)}</ul></> : null}
     </section>
-    {state.file ? <section className="card"><h2>{state.fileId}</h2><p>{state.file.path ?? 'Unmanaged'}. Read only.</p><AuthorIssues value={state.file} />
+    {state.file ? <section className="card"><h2>{state.fileId}</h2><p>{state.file.path ?? 'Unmanaged'}. Read only.</p><AuthorIssues issues={state.file.issues} />
       <pre className="setup-sync-diff" tabIndex={0} aria-label="Profile file text">{state.file.text}</pre>{state.file.truncated ? <p role="status">File preview is truncated.</p> : null}</section> : null}
     {capture ? <section className="card"><h2>Capture {capture.fileId} from this Mac</h2>
       <p>Affected profiles: {capture.affectedProfiles.join(', ')}</p>
