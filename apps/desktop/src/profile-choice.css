@@ -1,0 +1,5 @@
+/* First-run profile choice: one row per profile with its Follow button. */
+.profile-choice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.profile-choice-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.profile-choice-list li > span { display: grid; gap: 2px; min-width: 0; }
+.profile-choice-list small { color: #909ba9; font-size: 11px; }

@@ -17,12 +17,15 @@ import { UpdateController } from './update-controller.ts';
 import { UpdateView } from './update-view.tsx';
 import { HomeController } from './home-controller.ts';
 import { HomeView } from './home-view.tsx';
+import { ProfileChoiceView, profileChoiceDue, followApplied } from './profile-choice-view.tsx';
+import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { nativeAvailable, nativeBridge, nativeUpdateBridge } from './bridge.ts';
 import { SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, followFromSettings, navBadges, type Screen } from './views.tsx';
 import './style.css';
 import './home.css';
 import './changes.css';
 import './publish.css';
+import './profile-choice.css';
 
 const appMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
 const AUTHOR_SCREENS: ReadonlySet<Screen> = new Set(['profiles', 'upstreams', 'publish']);
@@ -48,7 +51,13 @@ function App() {
   const setupState = useSyncExternalStore(setup.subscribe, setup.snapshot);
   const updateState = useSyncExternalStore(updates.subscribe, updates.snapshot);
   const [screen, setScreen] = useState<Screen>('home');
-  useEffect(() => { if (screen === 'home' || screen === 'changes') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
+  // Set once the first-run profile choice is made or kept; it is never shown again in this session.
+  const [profileSettled, setProfileSettled] = useState(false);
+  const choosingProfile = profileChoiceDue(setupState, state, profileSettled);
+  const settleProfile = () => { setProfileSettled(true); setScreen('home'); };
+  // Re-entered once the agent is connected and its first read is done, so the review and profiles load.
+  useEffect(() => { if (screen === 'home' || screen === 'changes') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync, state.connection, state.session, state.initialReadPending]);
+  useEffect(() => { if (choosingProfile && followApplied(setupSyncState)) settleProfile(); }, [choosingProfile, setupSyncState]);
   useEffect(() => { setupSync.refresh(); }, [setupSync, updateState.update?.phase]);
   useEffect(() => { if (AUTHOR_SCREENS.has(screen)) author.enter(); else author.leave(); }, [author, screen, state.session, state.connection]);
   useEffect(() => { author.refresh(); }, [author, updateState.update?.phase]);
@@ -77,6 +86,7 @@ function App() {
 
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
     updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
+    {choosingProfile ? <ProfileChoiceView state={setupSyncState} controller={setupSync} repoUrl={setupState.setup?.defaultRepoUrl ?? DEFAULT_REPO_URL} onDone={settleProfile} /> :
     <ShellView screen={screen} navigate={setScreen} machine={state} badges={navBadges(setupSyncState, homeState, updateState)} onReconnect={() => void machine.restart()} onRecheck={() => void machine.inspect()}>
       {screen === 'home' ? <HomeView machine={state} changes={setupSyncState} home={homeState} update={updateState} navigate={setScreen} controller={home} /> : null}
       {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} /> : null}
@@ -89,7 +99,7 @@ function App() {
         <ConnectionsView state={connectionsState} controller={connections} />
         <UpdateView state={updateState} controller={updates} />
       </> : null}
-    </ShellView>
+    </ShellView>}
   </StartupBoundary>;
 }
 
