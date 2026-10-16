@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Effect } from 'effect';
-import { loadProfile, nodeFiles, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
+import { loadNamedProfile, loadProfile, nodeFiles, ReadFailed, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
 import { canonical, Fs, type FsFailed } from '@nortuscc/machine';
 import { composeDocuments } from './compose.ts';
 import { writeDocuments, type Documents } from './documents.ts';
@@ -50,17 +50,18 @@ export const snapshotFor = (input: {
 // Materializes an empty or mixed-provenance configuration without inventing a Git commit.
 export const snapshotFromDocuments = (input: {
   readonly documents: Documents;
+  readonly profile?: string;
   readonly stateRoot: string;
   readonly overrides: Input<MachineOverrides>;
   readonly now: Date;
 }) => materializeSnapshot({
   ...input,
-  key: createHash('sha256').update(canonical({ format: SNAPSHOT_FORMAT, documents: input.documents })).digest('hex').slice(0, 32),
+  key: createHash('sha256').update(canonical({ format: SNAPSHOT_FORMAT, documents: input.documents, ...(input.profile ? { profile: input.profile } : {}) })).digest('hex').slice(0, 32),
   marker: { documents: true }, documents: Effect.succeed(input.documents),
 });
 
 const materializeSnapshot = <E, R>(input: {
-  readonly stateRoot: string; readonly key: string; readonly now: Date;
+  readonly profile?: string; readonly stateRoot: string; readonly key: string; readonly now: Date;
   readonly overrides: Input<MachineOverrides>; readonly marker: Readonly<Record<string, unknown>>;
   readonly documents: Effect.Effect<Documents, E, R>;
 }) => Effect.gen(function* () {
@@ -77,7 +78,7 @@ const materializeSnapshot = <E, R>(input: {
   } else {
     yield* fs.writeTextAtomic(join(dir, MARKER), marker);
   }
-  const snapshot: Snapshot = { desired: yield* loadProfile(dir, { overrides: input.overrides }).pipe(Effect.provide(nodeFiles)), repo: dir };
+  const snapshot: Snapshot = { desired: yield* (input.profile === undefined ? loadProfile(dir, { overrides: input.overrides }) : loadNamedProfile(dir, input.profile, { overrides: input.overrides }).pipe(Effect.catchTag('ProfileInvalid', error => Effect.fail(new ReadFailed({ path: dir, reason: error.message }))))).pipe(Effect.provide(nodeFiles)), repo: dir };
   return snapshot;
 });
 
