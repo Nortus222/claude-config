@@ -14,7 +14,8 @@ export function AuthorFeedback({ state }: Pick<AuthorProps, 'state'>) {
     {state.message ? <p role="status">{state.message}</p> : null}
     {state.error ? <p className="alert" role="alert">{state.errorCode === 'UNAUTHORIZED' ? `${state.profiles ? `No access to ${state.profiles.repoUrl}` : state.error}. Check repository permission, then retry.`
       : state.errorCode === 'NOT_SIGNED_IN' ? 'Not signed in to GitHub, or GitHub is unreachable. Sign in or retry below.'
-      : state.errorCode === 'APP_UNAVAILABLE' ? 'The author repository or GitHub CLI is unavailable. Check repository trust in Settings and the GitHub card below.' : state.error}</p> : null}
+      : state.errorCode === 'APP_UNAVAILABLE' ? `${state.error}${state.error.includes('Follow your setup repository first')
+        ? '. Open the Setup page and use its Follow controls.' : state.error.includes('gh is not installed') ? '. Install GitHub CLI using the link below.' : ''}` : state.error}</p> : null}
   </>;
 }
 export function intentText(intent: AuthorIntent): string {

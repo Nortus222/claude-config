@@ -213,6 +213,26 @@ test('a tag failure retains a published run and Announce repairs it', async t =>
   assert.equal(result.publication?.tagged, true); assert.deepEqual(result.publication?.pending, []);
 });
 
+test('announce does not publish an empty revision', async t => {
+  const f = await fixture(t); const draft = await f.save();
+  f.intercept(c => c.args.includes('push') && c.args.some(a => a.startsWith('refs/tags/')) ? Effect.succeed({ code: 1, stdout: '', stderr: 'offline' }) : undefined);
+  const original = await publish(f, draft);
+  assert.deepEqual(original.publication?.pending, ['base', 'other', 'personal']);
+  f.intercept(undefined);
+  // Another announcement reaches the server after preview, without changing this profile's values.
+  const other = await f.run(f.client.registerSetup({ name: 'other', repoUrl: f.repoUrl, profile: 'other' }));
+  await f.run(f.client.publishRevision(other.setupId, { number: 1, commitSha: f.first, tag: `nortuscc/${f.first}`, changelog: '',
+    items: [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'added' }], requiredEnv: [] }));
+  const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
+  assert.equal(f.revisions.filter(revision => revision.setupId === other.setupId).length, 1);
+  assert.ok(f.revisions.every(revision => revision.items.length > 0));
+  assert.deepEqual(result.publication?.pending, []);
+  assert.deepEqual(result.publication?.announced, ['base', 'personal']);
+  assert.deepEqual(result.publication?.unannounceable ?? [], []);
+  assert.equal((await f.run(f.owner.recoverPublication(original))).action, null);
+  assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
+});
+
 test('announcement compares against the previous announced commit and includes skipped changes', async t => {
   const f = await fixture(t); await publish(f, await f.save());
   f.move('codex/AGENTS.md', 'unannounced instructions\n');

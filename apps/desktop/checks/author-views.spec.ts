@@ -40,7 +40,23 @@ test('profiles show origins, read-only text and an unselected capture choice wit
 test('GitHub prerequisite states have distinct wording and actions',async t=>{
   const f=await authorFixture(t);
   for(const [state,wording,action] of [['missing','GitHub CLI is not installed','Install GitHub CLI'],['signed-out','Not signed in to GitHub, or GitHub is unreachable','Sign in with GitHub'],['ready','GitHub is ready','Retry']] as const){
-    f.controller.state={...f.controller.state,gh:{state}};const html=render(PublishView,f);assert.ok(html.includes(wording));assert.ok(html.includes(action));
+    f.controller.state={...f.controller.state,gh:{state},error:state==='missing'?'gh is not installed':null,errorCode:state==='missing'?'APP_UNAVAILABLE':null};
+    const html=render(ProfilesView,f);assert.ok(html.includes(wording));assert.ok(html.includes(action));
+  }
+});
+
+test('an author page shows the follow-first message when no repository is followed', async t => {
+  const f = await authorFixture(t);
+  f.controller.state = { ...f.controller.state, profiles: null, upstreams: null };
+  f.handlers.authorProfiles = f.handlers.upstreams = () => {
+    throw Object.assign(new Error('Follow your setup repository first'), { code: 'APP_UNAVAILABLE' });
+  };
+  await f.controller.reload();
+  for (const View of [ProfilesView, UpstreamsView]) {
+    const html = render(View, f);
+    assert.match(html, /Follow your setup repository first/);
+    assert.match(html, /Setup page.*Follow/);
+    assert.doesNotMatch(html, /Check repository trust in Settings/);
   }
 });
 

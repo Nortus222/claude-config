@@ -172,6 +172,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
           }
           const before = previous ? yield* documentsAt(dir, previous.commitSha) : {};
           const items = changedItems(before, after, profile);
+          if (!items.length) return null;
           const requiredEnv = [...new Set(desired.integrations.filter(i => i.enabled).flatMap(i => Array.isArray(i.declaration.requiresEnv) ? i.declaration.requiresEnv.filter((name): name is string => typeof name === 'string') : []))].sort();
           const revision = { number: (previous?.number ?? 0) + 1, commitSha: commit, tag: `nortuscc/${commit}`, changelog: '', items, requiredEnv };
           if (requiredEnv.some(name => !Schema.is(EnvNameSchema)(name))) return 'Required environment names are unsupported by hosted announcements';
@@ -187,7 +188,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
         }).pipe(Effect.catch(() => Effect.succeed(false)));
         if (result !== false) {
           if (result === true) publication.announced = [...new Set([...publication.announced, profile])].sort();
-          else publication.unannounceable = [...(publication.unannounceable ?? []), { profile, reason: result }];
+          else if (result !== null) publication.unannounceable = [...(publication.unannounceable ?? []), { profile, reason: result }];
           publication.pending = publication.pending.filter(p => p !== profile);
           yield* checkpoint(lifecycle, publication);
         }
