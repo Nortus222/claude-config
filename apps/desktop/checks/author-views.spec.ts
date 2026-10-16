@@ -52,7 +52,7 @@ test('Profiles and Upstreams remain keyboard navigation destinations', async () 
 });
 test('valid profiles remain visible beside per-profile diagnostics', async t => {
   const f = await authorFixture(t);
-  f.controller.state = {...f.controller.state, profiles:{...f.controller.state.profiles!,issues:[{profile:'broken',message:'Invalid parent'}]} as typeof f.controller.state.profiles};
+  f.controller.state = {...f.controller.state, profiles:{...f.controller.state.profiles!,issues:[{profile:'broken',issues:[{layer:'profile',source:'profiles/broken.json',path:'extends',message:'Invalid parent'}]}]}};
   const html = render(ProfilesView,f);
   assert.match(html,/Invalid parent/);assert.match(html,/<option value="base"[^>]*>base<\/option>/);
 });
