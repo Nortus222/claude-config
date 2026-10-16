@@ -14,6 +14,8 @@ export type RunView = {
   readonly steps: ReadonlyArray<StepView>;
   readonly outcome: 'running' | 'done' | 'cancelled' | 'failed' | 'interrupted' | 'abandoned';
   readonly summary: string;
+  // Steps the agent reported as failed when the run finished.
+  readonly failed?: number;
   readonly backups?: string;
 };
 export type ViewState = {
@@ -67,7 +69,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
     case 'finished':
       return { ...run, steps: mark(progress.index, progress.outcome, progress.note) };
     case 'done':
-      return { ...run, outcome: 'done', summary: `${progress.ok} applied, ${progress.failed} failed`, ...backups(progress.backups) };
+      return { ...run, outcome: 'done', summary: `${progress.ok} applied, ${progress.failed} failed`, failed: progress.failed, ...backups(progress.backups) };
     case 'cancelled':
       return { ...run, outcome: 'cancelled', summary: `Cancelled; ${progress.remaining.length} not started`, ...backups(progress.backups) };
     case 'failed':
@@ -290,7 +292,8 @@ export class MachineController {
       });
       for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
       const staleChallenge = receipt.parity?.kind === 'signIn' && receipt.parity.signIn?.state === 'awaiting-user' && statusRevision !== this.statusRevision;
-      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: !staleChallenge }, detail: summary });
+      const failed = receipt.result && 'failed' in receipt.result ? { failed: receipt.result.failed } : {};
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, ...failed, receipt, challengeCurrent: !staleChallenge }, detail: summary });
       if (staleChallenge && this.ownsSession(token) && this.state.run?.runId === receipt.runId) await this.refreshRun(receipt.runId);
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.

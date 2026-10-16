@@ -35,6 +35,22 @@ test('every screen shows one disconnected banner with the reason and a Reconnect
   assert.doesNotMatch(connected, /shell-banner/);
   assert.equal(reconnects, 0);
 });
+test('a run with failed steps says so and keeps its summary after the re-inspection', () => {
+  const c = machine();
+  const run = { runId: 'r', outcome: 'done' as const, summary: '1 applied, 1 failed', failed: 1, steps: [
+    { key: 'config:a', summary: 'apply a', status: 'ok' as const, note: '' }, { key: 'config:b', summary: 'apply b', status: 'failed' as const, note: 'b failed' }] };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run, detail: 'Inspected 46 items' } }));
+  assert.match(markup, /<h2 class="status">Finished with 1 failed step<\/h2>/);
+  assert.match(markup, /1 applied, 1 failed/);
+  const clean = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run: { ...run, failed: 0, summary: '2 applied, 0 failed', steps: run.steps.map(step => ({ ...step, status: 'ok' as const })) } } }));
+  assert.match(clean, /<h2 class="status">Done<\/h2>/);
+});
+test('the agent version wraps inside the sidebar', () => {
+  const c = machine();
+  const hello = { agentVersion: 'a'.repeat(64), protocol: 3 as const, policy: 'manual' as const, paused: null };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, hello } as typeof c.state }));
+  assert.match(markup, /class="muted agent-version"/);
+});
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };
 const hosted = { enabled: true, recovered: true, signingIn: false, accountId: null, login: null, machineId: null, auth: 'signed-out' as const, setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 test('an existing installation waiting for native setup does not flash first-run consent', async () => {

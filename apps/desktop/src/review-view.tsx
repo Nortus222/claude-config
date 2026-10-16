@@ -1,9 +1,15 @@
 import React, { type Ref } from 'react';
 import type { OperationChange, RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
-import { MachineController, canCancel, type StepStatus, type ViewState } from './controller.ts';
+import { MachineController, canCancel, type RunView, type StepStatus, type ViewState } from './controller.ts';
 const DOMAINS = [['config', 'Configuration'], ['integrations', 'Integrations'], ['skills', 'Skills']] as const;
 const MARK: Record<StepStatus, string> = { pending: '·', running: '…', ok: '✓', failed: '✕', cancelled: '–' };
+const OUTCOME: Record<RunView['outcome'], string> = { running: 'Applying', done: 'Done', cancelled: 'Cancelled', failed: 'Failed', interrupted: 'Interrupted', abandoned: 'Abandoned' };
+// A finished run with failed steps never reads as plain "Done".
+const runHeading = (run: RunView) => {
+  const failed = Math.max(run.failed ?? 0, run.steps.filter(step => step.status === 'failed').length);
+  return run.outcome === 'done' && failed > 0 ? `Finished with ${failed} failed step${failed === 1 ? '' : 's'}` : OUTCOME[run.outcome];
+};
 const provenance = (item: WireObserved) => (item.from ? `${item.from.layer} · ${item.from.source}` : '—');
 function SkillAdditionResult({ run }: { run: OperationRunView }) {
   const skill = run.intent.skillAddition;
@@ -149,7 +155,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
               <ul>{inspection.probeErrors.map((error, n) => <li key={n}>{error}</li>)}</ul>
             </div>
           ) : null}
-          {state.hello ? <p className="muted">Agent {state.hello.agentVersion} · protocol {state.hello.protocol}</p> : null}
+          {state.hello ? <p className="muted agent-version">Agent {state.hello.agentVersion} · protocol {state.hello.protocol}</p> : null}
           {state.status ? (
             <div className="agent-status">
               <p>Policy: {state.status.policy}</p>
@@ -251,9 +257,10 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
             <div className="section-head">
               <div>
                 <p className="eyebrow">APPLY</p>
-                <h2 className="status">{state.connection === 'disconnected' ? 'Disconnected' : state.run?.outcome ?? 'Ready'}</h2>
+                <h2 className="status">{state.connection === 'disconnected' ? 'Disconnected' : state.run ? runHeading(state.run) : 'Ready'}</h2>
               </div>
             </div>
+            {state.run ? <p className="pad run-summary">{state.run.summary}</p> : null}
             {state.run ? (
               <ol className="progress-steps">
                 {state.run.steps.map((step, n) => (

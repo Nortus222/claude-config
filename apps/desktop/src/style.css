@@ -78,7 +78,7 @@ p {
 }
 .layout {
   display: grid;
-  grid-template-columns: 224px 1fr;
+  grid-template-columns: 224px minmax(0, 1fr);
   gap: 26px;
 }
 aside {
@@ -169,9 +169,10 @@ td code {
 .operation .section-head {
   padding-bottom: 14px;
 }
-.status {
-  text-transform: capitalize;
+.agent-version, aside li {
+  overflow-wrap: anywhere;
 }
+
 .detail {
   margin: 15px 23px 18px;
   font-size: 12px;
@@ -235,7 +236,7 @@ footer {
     padding: 24px 20px;
   }
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   aside {
     display: none;
@@ -497,7 +498,7 @@ input[type='text'], select {
     grid-template-columns: 170px minmax(0, 1fr);
   }
   .review-view .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .review-view aside {
     display: block;
