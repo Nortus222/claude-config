@@ -589,9 +589,9 @@ test('a page left before connecting does not load, and loads when entered later'
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 1);
 });
 
-test('incoming counts leave out unchanged rows and count rows on hold apart', () => {
+test('incoming counts leave out unchanged rows, held or not, and count changed rows on hold apart', () => {
   const row = (change: 'changed' | 'unchanged' | 'added', held: boolean) => ({ itemId: `setting:${change}${held}`, kind: 'setting' as const, change, held, conflict: false });
-  assert.deepEqual(incomingCounts(review({ rows: [row('changed', false), row('added', false), row('changed', true), row('unchanged', false), row('unchanged', true)] })), { incoming: 2, held: 2 });
+  assert.deepEqual(incomingCounts(review({ rows: [row('changed', false), row('added', false), row('changed', true), row('unchanged', false), row('unchanged', true)] })), { incoming: 2, held: 1 });
   assert.deepEqual(incomingCounts(null), { incoming: 0, held: 0 });
 });
 

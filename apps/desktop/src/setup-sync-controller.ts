@@ -47,11 +47,11 @@ const active = (run: RunView | null) => run?.state === 'accepted' || run?.state 
 const settles = (run: RunView) => !active(run) && (run.intent.change.kind === 'setupApply' || run.intent.change.kind === 'followProfile' && run.state === 'succeeded');
 const applyKeys = (inspection: InspectResult | null) => inspection?.items.filter(item => item.disposition === 'apply').map(item => item.key) ?? [];
 
-// One review page's counts, shared by Home, the Changes badge and its heading: rows to decide (changed
-// and not on hold) and rows on hold. Unchanged rows (overrides, pin siblings) are neither.
+// One review page's counts, shared by Home, the Changes badge and its heading: changed rows to decide and
+// changed rows on hold. Unchanged rows (overrides, pin siblings) are neither, even when held.
 export function incomingCounts(review: Pick<Review, 'rows'> | null): { incoming: number; held: number } {
-  const rows = review?.rows ?? [];
-  return { incoming: rows.filter(row => row.change !== 'unchanged' && !row.held).length, held: rows.filter(row => row.held).length };
+  const changed = (review?.rows ?? []).filter(row => row.change !== 'unchanged');
+  return { incoming: changed.filter(row => !row.held).length, held: changed.filter(row => row.held).length };
 }
 
 // The keys a local Preview sends as the reconcile's `only`: every `apply` item the user kept checked.
