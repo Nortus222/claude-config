@@ -82,3 +82,30 @@ test('an announced profile shows its follow link and a Copy button', async t => 
   await f.controller.selectProfile('base');
   assert.doesNotMatch(render(ProfilesView, f), /nortuscc:\/\/follow\//);
 });
+
+
+test('No access names the repository before profiles can be loaded and offers Retry', async t => {
+  const f = await authorFixture(t);
+  f.controller.state = { ...f.controller.state, profiles: null, error: 'No access to https://github.com/example/setup.git', errorCode: 'UNAUTHORIZED' };
+  const html = render(ProfilesView, f);
+  assert.match(html, /No access to https:\/\/github.com\/example\/setup.git/);
+  assert.match(html, /<button[^>]*>Retry<\/button>/);
+});
+
+test('a corrupt draft has a Delete action beside its diagnostic', async t => {
+  const f = await authorFixture(t);
+  f.controller.state = { ...f.controller.state, drafts: [{ id: '00000000-0000-4000-8000-000000000002', error: 'Invalid JSON' }] };
+  const html = render(PublishView, f);
+  assert.match(html, /Unreadable draft .*Invalid JSON/);
+  assert.match(html, /<button>Delete unreadable draft<\/button>/);
+});
+
+test('Retry shows a pending sign-in code without launching another login', async t => {
+  const f = await authorFixture(t); await f.controller.signIn();
+  f.handlers.getRun = () => authorRun({ kind: 'ghLogin' }, { ghCode: { code: 'NEW1-CODE', url: 'https://github.com/login/device' } });
+  await f.controller.reload();
+  const html = render(PublishView, f);
+  assert.match(html, /NEW1-CODE/);
+  assert.match(html, /<button>Retry<\/button>/);
+  assert.doesNotMatch(html, /<button[^>]*>Sign in with GitHub<\/button>/);
+});

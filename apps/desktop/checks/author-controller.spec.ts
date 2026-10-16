@@ -138,3 +138,61 @@ test('finishing a publication refreshes the profile follow links', async t => {
   await f.controller.publish();
   assert.equal(f.controller.state.profiles?.profiles.find(profile => profile.name === 'team')?.setupId, 'announced-setup');
 });
+
+
+test('Retry re-reads the active sign-in run when its code arrives without an event', async t => {
+  const f = await authorFixture(t);
+  await f.controller.signIn();
+  assert.equal(f.controller.state.run?.ghCode, undefined);
+  f.handlers.getRun = () => authorRun({ kind: 'ghLogin' }, { ghCode: { code: 'NEW1-CODE', url: 'https://github.com/login/device' } });
+  await f.controller.reload();
+  assert.equal(f.controller.state.run?.ghCode?.code, 'NEW1-CODE');
+  assert.equal(f.calls.filter(call => call.name === 'applyChange').length, 1);
+});
+
+test('saving a capture blocked by another operation preserves it despite an older succeeded run', async t => {
+  const f = await authorFixture(t);
+  await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  await f.controller.captureFile('claude:CLAUDE.md');
+  const capture = f.controller.state.capture;
+  f.machine.state = { ...f.machine.state, pending: true }; f.controller.refresh();
+  const applies = f.calls.filter(call => call.name === 'applyChange').length;
+  await f.controller.saveCapture({ kind: 'updateShared' });
+  assert.equal(f.calls.filter(call => call.name === 'applyChange').length, applies);
+  assert.equal(f.controller.state.capture, capture);
+});
+
+test('a capture remains when the returned receipt confirms a different draft change', async t => {
+  const f = await authorFixture(t);
+  await f.controller.captureFile('claude:CLAUDE.md');
+  const capture = f.controller.state.capture;
+  f.handlers.getRun = () => authorRun({ kind: 'ghLogin' }, { state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  await f.controller.saveCapture({ kind: 'updateShared' });
+  assert.equal(f.controller.state.capture, capture);
+});
+
+test('repository access errors leave drafts available and Retry can recover', async t => {
+  const f = await authorFixture(t);
+  const profiles = f.controller.state.profiles!;
+  f.controller.state = { ...f.controller.state, profiles: null };
+  f.handlers.authorProfiles = () => { throw Object.assign(new Error('No access to https://github.com/example/setup.git'), { code: 'UNAUTHORIZED' }); };
+  f.handlers.drafts = () => ({ drafts: [{ id: '00000000-0000-4000-8000-000000000002', error: 'Unreadable draft' }] });
+  await f.controller.reload();
+  assert.equal(f.controller.state.errorCode, 'UNAUTHORIZED');
+  assert.equal(f.controller.state.drafts.length, 1);
+  f.handlers.authorProfiles = () => profiles;
+  await f.controller.reload();
+  assert.equal(f.controller.state.error, null);
+  assert.equal(f.controller.state.profiles?.repoUrl, profiles.repoUrl);
+});
+
+test('deleting a corrupt draft removes it after its own successful receipt', async t => {
+  const f = await authorFixture(t); let deleted = false;
+  const id = '00000000-0000-4000-8000-000000000002';
+  f.handlers.drafts = () => ({ drafts: deleted ? [] : [{ id, error: 'Unreadable draft' }] });
+  f.handlers.applyChange = () => { deleted = true; return { status: 'started', run: authorRun({ kind: 'deleteDraft', draftId: id }, { state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } }) }; };
+  f.handlers.getRun = () => authorRun({ kind: 'deleteDraft', draftId: id }, { state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  await f.controller.reload(); await f.controller.deleteDraft(id);
+  assert.deepEqual(f.controller.state.drafts, []);
+  assert.deepEqual(f.calls.find(call => call.name === 'previewChange')?.input.change, { kind: 'deleteDraft', draftId: id });
+});

@@ -314,6 +314,7 @@ test('author repository reads distinguish missing gh, signed out, denied access 
     await f.within(s => Effect.gen(function* () {
       const error = yield* Effect.flip(s.authorProfiles(decodeOperationInput('authorProfiles', {})));
       assert.equal(error.code, code, state);
+      if (state === 'ready') assert.equal(error.message, `No access to ${repoUrl}`);
     }));
   }
 });

@@ -12,7 +12,7 @@ export function AuthorFeedback({ state }: Pick<AuthorProps, 'state'>) {
     {!state.canRead && !state.pending ? <p className="notice">Reconnect the local agent and finish any app maintenance to read author settings.</p> : null}
     {state.pending ? <p role="status">Reading or saving author settings…</p> : null}
     {state.message ? <p role="status">{state.message}</p> : null}
-    {state.error ? <p className="alert" role="alert">{state.errorCode === 'UNAUTHORIZED' ? `No access to ${state.profiles?.repoUrl ?? 'the author repository'}. Check repository permission, then retry.`
+    {state.error ? <p className="alert" role="alert">{state.errorCode === 'UNAUTHORIZED' ? `${state.profiles ? `No access to ${state.profiles.repoUrl}` : state.error}. Check repository permission, then retry.`
       : state.errorCode === 'NOT_SIGNED_IN' ? 'Not signed in to GitHub, or GitHub is unreachable. Sign in or retry below.'
       : state.errorCode === 'APP_UNAVAILABLE' ? 'The author repository or GitHub CLI is unavailable. Check repository trust in Settings and the GitHub card below.' : state.error}</p> : null}
   </>;

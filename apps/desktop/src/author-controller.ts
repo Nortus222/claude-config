@@ -93,7 +93,7 @@ export class AuthorController {
   }
   enter() { this.visible = true; if (!this.state.profiles) void this.reload(); else void this.discoverRuns(); }
   leave() { this.visible = false; }
-  private async request(body: (mark: ReturnType<AuthorController['mark']>) => Promise<void>, write = false) {
+  private async request(body: (mark: ReturnType<AuthorController['mark']>) => Promise<unknown>, write = false) {
     if (this.disposed || !(write ? this.state.canWrite : this.state.canRead)) return;
     if (write) this.discovery++;
     const mark = this.mark(); this.update({ pending: true, error: null, errorCode: null });
@@ -154,15 +154,15 @@ export class AuthorController {
   }
   async saveCapture(choice: CaptureChoice) {
     const capture = this.state.capture; if (!capture) return;
-    await this.addIntent({ kind: 'captureFile', profile: capture.profile, fileId: capture.fileId, text: capture.text, choice });
-    if (this.state.run?.state === 'succeeded' && !this.state.error) this.update({ capture: null });
+    const run = await this.addIntent({ kind: 'captureFile', profile: capture.profile, fileId: capture.fileId, text: capture.text, choice });
+    if (run?.state === 'succeeded' && run.runId === this.state.run?.runId && this.state.capture === capture && !this.state.error) this.update({ capture: null });
   }
   async includeSkill(profile: string, source: string, name: string, include: boolean) {
     await this.addIntent({ kind: include ? 'includeSkill' : 'excludeSkill', profile, source, name });
   }
   async pin(source: string, commit: string) { await this.addIntent({ kind: 'pin', source, commit }); }
   async unpin(source: string) { await this.addIntent({ kind: 'unpin', source }); }
-  private async addIntent(intent: AuthorIntent) { await this.change({ kind: 'editDraft', draftId: this.state.draft?.id ?? null, intent }); }
+  private async addIntent(intent: AuthorIntent) { return this.change({ kind: 'editDraft', draftId: this.state.draft?.id ?? null, intent }); }
   async removeIntent(index: number) { if (this.state.draft) await this.change({ kind: 'removeDraftIntent', draftId: this.state.draft.id, index }); }
   async deleteDraft(id = this.state.draft?.id) { if (id) await this.change({ kind: 'deleteDraft', draftId: id }); }
   selectDraft(id: string) {
@@ -222,11 +222,13 @@ export class AuthorController {
   }
   async recheck() { if (this.state.canRead && this.state.publicationRun) await this.readRun(this.state.publicationRun.runId); }
   private async change(change: OperationChange) {
+    let run: RunView | undefined;
     await this.request(async mark => {
       this.update({ preview: null, draftPreview: null }); this.discovery++;
       const preview = await this.call(mark, 'previewChange', { scope: SCOPE, change });
-      if (preview) await this.apply(mark, preview);
+      if (preview) run = await this.apply(mark, preview);
     }, true);
+    return run && JSON.stringify(run.intent.change) === JSON.stringify(change) ? run : undefined;
   }
   private async apply(mark: ReturnType<AuthorController['mark']>, preview: ChangePreview) {
     this.update({ preview: null, message: 'Waiting for the agent to confirm the action.' });
@@ -244,7 +246,7 @@ export class AuthorController {
     if (result.status === 'stale') { this.update({ message: 'Needs preview. Preview the draft again before publishing.' }); return; }
     this.reads.clear();
     this.update({ run: result.run, ...(publication(result.run) ? { publicationRun: result.run } : {}) });
-    await this.readRun(result.run.runId);
+    return this.readRun(result.run.runId);
   }
   private async readRun(runId: string) {
     if (this.disposed || !this.bridge || this.machine.state.connection !== 'connected') return;
@@ -269,10 +271,16 @@ export class AuthorController {
           if (this.current(mark)) { this.settling.delete(runId); this.update({}); }
         }
       }
+      return run;
     } catch (error) { if (this.current(mark) && this.reads.get(runId) === serial) this.fail(error); }
   }
   private async discoverRuns() {
-    if (this.disposed || !this.bridge || this.machine.state.connection !== 'connected' || active(this.state.run) || this.state.pending) return;
+    if (this.disposed || !this.bridge || this.machine.state.connection !== 'connected' || this.state.pending) return;
+    const activeRuns = [this.state.run, this.state.publicationRun].filter((run): run is RunView => !!run && !!active(run));
+    if (activeRuns.length) {
+      for (const runId of new Set(activeRuns.map(run => run.runId))) await this.readRun(runId);
+      return;
+    }
     const mark = this.mark(), serial = ++this.discovery;
     try {
       const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: RUN_LIMIT });

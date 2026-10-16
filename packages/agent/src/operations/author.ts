@@ -67,7 +67,7 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
       if (error instanceof SessionError) return yield* Effect.fail(error);
       if (error instanceof AccessDenied) {
         const state = yield* ghStatus().pipe(Effect.provideService(Processes, processes));
-        return yield* Effect.fail(new SessionError(state === 'missing' ? 'APP_UNAVAILABLE' : state === 'signed-out' ? 'NOT_SIGNED_IN' : state === 'ready' ? 'UNAUTHORIZED' : 'INTERNAL', 'GitHub repository access is unavailable'));
+        return yield* Effect.fail(new SessionError(state === 'missing' ? 'APP_UNAVAILABLE' : state === 'signed-out' ? 'NOT_SIGNED_IN' : state === 'ready' ? 'UNAUTHORIZED' : 'INTERNAL', state === 'ready' ? `No access to ${error.repoUrl}` : 'GitHub repository access is unavailable'));
       }
       return yield* Effect.fail(new SessionError('INTERNAL', 'Author operation is unavailable'));
     });
