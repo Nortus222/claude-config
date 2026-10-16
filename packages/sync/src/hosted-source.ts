@@ -12,7 +12,7 @@ import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import { fetchFollowedMain, privateFollowedRepository } from './followed-repository.ts';
 import { gitAuthArgs } from './git-auth.ts';
 import type { FollowedProfile } from './followed.ts';
-import { commitDocuments, FETCH_TIMEOUT_MS, originUrl, revParse } from './git.ts';
+import { commitDocuments, commitDocumentsCache, FETCH_TIMEOUT_MS, originUrl, revParse, type CommitDocumentsCache } from './git.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
 import { overrideOf } from './plan.ts';
@@ -25,7 +25,7 @@ import {
 import { SyncStore, syncStore } from './store.ts';
 import { desiredOfDocuments, hasProfile, type Documents } from './documents.ts';
 
-type Services = Fs | Processes | SetupsStore | OverridesStore | SyncStore;
+type Services = Fs | Processes | SetupsStore | OverridesStore | SyncStore | CommitDocumentsCache;
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));
 const mismatch = (revision: Revision, reason: string) => Effect.fail(new RevisionMismatch({ revision, reason }));
 const hash = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
@@ -356,7 +356,8 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     ) };
   })).pipe(Layer.provide(options.processes ?? nodeProcesses({ inherit: 'stderr' })));
 
-  const services = Layer.mergeAll(setupsStore, overridesStore, syncStore).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, guardedProcesses)));
+  // A cached read still resolves its commit through the guarded processes first.
+  const services = Layer.mergeAll(setupsStore, overridesStore, syncStore, commitDocumentsCache).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, guardedProcesses)));
   return Layer.effect(SetupSource, Effect.gen(function* () {
     const context = yield* Effect.context<Services>();
     const lock = yield* Semaphore.make(1);

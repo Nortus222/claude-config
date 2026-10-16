@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { missingTools, probeLoginEnvironment } from '../agent/login-environment.ts';
 import type { StartupPhase, StartupStatus } from '../agent/startup-diagnostics.ts';
+import { assertExited, assertReaped } from './support/processes.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'nortuscc-login-env-'));
 const unixShell = { skip: process.platform === 'win32' ? 'requires POSIX shell scripts and process groups' : false };
@@ -43,7 +44,8 @@ test('cancelling a held login capture joins its detached shell and runtime befor
       if (stage === 'runtime') pids.push(Number(readFileSync(runtimePid, 'utf8')));
       controller.abort();
       await rejected;
-      for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} was joined before probe return`);
+      assertReaped(pids[0]!, 'the login shell was reaped before probe return');
+      if (stage === 'runtime') assertExited(pids[1]!, 'the capture runtime exited before probe return');
       assert.deepEqual(events.filter(([phase]) => phase === 'probe_cleanup'), [['probe_cleanup', 'started'], ['probe_cleanup', 'completed']]);
       assert.ok(events.some(([phase, status]) => phase === heldPhase && status === 'cancelled'));
       assert.equal(JSON.stringify(events).includes('private-fixture-token'), false);

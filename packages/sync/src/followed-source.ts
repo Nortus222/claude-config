@@ -8,7 +8,7 @@ import {
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import type { SyncRevision } from '@nortuscc/hosted-protocol';
 import { composeDocuments, desiredFor } from './compose.ts';
-import { commitDocuments, isAncestor, revParse } from './git.ts';
+import { commitDocuments, commitDocumentsCache, isAncestor, revParse, type CommitDocumentsCache } from './git.ts';
 import { followedClone, followedGit, privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from './followed-repository.ts';
 import type { FollowedProfile } from './followed.ts';
 import { hostedSetupSourceLayer } from './hosted-source.ts';
@@ -62,7 +62,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     records: options.records ?? unavailable('HEAD', 'hosted metadata is unavailable'),
     followed, profile: followed.profile, processes: options.processes, now: options.now,
   });
-  type Services = Fs | Processes | OverridesStore | SyncStore;
+  type Services = Fs | Processes | OverridesStore | SyncStore | CommitDocumentsCache;
   const repo = followedClone(paths, followed.repoUrl);
   const repository = privateFollowedRepository(paths, followed);
   const emptyRef = emptyProfileRef(followed.profile);
@@ -134,7 +134,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     yield* pruneSnapshots(paths.stateRoot, [result.repo], options.now?.() ?? new Date());
     return result;
   });
-  const services = Layer.mergeAll(overridesStore, syncStore).pipe(Layer.provideMerge(
+  const services = Layer.mergeAll(overridesStore, syncStore, commitDocumentsCache).pipe(Layer.provideMerge(
     Layer.mergeAll(machinePaths(paths), nodeFs, options.processes ?? nodeProcesses({ inherit: 'stderr' })),
   ));
   return Layer.effect(SetupSource, Effect.gen(function* () {

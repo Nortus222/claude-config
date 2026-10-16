@@ -199,3 +199,30 @@ for (const corrupt of ['{broken metadata', '[{}]']) test(`reachable hosted metad
     assert.equal(f.text(yield* s.load(announced)), '# first\n');
   }), 'setup-1');
 });
+
+test('inspecting a followed profile lists each commit tree once', async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  await f.run(s => Effect.gen(function* () {
+    yield* s.fetch;
+    yield* s.effective([]);
+    yield* s.current;
+  }));
+  // Every git process costs a fork; re-reading an immutable commit per caller multiplied startup.
+  const listed = f.calls.filter(args => args[0] === 'ls-tree').map(args => args.at(-1));
+  assert.ok(listed.length > 0);
+  assert.deepEqual(listed, [...new Set(listed)]);
+});
+
+test('inspecting a profile followed through a setup lists each commit tree once', async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true })); f.publish();
+  // An inspection followed by a preview: each re-verifies the offered range.
+  await f.run(s => Effect.gen(function* () {
+    yield* s.fetch;
+    yield* s.effective([]);
+    yield* s.current;
+    yield* s.effective([]);
+  }), 'setup-1');
+  const listed = f.calls.filter(args => args[0] === 'ls-tree').map(args => args.at(-1));
+  assert.ok(listed.length > 0);
+  assert.deepEqual(listed, [...new Set(listed)]);
+});
