@@ -79,13 +79,27 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     const after = Object.fromEntries(Object.entries(replayed.documents).filter((entry): entry is [string, string] => entry[1] !== null));
     const diff = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(path => before[path] === after[path] ? []
       : [{ path, before: before[path] ?? null, after: after[path] ?? null }]);
+    const hosted = client ? yield* client.sync().pipe(Effect.catch(() => client.state), Effect.catch(() => Effect.succeed(undefined))) : undefined;
     const affectedProfiles = [...new Set([...profiles(before), ...profiles(after)])].sort().filter(profile => changedItems(before, after, profile).length > 0);
+    const pendingProfiles: string[] = [];
+    const announced = new Map<string, Documents>();
+    for (const profile of [...new Set([...profiles(before), ...profiles(after)])].sort()) {
+      const setup = hosted?.accountId ? hosted.setups.find(setup => setup.owned && setup.profile === profile && normalizeRepoUrl(setup.repoUrl) === normalizeRepoUrl(draft.repoUrl)) : undefined;
+      const latest = setup && client ? (yield* client.revisions(setup.setupId).pipe(Effect.catch(() => Effect.succeed([])))).at(-1) : undefined;
+      let previous: Documents = setup ? {} : before;
+      if (latest) {
+        if (!announced.has(latest.commitSha)) announced.set(latest.commitSha, yield* documentsAt(fresh.dir, latest.commitSha));
+        previous = announced.get(latest.commitSha)!;
+      }
+      if (changedItems(previous, after, profile).length) pendingProfiles.push(profile);
+    }
     const invalid = [...replayed.invalid, ...profiles(after).flatMap(profile => resolveNamedProfile({ documents: after, name: profile }).issues
       .map(issue => ({ index: null, profile, reason: `${profile}: ${issue.message}` })))];
-    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles } satisfies DraftPreview;
+    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles, pendingProfiles };
   });
+  const displayed = ({ pendingProfiles: _, ...result }: DraftPreview & { pendingProfiles: string[] }): DraftPreview => result;
   const previewDraft = (id: string): Effect.Effect<DraftPreview, SessionError> => Effect.flatMap(readDraft(id), preview).pipe(
-    Effect.tap(result => Effect.sync(() => { previews.set(id, { base: result.base, digest: result.digest }); })),
+    Effect.map(displayed), Effect.tap(result => Effect.sync(() => { previews.set(id, { base: result.base, digest: result.digest }); })),
     gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable')));
   const prepared = (change: Extract<OperationChange, { kind: 'publishDraft' | 'announcePublication' }>, target: Target, baseDigest: string, commit?: string) => Effect.gen(function* () {
     const currentGeneration = String(yield* generation);
@@ -183,7 +197,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     const seen = previews.get(draft.id);
     const accepted = yield* preview(draft);
     const state = yield* (client?.state ?? Effect.succeed({ accountId: null }));
-    const target: Target = { repoUrl: draft.repoUrl, base: seen?.base ?? accepted.base, draftId: draft.id, draftDigest: digest(draft), profiles: accepted.affectedProfiles, accountId: state.accountId };
+    const target: Target = { repoUrl: draft.repoUrl, base: seen?.base ?? accepted.base, draftId: draft.id, draftDigest: digest(draft), profiles: accepted.pendingProfiles, accountId: state.accountId };
     const plan = yield* prepared(change, target, change.digest);
     return { ...plan, revalidate: Effect.void,
       execute: (lifecycle, signal) => Effect.gen(function* () {
@@ -259,5 +273,5 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
       }).pipe(gate.withPermit, Effect.catch(error => sessionError(error))),
     } satisfies PreparedParityChange;
   }).pipe(gate.withPermit, Effect.catch(error => sessionError(error)));
-  return { previewDraftValue: (draft: Draft) => preview(draft).pipe(gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable'))), previewDraft, preparePublish, prepareAnnounce, recoverPublication };
+  return { previewDraftValue: (draft: Draft) => preview(draft).pipe(Effect.map(displayed), gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable'))), previewDraft, preparePublish, prepareAnnounce, recoverPublication };
 });

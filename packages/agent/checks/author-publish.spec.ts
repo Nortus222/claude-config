@@ -313,7 +313,7 @@ test('preview preserves existing source ignores while replaying another ignore',
 });
 
 test('switching a profile to an existing file with identical bytes changes no resolved values', async t => {
-  const f = await fixture(t); f.move('claude/same.md', 'old\n');
+  const f = await fixture(t); await publish(f, await f.save()); f.move('claude/same.md', 'new\n');
   const draft = await f.save([{ kind: 'setFile', profile: 'base', fileId: 'claude:CLAUDE.md', path: 'claude/same.md' }]);
   const preview = await f.run(f.owner.previewDraft(draft.id));
   assert.deepEqual(preview.affectedProfiles, []);
@@ -469,4 +469,24 @@ test('announce refuses a previously published profile with resolution issues', a
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
   assert.ok(result.publication?.unannounceable?.some(issue => issue.profile === 'personal' && issue.reason.includes('missing')));
   assert.ok(!f.revisions.some(revision => f.setups.find(s => s.setupId === revision.setupId)?.profile === 'personal'));
+});
+
+
+test('a profile changed by a hand push is announced on the next publish', async t => {
+  const f = await fixture(t);
+  await publish(f, await f.save());
+  f.move('claude/personal.md', 'hand-pushed rules\n');
+  f.move('profiles/personal.json', '{"extends":"base","files":{"claude:CLAUDE.md":"claude/personal.md"}}');
+  const draft = await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'next\n', choice: { kind: 'updateShared' } }]);
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.deepEqual(preview.affectedProfiles, ['base']);
+  const result = await publish(f, draft);
+  assert.deepEqual(result.publication?.announced, ['base', 'personal']);
+  const personal = f.setups.find(setup => setup.profile === 'personal')!;
+  const revision = f.revisions.filter(revision => revision.setupId === personal.setupId).at(-1)!;
+  assert.equal(revision.commitSha, result.publication?.commit);
+  assert.deepEqual(revision.items, [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' }]);
+  const unchanged = await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'last\n', choice: { kind: 'updateShared' } }]);
+  const last = await publish(f, unchanged);
+  assert.deepEqual(last.publication?.announced, ['base']);
 });
