@@ -3,13 +3,13 @@ import { basename, join } from 'node:path';
 import { Cause, Effect, Layer } from 'effect';
 import {
   authorDigest, Backups, backupsForRun, canonical, DecisionsStore, Fs, inspect, MachinePaths,
-  machinePaths, OverridesStore, peekMachineState, plan, selectAll, StateStore,
+  machinePaths, OverridesStore, peekMachineState, plan, selectAll, StateStore, withApplied,
   type MutationObserver,
 } from '@nortuscc/machine';
 import {
   composeSetupChoices, desiredOfDocuments, itemIdOf, itemValues, overrideOf, parseItemId, persistSyncDecision, prepareSyncDecision,
-  setupPinGroups, revisionSetupId, withoutOverride, SyncStore, validateSetupComposition, validateSetupPinChoices, worktreeDocuments,
-  type Revision, type SyncDecisionChange,
+  patchItem, setupPinGroups, revisionSetupId, withoutOverride, SyncStore, validateSetupComposition, validateSetupPinChoices, worktreeDocuments,
+  type Documents, type Revision, type SyncDecisionChange,
 } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
@@ -18,6 +18,7 @@ import { MAX_RECORD_BYTES } from '../ipc/protocol.ts';
 import { inspectSetupSource, type JobInspection } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { recordedRun } from '../apply.ts';
+import { observedHostedItems } from '../hosted-status.ts';
 import { decodeOperationOutput, SETUP_TEXT_MAX_BYTES, type OperationPlan, type OperationInput, type SetupApplyChange, type SetupReview } from './index.ts';
 import { parityObserver, type PreparedParityChange } from './parity.ts';
 
@@ -61,26 +62,34 @@ const inputs = (handle: AgentHandle, setupId: string, refetch = true) => Effect.
   reviewedHeads.set(handle, heads);
   return { selected, overrides, holds, decisions, observed };
 });
+const textOf = (documents: Documents, id: string, value: string | undefined) => {
+  const ref = parseItemId(id), desired = desiredOfDocuments(documents);
+  const file = ref?.kind === 'file' ? desired.files.find(file => file.id === ref.fileId) : undefined;
+  if (file) return documents[file.src];
+  const declaration = ref?.kind === 'integration' ? desired.integrations.find(item => item.id === ref.id)?.declaration : undefined;
+  return declaration?.type === 'hook' && typeof declaration.file === 'string'
+    ? `${value}\n\n${declaration.file}\n${documents[declaration.file] ?? ''}` : value;
+};
+// Apply defaults cover the same inventory as review, including hook-only changes and pin siblings.
+const reviewItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
+  const { observed, holds, overrides } = input;
+  const before = itemValues(observed.before), after = itemValues(observed.after);
+  const inventory = [...new Set([...before.keys(), ...after.keys()])];
+  const ids = new Set([...observed.changes.map(c => c.itemId), ...Object.keys(holds),
+    ...inventory.filter(id => overrideOf(id, overrides.value) !== undefined
+      || textOf(observed.before, id, before.get(id)) !== textOf(observed.after, id, after.get(id)))]);
+  for (const group of setupPinGroups(observed.before, observed.after, Object.keys(holds)))
+    if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
+  return [...ids].sort();
+};
 
 export const readSetupReview = (handle: AgentHandle, input: OperationInput<'setupReview'>, generation: number): Effect.Effect<SetupReview, SessionError, AgentServices> =>
   Effect.gen(function* () {
-    const { selected, overrides, holds, decisions, observed } = yield* inputs(handle, input.setupId, input.refetch);
+    const context = yield* inputs(handle, input.setupId, input.refetch);
+    const { selected, overrides, holds, decisions, observed } = context;
     const before = itemValues(observed.before), after = itemValues(observed.after);
     const pinGroups = setupPinGroups(observed.before, observed.after, Object.keys(holds));
-    const textOf = (documents: import('@nortuscc/sync').Documents, id: string, value: string | undefined) => {
-      const ref = parseItemId(id), desired = desiredOfDocuments(documents);
-      const file = ref?.kind === 'file' ? desired.files.find(file => file.id === ref.fileId) : undefined;
-      if (file) return documents[file.src];
-      const declaration = ref?.kind === 'integration' ? desired.integrations.find(item => item.id === ref.id)?.declaration : undefined;
-      return declaration?.type === 'hook' && typeof declaration.file === 'string'
-        ? `${value}\n\n${declaration.file}\n${documents[declaration.file] ?? ''}` : value;
-    };
-    const inventory = [...new Set([...before.keys(), ...after.keys()])];
-    const rowIds = new Set([...observed.changes.map(c => c.itemId), ...Object.keys(holds),
-      ...inventory.filter(id => overrideOf(id, overrides.value) !== undefined
-        || textOf(observed.before, id, before.get(id)) !== textOf(observed.after, id, after.get(id)))]);
-    for (const group of pinGroups) if (group.itemIds.some(id => rowIds.has(id))) for (const id of group.itemIds) rowIds.add(id);
-    const rows: SetupReview['rows'] = [...rowIds].sort().map(itemId => {
+    const rows: SetupReview['rows'] = reviewItemIds(context).map(itemId => {
       const ref = parseItemId(itemId)!;
       const change = { itemId, kind: ref.kind, before: before.get(itemId), after: after.get(itemId) };
       const values = { before: textOf(observed.before, itemId, change.before), after: textOf(observed.after, itemId, change.after), mine: mineOf(itemId, overrides.value) };
@@ -132,8 +141,11 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
       }
       yield* Effect.try({ try: () => validateSetupPinChoices(setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds)), change.choices),
         catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
+      const choices = [...change.choices, ...reviewItemIds(input)
+        .filter(id => !seen.has(id) && input.observed.offers.some(offer => offer.itemId === id))
+        .map(itemId => ({ itemId, action: 'hold' as const }))];
       const prepared = [];
-      for (const choice of change.choices) {
+      for (const choice of choices) {
         const offer = input.observed.offers.find(item => item.itemId === choice.itemId);
         const revision = offer ? revisionOf(offer.revision) : change.revision;
         prepared.push(yield* prepareSyncDecision({ source: input.selected.source, change: { kind: 'syncDecision', setupId: change.setupId, revision, ...choice },
@@ -159,6 +171,17 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
         catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
       const actual = yield* worktreeDocuments(effective.effective.repo);
       yield* Effect.try({ try: () => validateSetupComposition(expected, actual), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
+      // Advancing a local commit replays holds over head. Prove that replay preserves the reviewed bytes.
+      if (typeof input.observed.head === 'string') {
+        let replay = input.observed.after;
+        const origins = new Map<string, Documents>();
+        for (const id of Object.keys(nextHolds).sort()) {
+          const origin = nextHolds[id]!;
+          if (!origins.has(origin)) origins.set(origin, yield* worktreeDocuments((yield* input.selected.source.load(origin)).repo));
+          replay = patchItem(replay, id, origins.get(origin)!);
+        }
+        yield* Effect.try({ try: () => validateSetupComposition(expected, replay), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
+      }
       const jobPaths = { ...paths, repo: effective.effective.repo };
       const domains = handle.operationDomains?.(jobPaths);
       if (!domains) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Setup machine domains are unavailable'));
@@ -172,15 +195,18 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
     }).pipe(Effect.timeout(SETUP_INSPECT_TIMEOUT));
     const first = yield* observe.pipe(Effect.provide(backupsForRun(now)));
     const writes = first.prepared.filter(p => !p.unchanged);
+    const settles = typeof first.input.observed.head === 'string' || first.input.selected.source.recordApplied !== undefined;
     const keys = [...(canonical(first.nextOverrides) !== canonical(first.input.overrides.value) ? ['sync:override'] : []),
       ...(canonical(first.nextHolds) !== canonical(first.input.holds) ? ['sync:hold'] : []), ...(writes.length ? ['sync:decision'] : [])];
     const publicPlan: OperationPlan = { kind: 'operation' as const, steps: [
-      ...keys.map(key => ({ key, domain: 'sync' as const, action: 'save-decision' as const, summary: 'Back up and save the reviewed setup choices', touches: change.choices.map(c => c.itemId), interruptible: false })),
+      ...keys.map(key => ({ key, domain: 'sync' as const, action: 'save-decision' as const, summary: 'Back up and save choices; unchosen review rows stay held', touches: first.prepared.map(p => p.change.itemId), interruptible: false })),
       ...first.planned.steps.map(step => ({ ...step, summary: 'Apply the selected setup item using its existing owner' })),
+      ...(settles ? [{ key: 'sync:applied', domain: 'sync' as const, action: 'save-decision' as const, summary: 'Record the applied setup baseline after the machine plan succeeds', touches: change.choices.filter(c => c.action !== 'hold').map(c => c.itemId), interruptible: false }] : []),
     ], skipped: first.planned.skipped };
     const acceptance = { kind: 'setupApply' as const, generation: String(generation), baselineDigest: first.binding, planDigest: digest(publicPlan), plannedKeys: publicPlan.steps.map(s => s.key) };
     const preview = yield* Effect.try({ try: () => decodeOperationOutput('previewChange', { planId: randomUUID(), scope: { kind: 'machine' }, generation: String(generation), change, plan: publicPlan, nextActions: [],
-      actionEffects: ['Save every reviewed choice and apply the selected machine plan in this run', 'Machine overrides stay unless takeTheirs explicitly resets that item after a backup'] }), catch: () => new SessionError('OVERSIZED', 'Setup preview exceeds supported limits') });
+      actionEffects: ['Save reviewed choices, hold every unchosen review row, and apply the selected machine plan in this run', 'Machine overrides stay unless takeTheirs explicitly resets that item after a backup',
+        settles ? 'Settle the applied baseline only after the machine plan succeeds' : 'This hosted source has no applied observation owner; its baseline stays unchanged'] }), catch: () => new SessionError('OVERSIZED', 'Setup preview exceeds supported limits') });
     if (Buffer.byteLength(JSON.stringify(preview)) > SETUP_PREVIEW_MAX_BYTES) return yield* Effect.fail(new SessionError('OVERSIZED', 'Setup preview exceeds supported limits'));
     return { preview, acceptance,
       revalidate: Effect.gen(function* () { if ((yield* observe).binding !== first.binding) return yield* Effect.fail(stale()); }).pipe(Effect.provide(backupsForRun(now)), Effect.provideContext(context), Effect.catchCause(() => Effect.fail(stale()))),
@@ -214,7 +240,25 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
                 : { ...event, index, total: publicPlan.steps.length, note: event.outcome === 'ok' ? 'Machine effect observed' : 'Machine effect incomplete; inspect backups' });
             }),
           });
-          if (ran.steps.some(step => step.outcome !== 'ok')) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup machine plan stopped; inspect recorded effects'));
+          if (ran.result !== 'done' || signal.aborted || ran.steps.some(step => step.outcome !== 'ok')) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup machine plan stopped; inspect recorded effects'));
+          if (settles) {
+            yield* observer.pending('sync:applied');
+            const head = first.input.observed.head;
+            if (typeof head === 'string') {
+              yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
+              if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup apply cancelled'));
+              yield* stateStore.update(state => withApplied(state, head, at));
+            } else {
+              const fresh = yield* inspect(first.report.desired, first.domains);
+              const inspection: JobInspection = { paths: first.jobPaths, revision: head, desired: fresh.desired, report: fresh, domains: first.domains, trusted: true };
+              const accepted = change.choices.filter(c => c.action !== 'hold').map(c => c.itemId);
+              const successful = ran.steps.filter(s => s.outcome === 'ok').map(s => itemIdOf(s.key, first.report.desired)).filter((id): id is string => id !== undefined);
+              const observedItems = yield* observedHostedItems(inspection, first.input.observed.offered, accepted, successful);
+              if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup apply cancelled'));
+              yield* first.input.selected.source.recordApplied!({ revision: head, decisions: first.nextDecisions, observed: observedItems, released: [] });
+            }
+            yield* observer.committed('sync:applied');
+          }
         }).pipe(Effect.provide(backupsForRun(at).pipe(Layer.provideMerge(machinePaths(first.jobPaths)))));
       }).pipe(Effect.provideContext(context), Effect.catchCause(mapError)),
     } satisfies PreparedParityChange;

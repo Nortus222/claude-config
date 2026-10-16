@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { Effect } from 'effect';
-import { DecisionsStore, HistoryStore } from '@nortuscc/machine';
+import { Effect, Layer } from 'effect';
+import { DecisionsStore, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
 import { decodeOperationInput } from '../src/operations/index.ts';
 import { operationDigest } from '../src/runs.ts';
 import { AgentStateStore } from '../src/state.ts';
+import { RunStore, RunStoreError } from '../src/run-store.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture, HEAD, APPLIED, EFFORT, HOOK } from './support/setup-fixture.ts';
 
@@ -141,7 +142,7 @@ test('setup review includes held items even when both revisions omit the item', 
     assert.ok(review.rows.some(row => row.itemId === absent && row.held));
     const preview = yield* s.previewChange(change([{ itemId: absent, action: 'release' }]));
     assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
-    assert.deepEqual(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held, {});
+    assert.deepEqual(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held, { [EFFORT]: APPLIED, [HOOK]: APPLIED });
   }));
 });
 
@@ -156,24 +157,106 @@ test('accepting an incoming item preserves its machine override', async () => {
   }));
 });
 
-import { setupSourceLayer, normalizeRepoUrl } from '@nortuscc/sync';
+import { setupSourceLayer, normalizeRepoUrl, hostedSetupSourceLayer, SetupSource, commitDocuments, diffItems, itemValues } from '@nortuscc/sync';
 import { tempSetup, json } from '../../sync/checks/support/repo.ts';
-test('real local source composes accepted settings and retained hooks in the same run', async () => {
+test('after setup apply, accepted rows leave the review and unchosen rows show as held', async () => {
   const repo = tempSetup(), m = agentMachine();
   Object.assign(m.paths, { repo: repo.checkout });
   const head = repo.push({ 'claude/settings.keys.json': json({ theme: 'auto', effortLevel: 'medium' }),
     'integrations.json': json({ version: 1, integrations: [{ id: 'hk', label: 'hook', type: 'hook', target: 'claude', default: true, event: 'SessionStart', file: 'hooks/session.mjs' }] }), 'hooks/session.mjs': 'new hook\n' });
   m.write(join(m.paths.stateRoot, 'agent/setups.json'), json({ version: 1, setups: [{ setupId: null, repoUrl: normalizeRepoUrl(repo.origin), checkout: repo.checkout, trustedAt: '2026-10-15T00:00:00Z' }] }));
-  m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: repo.first } }));
+  m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: repo.first, at: '2026-10-15T00:00:00Z' } }));
   try {
     await m.run(Effect.scoped(Effect.gen(function* () {
       const handle = yield* startAgent(() => m.domains, { deferStart: true });
       const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
-      const preview = yield* session.previewChange({ ...change([{ itemId: EFFORT, action: 'accept' }, { itemId: HOOK, action: 'hold' }]), revision: { kind: 'local', commit: head } });
-      assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
+      const preview = yield* session.previewChange({ ...change([{ itemId: EFFORT, action: 'accept' }]), revision: { kind: 'local', commit: head } });
+      const run = yield* finish(session, preview.planId);
+      assert.equal(run.state, 'succeeded');
       assert.equal(JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!).effortLevel, 'medium');
-      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held[HOOK], repo.first);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json')) ?? '{}').held?.[HOOK], repo.first);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, head);
+      const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: false, limit: 100 }));
+      assert.equal(review.rows.some(row => row.itemId === EFFORT), false);
+      assert.equal(review.rows.find(row => row.itemId === HOOK)?.held, true);
+      assert.ok(run.parity?.committedKeys.includes('sync:applied'));
+      assert.equal(run.steps.at(-1)?.key, 'sync:applied');
+      const saved = readdirSync(m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile() && e.name === 'state.json');
+      assert.ok(saved.some(e => JSON.parse(readFileSync(join(e.parentPath, e.name), 'utf8')).applied.commit === repo.first));
     })), setupSourceLayer(m.paths));
+  } finally { rmSync(m.root, { recursive: true, force: true }); rmSync(repo.root, { recursive: true, force: true }); }
+});
+
+test('an interruption before settlement leaves the applied baseline unchanged and the run interrupted', async () => {
+  await withSetup((m, _setup, _s, handle) => Effect.gen(function* () {
+    m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: APPLIED, at: '2026-10-15T00:00:00Z' } }));
+    const store = yield* RunStore;
+    let interrupted = false;
+    const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(Effect.provideService(RunStore, {
+      ...store, write: receipt => {
+        if (!interrupted && receipt.inFlight === 'sync:applied') {
+          interrupted = true;
+          return Effect.fail(new RunStoreError('process lost before baseline settlement'));
+        }
+        return store.write(receipt);
+      },
+    }));
+    const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    const run = yield* finish(session, preview.planId);
+    assert.equal(run.state, 'interrupted');
+    assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, APPLIED);
+    assert.equal(JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!).effortLevel, 'high');
+    assert.ok(run.parity?.remainingKeys.includes('sync:applied'));
+    assert.ok(run.parity?.committedKeys.includes('sync:hold'));
+  }));
+});
+
+test('hosted setup apply records freshly observed settings and retains unchosen item origins', async () => {
+  const repo = tempSetup(), m = agentMachine();
+  const url = 'https://github.com/example/setup.git';
+  Object.assign(m.paths, { repo: repo.checkout });
+  repo.inCheckout('remote', 'set-url', 'origin', url);
+  const head = repo.push({ 'claude/settings.keys.json': json({ theme: 'light', effortLevel: 'medium' }) });
+  repo.inCheckout('fetch', repo.origin, 'main');
+  repo.inCheckout('tag', 'v1', repo.first);
+  repo.inCheckout('tag', 'v2', head);
+  repo.inCheckout('push', repo.origin, 'refs/tags/v1', 'refs/tags/v2');
+  m.write(join(m.paths.stateRoot, 'agent/setups.json'), json({ version: 1, setups: [{ setupId: 'setup-1', repoUrl: normalizeRepoUrl(url), accountId: 'account-1', checkout: repo.checkout, trustedAt: '2026-10-15T00:00:00Z' }] }));
+  const state = json({ version: 1, files: {}, applied: { commit: repo.first, at: '2026-10-15T00:00:00Z' } });
+  m.write(join(m.paths.stateRoot, 'state.json'), state);
+  const processes = Layer.effect(Processes, Effect.gen(function* () {
+    const real = yield* Processes;
+    return { run: (command: Parameters<typeof real.run>[0]) => real.run({ ...command, args: command.args.map(arg => arg === url ? repo.origin : arg) }) };
+  })).pipe(Layer.provide(nodeProcesses()));
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const before = yield* commitDocuments(repo.checkout, repo.first), after = yield* commitDocuments(repo.checkout, head);
+      const record = (number: number, commitSha: string, old: typeof before, next: typeof before) => ({ setupId: 'setup-1', number, commitSha, tag: `v${number}`, changelog: '', requiredEnv: [],
+        items: diffItems(itemValues(old), itemValues(next)).map(c => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' as const : c.after === undefined ? 'removed' as const : 'changed' as const })) });
+      const source = yield* SetupSource.pipe(Effect.provide(hostedSetupSourceLayer(m.paths, { setupId: 'setup-1', accountId: 'account-1', currentAccountId: Effect.succeed('account-1'), repoUrl: url,
+        records: Effect.succeed([record(1, repo.first, {}, before), record(2, head, before, after)]), processes })));
+      const baseline = yield* source.baseline!;
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const decisions = yield* DecisionsStore;
+      const session = yield* makeSession({ ...handle,
+        selectOperationSetup: () => Effect.succeed({ setupId: 'setup-1', trusted: true, accountId: 'account-1', repository: normalizeRepoUrl(url), source }),
+        mutationBodies: { ...handle.mutationBodies, decideAll: rows => Effect.forEach(rows, row => decisions.record(row), { discard: true }) },
+      }, { domains: () => m.domains, signal: new AbortController().signal });
+      const preview = yield* session.previewChange({ ...change([{ itemId: EFFORT, action: 'accept' }]), setupId: 'setup-1', revision: { kind: 'hosted', number: 2, commitSha: head } });
+      const run = yield* finish(session, preview.planId);
+      assert.equal(run.state, 'succeeded');
+      const settled = yield* source.baseline!;
+      assert.equal(settled.origins[EFFORT], head);
+      assert.equal(settled.origins['setting:claude:settings.json#theme'], baseline.origins['setting:claude:settings.json#theme']);
+      const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'setup-1', refetch: false, limit: 100 }));
+      assert.equal(review.rows.some(row => row.itemId === EFFORT), false);
+      assert.equal(review.rows.find(row => row.itemId === 'setting:claude:settings.json#theme')?.held, true);
+      assert.equal(m.read(join(m.paths.stateRoot, 'sync.json')), undefined);
+      assert.ok(run.parity?.committedKeys.includes('sync:applied'));
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, repo.first);
+      const saved = readdirSync(m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile() && e.name === 'setup-1.json');
+      assert.ok(saved.some(e => JSON.stringify(JSON.parse(readFileSync(join(e.parentPath, e.name), 'utf8'))) === JSON.stringify(baseline)));
+    })));
   } finally { rmSync(m.root, { recursive: true, force: true }); rmSync(repo.root, { recursive: true, force: true }); }
 });
 
@@ -239,10 +322,14 @@ test('hosted batches queue each exact item revision locally without creating loc
       }) },
     }, { domains: () => m.domains, signal: new AbortController().signal });
     const preview = yield* session.previewChange({ ...change([{ itemId: EFFORT, action: 'accept' }, { itemId: HOOK, action: 'hold' }]), setupId: 'hosted-setup', revision: { kind: 'hosted', number: 4, commitSha: HEAD } });
-    assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
+    const run = yield* finish(session, preview.planId);
+    assert.equal(run.state, 'succeeded');
     assert.deepEqual(queued.map(d => [d.itemId, d.revision, d.commit, d.decision]), [[EFFORT, 2, null, 'accept'], [HOOK, 4, null, 'skip']]);
     assert.equal(m.read(join(m.paths.stateRoot, 'sync.json')), undefined);
     assert.equal((yield* session.runs.list({ limit: 10 })).runs.length, 1);
+    assert.equal(run.parity?.committedKeys.includes('sync:applied'), false);
+    assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json')) ?? '{}').applied, undefined);
+    assert.ok('actionEffects' in preview && preview.actionEffects?.some(effect => effect.includes('baseline stays unchanged')));
   }));
 });
 
@@ -264,6 +351,37 @@ test('hook body-only changes appear in review with both executable bodies', asyn
       assert.match(row!.after!, /new hook/);
     })), setup.source);
   } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
+
+test('an omitted hook refuses settlement when hold replay would replace its retained body', async () => {
+  const m = agentMachine();
+  const { HEAD_FILES } = await import('./support/setup-fixture.ts');
+  const setup = setupFixture(join(m.root, 'snapshots'), { composeStateRoot: m.paths.stateRoot,
+    appliedFiles: { ...HEAD_FILES, 'claude/hooks/session.mjs': 'old hook\n' },
+    headFiles: { 'claude/hooks/session.mjs': 'new hook\n' } });
+  await m.trust();
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const before = durableFiles(m.paths.stateRoot);
+      const error = yield* Effect.flip(session.previewChange(change([{ itemId: EFFORT, action: 'accept' }])));
+      assert.equal(error.code, 'INVALID_REQUEST');
+      assert.match(error.message, /hook bytes cannot be retained/);
+      assert.deepEqual(durableFiles(m.paths.stateRoot), before);
+    })), setup.source);
+  } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
+
+test('unchosen source pin groups are held together while an independent setting is accepted', async () => {
+  await withSetup((m, _setup, s) => Effect.gen(function* () {
+    const preview = yield* s.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
+    const holds = JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held;
+    assert.equal(holds['skill:owner/repo/one'], APPLIED);
+    assert.equal(holds['skill:owner/repo/two'], APPLIED);
+    assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, HEAD);
+  }), { 'skills-manifest.txt': '[owner/repo]\none\ntwo\n', 'skill-pins.json': json({ version: 1, pins: { 'owner/repo': '1'.repeat(40) } }) });
 });
 
 test('large setup reviews paginate within the IPC record limit without dropping rows', async () => {
