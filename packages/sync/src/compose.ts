@@ -41,6 +41,8 @@ export const desiredFor = (input: {
   readonly head: Head;
   readonly held: Holds;
   readonly into: string;
+  // B3 supplies profile-aware composition; omission preserves the CLI root loader.
+  readonly profile?: string;
   readonly overrides?: Input<MachineOverrides>;
 }): Effect.Effect<Snapshot, ComposeError | ReadFailed, Fs | Processes> =>
   Effect.gen(function* () {
