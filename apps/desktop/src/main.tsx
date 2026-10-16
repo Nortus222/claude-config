@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
+import { SkillsController } from './skills-controller.ts';
+import { SkillsView } from './skills-view.tsx';
 import { MachineController } from './controller.ts';
 import { AccountController } from './account-controller.ts';
 import { SetupController } from './setup-controller.ts';
@@ -12,14 +14,19 @@ import { ReviewView } from './review-view.tsx';
 import { OverviewView, ResolvedView, SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, type Screen } from './views.tsx';
 import './style.css';
 
+const skillsMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
+
 function App() {
   const [controllers] = useState(() => {
     const bridge = nativeAvailable() ? nativeBridge : null;
     const machine = new MachineController(bridge);
-    return { machine, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates: new UpdateController(bridge ? nativeUpdateBridge : null) };
+    const updates = new UpdateController(bridge ? nativeUpdateBridge : null);
+    const skills = new SkillsController(bridge, machine, { maintenance: () => skillsMaintenance(updates.state.update?.phase) });
+    return { machine, skills, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates };
   });
-  const { machine, account, setup, updates, connections } = controllers;
+  const { machine, account, setup, updates, connections, skills } = controllers;
   const state = useSyncExternalStore(machine.subscribe, machine.snapshot);
+  const skillsState = useSyncExternalStore(skills.subscribe, skills.snapshot);
   const connectionsState = useSyncExternalStore(connections.subscribe, connections.snapshot);
   const accountState = useSyncExternalStore(account.subscribe, account.snapshot);
   const setupState = useSyncExternalStore(setup.subscribe, setup.snapshot);
@@ -29,10 +36,14 @@ function App() {
   const reviewSeen = useRef(0);
   const focusReview = useRef(false);
   useEffect(() => {
+    if (screen === 'skills') skills.enter();
+    return () => { if (screen === 'skills') skills.leave(); };
+  }, [skills, screen, state.session, state.connection]);
+  useEffect(() => {
     void updates.start();
     void setup.check();
-    return () => { account.dispose(); setup.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
-  }, [machine, account, setup, updates, connections]);
+    return () => { skills.dispose(); account.dispose(); setup.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
+  }, [machine, account, setup, updates, connections, skills]);
   useEffect(() => {
     if (state.connection === 'connected') { void account.refresh(); void connections.refresh(); }
   }, [account, connections, state.connection, state.session]);
@@ -55,6 +66,7 @@ function App() {
     <ShellView screen={screen} navigate={setScreen}>
       {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
       {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
+      {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={skillsMaintenance(updateState.update?.phase)} /> : null}
       {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
       {screen === 'settings' ? <>
         <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />

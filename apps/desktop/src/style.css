@@ -773,3 +773,31 @@ input[type='text'], select {
   .mcp-connections-error { align-items: flex-start; flex-wrap: wrap; }
   .mcp-connections-error button { margin-left: 0; }
 }
+
+/* Skills uses the shared form sections, buttons, steps and muted text. */
+.skills-view header, .skills-actions, .skills-toolbar, .skills-seg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.skills-view header > div { flex: 1 1 320px; }
+.skills-view :is(p, li, h2, h3, code, span) { overflow-wrap: anywhere; min-width: 0; }
+.skills-view :is(button, input, select):focus-visible { outline: 2px solid #b1d9bf; outline-offset: 2px; }
+.skills-alert { border: 1px solid #5a3a36; background: #2a1e1d; color: #efc2b9; padding: 12px; border-radius: 8px; }
+.skills-toolbar { margin: 16px 0; }
+.skills-toolbar input[type='search'] { flex: 1 1 220px; font: inherit; color: #dce2e8; background: #101318; border: 1px solid #414c5b; border-radius: 6px; padding: 9px 12px; }
+.skills-rows { list-style: none; padding: 0; margin: 0; }
+.skills-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #2c3440; padding: 16px 0; }
+.skills-row > div { min-width: 0; }
+.skills-row h3 { margin: 0; }
+.skills-row p { margin: 6px 0; }
+.skills-seg { gap: 0; }
+.skills-seg label { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid #37404c; cursor: pointer; }
+.skills-seg label:first-child { border-radius: 6px 0 0 6px; }
+.skills-seg label:last-child { border-radius: 0 6px 6px 0; }
+.skills-seg label:has(input:checked) { background: #26382f; }
+.skills-seg input { accent-color: #b1d9bf; }
+.skills-change, .skills-preview { display: grid; gap: 8px; border-top: 1px solid #2c3440; padding: 12px 0; }
+.skills-change label { display: flex; align-items: center; gap: 8px; }
+.skills-preview .steps { margin: 0; }
