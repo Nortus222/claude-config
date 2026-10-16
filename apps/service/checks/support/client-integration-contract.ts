@@ -112,7 +112,7 @@ export function registerClientIntegrationContract(name: string, factory: Service
           notifier.setConnected((notification) => ({ timeoutMs: 1000, deliver: Effect.sync(() => { delivered.push(notification.id); return true; }) }));
           yield* notifier.notify(job.status);
           assert.equal(delivered.length, 1);
-          assert.equal((yield* notifier.get(delivered[0]!))!.title, 'Review & apply');
+          assert.equal((yield* notifier.get(delivered[0]!))!.title, 'Incoming changes');
         }
       }
       const response = yield* Effect.promise(() => f.call('GET', '/v1/machines', undefined, publisher.token));
