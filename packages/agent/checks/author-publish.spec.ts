@@ -23,16 +23,17 @@ const fixture = async (t: TestContext) => {
   const root = mkdtempSync(join(tmpdir(), 'author-publish-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const env = { PATH: process.env.PATH!, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'gitconfig') };
-  const git = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const origin = join(root, 'origin.git');
+  const repoUrl = 'https://github.com/fixture/config';
+  const git = (dir: string, ...args: string[]) => execFileSync('git', [...(args.some(arg => ['clone', 'fetch', 'push', 'ls-remote'].includes(arg)) ? ['-c', `url.${origin}.insteadOf=${repoUrl}`] : []), '-C', dir, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const checkout = join(root, 'checkout'); mkdirSync(checkout);
-  const origin = join(root, 'origin.git'); git(root, 'init', '-q', '--bare', '-b', 'main', origin);
+  git(root, 'init', '-q', '--bare', '-b', 'main', origin);
   git(checkout, 'init', '-q', '-b', 'main'); git(checkout, 'config', 'user.name', 'Fixture'); git(checkout, 'config', 'user.email', 'fixture@example.test');
   const docs = { 'profiles/base.json': '{}\n', 'profiles/personal.json': '{"extends":"base"}\n',
     'profiles/other.json': '{"files":{"claude:CLAUDE.md":null}}\n', 'claude/CLAUDE.md': 'old\n', 'skills-manifest.txt': '' };
   for (const [path, text] of Object.entries(docs)) { mkdirSync(join(checkout, path, '..'), { recursive: true }); writeFileSync(join(checkout, path), text); }
   git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'initial'); git(checkout, 'remote', 'add', 'origin', origin); git(checkout, 'push', '-q', 'origin', 'main');
   const first = git(origin, 'rev-parse', 'main');
-  const repoUrl = 'https://github.com/fixture/config';
   let intercept: ((c: Command) => Effect.Effect<Completed, LaunchFailed> | undefined) | undefined;
   const processes = Layer.effect(Processes, Effect.map(Processes, real => ({ run: (c: Command) => {
     const replacement = intercept?.(c); if (replacement) return replacement;
@@ -115,7 +116,7 @@ const publish = async (f: Awaited<ReturnType<typeof fixture>>, draft: Draft) => 
   return f.execute(await f.run(f.owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest })));
 };
 
-test('publish pushes the previewed diff, tags it and announces each changed profile', async t => {
+test('publish pushes the previewed diff, tags it and announces each pending profile', async t => {
   const f = await fixture(t); const draft = await f.save(); const preview = await f.run(f.owner.previewDraft(draft.id));
   assert.deepEqual(preview.affectedProfiles, ['base', 'personal']);
   assert.deepEqual(preview.diff, [{ path: 'claude/CLAUDE.md', before: 'old\n', after: 'new\n' }]);
@@ -123,9 +124,9 @@ test('publish pushes the previewed diff, tags it and announces each changed prof
   assert.equal(f.git(f.origin, 'show', 'main:claude/CLAUDE.md'), 'new');
   assert.equal(f.git(f.origin, 'rev-parse', `refs/tags/nortuscc/${commit}`), commit);
   assert.equal(result.result?.status, 'succeeded');
-  assert.deepEqual(result.publication, { commit, pushed: true, tagged: true, announced: ['base', 'personal'], pending: [] });
+  assert.deepEqual(result.publication, { commit, pushed: true, tagged: true, announced: ['base', 'other', 'personal'], pending: [] });
   assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
-  assert.equal(f.revisions.length, 2);
+  assert.equal(f.revisions.length, 3);
 });
 
 test('publish refuses when the replayed diff no longer matches the preview', async t => {
@@ -148,7 +149,7 @@ test('a hosted failure after push leaves the run published but not yet announced
   const f = await fixture(t); const draft = await f.save(); f.failHosted(true);
   const result = await publish(f, draft);
   assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
-  assert.deepEqual(result.publication?.pending, ['base', 'personal']); assert.ok(await f.run(f.drafts.read(draft.id)));
+  assert.deepEqual(result.publication?.pending, ['base', 'other', 'personal']); assert.ok(await f.run(f.drafts.read(draft.id)));
 });
 
 test('announce twice registers each profile revision once after a lost hosted reply', async t => {
@@ -157,7 +158,7 @@ test('announce twice registers each profile revision once after a lost hosted re
     const prepared = await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId }));
     const result = await f.execute(prepared); assert.deepEqual(result.publication?.pending, []);
   }
-  assert.equal(f.revisions.length, 2); assert.ok(f.revisions.every(r => r.number === 1));
+  assert.equal(f.revisions.length, 3); assert.ok(f.revisions.every(r => r.number === 1));
 });
 
 test('after a crash between commit and push, recovery reports not pushed', async t => {
@@ -171,9 +172,11 @@ test('after a crash between commit and push, recovery reports not pushed', async
   assert.equal(recovery.published, false); assert.equal(recovery.action, 're-preview');
 });
 
-test('an unrelated profile gets no revision', async t => {
+test('a profile unchanged since its announcement gets no additional revision', async t => {
   const f = await fixture(t); await publish(f, await f.save());
-  assert.deepEqual(f.setups.map(s => s.profile), ['base', 'personal']);
+  await publish(f, await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'next\n', choice: { kind: 'updateShared' } }]));
+  const other = f.setups.find(setup => setup.profile === 'other')!;
+  assert.equal(f.revisions.filter(revision => revision.setupId === other.setupId).length, 1);
 });
 
 test('a successful push with a lost reply continues tagging and announcing', async t => {
@@ -182,7 +185,7 @@ test('a successful push with a lost reply continues tagging and announcing', asy
     f.git(c.cwd!, 'push', '-q', 'origin', 'HEAD:main'); return Effect.succeed({ code: 1, stdout: '', stderr: 'reply lost' });
   } return undefined; });
   const result = await publish(f, draft);
-  assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.tagged, true); assert.equal(f.revisions.length, 2);
+  assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.tagged, true); assert.equal(f.revisions.length, 3);
 });
 
 test('main advancing after preview requires preview again even when the draft diff is unchanged', async t => {
@@ -216,11 +219,13 @@ test('announcement compares against the previous announced commit and includes s
   const result = await publish(f, await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'third\n', choice: { kind: 'updateShared' } }]));
   assert.deepEqual(result.publication?.pending, []);
   const latest = f.revisions.filter(r => r.number === 2);
-  assert.equal(latest.length, 2);
-  for (const record of latest) assert.deepEqual(record.items, [
+  assert.equal(latest.length, 3);
+  for (const record of latest.filter(record => f.setups.find(setup => setup.setupId === record.setupId)!.profile !== 'other')) assert.deepEqual(record.items, [
     { id: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' },
     { id: 'file:codex:AGENTS.md', kind: 'file', change: 'added' },
   ]);
+  const other = f.setups.find(setup => setup.profile === 'other')!;
+  assert.deepEqual(latest.find(record => record.setupId === other.setupId)!.items, [{ id: 'file:codex:AGENTS.md', kind: 'file', change: 'added' }]);
 });
 
 test('announcing an older run does not append a revision after a newer commit', async t => {
@@ -229,7 +234,7 @@ test('announcing an older run does not append a revision after a newer commit', 
   const count = f.revisions.length;
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: old.runId })));
   assert.equal(f.revisions.length, count); assert.deepEqual(result.publication?.pending, []);
-  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'personal']);
+  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'other', 'personal']);
   assert.ok(result.publication?.unannounceable?.every(p => /newer|divergent/i.test(p.reason)));
   assert.equal((await f.run(f.owner.recoverPublication(result))).action, null);
   assert.equal((await f.run(f.owner.recoverPublication(old))).action, null);
@@ -261,14 +266,14 @@ test('announcement includes the enabled integrations required environment names'
   const f = await fixture(t);
   f.move('integrations.json', JSON.stringify({ version: 1, integrations: [{ id: 'server', label: 'Server', target: 'codex', type: 'mcp', command: 'server', default: true, requiresEnv: ['SERVER_KEY'] }] }));
   await publish(f, await f.save());
-  assert.equal(f.revisions.length, 2); assert.deepEqual(f.revisions[0]!.requiredEnv, ['SERVER_KEY']);
+  assert.equal(f.revisions.length, 3); assert.deepEqual(f.revisions[0]!.requiredEnv, ['SERVER_KEY']);
 });
 
 test('an existing commit with contradictory hosted items cannot be announced', async t => {
   const f = await fixture(t); const original = await publish(f, await f.save());
   f.revisions[0] = { ...f.revisions[0]!, items: [] };
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
-  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 3);
   assert.deepEqual(result.publication?.unannounceable, [{ profile: 'base', reason: 'Existing hosted revision has different publication metadata' }]);
 });
 
@@ -285,16 +290,16 @@ test('a failed durable commit checkpoint prevents the push', async t => {
 test('a committed publication returning 409 is reconciled without another revision', async t => {
   const f = await fixture(t); f.loseHostedReply('revision_conflict'); const original = await publish(f, await f.save());
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
-  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 3);
   assert.ok(f.revisions.every(r => r.number === 1));
 });
 
 test('partial hosted success records each profile and retry only appends the missing revision', async t => {
   const f = await fixture(t); const draft = await f.save(); f.failProfile('personal'); const original = await publish(f, draft);
-  assert.deepEqual(original.publication?.announced, ['base']); assert.deepEqual(original.publication?.pending, ['personal']);
+  assert.deepEqual(original.publication?.announced, ['base', 'other']); assert.deepEqual(original.publication?.pending, ['personal']);
   assert.ok(await f.run(f.drafts.read(draft.id))); f.failProfile();
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
-  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 3);
   assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
 });
 
@@ -326,7 +331,7 @@ test('a defect after push succeeds with pending announcements and Announce compl
   const receipt = (await f.run(f.runStore.read))[0]!; f.intercept(undefined);
   assert.deepEqual(await f.run(f.owner.recoverPublication(receipt.view)), { published: true, action: 'announce' });
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: receipt.view.runId })));
-  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 3);
   const original = (await f.run(f.runStore.read)).find(r => r.view.runId === receipt.view.runId)!;
   assert.equal(original.view.state, 'succeeded');
 });
@@ -351,7 +356,7 @@ test('a push that lands while the follow-up fetch fails is still treated as publ
   });
   const result = await publish(f, draft);
   assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
-  assert.equal(result.publication?.tagged, true); assert.equal(f.revisions.length, 2);
+  assert.equal(result.publication?.tagged, true); assert.equal(f.revisions.length, 3);
   assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
 });
 
@@ -373,7 +378,7 @@ test('an unknown push outcome offers re-check and can later be announced', async
   f.intercept(undefined);
   assert.deepEqual(await f.run(f.owner.recoverPublication(result)), { published: true, action: 'announce' });
   const announced = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: result.runId })));
-  assert.equal(announced.result?.status, 'succeeded'); assert.equal(f.revisions.length, 2);
+  assert.equal(announced.result?.status, 'succeeded'); assert.equal(f.revisions.length, 3);
 });
 
 test('missing drafts and runs without publications keep actionable invalid-request errors', async t => {
@@ -412,7 +417,7 @@ for (const [name, settings, integrations, reason] of [
   if (Object.keys(integrations).length) f.move('integrations.json', JSON.stringify({ version: 1, integrations: Object.entries(integrations).map(([id, fields]) => ({ id, label: 'Server', target: 'codex', type: 'mcp', command: 'server', default: true, ...fields })) }));
   const draft = await f.save(); const result = await publish(f, draft);
   assert.equal(result.result?.status, 'succeeded'); assert.deepEqual(result.publication?.pending, []);
-  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'personal']);
+  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'other', 'personal']);
   assert.ok(result.publication?.unannounceable?.every(p => reason.test(p.reason)));
   assert.equal((await f.run(f.owner.recoverPublication(result))).action, null);
   assert.equal(await f.run(f.drafts.read(draft.id)), undefined); assert.equal(f.revisions.length, 0);
@@ -429,7 +434,7 @@ test('draft cleanup failure is a note on a successful published run', async t =>
   const result = await f.execute(await f.run(owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest })));
   assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
   assert.deepEqual(result.publication?.pending, []); assert.match(result.result!.message, /draft cleanup/i);
-  assert.ok(await f.run(f.drafts.read(draft.id))); assert.equal(f.revisions.length, 2);
+  assert.ok(await f.run(f.drafts.read(draft.id))); assert.equal(f.revisions.length, 3);
 });
 
 
@@ -544,4 +549,13 @@ test('many changed files share a bounded preview budget without dropping publish
   const result = await publish(f, draft);
   assert.equal(result.publication?.pushed, true);
   for (let index = 0; index < 20; index++) assert.equal(f.git(f.origin, 'cat-file', '-s', `main:claude/capture-${index}.md`), '100000');
+});
+
+
+test('profiles without an announced revision publish their complete initial values', async t => {
+  const f = await fixture(t);
+  const result = await publish(f, await f.save());
+  assert.deepEqual(result.publication?.announced, ['base', 'other', 'personal']);
+  const setup = f.setups.find(setup => setup.profile === 'other')!;
+  assert.deepEqual(f.revisions.find(record => record.setupId === setup.setupId)!.items, [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'added' }]);
 });

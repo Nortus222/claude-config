@@ -106,7 +106,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     for (const profile of [...new Set([...profiles(before), ...profiles(after)])].sort()) {
       const setup = hosted?.accountId ? hosted.setups.find(setup => setup.owned && setup.profile === profile && normalizeRepoUrl(setup.repoUrl) === normalizeRepoUrl(draft.repoUrl)) : undefined;
       const latest = setup && client ? (yield* client.revisions(setup.setupId).pipe(Effect.catch(() => Effect.succeed([])))).at(-1) : undefined;
-      let previous: Documents = setup ? {} : before;
+      let previous: Documents = {};
       if (latest) {
         if (!announced.has(latest.commitSha)) announced.set(latest.commitSha, yield* documentsAt(fresh.dir, latest.commitSha));
         previous = announced.get(latest.commitSha)!;
