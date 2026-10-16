@@ -64,6 +64,8 @@ export class SetupSyncController {
   private machine: MachineController;
   private maintenance: () => boolean;
   private inMaintenance = false;
+  // The session the review was last loaded in, so an entered page loads it once per session as soon as it can.
+  private loaded: number | null = null;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
@@ -83,6 +85,7 @@ export class SetupSyncController {
           else if (this.visible) void this.discoverRun();
         }
       } else this.update(inspection);
+      this.autoload();
     });
     if (bridge) void bridge.subscribe(event => this.receive(event)).then(unlisten => {
       if (this.disposed) unlisten(); else this.unlistenEvents = unlisten;
@@ -115,6 +118,12 @@ export class SetupSyncController {
       local, previewLocal: local && !this.state.inspection!.profile.issues.length && selectedLocal(this.state).length > 0 } };
     for (const listener of this.listeners) listener();
   }
+  // An entered page without a review loads it the first time reading is allowed in a session: after the
+  // first connection, a Reconnect, the machine's first inspection, or the end of maintenance or a run.
+  // Called on those outside changes only, never mid-action.
+  private autoload() {
+    if (this.visible && !this.state.review && this.state.eligibility.read && this.loaded !== this.machine.state.session) void this.load(false);
+  }
   private mark() { return { epoch: this.epoch, token: this.machine.sessionToken() }; }
   private current(mark: ReturnType<SetupSyncController['mark']>) { return !this.disposed && this.epoch === mark.epoch && this.machine.ownsSession(mark.token); }
   private async call<N extends OperationName>(mark: ReturnType<SetupSyncController['mark']>, name: N, input: OperationInput<N>): Promise<OperationOutput<N> | undefined> {
@@ -123,12 +132,15 @@ export class SetupSyncController {
     return this.current(mark) && this.machine.ownsSession(mark.token, reply) ? reply.data : undefined;
   }
   // Loads the review when there is none, keeping a follow preview requested just before entering.
-  enter() { this.visible = true; if (!this.state.run) void this.discoverRun(); if (!this.state.review) void this.reload(); }
+  enter() { this.visible = true; if (!this.state.run) void this.discoverRun(); if (!this.state.review) void this.load(false); }
   leave() { this.visible = false; }
   refresh() {
     const maintenance = this.maintenance(), entering = maintenance && !this.inMaintenance;
+    // Leaving maintenance lets an entered page load the review it discarded.
+    if (!maintenance && this.inMaintenance) this.loaded = null;
     this.inMaintenance = maintenance;
     if (entering) this.invalidate(); else this.update({});
+    this.autoload();
   }
   invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {}, previewError: null, localError: null, previewNotice: null, switchTarget: null }); }
   // Adopts the newest machine run that is active or interrupted. A finished run found here is history,
@@ -158,7 +170,7 @@ export class SetupSyncController {
       if (run?.runId === runId && serial === this.runRead && this.state.run?.runId === runId) {
         const finished = active(this.state.run) && !active(run);
         this.update({ run, ...(active(run) ? { preview: null } : {}) });
-        if (finished) await this.finished(run);
+        if (finished) await this.finished(run); else this.autoload();
       }
     } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: errorText(error) }); }
   }
@@ -184,6 +196,7 @@ export class SetupSyncController {
   }
   private async load(refetch: boolean) {
     if (!this.state.eligibility.read) return;
+    this.loaded = this.machine.state.session;
     this.epoch++; this.issued.clear(); this.cursors = [undefined];
     // A follow preview does not depend on the review, so a reload keeps it.
     const follow = this.state.preview?.change.kind === 'followProfile';

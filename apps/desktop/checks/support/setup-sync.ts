@@ -16,7 +16,8 @@ export const run = (fields: Partial<RunView> = {}): RunView => decodeRunView({ r
 export const status = (fields = {}) => ({ at: 'now', policy: 'notify' as const, paused: null, trusted: true, applying: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 }, ...fields });
 export const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
 export function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
-export async function fixture() {
+// `connect: false` leaves the machine connecting, so a test can act before the first connection.
+export async function fixture(options: { connect?: boolean } = {}) {
   let generation = 1;
   const listeners = new Set<(event: HostEvent) => void>();
   const calls: { name: string; input: any }[] = [];
@@ -38,7 +39,7 @@ export async function fixture() {
     return { generation: issuedGeneration, data: command === 'agent_status' ? status() : command === 'inspect_machine'
       ? { ...report, status: status() } : null };
   } };
-  const machine = new MachineController(bridge); await machine.connect();
+  const machine = new MachineController(bridge); if (options.connect !== false) await machine.connect();
   return { bridge, machine, handlers, calls, commands, report, emit: (event: HostEvent extends infer E ? E extends HostEvent ? Omit<E, 'generation'> : never : never) => { for (const receive of listeners) receive({ ...event, generation } as HostEvent); },
     reconnect: async () => { generation++; await machine.connect(); await flush(); } };
 }

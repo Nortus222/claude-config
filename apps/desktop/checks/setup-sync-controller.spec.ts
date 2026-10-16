@@ -432,3 +432,26 @@ test('a late recovery page cannot replace a run started after discovery', async 
   assert.equal(f.controller.state.run?.runId, 'setup-run');
   assert.equal(f.controller.state.run?.state, 'running');
 });
+
+test('a page entered while connecting loads profiles and the review once connected, and again after Reconnect', async t => {
+  const f = await fixture({ connect: false }); const controller = new SetupSyncController(f.bridge, f.machine);
+  t.after(() => { controller.dispose(); f.machine.dispose(); });
+  controller.enter(); await flush();
+  assert.equal(f.calls.some(c => c.name === 'setupReview'), false);
+  await f.machine.connect(); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'inspectProfiles').length, 1);
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 1);
+  assert.ok(controller.state.review); assert.ok(controller.state.profiles);
+  await f.machine.restart(); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'inspectProfiles').length, 2);
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 2);
+  assert.ok(controller.state.review);
+});
+test('a page left before connecting does not load, and loads when entered later', async t => {
+  const f = await fixture({ connect: false }); const controller = new SetupSyncController(f.bridge, f.machine);
+  t.after(() => { controller.dispose(); f.machine.dispose(); });
+  controller.enter(); controller.leave(); await f.machine.connect(); await flush();
+  assert.equal(f.calls.some(c => c.name === 'setupReview'), false);
+  controller.enter(); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 1);
+});
