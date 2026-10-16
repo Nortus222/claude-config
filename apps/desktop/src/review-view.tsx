@@ -1,9 +1,15 @@
 import React, { type Ref } from 'react';
 import type { OperationChange, RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { WireObserved } from '@nortuscc/agent/ipc/protocol';
-import { MachineController, canCancel, type StepStatus, type ViewState } from './controller.ts';
+import { MachineController, canCancel, type RunView, type StepStatus, type ViewState } from './controller.ts';
 const DOMAINS = [['config', 'Configuration'], ['integrations', 'Integrations'], ['skills', 'Skills']] as const;
 const MARK: Record<StepStatus, string> = { pending: '·', running: '…', ok: '✓', failed: '✕', cancelled: '–' };
+const OUTCOME: Record<RunView['outcome'], string> = { running: 'Applying', done: 'Done', cancelled: 'Cancelled', failed: 'Failed', interrupted: 'Interrupted', abandoned: 'Abandoned' };
+// A finished run with failed steps never reads as plain "Done".
+const runHeading = (run: RunView) => {
+  const failed = Math.max(run.failed ?? 0, run.steps.filter(step => step.status === 'failed').length);
+  return run.outcome === 'done' && failed > 0 ? `Finished with ${failed} failed step${failed === 1 ? '' : 's'}` : OUTCOME[run.outcome];
+};
 const provenance = (item: WireObserved) => (item.from ? `${item.from.layer} · ${item.from.source}` : '—');
 function SkillAdditionResult({ run }: { run: OperationRunView }) {
   const skill = run.intent.skillAddition;
@@ -39,11 +45,17 @@ function SkillAdditionResult({ run }: { run: OperationRunView }) {
 }
 
 const domainText = {
+  editDraft: ['Save draft', 'Saves a local draft for review and publication.'],
+  removeDraftIntent: ['Remove draft intent', 'Removes one choice from the local draft.'],
+  deleteDraft: ['Delete draft', 'Deletes the local draft after preserving its previous contents.'],
+  ghLogin: ['Sign in to GitHub', 'Authorizes gh independently of the hosted account.'],
+  publishDraft: ['Publish draft', 'Push the previewed draft to main and announce changed profiles.'],
+  announcePublication: ['Announce publication', 'Retry announcements for the published commit.'],
   reconcile: ['Reconcile selected items', 'Existing owner guards and selected targets apply.'],
   machineIntent: ['Machine intent', 'Reset reveals inherited intent. Disabling or removing a declaration does not physically remove content.'],
-  capture: ['Capture configuration', 'Writes selected author documents. Commit and publication remain explicit CLI actions.'],
+  capture: ['Capture configuration', 'Capture selected configuration into a draft, then review and publish it in the app.'],
   uninstallConfig: ['Restore recorded configuration', 'Restores recorded documents through their owner; general backup restoration is unavailable.'],
-  update: ['Update selected skills', 'Addition repair requires the verified addition workflow. Author manifest edits are separately selected.'],
+  update: ['Update selected skills', 'Addition repair requires the verified addition workflow. Author changes use draft intents.'],
   followProfile: ['Follow profile', 'Back up dropped choices and refetch for inspection only.'],
   setupApply: ['Apply incoming setup choices', 'Saves every reviewed choice and applies the selected machine plan in one run.'],
   syncDecision: ['Incoming configuration decision', 'Accepting may permit existing policy scheduling. Repository trust requires the app consent action.'],
@@ -87,7 +99,7 @@ function SemanticRunResult({ run, challengeCurrent }: { run: OperationRunView; c
     {accepted?.kind === 'pruneBackups' && accepted.retention.limited ? <p>This retention batch is limited. Review another preview for remaining eligible folders.</p> : null}
     {signIn ? <>
       <p>Device authorization: {signIn.state}. Display expires at {signIn.expiresAt}.</p>
-      {challenge?.userCode && challenge.verificationUri ? <p>Complete authorization in your browser at <a href={challenge.verificationUri} target="_blank" rel="noreferrer">{challenge.verificationUri}</a> with code <code>{challenge.userCode}</code>.</p>
+      {challenge?.userCode && challenge.verificationUri ? <p>Complete authorization in your browser at <code>{challenge.verificationUri}</code> with code <code>{challenge.userCode}</code>.</p>
         : <p>Challenge unavailable. Inspect current account state before starting authorization again.</p>}
     </> : null}
   </div>;
@@ -143,7 +155,7 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
               <ul>{inspection.probeErrors.map((error, n) => <li key={n}>{error}</li>)}</ul>
             </div>
           ) : null}
-          {state.hello ? <p className="muted">Agent {state.hello.agentVersion} · protocol {state.hello.protocol}</p> : null}
+          {state.hello ? <p className="muted agent-version">Agent {state.hello.agentVersion} · protocol {state.hello.protocol}</p> : null}
           {state.status ? (
             <div className="agent-status">
               <p>Policy: {state.status.policy}</p>
@@ -245,9 +257,10 @@ export function ReviewView({ controller, state, reviewTarget }: { controller: Ma
             <div className="section-head">
               <div>
                 <p className="eyebrow">APPLY</p>
-                <h2 className="status">{state.connection === 'disconnected' ? 'Disconnected' : state.run?.outcome ?? 'Ready'}</h2>
+                <h2 className="status">{state.connection === 'disconnected' ? 'Disconnected' : state.run ? runHeading(state.run) : 'Ready'}</h2>
               </div>
             </div>
+            {state.run ? <p className="pad run-summary">{state.run.summary}</p> : null}
             {state.run ? (
               <ol className="progress-steps">
                 {state.run.steps.map((step, n) => (

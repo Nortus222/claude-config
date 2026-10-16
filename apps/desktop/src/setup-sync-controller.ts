@@ -11,6 +11,8 @@ export type SetupSyncState = {
   native: boolean; connection: MachineController['state']['connection']; sources: readonly Source[]; source: Source | null;
   review: Review | null; choices: readonly SetupChoice[]; preview: ChangePreview | null; run: RunView | null;
   pending: boolean; pagePending: boolean; pageIndex: number; error: string | null; message: string;
+  // A refused Preview of the review's choices, shown beside its button.
+  previewError: string | null;
   groupErrors: Readonly<Record<string, string>>;
   eligibility: { read: boolean; refetch: boolean; choose: boolean; preview: boolean; apply: boolean; cancel: boolean; browse: boolean };
 };
@@ -20,6 +22,8 @@ const MAX_CHOICES = 1000;
 const MAX_RUN_PAGES = 5;
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+// A finished setup apply or a successful follow changes what is incoming, so the review is re-read.
+const settles = (run: RunView) => !active(run) && (run.intent.change.kind === 'setupApply' || run.intent.change.kind === 'followProfile' && run.state === 'succeeded');
 
 // Choices survive paging, while connection changes discard every preview and re-read the durable run.
 export class SetupSyncController {
@@ -40,7 +44,7 @@ export class SetupSyncController {
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
-      pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {},
+      pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {}, previewError: null,
       eligibility: { read: false, refetch: false, choose: false, preview: false, apply: false, cancel: false, browse: false } };
     let session = machine.state.session, connection = machine.state.connection;
     this.unlisten = machine.subscribe(() => {
@@ -48,7 +52,7 @@ export class SetupSyncController {
       session = machine.state.session; connection = machine.state.connection;
       if (changed) {
         this.epoch++; this.runRead++; this.issued.clear(); this.cursors = [undefined];
-        this.update({ connection, review: null, choices: [], preview: null, pending: false, pagePending: false, groupErrors: {} });
+        this.update({ connection, review: null, choices: [], preview: null, pending: false, pagePending: false, groupErrors: {}, previewError: null });
         if (connection === 'connected') {
           if (this.state.run) void this.readRun(this.state.run.runId);
           else if (this.visible) void this.discoverRun();
@@ -89,7 +93,7 @@ export class SetupSyncController {
     this.inMaintenance = maintenance;
     if (entering) this.invalidate(); else this.update({});
   }
-  invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {} }); }
+  invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {}, previewError: null }); }
   private async discoverRun() {
     if (!this.bridge || this.machine.state.connection !== 'connected') return;
     const mark = this.mark(), serial = ++this.runRead;
@@ -113,9 +117,9 @@ export class SetupSyncController {
     try {
       const run = await this.call(mark, 'getRun', { scope: SCOPE, runId });
       if (run?.runId === runId && serial === this.runRead && this.state.run?.runId === runId) {
-        const switched = active(this.state.run) && run.state === 'succeeded' && run.intent.change.kind === 'followProfile';
+        const settled = active(this.state.run) && settles(run);
         this.update({ run, preview: null, message: `Run ${run.state}` });
-        if (switched) { this.invalidate(); await this.reload(); }
+        if (settled) { this.invalidate(); await this.reload(); }
       }
     } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: message(error) }); }
   }
@@ -136,7 +140,7 @@ export class SetupSyncController {
   private async load(refetch: boolean) {
     if (!this.state.eligibility.read) return;
     this.epoch++; this.issued.clear(); this.cursors = [undefined];
-    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, profiles: null, profileNotice: null, groupErrors: {} });
+    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, profiles: null, profileNotice: null, groupErrors: {}, previewError: null });
     try {
       let profiles: SetupSyncState['profiles'] = null;
       try {
@@ -164,7 +168,21 @@ export class SetupSyncController {
     const row = this.issued.get(choice.itemId);
     if (!row || choice.action === 'takeTheirs' && !row.conflict || choice.action === 'release' && !row.held) return;
     if (!this.state.choices.some(c => c.itemId === choice.itemId) && this.state.choices.length >= MAX_CHOICES) return;
-    this.update({ choices: [...this.state.choices.filter(c => c.itemId !== choice.itemId), choice], preview: null, groupErrors: {}, error: null });
+    this.update({ choices: [...this.state.choices.filter(c => c.itemId !== choice.itemId), choice], preview: null, groupErrors: {}, previewError: null, error: null });
+  }
+  // Stages one action for many rows on this page: one pin group, or every incoming row with its
+  // pin-group siblings so the group's choices match.
+  chooseAll(action: 'accept' | 'hold', source?: string) {
+    const review = this.state.review;
+    if (!this.state.eligibility.choose || !review) return;
+    const onPage = new Set(review.rows.map(row => row.itemId));
+    const ids = new Set(source !== undefined ? review.pinGroups.find(group => group.source === source)?.itemIds ?? []
+      : review.rows.filter(row => row.change !== 'unchanged').map(row => row.itemId));
+    if (source === undefined) for (const group of review.pinGroups) if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
+    const staged = new Map(this.state.choices.map(choice => [choice.itemId, choice]));
+    for (const itemId of ids) if (onPage.has(itemId) && this.issued.has(itemId)) staged.set(itemId, { itemId, action });
+    if (staged.size > MAX_CHOICES) return;
+    this.update({ choices: [...staged.values()], preview: null, groupErrors: {}, previewError: null, error: null });
   }
   async page(direction: 'next' | 'previous') {
     const review = this.state.review;
@@ -213,15 +231,17 @@ export class SetupSyncController {
   }
   private async prepare(change: ChangePreview['change']) {
     this.runRead++;
-    const mark = this.mark(); this.update({ pending: true, preview: null, error: null, groupErrors: {} });
+    const mark = this.mark(); this.update({ pending: true, preview: null, error: null, groupErrors: {}, previewError: null });
     try {
       const preview = await this.call(mark, 'previewChange', { scope: SCOPE, change });
       if (preview) this.update({ preview });
     } catch (error) {
       if (this.current(mark)) {
         const text = message(error);
-        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => `Choices for ${group.source} must match: its items share one pin.` === text).map(group => [group.source, text]));
-        this.update({ error: text, groupErrors });
+        // The host prefixes the agent's refusal with its error code.
+        const refusal = text.replace(/^[A-Z_]+: /, '');
+        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => `Choices for ${group.source} must match: its items share one pin.` === refusal).map(group => [group.source, refusal]));
+        this.update(change.kind === 'setupApply' && this.state.review ? { previewError: text, groupErrors } : { error: text, groupErrors });
       }
     } finally { if (this.current(mark)) this.update({ pending: false }); }
   }
@@ -230,18 +250,18 @@ export class SetupSyncController {
     if (!this.state.eligibility.apply || !preview) return;
     this.runRead++;
     const mark = this.mark(); this.update({ pending: true, preview: null, error: null });
-    let switched = false;
+    let settled = false;
     try {
       const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId: crypto.randomUUID() });
       if (!result) return;
       if (result.status === 'stale') this.update({ message: 'Setup changed. Preview again before applying.' });
       else {
         this.update({ run: result.run, choices: [], message: `Run ${result.run.state}` });
-        switched = preview.change.kind === 'followProfile' && result.run.state === 'succeeded';
-        if (!switched) await this.readRun(result.run.runId);
+        settled = settles(result.run);
+        if (!settled) await this.readRun(result.run.runId);
       }
     } catch (error) { if (this.current(mark)) this.update({ error: `${message(error)}. Apply completion is unconfirmed. Reload to inspect runs before retrying.` }); }
-    finally { if (this.current(mark)) { this.update({ pending: false }); if (switched) { this.invalidate(); await this.reload(); } } }
+    finally { if (this.current(mark)) { this.update({ pending: false }); if (settled) { this.invalidate(); await this.reload(); } } }
   }
   async repreview() {
     const run = this.state.run;

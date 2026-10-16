@@ -5,7 +5,7 @@ import { RunRecovery } from './run-recovery.tsx';
 
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
-type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'>;
+type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'chooseAll' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'>;
 const CHANGE = { added: 'Added', changed: 'Changed', removed: 'Removed', unchanged: 'Unchanged' };
 
 function SourceSummary({ state, controller }: { state: SetupSyncState; controller: Actions }) {
@@ -32,7 +32,9 @@ function pairLabel(row: ReviewRow, action: SetupChoice['action']) {
   return row.conflict ? `${incoming} · keep this Mac's ${row.kind === 'file' ? 'file' : 'override'}` : incoming;
 }
 function Row({ row, state, controller }: { row: ReviewRow; state: SetupSyncState; controller: Actions }) {
-  const chosen = state.choices.find(choice => choice.itemId === row.itemId);
+  const staged = state.choices.find(choice => choice.itemId === row.itemId);
+  // A bulk take stages accept, which also releases a held row.
+  const chosen = staged?.action === 'accept' && row.held ? { ...staged, action: 'release' as const } : staged;
   const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
   return <li className="setup-sync-row">
     <div className="setup-sync-row-head"><strong>{row.itemId}</strong><span className="setup-sync-tag">{row.kind}</span><span className="setup-sync-tag">{CHANGE[row.change]}</span></div>
@@ -52,13 +54,18 @@ function Row({ row, state, controller }: { row: ReviewRow; state: SetupSyncState
   </li>;
 }
 
-function Pins({ review, state }: { review: Review; state: SetupSyncState }) {
+// Groups with no row on this page have nothing to decide here.
+function Pins({ review, state, controller }: { review: Review; state: SetupSyncState; controller: Actions }) {
   const onPage = new Set(review.rows.map(row => row.itemId));
+  const groups = review.pinGroups.filter(group => group.itemIds.some(id => onPage.has(id)));
+  if (!groups.length) return null;
   return <div className="setup-sync-pins" role="group" aria-label="Source pins"><h3>Source pins</h3>
     <p className="setup-sync-note">A pin moves for a whole source. Choose the same action for every affected item, including rows on other pages.</p>
-    {review.pinGroups.map(group => <fieldset key={group.source} className="setup-sync-pin"><legend>{group.source}</legend>
+    {groups.map(group => <fieldset key={group.source} className="setup-sync-pin"><legend>{group.source}</legend>
       <p>{group.itemIds.length} affected items, {group.itemIds.filter(id => !onPage.has(id)).length} not on this page</p>
-      <ul>{group.itemIds.map(id => <li key={id}><code>{id}</code></li>)}</ul>
+      <div className="setup-sync-actions"><button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('accept', group.source)}>Take this group</button>
+        <button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('hold', group.source)}>Hold this group</button></div>
+      <details><summary>Affected items</summary><ul>{group.itemIds.map(id => <li key={id}><code>{id}</code></li>)}</ul></details>
       {state.groupErrors[group.source] ? <p className="alert" role="alert">{state.groupErrors[group.source]}</p> : null}
     </fieldset>)}
   </div>;
@@ -94,11 +101,15 @@ export function SetupSyncView({ state, controller }: { state: SetupSyncState; co
     </section> : null}
     {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAbandon={() => void controller.abandon()} disabled={!can.read} /> : null}
     {review ? <section className="card setup-sync-review" aria-labelledby="setup-sync-review-h"><p className="eyebrow">INCOMING CHANGES</p><h2 id="setup-sync-review-h">{review.rows.length ? `Review page ${state.pageIndex + 1}` : 'No incoming rows in this review'}</h2>
+      {review.rows.some(row => row.change !== 'unchanged') ? <div className="setup-sync-actions" role="group" aria-label="Choose for every incoming row">
+        <button disabled={!can.choose} onClick={() => controller.chooseAll('accept')}>Take all incoming</button>
+        <button disabled={!can.choose} onClick={() => controller.chooseAll('hold')}>Hold all incoming</button></div> : null}
+      {review.pinGroups.length ? <Pins review={review} state={state} controller={controller} /> : null}
       <ul className="setup-sync-rows">{review.rows.map(row => <Row key={row.itemId} row={row} state={state} controller={controller} />)}</ul>
       <nav className="setup-sync-actions" aria-label="Review pages"><button disabled={!can.browse || !state.pageIndex} onClick={() => void controller.page('previous')}>Previous page</button>
         <button disabled={!can.browse || !review.nextCursor} onClick={() => void controller.page('next')}>Next page</button></nav>
-      {review.pinGroups.length ? <Pins review={review} state={state} /> : null}
       <p className="notice">Items you don't choose will be held.</p><div className="setup-sync-actions"><button disabled={!can.preview} onClick={() => void controller.preview()}>Preview</button><span>{state.choices.length} explicit choices. Preview writes nothing.</span></div>
+      {state.previewError && !Object.keys(state.groupErrors).length ? <p className="alert" role="alert">{state.previewError}</p> : null}
     </section> : null}
     <PreviewPanel state={state} controller={controller} />
   </div>;

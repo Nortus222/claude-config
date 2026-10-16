@@ -19,7 +19,8 @@ export class FsFailed extends Data.TaggedError('FsFailed')<{ readonly op: string
 }
 
 // A child process could not be started at all.
-export class LaunchFailed extends Data.TaggedError('LaunchFailed')<{ readonly cmd: string; readonly reason: string }> {
+// `code` is the launch error's errno code (for example ENOENT) when the platform reported one.
+export class LaunchFailed extends Data.TaggedError('LaunchFailed')<{ readonly cmd: string; readonly reason: string; readonly code?: string }> {
   override get message() {
     return `could not launch ${this.cmd}: ${this.reason}`;
   }

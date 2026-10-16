@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MachineController, advance, canCancel, type RunView } from '../src/controller.ts';
 import { skillRun } from './support/skill-run.ts';
+import { authorRun } from './support/author.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
 
 const step = (key: string) => ({ key, domain: 'config', action: 'write-file', summary: `write ${key}`, touches: [key], interruptible: false });
@@ -931,8 +932,22 @@ test('reconnect restores an addition receipt independently of first inspection a
   f.emit(event(run.runId, { type: 'done', ok: 3, failed: 0 })); await settle();
   assert.equal(c.state.run?.receipt?.installation?.state, 'verified');
   assert.equal(c.state.run?.outcome, 'done');
-  assert.deepEqual(f.calls.find(([n]) => n === 'list_operation_runs')?.[1], { limit: 1 });
+  assert.deepEqual(f.calls.find(([n]) => n === 'list_operation_runs')?.[1], { limit: 50 });
   assert.deepEqual(f.calls.find(([n]) => n === 'get_operation_run')?.[1], { runId: run.runId });
+});
+
+test('run discovery skips author runs such as a waiting GitHub sign-in or a publish', async () => {
+  const login = authorRun({ kind: 'ghLogin' }, { runId: 'login-run', state: 'running', result: null });
+  const publish = authorRun({ kind: 'publishDraft', draftId: 'd', digest: 'a'.repeat(64) }, { runId: 'publish-run' });
+  let runs = [login, publish];
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ({ runs, nextBefore: null }), get_operation_run: () => skillRun(),
+    inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); await c.connect();
+  const adopted = () => c.state.run as RunView | null;
+  assert.equal(adopted(), null, 'an author run never becomes the machine run');
+  runs = [login, publish, skillRun()];
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: 'login-run' }); await settle();
+  assert.equal(adopted()?.runId, skillRun().runId, 'the newest machine run is still discovered');
 });
 
 test('a delayed durable terminal receipt cannot replace a different live legacy run', async () => {
@@ -1354,7 +1369,7 @@ test('unknown semantic invalidations coalesce to one in-flight acceptance-ordere
   let owner = skillRun({ runId: 'old' });
   const f = fake({ agent_generation: () => operationHello, inspect_machine: () => inspection([]),
     list_operation_runs: async args => {
-      assert.deepEqual(args, { limit: 1 }); lists++; active++; maximum = Math.max(maximum, active);
+      assert.deepEqual(args, { limit: 50 }); lists++; active++; maximum = Math.max(maximum, active);
       try { return lists === 1 ? { runs: [], nextBefore: null } : lists === 2 ? await pending.promise : { runs: [owner], nextBefore: null }; }
       finally { active--; }
     } });

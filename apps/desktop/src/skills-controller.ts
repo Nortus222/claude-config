@@ -116,7 +116,7 @@ export class SkillsController {
     this.epoch++;
     const current = this.current();
     this.update({ operation: kind, error: null, ...fields });
-    const done = action(current).catch(error => { if (current()) this.update({ error: text(error) }); }).finally(() => {
+    const done = action(current).catch(error => { if (current()) this.update({ error: text(error), ...(fields.detail !== undefined && this.state.detail === fields.detail ? { detail: '' } : {}) }); }).finally(() => {
       if (this.active === done) this.active = null;
       if (current()) this.update({ operation: null, ...(!live(this.state.run) ? { saving: null } : {}) });
     });

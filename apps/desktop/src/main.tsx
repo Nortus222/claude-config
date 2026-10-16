@@ -1,3 +1,6 @@
+import { AuthorController } from './author-controller.ts';
+import { ProfilesView } from './profiles-view.tsx';
+import { UpstreamsView } from './upstreams-view.tsx';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SkillsController } from './skills-controller.ts';
@@ -25,10 +28,12 @@ function App() {
     const updates = new UpdateController(bridge ? nativeUpdateBridge : null);
     const setupSync = new SetupSyncController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
     const skills = new SkillsController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) });
-    return { machine, skills, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
+    const author = new AuthorController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
+    return { machine, skills, author, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
   });
-  const { machine, account, setup, updates, connections, setupSync, skills } = controllers;
+  const { machine, account, setup, updates, connections, setupSync, skills, author } = controllers;
   const state = useSyncExternalStore(machine.subscribe, machine.snapshot);
+  const authorState = useSyncExternalStore(author.subscribe, author.snapshot);
   const skillsState = useSyncExternalStore(skills.subscribe, skills.snapshot);
   const connectionsState = useSyncExternalStore(connections.subscribe, connections.snapshot);
   const accountState = useSyncExternalStore(account.subscribe, account.snapshot);
@@ -38,6 +43,8 @@ function App() {
   const [screen, setScreen] = useState<Screen>('overview');
   useEffect(() => { if (screen === 'setup') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
   useEffect(() => { setupSync.refresh(); }, [setupSync, updateState.update?.phase]);
+  useEffect(() => { if (screen === 'profiles' || screen === 'upstreams') author.enter(); else author.leave(); }, [author, screen, state.session, state.connection]);
+  useEffect(() => { author.refresh(); }, [author, updateState.update?.phase]);
   const reviewTarget = useRef<HTMLHeadingElement>(null);
   const reviewSeen = useRef(0);
   const focusReview = useRef(false);
@@ -48,18 +55,18 @@ function App() {
   useEffect(() => {
     void updates.start();
     void setup.check();
-    return () => { skills.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
-  }, [machine, account, setup, updates, connections, setupSync, skills]);
+    return () => { author.dispose(); skills.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
+  }, [machine, account, setup, updates, connections, setupSync, skills, author]);
   useEffect(() => {
     if (state.connection === 'connected') { void account.refresh(); void connections.refresh(); }
   }, [account, connections, state.connection, state.session]);
   useEffect(() => {
     if (state.reviewRequested <= reviewSeen.current) return;
     const previous = reviewSeen.current;
-    focusReview.current = true;
-    setScreen((current) => screenForReview(current, previous, state.reviewRequested));
+    focusReview.current = screenForReview(screen, previous, state.reviewRequested, state.status) === 'review';
+    setScreen((current) => screenForReview(current, previous, state.reviewRequested, state.status));
     reviewSeen.current = state.reviewRequested;
-  }, [state.reviewRequested]);
+  }, [state.reviewRequested, state.status]);
   useEffect(() => {
     if (screen !== 'review' || !focusReview.current || !reviewTarget.current) return;
     reviewTarget.current.focus();
@@ -69,11 +76,13 @@ function App() {
 
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
     updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
-    <ShellView screen={screen} navigate={setScreen}>
+    <ShellView screen={screen} navigate={setScreen} machine={state} onReconnect={() => void machine.restart()}>
       {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
       {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
       {screen === 'setup' ? <SetupSyncView state={setupSyncState} controller={setupSync} /> : null}
       {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} /> : null}
+      {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} /> : null}
+      {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} /> : null}
       {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
       {screen === 'settings' ? <>
         <SettingsView machine={state} state={accountState} controller={account} machineController={machine} onFollowProfile={setupId => { const following = setupSync.followSharedLink(setupId); setScreen('setup'); return following; }} />

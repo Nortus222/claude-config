@@ -7,6 +7,7 @@ import { isSkillCandidateSelector } from './candidates.ts';
 
 // The only place `npx skills` is spelled. nortuscc's target names are not the installer's agent ids.
 export const SKILL_AGENTS: Record<Target, string> = { claude: 'claude-code', codex: 'codex' };
+export const SKILLS_CLI_VERSION = '1.7.2';
 
 // Supplies the accepted ref to the audited vendor. SHA-looking branches/tags can win its checkout;
 // the driver must verify accepted path/content before success. Legacy commands retain their version.
@@ -21,7 +22,7 @@ export const additionCommand = (input: {
     || input.targets.some(t => t !== 'claude' && t !== 'codex')) throw new Error('invalid skill addition command');
   return {
     cmd: 'npx',
-    args: ['-y', 'skills@1.7.2', 'add', `https://github.com/${input.source}/tree/${input.revision}`,
+    args: ['-y', `skills@${SKILLS_CLI_VERSION}`, 'add', `https://github.com/${input.source}/tree/${input.revision}`,
       '--skill', input.selectorName, '--agent', ...input.targets.map(t => SKILL_AGENTS[t]), '--global', '--yes'],
     output: 'inherit',
   };

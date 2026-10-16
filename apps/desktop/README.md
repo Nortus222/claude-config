@@ -391,8 +391,8 @@ The manual `desktop-release` workflow targets only macOS arm64. The owner dispat
 `main` with its exact reviewed SHA, stable version and plain release notes. By default it validates
 the signed distribution and retains workflow artifacts without publishing. Selecting `publish`
 on that manual dispatch is the release approval. The workflow checks the repository, current main SHA, matching versions in
-`package.json`, `Cargo.toml` and `tauri.conf.json`, and successful main runs of macos, linux,
-windows and cosmos. It creates a temporary release overlay with the owner's public updater key,
+`package.json`, `Cargo.toml` and `tauri.conf.json`, and successful main runs of macos, linux
+and windows. It creates a temporary release overlay with the owner's public updater key,
 the fixed stable endpoint and `requireSignedVersion: true`. Ordinary builds remain unconfigured
 for updates and do not use signing secrets.
 

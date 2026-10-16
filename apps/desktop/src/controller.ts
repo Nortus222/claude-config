@@ -14,6 +14,8 @@ export type RunView = {
   readonly steps: ReadonlyArray<StepView>;
   readonly outcome: 'running' | 'done' | 'cancelled' | 'failed' | 'interrupted' | 'abandoned';
   readonly summary: string;
+  // Steps the agent reported as failed when the run finished.
+  readonly failed?: number;
   readonly backups?: string;
 };
 export type ViewState = {
@@ -38,6 +40,11 @@ export const canCancel = (state: ViewState) => state.connection === 'connected'
   && (state.run?.outcome === 'running' || state.status?.applying === true);
 
 const MAX_EARLY_EVENTS = 10_000;
+// The author pages own drafts, gh sign-in and publication runs; they never become this machine's run.
+export const AUTHOR_RUN_KINDS: ReadonlySet<string> = new Set(['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication']);
+const machineRun = (run: OperationRunView) => !AUTHOR_RUN_KINDS.has(run.intent.change.kind);
+// Discovery reads a page of the newest runs and adopts the newest machine run among them.
+const DISCOVERY_PAGE = 50;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
@@ -62,7 +69,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
     case 'finished':
       return { ...run, steps: mark(progress.index, progress.outcome, progress.note) };
     case 'done':
-      return { ...run, outcome: 'done', summary: `${progress.ok} applied, ${progress.failed} failed`, ...backups(progress.backups) };
+      return { ...run, outcome: 'done', summary: `${progress.ok} applied, ${progress.failed} failed`, failed: progress.failed, ...backups(progress.backups) };
     case 'cancelled':
       return { ...run, outcome: 'cancelled', summary: `Cancelled; ${progress.remaining.length} not started`, ...backups(progress.backups) };
     case 'failed':
@@ -250,7 +257,7 @@ export class MachineController {
     if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
-        : await this.bridge.invoke('list_operation_runs', { limit: 1 });
+        : await this.bridge.invoke('list_operation_runs', { limit: DISCOVERY_PAGE });
       if (!this.ownsSession(token, reply) || (runId ? targetedRead !== this.latestRunRead : this.runDiscovery !== discovery)) return;
       if (!runId && this.discoveryFlight?.dirty) return;
       if (discovery?.overflow) {
@@ -261,8 +268,8 @@ export class MachineController {
         return;
       }
       const receipt = runId ? checkedReply(decodeRunView, reply.data)
-        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
-      if (!receipt || runId && receipt.runId !== runId) return;
+        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs.find(machineRun);
+      if (!receipt || runId && receipt.runId !== runId || !machineRun(receipt)) return;
       const current = this.state.run;
       if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
       if (!runId && current?.runId === receipt.runId && targetedAtStart !== this.latestRunRead) return;
@@ -285,7 +292,8 @@ export class MachineController {
       });
       for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
       const staleChallenge = receipt.parity?.kind === 'signIn' && receipt.parity.signIn?.state === 'awaiting-user' && statusRevision !== this.statusRevision;
-      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: !staleChallenge }, detail: summary });
+      const failed = receipt.result && 'failed' in receipt.result ? { failed: receipt.result.failed } : {};
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, ...failed, receipt, challengeCurrent: !staleChallenge }, detail: summary });
       if (staleChallenge && this.ownsSession(token) && this.state.run?.runId === receipt.runId) await this.refreshRun(receipt.runId);
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.

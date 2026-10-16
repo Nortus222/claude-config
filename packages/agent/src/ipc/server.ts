@@ -344,6 +344,15 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'authorProfiles': result = yield* session.authorProfiles(request.input); break;
+            case 'machineFile': result = yield* session.machineFile(request.input); break;
+            case 'authorFile': result = yield* session.authorFile(request.input); break;
+            case 'upstreams': result = yield* session.upstreams(request.input); break;
+            case 'discoverUpstream': result = yield* session.discoverUpstream(request.input); break;
+            case 'upstreamSkill': result = yield* session.upstreamSkill(request.input); break;
+            case 'drafts': result = yield* session.drafts(request.input); break;
+            case 'draftPreview': result = yield* session.draftPreview(request.input); break;
+            case 'ghState': result = yield* session.ghState(request.input); break;
             case 'listBackups': result = yield* session.listBackups(request.input); break;
             case 'agentStatus': result = yield* session.agentStatus(request.input); break;
             case 'accountState': result = yield* session.accountState(request.input); break;

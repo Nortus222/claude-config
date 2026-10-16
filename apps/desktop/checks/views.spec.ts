@@ -25,6 +25,32 @@ test('browser preview has only implemented navigation and real empty states', ()
   for (const name of ['Discover', 'Machines', 'History', 'Publish', 'Updates', 'fixture-login']) assert.doesNotMatch(markup, new RegExp(name));
   assert.match(markup, /Browser preview/);
 });
+test('every screen shows one disconnected banner with the reason and a Reconnect action', () => {
+  const c = machine(); let reconnects = 0;
+  const state = { ...c.state, connection: 'disconnected' as const, detail: 'Agent request timed out; restart explicitly' };
+  const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'skills', navigate: () => {}, machine: state, onReconnect: () => { reconnects++; }, children: null }));
+  assert.match(markup, /class="[^"]*shell-banner[^"]*" role="alert"[\s\S]*Agent request timed out; restart explicitly[\s\S]*>Reconnect<\/button>/);
+  assert.equal(markup.match(/shell-banner/g)?.length, 1);
+  const connected = renderToStaticMarkup(createElement(ShellView, { screen: 'skills', navigate: () => {}, machine: { ...state, connection: 'connected' as const }, onReconnect: () => {}, children: null }));
+  assert.doesNotMatch(connected, /shell-banner/);
+  assert.equal(reconnects, 0);
+});
+test('a run with failed steps says so and keeps its summary after the re-inspection', () => {
+  const c = machine();
+  const run = { runId: 'r', outcome: 'done' as const, summary: '1 applied, 1 failed', failed: 1, steps: [
+    { key: 'config:a', summary: 'apply a', status: 'ok' as const, note: '' }, { key: 'config:b', summary: 'apply b', status: 'failed' as const, note: 'b failed' }] };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run, detail: 'Inspected 46 items' } }));
+  assert.match(markup, /<h2 class="status">Finished with 1 failed step<\/h2>/);
+  assert.match(markup, /1 applied, 1 failed/);
+  const clean = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run: { ...run, failed: 0, summary: '2 applied, 0 failed', steps: run.steps.map(step => ({ ...step, status: 'ok' as const })) } } }));
+  assert.match(clean, /<h2 class="status">Done<\/h2>/);
+});
+test('the agent version wraps inside the sidebar', () => {
+  const c = machine();
+  const hello = { agentVersion: 'a'.repeat(64), protocol: 3 as const, policy: 'manual' as const, paused: null };
+  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, hello } as typeof c.state }));
+  assert.match(markup, /class="muted agent-version"/);
+});
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };
 const hosted = { enabled: true, recovered: true, signingIn: false, accountId: null, login: null, machineId: null, auth: 'signed-out' as const, setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 test('an existing installation waiting for native setup does not flash first-run consent', async () => {
@@ -234,9 +260,12 @@ test('Review remains usable locally with selection, preview and external activit
   const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', status: { ...status, applying: true } } }));
   assert.match(markup, /Review &amp; apply/); assert.match(markup, /Cancel<\/button>/); assert.doesNotMatch(markup, /disabled="">Cancel<\/button>/); assert.match(markup, /Automatic apply paused/);
 });
-test('new notification requests route every screen to Review without previewing or applying', () => {
-  for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2), 'review');
-  assert.equal(screenForReview('settings', 2, 2), 'settings');
+test('item notifications open Setup, where incoming items are decided; agent failures open Review', () => {
+  for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2, { ...status, paused: null }), 'setup');
+  assert.equal(screenForReview('overview', 1, 2, null), 'setup');
+  assert.equal(screenForReview('overview', 1, 2, status), 'review', 'a paused agent sent the failure notification');
+  assert.equal(screenForReview('overview', 1, 2, { ...status, paused: null, error: 'JOB_FAILED' }), 'review');
+  assert.equal(screenForReview('settings', 2, 2, null), 'settings');
 });
 
 test('startup updates stay compact until a real update needs attention or a failed read needs retry', async () => {

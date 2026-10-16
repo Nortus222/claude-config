@@ -25,6 +25,10 @@ test('a command that cannot launch fails with LaunchFailed', async () => {
   const exit = await run(Processes.use((p) => p.run({ cmd: '/no/such/tool', args: [], output: 'capture' })));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LaunchFailed'));
 });
+test('a missing executable carries its error code, not only its message', async () => {
+  const exit = await run(Processes.use((p) => Effect.flip(p.run({ cmd: 'nortuscc-definitely-missing-command', args: [], output: 'capture' }))));
+  assert.ok(Exit.isSuccess(exit)); assert.equal(exit.value._tag, 'LaunchFailed'); assert.equal('code' in exit.value && exit.value.code, 'ENOENT');
+});
 
 // A POSIX shell script; the .cmd shim tests cover PATH lookup on Windows.
 test('the path option replaces PATH for the child', { skip: process.platform === 'win32' }, async () => {
@@ -307,4 +311,27 @@ test('cleanup observer exceptions cannot change a confirmed owned-group shutdown
   assert.ok(Exit.isFailure(exit)); assert.match(String(exit.cause), /capture byte limit exceeded/);
   assert.doesNotMatch(String(exit.cause), /observer-fixture-secret/);
   assert.equal(observed, 1);
+});
+
+test('processes deliver output chunks before the process exits', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'machine-stream-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const marker = join(directory, 'continue');
+  const chunks: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' };
+  const script = `const fs = require('node:fs'); process.stdout.write('hello é'); process.stderr.write('challenge');
+    const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(marker)})) { clearInterval(timer); process.stdout.write(' done'); } }, 10);`;
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', script], output: 'capture', stderr: 'capture', captureLimit: { stdout: 100, stderr: 100 },
+    onOutput: (stream, chunk) => { chunks[stream] += chunk; if (chunks.stdout && chunks.stderr) writeFileSync(marker, 'continue'); },
+  })).pipe(Effect.timeout(3000)));
+  assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
+  assert.deepEqual(exit.value, { code: 0, stdout: 'hello é done', stderr: 'challenge' });
+  assert.deepEqual(chunks, { stdout: 'hello é done', stderr: 'challenge' });
+});
+
+test('output observers cannot bypass capture limits or interrupt capture by throwing', async () => {
+  let observed = '';
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("too large")'], output: 'capture', captureLimit: { stdout: 2 }, onOutput: (_stream, chunk) => { observed += chunk; } })));
+  assert.ok(Exit.isFailure(exit)); assert.equal(observed, '');
+  const throwing = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("ok")'], output: 'capture', onOutput: () => { throw new Error('observer'); } })));
+  assert.ok(Exit.isSuccess(throwing)); assert.equal(throwing.value.stdout, 'ok');
 });
