@@ -18,6 +18,7 @@ export type AuthorState = {
 };
 const SCOPE = { kind: 'machine' } as const;
 const RUN_LIMIT = 100;
+const RUN_PAGES = 5;
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const publication = (run: RunView) => run.intent.change.kind === 'publishDraft' || run.intent.change.kind === 'announcePublication';
 const author = (run: RunView) => publication(run) || ['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin'].includes(run.intent.change.kind);
@@ -283,10 +284,16 @@ export class AuthorController {
     }
     const mark = this.mark(), serial = ++this.discovery;
     try {
-      const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: RUN_LIMIT });
-      if (!result || serial !== this.discovery) return;
+      let before: string | undefined;
+      let run: RunView | undefined, published: RunView | undefined;
+      for (let page = 0; page < RUN_PAGES; page++) {
+        const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: RUN_LIMIT, ...(before ? { before } : {}) });
+        if (!result || serial !== this.discovery) return;
+        run ??= result.runs.find(author); published ??= result.runs.find(publication);
+        if (run && published || !result.nextBefore) break;
+        before = result.nextBefore;
+      }
       this.uncertain = false;
-      const run = result.runs.find(author), published = result.runs.find(publication);
       this.update({ ...(run ? { run } : {}), ...(published ? { publicationRun: published } : {}) });
       if (run) await this.readRun(run.runId);
       if (published && published.runId !== run?.runId) await this.readRun(published.runId);

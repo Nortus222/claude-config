@@ -280,7 +280,8 @@ const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChang
 const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsChangeSchema,retention:BackupPrunePlanSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
 export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: AuthorHeadSchema, digest: DigestSchema,
-  diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String) })),
+  diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String), truncated: Schema.optionalKey(Schema.Literal(true)) })),
+  truncated: Schema.optionalKey(Schema.Literal(true)),
   invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema) });
 const AuthorLocalPreviewSchema = Schema.Struct({ ...previewFields, skillAddition: Schema.optionalKey(Schema.Never), change: AuthorLocalChangeSchema,
   draftId: Schema.NullOr(DraftIdSchema), draft: Schema.NullOr(DraftPreviewSchema), actionEffects: Schema.Array(Text) });

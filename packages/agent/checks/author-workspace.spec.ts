@@ -190,3 +190,14 @@ test('commitAndPush reports unreadable GitHub identity without publishing', asyn
   assert.equal(result.kind, 'failed');
   assert.equal(s.git(s.origin, 'rev-parse', 'main'), fresh.base);
 });
+
+
+test('SSH publishing fails unattended instead of waiting for a passphrase', async t => {
+  const s = fixture(t);
+  s.intercept(command => command.cmd === 'git' && command.args.includes('clone')
+    ? Effect.succeed({ code: 128, stdout: '', stderr: command.env?.GIT_SSH_COMMAND === 'ssh -o BatchMode=yes' ? 'Permission denied (publickey)' : 'Passphrase prompt would block' }) : undefined);
+  await assert.rejects(s.run(workspace => workspace.fresh('git@github.com:example/setup.git')), (error: any) => {
+    assert.equal(error.reason, 'Permission denied (publickey)');
+    return true;
+  });
+});

@@ -32,7 +32,7 @@ export const authorWorkspaceLayer = (input: { readonly env: Readonly<Record<stri
   const hooks = join(root, 'empty-hooks');
   // Drop inherited Git directory, index, author and executable overrides. Keep login/keychain variables.
   const env = { ...Object.fromEntries(Object.entries(input.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_'))),
-    GIT_TERMINAL_PROMPT: '0', GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C' };
+    GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes', GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C' };
   const failed = (repoUrl: string, reason: string) => new GitFailed({ repoUrl, reason });
   const git = (args: readonly string[], cwd?: string) => processes.run({
     cmd: 'git', args: [...gitAuthArgs(hooks), ...args], cwd, env, envAllow: [],

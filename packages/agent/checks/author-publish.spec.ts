@@ -516,3 +516,32 @@ test('a follower verifies and loads the same profile items announced by publishi
   assert.deepEqual(loaded.items, ['file:claude:CLAUDE.md', 'file:codex:AGENTS.md']);
   assert.deepEqual(records[1]!.items, [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' }, { id: 'file:codex:AGENTS.md', kind: 'file', change: 'added' }]);
 });
+
+
+test('diff previews fit IPC while their digest and publication retain every byte', async t => {
+  const f = await fixture(t);
+  f.move('claude/CLAUDE.md', '\t'.repeat(600_000));
+  const text = 'x'.repeat(200_000) + 'full tail';
+  const draft = await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text, choice: { kind: 'updateShared' } }]);
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.equal((preview.diff[0] as any).truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 1_048_576);
+  const changed = await f.run(f.owner.previewDraftValue({ ...draft, intents: [{ ...draft.intents[0]!, text: text + 'changed' } as Draft['intents'][number]] }));
+  assert.equal(changed.diff[0]!.after, preview.diff[0]!.after);
+  assert.notEqual(changed.digest, preview.digest);
+  const result = await f.execute(await f.run(f.owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest })));
+  assert.equal(result.publication?.pushed, true);
+  assert.equal(f.git(f.origin, 'show', 'main:claude/CLAUDE.md'), text);
+});
+
+test('many changed files share a bounded preview budget without dropping published files', async t => {
+  const f = await fixture(t);
+  const text = '\t'.repeat(100_000);
+  const draft = await f.save(Array.from({ length: 20 }, (_, index) => ({ kind: 'captureFile' as const, profile: 'personal', fileId: 'claude:CLAUDE.md', text, choice: { kind: 'ownCopy' as const, repoPath: `claude/capture-${index}.md` } })));
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.equal((preview as any).truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 1_048_576);
+  const result = await publish(f, draft);
+  assert.equal(result.publication?.pushed, true);
+  for (let index = 0; index < 20; index++) assert.equal(f.git(f.origin, 'cat-file', '-s', `main:claude/capture-${index}.md`), '100000');
+});

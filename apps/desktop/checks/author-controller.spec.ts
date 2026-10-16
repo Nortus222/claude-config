@@ -134,7 +134,7 @@ test('finishing a publication refreshes the profile follow links', async t => {
   const profiles = f.controller.state.profiles!;
   f.handlers.authorProfiles = () => ({ ...profiles, profiles: profiles.profiles.map(profile => ({ ...profile, setupId: 'announced-setup' })) });
   f.handlers.getRun = () => authorRun({ kind: 'publishDraft', draftId: f.controller.state.draft!.id, digest: 'b'.repeat(64) }, { runId: 'new-publication', state: 'succeeded', result: { status: 'succeeded', message: 'Published and announced' } });
-  f.handlers.applyChange = () => ({ status: 'started', run: f.handlers.getRun() });
+  f.handlers.applyChange = () => ({ status: 'started', run: f.handlers.getRun({}) });
   await f.controller.publish();
   assert.equal(f.controller.state.profiles?.profiles.find(profile => profile.name === 'team')?.setupId, 'announced-setup');
 });
@@ -143,7 +143,7 @@ test('finishing a publication refreshes the profile follow links', async t => {
 test('Retry re-reads the active sign-in run when its code arrives without an event', async t => {
   const f = await authorFixture(t);
   await f.controller.signIn();
-  assert.equal(f.controller.state.run?.ghCode, undefined);
+  assert.equal(f.controller.snapshot().run?.ghCode, undefined);
   f.handlers.getRun = () => authorRun({ kind: 'ghLogin' }, { ghCode: { code: 'NEW1-CODE', url: 'https://github.com/login/device' } });
   await f.controller.reload();
   assert.equal(f.controller.state.run?.ghCode?.code, 'NEW1-CODE');
@@ -195,4 +195,26 @@ test('deleting a corrupt draft removes it after its own successful receipt', asy
   await f.controller.reload(); await f.controller.deleteDraft(id);
   assert.deepEqual(f.controller.state.drafts, []);
   assert.deepEqual(f.calls.find(call => call.name === 'previewChange')?.input.change, { kind: 'deleteDraft', draftId: id });
+});
+
+
+test('run discovery pages past unrelated history to find the newest login and publication', async t => {
+  const f = await authorFixture(t); const { run } = await import('./support/setup-sync.ts'); const { draftId } = await import('./support/author.ts');
+  const login = authorRun({ kind: 'ghLogin' }, { runId: 'login', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  const published = authorRun({ kind: 'publishDraft', draftId, digest: 'b'.repeat(64) }, { runId: 'publication', state: 'succeeded', result: { status: 'succeeded', message: 'Published' } });
+  f.handlers.listRuns = (input: any) => !input.before ? { runs: [run()], nextBefore: 'older' } : input.before === 'older'
+    ? { runs: [login], nextBefore: 'oldest' } : { runs: [published], nextBefore: null };
+  f.handlers.getRun = (input: any) => input.runId === 'login' ? login : published;
+  await f.controller.reload();
+  assert.equal(f.controller.state.run?.runId, 'login');
+  assert.equal(f.controller.state.publicationRun?.runId, 'publication');
+  assert.deepEqual(f.calls.filter(call => call.name === 'listRuns').slice(-3).map(call => call.input.before ?? null), [null, 'older', 'oldest']);
+});
+
+test('run discovery stops after five pages of unrelated history', async t => {
+  const f = await authorFixture(t); const { run } = await import('./support/setup-sync.ts');
+  const before = f.calls.filter(call => call.name === 'listRuns').length;
+  f.handlers.listRuns = () => ({ runs: [run()], nextBefore: 'more' });
+  await f.controller.reload();
+  assert.equal(f.calls.filter(call => call.name === 'listRuns').length - before, 5);
 });

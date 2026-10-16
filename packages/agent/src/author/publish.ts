@@ -19,8 +19,28 @@ import { ghStatus } from './gh.ts';
 
 export type DraftPreview = {
   draftId: string; base: string; digest: string;
-  diff: { path: string; before: string | null; after: string | null }[];
+  diff: { path: string; before: string | null; after: string | null; truncated?: true }[];
+  truncated?: true;
   invalid: { index: number | null; profile?: string; reason: string }[]; affectedProfiles: string[];
+};
+const DIFF_FILE_TEXT_BYTES = 16_384;
+const DIFF_PREVIEW_BYTES = 262_144;
+
+// Only display bytes are clipped. The digest and the files sent to Git cover the full diff.
+const boundedPreview = (preview: DraftPreview): DraftPreview => {
+  const clip = (text: string | null) => text === null ? null : new TextDecoder('utf-8', { ignoreBOM: true })
+    .decode(Buffer.from(text).subarray(0, DIFF_FILE_TEXT_BYTES), { stream: true });
+  const diff: DraftPreview['diff'] = [];
+  let bytes = 2, truncated = false;
+  for (const file of preview.diff) {
+    const before = clip(file.before), after = clip(file.after);
+    const clipped = before !== file.before || after !== file.after;
+    const entry = { ...file, before, after, ...(clipped ? { truncated: true as const } : {}) };
+    const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+    if (bytes + size > DIFF_PREVIEW_BYTES) { truncated = true; break; }
+    diff.push(entry); bytes += size; truncated ||= clipped;
+  }
+  return { ...preview, diff, ...(truncated ? { truncated: true } : {}) };
 };
 type Publication = { -readonly [K in keyof NonNullable<RunView['publication']>]: NonNullable<RunView['publication']>[K] };
 type Acceptance = Extract<ParityAcceptance, { kind: 'publishDraft' | 'announcePublication' }>;
@@ -97,7 +117,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
       .map(issue => ({ index: null, profile, reason: `${profile}: ${issue.message}` })))];
     return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles, pendingProfiles };
   });
-  const displayed = ({ pendingProfiles: _, ...result }: DraftPreview & { pendingProfiles: string[] }): DraftPreview => result;
+  const displayed = ({ pendingProfiles: _, ...result }: DraftPreview & { pendingProfiles: string[] }): DraftPreview => boundedPreview(result);
   const previewDraft = (id: string): Effect.Effect<DraftPreview, SessionError> => Effect.flatMap(readDraft(id), preview).pipe(
     Effect.map(displayed), Effect.tap(result => Effect.sync(() => { previews.set(id, { base: result.base, digest: result.digest }); })),
     gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable')));

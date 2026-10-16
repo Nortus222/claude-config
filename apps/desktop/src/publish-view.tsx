@@ -73,6 +73,7 @@ export function PublishView({ state, controller }: AuthorProps) {
         <p>Affected profiles: {preview.affectedProfiles.join(', ') || 'None'}</p>
         {preview.invalid.filter(issue => issue.index === null).map((issue, index) => <p className="alert" role="alert" key={index}>{issue.reason}</p>)}
         {preview.invalid.length ? <p role="alert">Publish is disabled until every invalid intent or profile is corrected.</p> : null}
+        {preview.truncated ? <p role="status">Diff preview is truncated. Publication includes the full files.</p> : null}
         {preview.diff.map(file => <div key={file.path}><h3>{file.path}</h3>
           <p>Before</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`Before ${file.path}`}>{file.before ?? '(absent)'}</pre>
           <p>After</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`After ${file.path}`}>{file.after ?? '(removed)'}</pre></div>)}

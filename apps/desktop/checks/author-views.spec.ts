@@ -109,3 +109,11 @@ test('Retry shows a pending sign-in code without launching another login', async
   assert.match(html, /<button>Retry<\/button>/);
   assert.doesNotMatch(html, /<button[^>]*>Sign in with GitHub<\/button>/);
 });
+
+
+test('truncated draft previews disclose that publication includes the full files', async t => {
+  const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  f.handlers.draftPreview = () => draftPreview({ truncated: true, diff: [{ path: 'claude/CLAUDE.md', before: 'old', after: 'partial', truncated: true }] });
+  await f.controller.previewDraft();
+  assert.match(render(PublishView, f), /Diff preview is truncated. Publication includes the full files./);
+});
