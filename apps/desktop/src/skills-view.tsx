@@ -51,6 +51,12 @@ export function ChoiceControl({ row, state, disabled, controller }: { row: Skill
     <p className="muted">{saving ? <span role="status">Saving…</span> : row.choice === null ? 'From the profile' : 'Your choice on this Mac'}</p>
   </div>;
 }
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+// "3 steps done, 1 failed": the run's step outcomes as counts, never their keys.
+function stepCounts(steps: readonly { readonly outcome: 'ok' | 'failed' | 'cancelled' }[]) {
+  const failed = steps.filter(step => step.outcome === 'failed').length, cancelled = steps.filter(step => step.outcome === 'cancelled').length;
+  return [`${count(steps.length - failed - cancelled, 'step')} done`, failed ? `${failed} failed` : '', cancelled ? `${cancelled} cancelled` : ''].filter(Boolean).join(', ');
+}
 export function SkillsView({ state, machine, controller, maintenance = null, onOpenChanges }: {
   state: SkillsViewState; machine: ViewState; controller: SkillsController; maintenance?: string | null; onOpenChanges?: () => void;
 }) {
@@ -66,7 +72,7 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
   const preview = state.preview?.change.kind === 'update' && !active ? state.preview : null;
   const busy = machine.connection !== 'connected' || machine.pending || machine.initialReadPending || state.operation !== null || active || machine.run?.outcome === 'running' || machine.status?.applying;
   return <div className="skills-view">
-    <header><div><p className="eyebrow">THIS MACHINE</p><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Choices stay on this Mac. Apply on Changes makes installation changes.</p></div>
+    <header><div><p className="eyebrow">THIS MAC</p><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Choices stay on this Mac. Apply on Changes makes installation changes.</p></div>
       <div>{onOpenChanges && waiting ? <button onClick={onOpenChanges}>Open Changes</button> : null}
       {state.native ? <button disabled={!!busy && !(active && state.error && !state.operation && machine.connection === 'connected')} onClick={() => void controller.reload()}>{view ? 'Reload skills' : 'Load skills'}</button> : null}</div>
     </header>
@@ -81,8 +87,8 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
         <button disabled={blocked !== null} onClick={() => void controller.setChoice(choicePatch.source, choicePatch.name, choicePatch.action === 'reset' ? 'inherit' : choicePatch.action === 'enable' ? 'on' : 'off')}>Retry saving choice</button>
       </section> : null}
       {state.run ? <section className="form-section" aria-label="Skills run"><h2>{changeTitle(state.run.intent.change.kind)} · {state.run.state}</h2>
-        {state.run.steps.length ? <ol className="progress-steps">{state.run.steps.map((step, index) => <li key={index}>{step.key}: {step.outcome}{step.note ? ` · ${step.note}` : ''}</li>)}</ol> : null}
-        {state.run.parity?.backupIds.length ? <p>Backups: {state.run.parity.backupIds.join(', ')}</p> : null}
+        {state.run.steps.length ? <p>{stepCounts(state.run.steps)}</p> : null}
+        {state.run.parity?.backupIds.length ? <p className="muted">{count(state.run.parity.backupIds.length, 'backup')} kept before changing files.</p> : null}
         {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}
       </section> : null}
       {view ? <>

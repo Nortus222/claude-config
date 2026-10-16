@@ -85,3 +85,10 @@ test('run and update cards show no run ID or digest', () => {
   assert.doesNotMatch(html, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/); assert.doesNotMatch(html, new RegExp(digest));
   assert.doesNotMatch(html, /Run <code>/); assert.match(html, /Save skill choice/);
 });
+test('the run card counts steps and backups instead of listing their keys and IDs', () => {
+  const run = { ...receipt('failed'), steps: [{ key: 'skills:tdd', outcome: 'ok' as const, note: 'Step completed' }, { key: 'skills:grill', outcome: 'ok' as const, note: 'Step completed' },
+    { key: 'skills:review', outcome: 'failed' as const, note: 'Step failed' }], parity: { kind: 'machineIntent' as const, state: 'partial' as const, committedKeys: ['skills:tdd'], remainingKeys: [], backupIds: ['backup-7f3a', 'backup-9c1d'] } };
+  const html = render({ run: run as SkillsViewState['run'] & object });
+  assert.match(html, /2 steps done, 1 failed/); assert.match(html, /2 backups kept before changing files/);
+  assert.doesNotMatch(html, /skills:tdd|skills:review|backup-7f3a|backup-9c1d|Backups:/);
+});
