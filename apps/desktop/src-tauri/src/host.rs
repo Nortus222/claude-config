@@ -23,6 +23,9 @@ const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+// Shared operations may fetch, clone or run gh; match the MCP client's budget so a slow reply does
+// not tear down the connection every screen shares.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const BOOTSTRAP_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 type Pending = HashMap<String, mpsc::Sender<Result<Value, String>>>;
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
@@ -76,6 +79,7 @@ impl Request {
     }
     fn timeout(&self) -> Duration {
         match self {
+            Self::Operation { .. } => OPERATION_TIMEOUT,
             Self::Inspect | Self::Apply { .. } | Self::SyncNow => Duration::from_secs(60),
             Self::Cancel | Self::SignOut => Duration::from_secs(30),
             Self::Hello { .. } => HELLO_TIMEOUT,
@@ -1017,6 +1021,14 @@ mod tests {
             for (key, value) in patch.as_object().unwrap() { bad[key] = value.clone(); }
             assert!(validate(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn shared_operations_get_the_mcp_budget_and_fixed_reads_stay_short() {
+        let operation = Request::Operation { name: "authorProfiles".into(), input: json!({}) };
+        assert_eq!(operation.timeout(), Duration::from_secs(120), "Shared operations may fetch, clone or run gh for up to 120 s, as MCP allows");
+        assert_eq!(Request::GetOperationRun { run_id: "r".into() }.timeout(), Duration::from_secs(10));
+        assert_eq!(Request::ListOperationRuns { limit: 1 }.timeout(), Duration::from_secs(10));
     }
 
     #[test]
