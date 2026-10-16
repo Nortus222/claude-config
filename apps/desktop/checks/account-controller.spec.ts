@@ -84,7 +84,7 @@ test('an account change clears the transient code and stops old-account polling'
 });
 test('strict malformed account and sign-in responses never print rejected values', async () => {
   for (const command of ['hosted_state', 'sign_in', 'sign_out', 'sync_now', 'machine_settings', 'trust_setup', 'set_policy', 'resume_agent', 'open_device_login'] as const) {
-    const setup = { setupId: 'setup-a', name: 'Fixture', repoUrl: 'https://example.com/fixture.git', latestRevision: 0 };
+    const setup = { setupId: 'setup-a', name: 'Fixture', repoUrl: 'https://example.com/fixture.git', profile: 'default', owned: true, latestRevision: 0 };
     const f = fixture({ hosted_state: () => command === 'hosted_state' ? { ...hosted(), token: 'SECRET' } : signedIn({ setups: [setup] }), [command]: () => ({ token: 'SECRET', unknown: 'SECRET' }), agent_status: () => status({ paused: { at: 'now', reason: 'fixture' } }) });
     await f.machine.connect(); await f.account.refresh();
     if (command === 'sign_in' || command === 'open_device_login') {
@@ -104,7 +104,7 @@ test('strict malformed account and sign-in responses never print rejected values
   }
 });
 test('only a consented offered setup ID can be trusted, with an honest acknowledgement', async () => {
-  const state = signedIn({ setups: [{ setupId: 'setup-a', name: 'Fixture', repoUrl: 'https://example.com/fixture.git', latestRevision: 0 }] });
+  const state = signedIn({ setups: [{ setupId: 'setup-a', name: 'Fixture', repoUrl: 'https://example.com/fixture.git', profile: 'default', owned: true, latestRevision: 0 }] });
   const f = fixture({ hosted_state: () => state, trust_setup: () => state });
   await f.machine.connect(); await f.account.refresh();
   await f.account.trustSetup('setup-a', false); await f.account.trustSetup('unknown', true);

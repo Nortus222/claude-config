@@ -7,7 +7,7 @@ import { agentMachine } from './support/agent-machine.ts';
 import type { HostedState } from '@nortuscc/hosted-client';
 
 const state: HostedState = { accountId: 'account1', login: 'person', machineId: 'machine1', auth: 'signed-in',
-  setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/example/setup.git', latestRevision: 1 }],
+  setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/example/setup.git', profile: 'default', owned: true, latestRevision: 1 }],
   machine: { policy: 'notify', reportStatus: true }, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 
 test('hosted trust binds current offered account and actual matching own origin only', async () => {

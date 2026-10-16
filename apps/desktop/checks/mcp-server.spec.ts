@@ -180,6 +180,12 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boole
   await m.run(Effect.gen(function* () {
     const processes=fixtureProcesses(yield* Processes,m.root,inputs.sourceReads?.url);
     const hosted = inputs.metadata ? yield* makeHostedRuntime({
+      registerSetup: () => Effect.die('Unexpected setup registration'),
+      publishRevision: () => Effect.die('Unexpected publication'),
+      listRevisions: () => Effect.succeed([]),
+      publicSetup: () => Effect.die('Unexpected public setup read'),
+      subscribe: () => Effect.void,
+      unsubscribe: () => Effect.void,
       state: Effect.sync(metadataState), signInFlow: Effect.succeed(null), recover: () => Effect.sync(metadataState), sync: () => Effect.sync(metadataState),
       revisions: () => Effect.succeed([]), reportStatus: () => Effect.void, enqueueDecision: () => Effect.die('Unexpected decision'),
       enqueueMachine: patch => Effect.sync(() => { metadataPatches.push(patch); }),

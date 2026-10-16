@@ -11,6 +11,12 @@ import { setupFixture } from './support/setup-fixture.ts';
 
 const empty: HostedState = { accountId: null, login: null, machineId: null, auth: 'signed-out', setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 const fakeClient = (calls: string[], failRecovery = false): HostedClient => ({
+  registerSetup: () => Effect.die('Unexpected setup registration'),
+  publishRevision: () => Effect.die('Unexpected publication'),
+  listRevisions: () => Effect.succeed([]),
+  publicSetup: () => Effect.die('Unexpected public setup read'),
+  subscribe: () => Effect.void,
+  unsubscribe: () => Effect.void,
   signInFlow: Effect.succeed(null),
   state: Effect.succeed(empty), revisions: () => Effect.succeed([]),
   recover: () => Effect.suspend(() => { calls.push('recover'); return failRecovery ? Effect.fail(new HostedFailure({ code: 'storage' })) : Effect.succeed(empty); }),
