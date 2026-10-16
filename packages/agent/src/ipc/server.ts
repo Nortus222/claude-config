@@ -197,9 +197,9 @@ export const serveIpc = (input: {
       Effect.map(session.running, (running) => ({
         ...toWireStatus(status), applying: running || liveLockHolder(join(input.paths.stateRoot, 'apply.lock')) !== undefined,
       }));
-    const unsubscribe = handle.onStatus((status) => {
+    const unsubscribe = handle.onStatus((status, cause) => {
       void run(Effect.map(liveStatus(status), (status) => {
-        const message = { version: PROTOCOL_VERSION, event: 'status', status };
+        const message = { version: PROTOCOL_VERSION, event: 'status', status, ...(cause ? { runId: cause.runId } : {}) };
         for (const conn of subscribers()) event(conn, message);
       }));
     });
