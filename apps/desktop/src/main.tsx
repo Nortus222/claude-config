@@ -22,6 +22,7 @@ import { SettingsView, StartupBoundary, updateAttention, ShellView, screenForRev
 import './style.css';
 import './home.css';
 import './changes.css';
+import './publish.css';
 
 const appMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
 const AUTHOR_SCREENS: ReadonlySet<Screen> = new Set(['profiles', 'upstreams', 'publish']);
@@ -74,16 +75,14 @@ function App() {
     reviewSeen.current = state.reviewRequested;
   }, [state.reviewRequested, state.status]);
 
-  // Profiles and Upstreams link to Publish once they accept the prop.
-  const openPublish = { onOpenPublish: () => setScreen('publish') };
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
     updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
     <ShellView screen={screen} navigate={setScreen} machine={state} badges={navBadges(setupSyncState, homeState, updateState)} onReconnect={() => void machine.restart()} onRecheck={() => void machine.inspect()}>
       {screen === 'home' ? <HomeView machine={state} changes={setupSyncState} home={homeState} update={updateState} navigate={setScreen} controller={home} /> : null}
       {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} /> : null}
       {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} onOpenChanges={() => setScreen('changes')} /> : null}
-      {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} {...openPublish} /> : null}
-      {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} {...openPublish} /> : null}
+      {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}
+      {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}
       {screen === 'publish' ? <PublishView state={authorState} controller={author} /> : null}
       {screen === 'settings' ? <>
         <SettingsView machine={state} state={accountState} controller={account} machineController={machine} onFollowProfile={followFromSettings(setupSync, setScreen)} />

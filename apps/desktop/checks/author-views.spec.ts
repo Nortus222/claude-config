@@ -253,3 +253,13 @@ test('deleting a draft asks once and names the draft', async t => {
   assert.match(words(html), /Delete the draft from .+ with 1 change\? This can't be undone\./);
   assert.match(html, /<button[^>]*>Delete draft<\/button>[\s\S]*<button[^>]*>Keep draft<\/button>/);
 });
+test('an interrupted author run on Publish counts its effects and keeps the run ID and keys under Details', async t => {
+  const f = await authorFixture(t);
+  const interrupted = authorRun({ kind: 'deleteDraft', draftId }, { state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' },
+    parity: { kind: 'deleteDraft', state: 'partial', committedKeys: ['draft:written-key'], remainingKeys: ['draft:remaining-key'], backupIds: ['backup-author'] } });
+  f.controller.state = { ...f.controller.state, run: interrupted };
+  const html = render(PublishView, f), visible = html.replace(/<details[\s\S]*?<\/details>/g, '');
+  assert.match(visible, /Delete draft was interrupted/); assert.match(visible, /1 change was written and 1 was not/);
+  assert.doesNotMatch(visible, /author-run|draft:written-key|draft:remaining-key|backup-author/);
+  for (const text of ['author-run', 'draft:written-key', 'draft:remaining-key']) assert.ok(html.includes(text), text);
+});
