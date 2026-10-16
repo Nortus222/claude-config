@@ -54,6 +54,8 @@ export class SetupSource extends Context.Service<
   SetupSource,
   {
     readonly setupId?: string;
+    // Omitted by legacy root-only sources.
+    readonly profile?: string;
     // Hosted sources check the active account and locally granted repository trust here.
     readonly trusted?: Effect.Effect<boolean, RevisionUnavailable>;
     readonly baseline?: Effect.Effect<HostedBaseline, RevisionUnavailable>;

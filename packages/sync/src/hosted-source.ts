@@ -352,6 +352,6 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const available = <A>(effect: Effect.Effect<A, unknown, Services>) => provide(effect).pipe(
       Effect.catchTag('RevisionMismatch', () => unavailable('HEAD', 'hosted baseline unavailable')),
     );
-    return { setupId: options.setupId, offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
+    return { setupId: options.setupId, ...(profile === undefined ? {} : { profile }), offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
   })).pipe(Layer.provide(services));
 };

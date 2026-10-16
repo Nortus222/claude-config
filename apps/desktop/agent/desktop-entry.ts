@@ -6,7 +6,7 @@ import {
   backupsForRun, configDomain, Fs, integrationsDomain, machinePaths, nodeFileIntegrity, nodeFs, nodeProcesses, nodeProcessDialogue, pathsFromEnvironment, skillsDomain,
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
-import { followedSetupSourceLayer, migrateFollowed, setupsStore, setupSourceLayer } from '@nortuscc/sync';
+import { followedSetupSourceLayer, migrateFollowed, RevisionUnavailable, SetupSource, setupsStore, setupSourceLayer } from '@nortuscc/sync';
 import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
 import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
 import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
@@ -233,7 +233,14 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         paths, domains, source: Layer.unwrap(migrateFollowed(paths).pipe(
           Effect.map(followed => followed ? followedSetupSourceLayer(paths, followed, { processes }) : setupSourceLayer(paths, { processes })),
           Effect.provide(setupsStore.pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, processes)))),
-          Effect.orDie,
+          Effect.catch(error => {
+            const unavailable = Effect.fail(error instanceof RevisionUnavailable ? error
+              : new RevisionUnavailable({ revision: 'HEAD', reason: String(error) }));
+            return Effect.succeed(Layer.succeed(SetupSource, {
+              trusted: unavailable, fetch: unavailable, current: unavailable,
+              load: () => unavailable, effective: () => unavailable,
+            }));
+          }),
         )), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal,
         onLifecycle: trace.record,

@@ -31,10 +31,10 @@ const fixture = () => {
       return real.run({ ...command, args: command.args.map(arg => arg === URL && (command.args.includes('fetch') || command.args.includes('ls-remote')) ? origin : arg), stderr: 'capture' });
     } };
   })).pipe(Layer.provide(nodeProcesses()));
-  const layer = (setupId: string | null = null) => sync.followedSetupSourceLayer(paths, { repoUrl: URL, profile: 'default', setupId }, {
+  const layer = (setupId: string | null = null, profile = 'default') => sync.followedSetupSourceLayer(paths, { repoUrl: URL, profile, setupId }, {
     processes, records: Effect.suspend(() => offline ? Effect.fail(new Error('service unreachable')) : Effect.succeed(records)),
   });
-  const run = <A, E>(f: (s: sync.SetupSource['Service']) => Effect.Effect<A, E>, setupId: string | null = null) => Effect.runPromise(sync.SetupSource.use(f).pipe(Effect.provide(layer(setupId))));
+  const run = <A, E>(f: (s: sync.SetupSource['Service']) => Effect.Effect<A, E>, setupId: string | null = null, profile = 'default') => Effect.runPromise(sync.SetupSource.use(f).pipe(Effect.provide(layer(setupId, profile))));
   const publish = () => {
     const record: SyncRevision = { setupId: 'setup-1', number: 1, commitSha: repo.first, tag: 'v1', changelog: '', requiredEnv: [], items: [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'added' }] };
     repo.git('tag', record.tag, record.commitSha); repo.git('push', '-q', 'origin', `refs/tags/${record.tag}`); records = [record]; return record;
@@ -42,6 +42,15 @@ const fixture = () => {
   const text = (snapshot: sync.Snapshot) => readFileSync(join(snapshot.repo, 'claude/CLAUDE.md'), 'utf8');
   return { ...repo, paths, calls, run, publish, text, offline: () => { offline = true; }, setRecords: (next: SyncRevision[]) => { records = next; } };
 };
+
+test('a followed source exposes its profile name', async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  for (const setupId of [null, 'setup-1']) {
+    await t.test(setupId === null ? 'direct Git' : 'hosted setup', async () => {
+      await f.run(s => Effect.sync(() => assert.equal(s.profile, 'personal')), setupId, 'personal');
+    });
+  }
+});
 
 test('following from Git applies the fetched main of the private clone without reading the CLI checkout', async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
