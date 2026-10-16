@@ -167,6 +167,13 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
   });
   const flush = (initial: HostedAccount) => Effect.gen(function* () {
     let a = initial;
+    const closed = new Set(a.setups.filter(s => s.closed).map(s => s.setupId));
+    const outbox = a.outbox.filter(e => e.kind !== 'decision' || !closed.has(e.decision.setupId));
+    if (outbox.length !== a.outbox.length) {
+      const doc = yield* updateAccount(a.accountId, current => ({ ...current, outbox }));
+      a = active(doc)!;
+      yield* reconcile(a);
+    }
     while (a.outbox.length > 0) {
       const head = a.outbox[0]!;
       if (head.kind === 'machine') {
@@ -429,6 +436,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       yield* decode(IsoTimeSchema, decision.decidedAt, true);
       const checked = yield* decode(DecisionsRequestSchema, { decisions: [{ setupId: decision.setupId, itemId: decision.itemId, revision: decision.revision, decision: decision.decision }] }, true);
       const a = yield* requireAccount;
+      if (a.setups.some(s => s.setupId === decision.setupId && s.closed)) return;
       yield* enqueue(a, { kind: 'decision', decision: checked.decisions[0]!, decidedAt: decision.decidedAt }, actor);
     }).pipe(lock.withPermit),
     enqueueMachine: (patch, actor = 'agent') => Effect.gen(function* () {

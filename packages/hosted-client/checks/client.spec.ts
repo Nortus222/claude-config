@@ -751,6 +751,48 @@ test('a queued decision for a closed setup is dropped and later decisions for a 
   });
 });
 
+test('a decision queued for a known-closed setup is dropped even when sync is not modified', async (t) => {
+  for (const persisted of [false, true]) await t.test(persisted ? 'persisted outbox after restart' : 'newly enqueued decision', async (t) => {
+    const f = await fixture(t); await f.signIn();
+    const subscribed = { ...delta().setups[0]!, owned:false };
+    const healthy = { ...delta().setups[0]!, setupId:'setup2' };
+    f.setResponse(delta({ setups:[subscribed, healthy], revisions:[revision(1), revision(1, 'setup2')] }));
+    await run(f.client.sync());
+    f.setResponse(delta({ setups:[{ ...subscribed, closed:true }, healthy], revisions:[] }));
+    await run(f.client.sync());
+    if (persisted) {
+      // An older client could leave a decision queued after learning of closure.
+      await run(f.services.store.update(doc => ({ ...doc, accounts:doc.accounts.map(a => ({ ...a, outbox:[{
+        kind:'decision', decision:{ setupId:'setup1', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }, decidedAt:local().decidedAt,
+      }] })) })));
+      await f.restart();
+    } else {
+      await run(f.client.enqueueDecision(local()));
+      assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+      assert.deepEqual(await run(f.services.decisions.read), []);
+    }
+    await run(f.client.enqueueDecision(local({ setupId:'setup2' })));
+    const before = f.requests.length;
+    f.actions.push(req => {
+      assert.equal(req.path, '/decisions');
+      const { decisions } = req.body as { decisions: Decision[] };
+      if (decisions.some(d => d.setupId === 'setup1')) return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+      return Effect.succeed({ status:200, body:{ seq:100, results:decisions.map(d => ({ setupId:d.setupId, itemId:d.itemId, outcome:'stored' })) } });
+    });
+    f.actions.push(req => {
+      assert.equal(req.method, 'GET'); assert.match(req.path, /^\/sync\?/); assert.equal(req.etag, 'etag1');
+      return Effect.succeed({ status:304 });
+    });
+    assert.equal((await run(f.client.sync())).setups[0]!.closed, true);
+    assert.deepEqual(f.requests.slice(before).map(req => req.body).filter(Boolean), [
+      { decisions:[{ setupId:'setup2', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }] },
+    ]);
+    assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+    assert.deepEqual((await run(f.services.decisions.read)).map(d => d.setupId), ['setup2']);
+    assert.deepEqual(await run(f.client.revisions('setup1')), [revision(1)]);
+  });
+});
+
 test('a machine update 404 is still reported', async (t) => {
   const f = await fixture(t); await f.signIn(); await run(f.client.sync());
   f.setResponse(delta({ revisions:[] }));
