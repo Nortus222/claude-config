@@ -1,12 +1,10 @@
 import test from 'node:test';
-import { skillRun } from './support/skill-run.ts';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { OfferedSetup, SetupView, StartupBoundary, updateAttention, SettingsView, OverviewView, ResolvedView, ShellView, screenForReview } from '../src/views.tsx';
-import { UpdateController } from '../src/update-controller.ts';
+import { OfferedSetup, SetupView, StartupBoundary, updateAttention, SettingsView, ShellView, screenForReview, followFromSettings, navBadges, type Screen } from '../src/views.tsx';
+import { UpdateController, type UpdateViewState } from '../src/update-controller.ts';
 import { UpdateView } from '../src/update-view.tsx';
-import { ReviewView } from '../src/review-view.tsx';
 import { SetupController } from '../src/setup-controller.ts';
 import { AccountController } from '../src/account-controller.ts';
 import { MachineController } from '../src/controller.ts';
@@ -18,12 +16,38 @@ function heldReply<T>() {
   return { promise, resolve };
 }
 const machine = () => new MachineController(null);
-test('browser preview has only implemented navigation and real empty states', () => {
+const navLabels = (markup: string) => [...markup.matchAll(/<button[^>]*>([^<]+)/g)].map(match => match[1]);
+test('navigation lists seven screens in THIS MAC and MY PROFILES groups plus Settings, under the Nortuscc brand', () => {
   const c = machine();
-  const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'overview', navigate: () => {}, children: createElement(OverviewView, { state: c.state, navigate: () => {} }) }));
-  for (const name of ['Claude Config', 'Overview', 'Review &amp; apply', 'Resolved', 'Settings']) assert.match(markup, new RegExp(name));
-  for (const name of ['Discover', 'Machines', 'History', 'Publish', 'Updates', 'fixture-login']) assert.doesNotMatch(markup, new RegExp(name));
-  assert.match(markup, /Browser preview/);
+  const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'home', navigate: () => {}, machine: c.state, children: createElement('p', null, 'Home body') }));
+  assert.deepEqual(navLabels(markup), ['Home', 'Changes', 'Skills', 'Profiles', 'Upstreams', 'Publish', 'Settings']);
+  const groups = [...markup.matchAll(/role="group" aria-labelledby="([^"]+)"><p class="[^"]*" id="\1">([^<]+)<\/p>(.*?)<\/div>/g)]
+    .map(([, , label, body]) => [label, navLabels(body)]);
+  assert.deepEqual(groups, [['THIS MAC', ['Home', 'Changes', 'Skills']], ['MY PROFILES', ['Profiles', 'Upstreams', 'Publish']]]);
+  assert.match(markup, /<h2>Nortuscc<\/h2>/);
+  assert.match(markup, /<button aria-current="page">Home<\/button>/);
+  for (const gone of ['Review &amp; apply', 'Resolved', 'Overview', 'Setup', 'Claude Config', 'Inspect, review, then apply']) assert.doesNotMatch(markup, new RegExp(gone));
+});
+test('navigation badges count undecided incoming changes and drafts and flag an app update', () => {
+  const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'changes', navigate: () => {}, badges: { changes: 3, publish: 1, settings: true }, children: null }));
+  assert.match(markup, />Changes<span class="nav-badge" aria-label="3 incoming changes">3<\/span><\/button>/);
+  assert.match(markup, />Publish<span class="nav-badge" aria-label="1 draft not published">1<\/span><\/button>/);
+  assert.match(markup, />Settings<span class="nav-badge" aria-label="App update available">Update<\/span><\/button>/);
+  assert.match(markup, /<button>Home<\/button>/);
+  const quiet = renderToStaticMarkup(createElement(ShellView, { screen: 'changes', navigate: () => {}, badges: { changes: 0, publish: 0, settings: false }, children: null }));
+  assert.doesNotMatch(quiet, /nav-badge/);
+});
+test('badge counts come from review rows not on hold, readable drafts and an available or verified update', async () => {
+  const { review } = await import('./support/setup-sync.ts');
+  const { draft } = await import('./support/author.ts');
+  const rows = [true, false, false].map((held, index) => ({ itemId: `setting:${index}`, kind: 'setting' as const, change: 'changed' as const, held, conflict: false }));
+  const update = (phase: 'current' | 'available' | 'verified', enabled = true): UpdateViewState => ({ native: true, pending: false, retry: null, detail: '', deferred: false,
+    update: { installedVersion: '0.1.5', enabled, automaticChecks: false, phase, availableVersion: '0.1.6', notes: null, downloadedBytes: 0, totalBytes: null, diagnostic: null } });
+  const drafts = [draft, { id: 'broken', error: 'unreadable' }] as never;
+  assert.deepEqual(navBadges({ review: review({ rows }) }, { drafts }, update('available')), { changes: 2, publish: 1, settings: true });
+  assert.deepEqual(navBadges({ review: null }, { drafts: null }, update('verified', false)), { changes: 0, publish: 0, settings: false });
+  assert.equal(navBadges({ review: null }, { drafts: null }, update('verified')).settings, true);
+  assert.equal(navBadges({ review: null }, { drafts: null }, update('current')).settings, false);
 });
 test('every screen shows one disconnected banner with the reason and a Reconnect action', () => {
   const c = machine(); let reconnects = 0;
@@ -35,21 +59,14 @@ test('every screen shows one disconnected banner with the reason and a Reconnect
   assert.doesNotMatch(connected, /shell-banner/);
   assert.equal(reconnects, 0);
 });
-test('a run with failed steps says so and keeps its summary after the re-inspection', () => {
-  const c = machine();
-  const run = { runId: 'r', outcome: 'done' as const, summary: '1 applied, 1 failed', failed: 1, steps: [
-    { key: 'config:a', summary: 'apply a', status: 'ok' as const, note: '' }, { key: 'config:b', summary: 'apply b', status: 'failed' as const, note: 'b failed' }] };
-  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run, detail: 'Inspected 46 items' } }));
-  assert.match(markup, /<h2 class="status">Finished with 1 failed step<\/h2>/);
-  assert.match(markup, /1 applied, 1 failed/);
-  const clean = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', run: { ...run, failed: 0, summary: '2 applied, 0 failed', steps: run.steps.map(step => ({ ...step, status: 'ok' as const })) } } }));
-  assert.match(clean, /<h2 class="status">Done<\/h2>/);
-});
-test('the agent version wraps inside the sidebar', () => {
-  const c = machine();
+test('Settings reconnects the agent and keeps its version under Details', () => {
+  const c = machine(); const account = new AccountController(null, c);
   const hello = { agentVersion: 'a'.repeat(64), protocol: 3 as const, policy: 'manual' as const, paused: null };
-  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, hello } as typeof c.state }));
-  assert.match(markup, /class="muted agent-version"/);
+  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', hello }, state: account.state, controller: account, machineController: c }));
+  assert.match(markup, />Reconnect agent<\/button>/);
+  assert.match(markup, /<details class="settings-details"><summary>Details<\/summary><p class="agent-version">Agent version a{64}<\/p><\/details>/);
+  assert.match(markup, /<p class="eyebrow">THIS MAC<\/p><h1>Settings/);
+  assert.doesNotMatch(markup, /Restart \/ reinstall agent|THIS MACHINE|protocol 3/);
 });
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };
 const hosted = { enabled: true, recovered: true, signingIn: false, accountId: null, login: null, machineId: null, auth: 'signed-out' as const, setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
@@ -76,7 +93,7 @@ test('an existing installation waiting for native setup does not flash first-run
   };
   const c = new MachineController(bridge);
   const setup = new SetupController(bridge, c);
-  const renderStartup = () => renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: createElement('p', null, 'Updates remain available'), children: createElement(OverviewView, { state: c.state, navigate: () => {} }) }));
+  const renderStartup = () => renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: createElement('p', null, 'Updates remain available'), children: createElement('p', null, 'Operational view') }));
   const check = setup.check();
   const waiting = renderStartup();
   setupReply.resolve({ needsSetup: false, repo: '/existing', gitAvailable: true, canInstallGit: true, defaultRepoUrl: 'https://github.com/Nortus222/claude-config.git' });
@@ -115,30 +132,25 @@ test('an existing installation waiting for native setup does not flash first-run
     assert.equal(calls.includes('setup_desktop'), false);
   } finally { setup.dispose(); c.dispose(); }
 });
-test('an early active apply leaves the startup boundary with cancellation available', async () => {
+test('an early active apply leaves the startup boundary for the operational screens', async () => {
   const routing = heldReply<unknown>(); const routed = heldReply<void>();
-  const calls: string[] = [];
   let receive: (event: HostEvent) => void = () => {};
   const bridge: Bridge = {
     subscribe: async (listener) => { receive = listener; return () => {}; },
     invoke: async (command) => {
-      calls.push(command);
       if (command === 'agent_generation') receive({ generation: 1, version: 3, event: 'status', status: { ...status, applying: true } });
       return { generation: 1, data: command === 'desktop_setup_state' ? { needsSetup: false, repo: '/existing', gitAvailable: true, canInstallGit: true, defaultRepoUrl: 'https://github.com/Nortus222/claude-config.git' }
         : command === 'take_review_request' ? (routed.resolve(), await routing.promise)
-        : command === 'agent_status' ? { ...status, applying: true }
-        : command === 'cancel_apply' ? { cancelled: true } : null };
+        : command === 'agent_status' ? { ...status, applying: true } : null };
     },
   };
   const c = new MachineController(bridge); const setup = new SetupController(bridge, c);
   const check = setup.check(); await routed.promise;
   const markup = renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
-    children: createElement(ReviewView, { state: c.state, controller: c }) }));
-  await c.cancel();
+    children: createElement('p', null, 'Operational view') }));
   routing.resolve(null); await check;
-  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN|disabled="">Cancel/);
-  assert.match(markup, /Cancel<\/button>/);
-  assert.ok(calls.includes('cancel_apply'));
+  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN/);
+  assert.match(markup, /Operational view/);
   setup.dispose(); c.dispose();
 });
 test('setup failure renders retained setup recovery and Updates without first-run consent', async () => {
@@ -174,22 +186,24 @@ test('initial NO_REPORT shows startup progress until real status and inspection 
   const c = new MachineController(bridge);
   const setup = new SetupController(bridge, c);
   c.subscribe(() => { if (c.state.inspection !== null) inspected.resolve(); });
+  const boundary = () => renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
+    children: createElement('p', null, `Operational view: ${c.state.status?.at ?? 'no status'}`) }));
   await setup.check();
-  const waiting = renderToStaticMarkup(createElement(OverviewView, { state: c.state, navigate: () => {} }));
+  const waiting = boundary();
   reportReady = true;
   receive({ generation: 1, version: 3, event: 'status', status });
   await inspectionCalled.promise;
-  const inspecting = renderToStaticMarkup(createElement(OverviewView, { state: c.state, navigate: () => {} }));
+  const inspecting = boundary();
   inspectionReply.resolve({ profile: { repo: '/existing', revision: 'fixture', overrides: '/fixture/overrides', issues: [] }, items: [], probeErrors: [], status });
-  await inspected.promise;
-  const ready = renderToStaticMarkup(createElement(OverviewView, { state: c.state, navigate: () => {} }));
+  await inspected.promise; await new Promise((resolve) => setTimeout(resolve, 0));
+  const ready = boundary();
   try {
     assert.equal(c.state.connection, 'connected');
     assert.doesNotMatch(waiting, /NO_REPORT|agent has not responded|role="alert"/);
     assert.match(waiting, /starting|waiting|inspection/i);
-    assert.doesNotMatch(waiting, /Last inspection:|<strong>/);
+    assert.doesNotMatch(waiting, /Operational view|<strong>/);
     assert.doesNotMatch(inspecting, /NO_REPORT|agent has not responded|role="alert"/);
-    assert.match(ready, /Last inspection: 2026-10-11T12:00:00Z/);
+    assert.match(ready, /Operational view: 2026-10-11T12:00:00Z/);
   } finally { setup.dispose(); c.dispose(); }
 });
 test('a failed initial inspection remains visible with a read-only retry after valid status', async () => {
@@ -205,15 +219,19 @@ test('a failed initial inspection remains visible with a read-only retry after v
   };
   const c = new MachineController(bridge); const setup = new SetupController(bridge, c);
   await setup.check();
-  const markup = renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
-    children: createElement(OverviewView, { state: c.state, navigate: () => {}, controller: c }) }));
-  assert.match(markup, /role="alert"[^>]*>INSPECT_FAILED: fixture read failed/);
-  assert.match(markup, /Recheck inspection/);
-  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN/);
+  let rechecks = 0;
+  const render = () => renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
+    children: createElement(ShellView, { screen: 'home', navigate: () => {}, machine: c.state, onReconnect: () => {}, onRecheck: () => { rechecks++; }, children: createElement('p', null, 'Home body') }) }));
+  const markup = render();
+  assert.match(markup, /class="alert shell-banner" role="alert"><div><strong>This Mac couldn’t be inspected.<\/strong> <span>fixture read failed<\/span>/);
+  assert.match(markup, />Check again<\/button>/);
+  assert.match(markup, /Home body/);
+  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN|INSPECT_FAILED|>Reconnect</);
   fail = false;
   await c.inspect();
-  const recovered = renderToStaticMarkup(createElement(OverviewView, { state: c.state, navigate: () => {}, controller: c }));
-  assert.doesNotMatch(recovered, /INSPECT_FAILED|Recheck inspection/);
+  const recovered = render();
+  assert.doesNotMatch(recovered, /shell-banner|fixture read failed|Check again/);
+  assert.equal(rechecks, 0);
   setup.dispose(); c.dispose();
 });
 test('first run displays fixed consent, all four choices and explicit Git installer/recheck', () => {
@@ -229,7 +247,7 @@ test('before sign-in reporting is unchecked and native browser actions are disab
   const c = machine(); const account = new AccountController(null, c);
   const markup = renderToStaticMarkup(createElement(SettingsView, { machine: c.state, state: { ...account.state, hosted }, controller: account, machineController: c }));
   assert.match(markup, /type="checkbox" disabled=""/); assert.doesNotMatch(markup, /checked=""/);
-  assert.match(markup, /Sign in with GitHub/); assert.match(markup, /Restart \/ reinstall agent/);
+  assert.match(markup, /Sign in with GitHub/); assert.match(markup, /Reconnect agent/);
   assert.doesNotMatch(markup, /Open GitHub/);
 });
 test('pending sign-in shows only transient code, explicit browser action and cancel, with actual backoff', () => {
@@ -246,25 +264,11 @@ test('signed-in settings show identity, queue acknowledgement and profile follow
   assert.match(markup, /Follow this profile/);
   assert.doesNotMatch(markup, /Trust on this Mac|I trust this repository/);
 });
-test('overview and resolved render only current inspection counts and provenance', () => {
-  const c = machine();
-  const state = { ...c.state, status, inspection: { profile: { repo: '/fixture', revision: 'fixture-revision', overrides: '/fixture/overrides', issues: [] }, items: [{ key: 'config:a', domain: 'config' as const, label: 'Fixture item', group: 'Files', state: 'repo-ahead', disposition: 'apply' as const, from: { layer: 'machine' as const, source: '/fixture/overrides' } }], probeErrors: [] } };
-  const overview = renderToStaticMarkup(createElement(OverviewView, { state, navigate: () => {} }));
-  assert.match(overview, /Pending.*<strong>3/); assert.match(overview, /Cancelled/); assert.match(overview, /2026-10-11T12:00:00Z/);
-  const resolved = renderToStaticMarkup(createElement(ResolvedView, { state, controller: c }));
-  assert.match(resolved, /Fixture item/); assert.match(resolved, /machine · \/fixture\/overrides/);
-  assert.doesNotMatch(resolved, /type="checkbox"|Add override|Remove override|diff/i);
-});
-test('Review remains usable locally with selection, preview and external activity cancellation', () => {
-  const c = machine();
-  const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', status: { ...status, applying: true } } }));
-  assert.match(markup, /Review &amp; apply/); assert.match(markup, /Cancel<\/button>/); assert.doesNotMatch(markup, /disabled="">Cancel<\/button>/); assert.match(markup, /Automatic apply paused/);
-});
-test('item notifications open Setup, where incoming items are decided; agent failures open Review', () => {
-  for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2, { ...status, paused: null }), 'setup');
-  assert.equal(screenForReview('overview', 1, 2, null), 'setup');
-  assert.equal(screenForReview('overview', 1, 2, status), 'review', 'a paused agent sent the failure notification');
-  assert.equal(screenForReview('overview', 1, 2, { ...status, paused: null, error: 'JOB_FAILED' }), 'review');
+test('item notifications open Changes; agent failures open Home', () => {
+  for (const screen of ['home', 'skills', 'settings', 'publish', 'changes'] as const satisfies readonly Screen[]) assert.equal(screenForReview(screen, 1, 2, { ...status, paused: null }), 'changes');
+  assert.equal(screenForReview('home', 1, 2, null), 'changes');
+  assert.equal(screenForReview('publish', 1, 2, status), 'home', 'a paused agent sent the failure notification');
+  assert.equal(screenForReview('skills', 1, 2, { ...status, paused: null, error: 'JOB_FAILED' }), 'home');
   assert.equal(screenForReview('settings', 2, 2, null), 'settings');
 });
 
@@ -302,68 +306,7 @@ test('startup updates stay compact until a real update needs attention or a fail
 });
 
 
-test('addition view separates saved intent, native evidence limits and blocked suggestions', () => {
-  const c = machine(); const receipt = skillRun();
-  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'done', summary: '', receipt } };
-  const markup = renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c }));
-  for (const text of ['Machine intent: saved', 'Installation: verified', 'owner/repo', 'design-review', 'claude', 'Codex also scans', 'does not attest the selected source or invocation authorization', 'Managed startup remains active', 'Do you want to share it with your other machines?', 'Promote to profile', 'personal sharing workflow', 'profile publication workflow', 'Required destination: user', 'Required destination: profile']) assert.ok(markup.includes(text), text);
-  assert.doesNotMatch(markup, /Requested via/);
-  assert.doesNotMatch(markup, /<button[^>]*>.*?(Share|Promote)/);
-});
-for (const intentState of ['saved', 'needsInspection'] as const) for (const installationState of ['failed', 'cancelled', 'needsInspection', undefined] as const) test(`addition view preserves ${intentState} intent without success or suggestions for ${installationState}`, () => {
-  const c = machine(); const original = skillRun();
-  const receipt = skillRun({ state: 'failed', intentSaved: intentState === 'saved', intentState, installation: installationState ? { ...original.installation!, state: installationState, nextActions: [] } : undefined });
-  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'failed', summary: '', receipt } };
-  const markup = renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c }));
-  assert.match(markup, new RegExp(`Machine intent: ${intentState === 'saved' ? 'saved' : 'needs inspection'}`));
-  assert.match(markup, new RegExp(`Installation: ${installationState === 'needsInspection' ? 'needs inspection' : installationState ?? 'not verified'}`));
-  assert.doesNotMatch(markup, /Do you want to share|Promote to profile|Installation: verified/);
-});
-
-
-test('addition view displays the receipt owner actor when present', () => {
-  const c = machine(); const receipt = skillRun({ actor: 'mcp' });
-  c.state = { ...c.state, run: { runId: receipt.runId, steps: [], outcome: 'done', summary: '', receipt } };
-  assert.match(renderToStaticMarkup(createElement(ReviewView, { state: c.state, controller: c })), /Requested via mcp/);
-});
-
-import { decodeRunView, type OperationChange } from '@nortuscc/agent/operations';
-const semanticRun = (change: OperationChange, extra: object = {}) => {
-  const author = { checkout: '/author', realCheckout: '/author', gitDir: '/author/.git', head: 'c'.repeat(40), files: [] };
-  return decodeRunView({ runId: 'semantic', actor: 'mcp', state: 'failed', operation: 'applyChange', scope: {kind:'machine'},
-    intent: {requestId:'semantic-request', inputDigest:'a'.repeat(64), planId:'p', change,
-      parity: {kind:change.kind, generation:'1', baselineDigest:'a'.repeat(64), planDigest:'b'.repeat(64), plannedKeys:['first','second'], ...(change.kind==='capture'?{author}:{})}},
-    intentSaved:false, steps:[], result:{status:'failed',message:'Inspect effects'},
-    parity: {kind:change.kind,state:'needsInspection',committedKeys:['first'],remainingKeys:['second'],backupIds:['backup'],...extra},
-  });
-};
-const semanticMarkup = (receipt: ReturnType<typeof semanticRun>) => {
-  const c = machine(); c.state={...c.state,run:{runId:receipt.runId,outcome:'failed',summary:'Inspect effects',steps:[],receipt}};
-  return renderToStaticMarkup(createElement(ReviewView,{controller:c,state:c.state}));
-};
-test('semantic run view shows author destination, partial evidence and exact attribution', () => {
-  const text = semanticMarkup(semanticRun({kind:'capture',only:['config:claude:CLAUDE.md'],takeLocal:true,allowShrink:false}));
-  for(const expected of ['Capture configuration','Author destination','/author','Committed effects','Remaining effects','first','second','backup','uncertain','semantic-request','Requested via mcp']) assert.ok(text.includes(expected),expected);
-  assert.doesNotMatch(text,/share it with your other machines/);
-});
-test('metadata run distinguishes local queueing from confirmed persistence', () => {
-  const text=semanticMarkup(semanticRun({kind:'patchMachineMetadata',patch:{name:'fixture'}},{metadata:'locally-queued'}));
-  assert.match(text,/locally queued/); assert.match(text,/not confirmed/);
-});
-for(const state of ['awaiting-user','expired','needsInspection'] as const) test(`sign-in view treats ${state} as initiation only`, () => {
-  const text=semanticMarkup(semanticRun({kind:'signIn'},{signIn:{kind:'signIn',state,expiresAt:'2099-10-15T00:00:00.000Z',...(state==='awaiting-user'?{userCode:'ABCD-EFGH',verificationUri:'https://github.com/login/device'}:{})}}));
-  assert.match(text,/authorization initiation/); assert.match(text,/2099-10-15/);
-  if(state==='awaiting-user')assert.match(text,/ABCD-EFGH/);
-  else {assert.match(text,/challenge unavailable/i);assert.doesNotMatch(text,/ABCD-EFGH|login\/device/);}
-  assert.doesNotMatch(text,/Authenticated|Authentication failed/);
-});
-
-test('machine intent view names reset rather than implying an installation effect', () => {
- const text=semanticMarkup(semanticRun({kind:'machineIntent',patch:{kind:'manageConfig',action:'reset'}},{intentState:'saved',routingEffects:[]}));
- assert.match(text,/manageConfig: reset/);assert.match(text,/does not physically remove content/);
-});
-
-test('offered profile setups are followed through the profile preview', async t => {
+test('following an offered profile in Settings lands on Changes with the follow preview', async t => {
   const { fixture, run } = await import('./support/setup-sync.ts');
   const { SetupSyncController } = await import('../src/setup-sync-controller.ts');
   const f = await fixture(); const sync = new SetupSyncController(f.bridge, f.machine);
@@ -371,11 +314,13 @@ test('offered profile setups are followed through the profile preview', async t 
   f.handlers.inspectShareLink = input => ({ setupId: input.setupId, name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', latestRevision: 0, access: 'readable' });
   f.handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: [], overrides: [] }, actionEffects: ['Inspect only'] });
   const account = new AccountController(null, f.machine);
-  const element = OfferedSetup({ setup: { setupId: 'shared', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', owned: true, latestRevision: 0 }, controller: account, disabled: false, onFollowProfile: id => sync.followSharedLink(id) });
+  const visited: Screen[] = [];
+  const element = OfferedSetup({ setup: { setupId: 'shared', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', owned: true, latestRevision: 0 }, controller: account, disabled: false, onFollowProfile: followFromSettings(sync, screen => visited.push(screen)) });
   const html = renderToStaticMarkup(element);
   assert.match(html, /Follow this profile/); assert.doesNotMatch(html, /Trust on this Mac/);
   const button = element.props.children.find((child: any) => child?.type === 'button');
   await button.props.onClick();
+  assert.deepEqual(visited, ['changes']);
   f.handlers.listRuns = () => ({ runs: [run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } })], nextBefore: null });
   sync.enter(); await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(sync.state.preview?.change, { kind: 'followProfile', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', setupId: 'shared' });

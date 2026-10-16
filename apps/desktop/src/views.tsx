@@ -6,13 +6,37 @@ import type { SetupController, SetupViewState } from './setup-controller.ts';
 import type { AccountController, AccountViewState } from './account-controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import type { MachineController, ViewState } from './controller.ts';
+import type { SetupSyncController, SetupSyncState } from './setup-sync-controller.ts';
+import { draftCount, type HomeState } from './home-controller.ts';
+import { errorText } from './copy.ts';
 
-export type Screen = 'overview' | 'review' | 'setup' | 'skills' | 'profiles' | 'upstreams' | 'resolved' | 'settings';
-const screens = [['overview', 'Overview'], ['review', 'Review & apply'], ['setup', 'Setup'], ['skills', 'Skills'], ['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['resolved', 'Resolved'], ['settings', 'Settings']] as const;
-// A notification click names no notification. Agent failures (error or pause) are reviewed on Review &
-// apply; item notifications count incoming items, which are decided on Setup.
+export type Screen = 'home' | 'changes' | 'skills' | 'profiles' | 'upstreams' | 'publish' | 'settings';
+// Counts shown beside a screen's name: undecided incoming changes, unpublished drafts, an app update.
+export type NavBadges = { readonly changes?: number; readonly publish?: number; readonly settings?: boolean };
+// Badges from the Changes review (rows not on hold), Home's local drafts and the updater.
+export function navBadges(changes: Pick<SetupSyncState, 'review'>, home: Pick<HomeState, 'drafts'>, update: UpdateViewState): NavBadges {
+  const phase = update.update?.enabled ? update.update.phase : null;
+  return {
+    changes: changes.review?.rows.filter(row => !row.held).length ?? 0,
+    publish: draftCount(home.drafts),
+    settings: phase === 'available' || phase === 'verified',
+  };
+}
+const groups = [
+  ['THIS MAC', [['home', 'Home'], ['changes', 'Changes'], ['skills', 'Skills']]],
+  ['MY PROFILES', [['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['publish', 'Publish']]],
+] as const;
+// A notification click names no notification. Item notifications count incoming changes, decided on Changes;
+// agent failures (error or pause) are explained on Home.
 export const screenForReview = (screen: Screen, previous: number, requested: number, status: ViewState['status']): Screen =>
-  requested <= previous ? screen : status?.error || status?.paused ? 'review' : 'setup';
+  requested <= previous ? screen : status?.error || status?.paused ? 'home' : 'changes';
+
+// Follows an offered profile from Settings and shows its preview on Changes.
+export const followFromSettings = (sync: Pick<SetupSyncController, 'followSharedLink'>, navigate: (screen: Screen) => void) => (setupId: string) => {
+  const following = sync.followSharedLink(setupId);
+  navigate('changes');
+  return following;
+};
 
 // A lost agent connection is reported once, above every screen, with the way back.
 function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onReconnect: () => void }) {
@@ -21,21 +45,46 @@ function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onRe
     <button disabled={machine.pending} onClick={onReconnect}>Reconnect</button>
   </div>;
 }
-export function ShellView({ screen, navigate, children, machine, onReconnect }: { screen: Screen; navigate: (screen: Screen) => void; children: ReactNode; machine?: ViewState; onReconnect?: () => void }) {
+// A failed inspection on a connected agent stays visible on every screen with a read-only retry.
+function InspectionBanner({ machine, onRecheck }: { machine: ViewState; onRecheck: () => void }) {
+  return <div className="alert shell-banner" role="alert">
+    <div><strong>This Mac couldn’t be inspected.</strong> <span>{errorText(machine.initialReadError)}</span></div>
+    <button disabled={machine.pending || machine.status?.applying === true} onClick={onRecheck}>Check again</button>
+  </div>;
+}
+function badgeText(screen: Screen, badges: NavBadges): { text: string; label: string } | null {
+  if (screen === 'changes' && badges.changes) return { text: String(badges.changes), label: `${badges.changes} incoming ${badges.changes === 1 ? 'change' : 'changes'}` };
+  if (screen === 'publish' && badges.publish) return { text: String(badges.publish), label: `${badges.publish} ${badges.publish === 1 ? 'draft' : 'drafts'} not published` };
+  if (screen === 'settings' && badges.settings) return { text: 'Update', label: 'App update available' };
+  return null;
+}
+function NavButton({ screen, label, current, badges, navigate }: { screen: Screen; label: string; current: Screen; badges: NavBadges; navigate: (screen: Screen) => void }) {
+  const badge = badgeText(screen, badges);
+  return <button aria-current={current === screen ? 'page' : undefined} onClick={() => navigate(screen)}>
+    {label}{badge ? <span className="nav-badge" aria-label={badge.label}>{badge.text}</span> : null}
+  </button>;
+}
+export function ShellView({ screen, navigate, children, machine, onReconnect, onRecheck, badges = {} }: {
+  screen: Screen; navigate: (screen: Screen) => void; children: ReactNode; machine?: ViewState; onReconnect?: () => void; onRecheck?: () => void; badges?: NavBadges;
+}) {
+  const banner = machine?.connection === 'disconnected' && onReconnect ? <DisconnectedBanner machine={machine} onReconnect={onReconnect} />
+    : machine?.connection === 'connected' && machine.initialReadError && onRecheck ? <InspectionBanner machine={machine} onRecheck={onRecheck} /> : null;
   return (
     <div className="app-shell">
       <aside className="shell-nav">
-        <p className="eyebrow">CLAUDE CONFIG</p>
-        <h2>Claude Config</h2>
-        <p className="muted">This Mac</p>
+        <h2>Nortuscc</h2>
         <nav aria-label="Main navigation">
-          {screens.map(([key, label]) => (
-            <button key={key} aria-current={screen === key ? 'page' : undefined} onClick={() => navigate(key)}>{label}</button>
-          ))}
+          {groups.map(([group, items]) => {
+            const id = `nav-${group.toLowerCase().replace(/ /g, '-')}`;
+            return <div className="nav-group" role="group" aria-labelledby={id} key={group}>
+              <p className="eyebrow nav-group-label" id={id}>{group}</p>
+              {items.map(([key, label]) => <NavButton key={key} screen={key} label={label} current={screen} badges={badges} navigate={navigate} />)}
+            </div>;
+          })}
+          <div className="nav-group nav-settings"><NavButton screen="settings" label="Settings" current={screen} badges={badges} navigate={navigate} /></div>
         </nav>
-        <p className="muted">Inspect, review, then apply.</p>
       </aside>
-      <main>{machine?.connection === 'disconnected' && onReconnect ? <DisconnectedBanner machine={machine} onReconnect={onReconnect} /> : null}{children}</main>
+      <main>{banner}{children}</main>
     </div>
   );
 }
@@ -155,86 +204,6 @@ export function StartupBoundary({ setup, setupController, machine, machineContro
   </div>;
 }
 
-export function OverviewView({ state, navigate, controller }: { state: ViewState; navigate: (screen: Screen) => void; controller?: MachineController }) {
-  const status = state.status;
-  return (
-    <>
-      <header>
-        <div><p className="eyebrow">THIS MACHINE</p><h1>Overview</h1><p className="intro">Current local agent inspection.</p></div>
-        <span className={`connection ${state.connection}`}>{state.connection === 'browser' ? 'Browser preview' : state.connection}</span>
-      </header>
-      {state.initialReadError ? <section className="form-section">
-        <p role="alert">{state.initialReadError}</p>
-        {state.connection === 'connected' && controller ? <button disabled={state.pending || state.status?.applying === true} onClick={() => void controller.inspect()}>Recheck inspection</button>
-          : <p className="muted">Open Settings to restart or reinstall the local agent.</p>}
-      </section> : null}
-      {status ? (
-        <>
-          <div className="metrics">
-            {([['Pending', status.counts.pending], ['Held', status.counts.held], ['Ready', status.counts.ready], ['Drift', status.counts.drift]] as const).map(([label, count]) => (
-              <section key={label}><p>{label}</p><strong>{count}</strong></section>
-            ))}
-          </div>
-          <section className="form-section">
-            <h2>This machine</h2>
-            <p>Last inspection: {status.at}</p>
-            <p>Policy: {status.policy}</p>
-            <p>{status.trusted ? 'Local setup trusted' : 'Local setup not trusted'}</p>
-            {status.paused ? <p role="status">Automatic apply paused: {status.paused.reason}</p> : null}
-            {status.applying ? <p role="status">Applying changes</p> : null}
-            {status.error ? <p role="alert">{status.error}: {status.detail}</p> : null}
-            <p>{status.conflicts.length} conflicts</p>
-          </section>
-        </>
-      ) : state.initialReadPending || state.waitingForReport ? <MachineStartupView state={state} />
-        : state.initialReadError ? null : <section className="form-section"><p role={state.connection === 'disconnected' ? 'alert' : 'status'}>{state.detail}</p></section>}
-      <div className="form-actions">
-        <button onClick={() => navigate('review')}>Review &amp; apply</button>
-        <button onClick={() => navigate('settings')}>Open Settings</button>
-      </div>
-    </>
-  );
-}
-
-export function ResolvedView({ state, controller }: { state: ViewState; controller: MachineController }) {
-  const inspection = state.inspection;
-  return (
-    <>
-      <header>
-        <div><p className="eyebrow">THIS MACHINE</p><h1>Resolved</h1><p className="intro">Inspected items and the layer that supplied each item.</p></div>
-        <button disabled={state.connection !== 'connected' || state.pending || state.status?.applying === true || state.run?.outcome === 'running'} onClick={() => void controller.inspect()}>Inspect again</button>
-      </header>
-      <section>
-        {inspection ? (
-          <>
-            <dl className="profile resolved-profile">
-              <dt>Repository</dt><dd><code>{inspection.profile.repo}</code></dd>
-              <dt>Revision</dt><dd><code>{inspection.profile.revision ?? 'Unknown'}</code></dd>
-            </dl>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>Item</th><th>Domain</th><th>State</th><th>Disposition</th><th>Layer / source</th></tr></thead>
-                <tbody>
-                  {inspection.items.map((item) => (
-                    <tr key={item.key}>
-                      <td><strong>{item.label}</strong><small>{item.group}{item.target ? ` · ${item.target}` : ''}</small>{item.note ? <small>{item.note}</small> : null}</td>
-                      <td>{item.domain}</td><td>{item.state}</td><td>{item.disposition}</td>
-                      <td>{item.from ? `${item.from.layer} · ${item.from.source}` : 'No provenance reported'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {inspection.items.length === 0 ? <p className="pad">No items reported.</p> : null}
-            {inspection.profile.issues.length ? <ul>{inspection.profile.issues.map((issue, index) => <li key={index}>{issue.source}: {issue.path}, {issue.message}</li>)}</ul> : null}
-            {inspection.probeErrors.length ? <ul>{inspection.probeErrors.map((error, index) => <li key={index}>{error}</li>)}</ul> : null}
-          </>
-        ) : <p className="form-section">{state.detail}</p>}
-      </section>
-    </>
-  );
-}
-
 export function OfferedSetup({ setup, controller, disabled, onFollowProfile }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean; onFollowProfile?: (setupId: string) => void | Promise<void> }) {
   if (setup.profile) return (
     <div className="offered-setup">
@@ -270,7 +239,7 @@ export function SettingsView({ machine, state, controller, machineController, on
   const pending = state.flow === 'pending' && !authenticated;
   return (
     <>
-      <header><div><p className="eyebrow">THIS MACHINE</p><h1>Settings</h1><p className="intro">Account access is optional. Review and apply work locally.</p></div></header>
+      <header><div><p className="eyebrow">THIS MAC</p><h1>Settings</h1><p className="intro">Account access is optional. Review and apply work locally.</p></div></header>
       <section className="form-section">
         <h2>Account</h2>
         {!native ? <p>{machine.detail}</p> : null}
@@ -337,7 +306,10 @@ export function SettingsView({ machine, state, controller, machineController, on
             <p className="muted">Displayed reporting settings include local queued changes.</p>
           </>
         ) : null}
-        <button disabled={machine.connection === 'browser' || machine.pending || (native && (machine.status?.applying === true || machine.run?.outcome === 'running'))} onClick={() => void machineController.restart()}>Restart / reinstall agent</button>
+        <button disabled={machine.connection === 'browser' || machine.pending || (native && (machine.status?.applying === true || machine.run?.outcome === 'running'))} onClick={() => void machineController.restart()}>Reconnect agent</button>
+        {machine.hello ? <details className="settings-details"><summary>Details</summary>
+          <p className="agent-version">Agent version {machine.hello.agentVersion}</p>
+        </details> : null}
       </section>
       {authenticated && hosted.setups.length ? (
         <section className="form-section">

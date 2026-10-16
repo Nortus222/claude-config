@@ -1,6 +1,7 @@
 import { AuthorController } from './author-controller.ts';
 import { ProfilesView } from './profiles-view.tsx';
 import { UpstreamsView } from './upstreams-view.tsx';
+import { PublishView } from './publish-view.tsx';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SkillsController } from './skills-controller.ts';
@@ -14,12 +15,16 @@ import { ConnectionsController } from './mcp-connections-controller.ts';
 import { ConnectionsView } from './mcp-connections-view.tsx';
 import { UpdateController } from './update-controller.ts';
 import { UpdateView } from './update-view.tsx';
+import { HomeController } from './home-controller.ts';
+import { HomeView } from './home-view.tsx';
 import { nativeAvailable, nativeBridge, nativeUpdateBridge } from './bridge.ts';
-import { ReviewView } from './review-view.tsx';
-import { OverviewView, ResolvedView, SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, type Screen } from './views.tsx';
+import { SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, followFromSettings, navBadges, type Screen } from './views.tsx';
 import './style.css';
+import './home.css';
+import './changes.css';
 
 const appMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
+const AUTHOR_SCREENS: ReadonlySet<Screen> = new Set(['profiles', 'upstreams', 'publish']);
 
 function App() {
   const [controllers] = useState(() => {
@@ -29,25 +34,27 @@ function App() {
     const setupSync = new SetupSyncController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
     const skills = new SkillsController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) });
     const author = new AuthorController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
-    return { machine, skills, author, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
+    return { machine, skills, author, home: new HomeController(bridge, machine), connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
   });
-  const { machine, account, setup, updates, connections, setupSync, skills, author } = controllers;
+  const { machine, account, setup, updates, connections, setupSync, skills, author, home } = controllers;
   const state = useSyncExternalStore(machine.subscribe, machine.snapshot);
   const authorState = useSyncExternalStore(author.subscribe, author.snapshot);
   const skillsState = useSyncExternalStore(skills.subscribe, skills.snapshot);
   const connectionsState = useSyncExternalStore(connections.subscribe, connections.snapshot);
   const accountState = useSyncExternalStore(account.subscribe, account.snapshot);
   const setupSyncState = useSyncExternalStore(setupSync.subscribe, setupSync.snapshot);
+  const homeState = useSyncExternalStore(home.subscribe, home.snapshot);
   const setupState = useSyncExternalStore(setup.subscribe, setup.snapshot);
   const updateState = useSyncExternalStore(updates.subscribe, updates.snapshot);
-  const [screen, setScreen] = useState<Screen>('overview');
-  useEffect(() => { if (screen === 'setup') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
+  const [screen, setScreen] = useState<Screen>('home');
+  useEffect(() => { if (screen === 'home' || screen === 'changes') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
   useEffect(() => { setupSync.refresh(); }, [setupSync, updateState.update?.phase]);
-  useEffect(() => { if (screen === 'profiles' || screen === 'upstreams') author.enter(); else author.leave(); }, [author, screen, state.session, state.connection]);
+  useEffect(() => { if (AUTHOR_SCREENS.has(screen)) author.enter(); else author.leave(); }, [author, screen, state.session, state.connection]);
   useEffect(() => { author.refresh(); }, [author, updateState.update?.phase]);
-  const reviewTarget = useRef<HTMLHeadingElement>(null);
+  // Home's runs and drafts also feed the Publish badge, so they are read on every (re)connection too.
+  useEffect(() => { if (screen === 'home') void home.refresh(); }, [home, screen]);
+  useEffect(() => { if (state.connection === 'connected') void home.refresh(); }, [home, state.connection, state.session]);
   const reviewSeen = useRef(0);
-  const focusReview = useRef(false);
   useEffect(() => {
     if (screen === 'skills') skills.enter();
     return () => { if (screen === 'skills') skills.leave(); };
@@ -55,37 +62,31 @@ function App() {
   useEffect(() => {
     void updates.start();
     void setup.check();
-    return () => { author.dispose(); skills.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
-  }, [machine, account, setup, updates, connections, setupSync, skills, author]);
+    return () => { author.dispose(); skills.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); home.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
+  }, [machine, account, setup, updates, connections, setupSync, skills, author, home]);
   useEffect(() => {
     if (state.connection === 'connected') { void account.refresh(); void connections.refresh(); }
   }, [account, connections, state.connection, state.session]);
   useEffect(() => {
     if (state.reviewRequested <= reviewSeen.current) return;
     const previous = reviewSeen.current;
-    focusReview.current = screenForReview(screen, previous, state.reviewRequested, state.status) === 'review';
     setScreen((current) => screenForReview(current, previous, state.reviewRequested, state.status));
     reviewSeen.current = state.reviewRequested;
   }, [state.reviewRequested, state.status]);
-  useEffect(() => {
-    if (screen !== 'review' || !focusReview.current || !reviewTarget.current) return;
-    reviewTarget.current.focus();
-    reviewTarget.current.scrollIntoView({ block: 'start' });
-    focusReview.current = false;
-  }, [screen, state.reviewRequested, setupState.phase, state.initialReadPending, state.waitingForReport]);
 
+  // Profiles and Upstreams link to Publish once they accept the prop.
+  const openPublish = { onOpenPublish: () => setScreen('publish') };
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
     updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
-    <ShellView screen={screen} navigate={setScreen} machine={state} onReconnect={() => void machine.restart()}>
-      {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
-      {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
-      {screen === 'setup' ? <SetupSyncView state={setupSyncState} controller={setupSync} /> : null}
-      {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} /> : null}
-      {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} /> : null}
-      {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} /> : null}
-      {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
+    <ShellView screen={screen} navigate={setScreen} machine={state} badges={navBadges(setupSyncState, homeState, updateState)} onReconnect={() => void machine.restart()} onRecheck={() => void machine.inspect()}>
+      {screen === 'home' ? <HomeView machine={state} changes={setupSyncState} home={homeState} update={updateState} navigate={setScreen} controller={home} /> : null}
+      {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} /> : null}
+      {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} onOpenChanges={() => setScreen('changes')} /> : null}
+      {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} {...openPublish} /> : null}
+      {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} {...openPublish} /> : null}
+      {screen === 'publish' ? <PublishView state={authorState} controller={author} /> : null}
       {screen === 'settings' ? <>
-        <SettingsView machine={state} state={accountState} controller={account} machineController={machine} onFollowProfile={setupId => { const following = setupSync.followSharedLink(setupId); setScreen('setup'); return following; }} />
+        <SettingsView machine={state} state={accountState} controller={account} machineController={machine} onFollowProfile={followFromSettings(setupSync, setScreen)} />
         <ConnectionsView state={connectionsState} controller={connections} />
         <UpdateView state={updateState} controller={updates} />
       </> : null}

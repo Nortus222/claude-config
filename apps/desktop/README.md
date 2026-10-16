@@ -63,10 +63,10 @@ removal, selected-backup restoration, user pause, personal distribution and prof
 require owners that are not available through MCP.
 
 The connected app discovers accepted and changed runs through bounded run-ID notifications and
-reads the current safe receipt through its existing controller. Review & apply shows the operation's
-intent, author destination, committed and remaining effects, uncertainty and backups. Device
-sign-in success means initiation only. A current safe read may display the human challenge until
-its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
+reads the current safe receipt through its existing controller. Changes shows a machine run's
+progress, committed and remaining effects and recovery; Publish shows author runs. Device
+sign-in success means initiation only. The controller treats a human challenge as current only
+until its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
 from confirmed hosted state. History uses the shared bounded projection with constant fallback for
 unknown events and closed summaries for historical diagnostics.
 
@@ -290,7 +290,7 @@ lose queued records. No logs are uploaded automatically.
 
 ## Agent notifications
 
-The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the existing Review & apply view. A pending review request survives renderer startup; clicks refresh and focus that view without previewing or applying automatically.
+The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the Changes screen (Home when the agent reports an error or pause). A pending review request survives renderer startup; clicks refresh the inspection without previewing or applying automatically.
 
 Hidden delivery branches before Tauri creates a window. Its fixed `--paths` helper resolves the same configured state root without registering or restarting the service. It reads the current token, authenticates as an app without subscribing, fetches the exact id and active receipt, posts, acknowledges and exits. Invalid ids, expired receipts and malformed payloads fail closed. Unbundled executables decline native posting. Native posting on non-macOS platforms returns unavailable so the agent can try Linux `notify-send`; packaging remains macOS arm64 only.
 
@@ -361,11 +361,14 @@ Missing Git exposes an explicit Apple installer request and recheck. Bootstrap r
 completed native-owned checkouts; existing recorded setups are inspected without bootstrap.
 Setup prepares the agent and does not apply configuration changes.
 
-The sidebar contains Overview, Review & apply, Resolved and Settings. Overview reads the current
-agent status. Resolved shows inspected items and their available layer/source provenance.
-Review keeps selection, stale replacement previews, progress, cancellation and reconnect behavior.
-Notification clicks route to Review, refresh it and focus its heading without applying.
-Browser preview shows empty real states with native actions disabled.
+The sidebar, under the Nortuscc brand, groups THIS MAC (Home, Changes, Skills) and MY PROFILES
+(Profiles, Upstreams, Publish), then Settings. Badges count undecided incoming changes on Changes and
+unpublished drafts on Publish, and flag an app update on Settings. Home names what this Mac follows
+and what needs attention, each line with its next action. Changes holds the one preview and Apply for
+incoming changes, this Mac's own items (a durable `reconcile`) and profile switches; its Details keep
+layer/source provenance. Item notifications open Changes and agent failures open Home, without
+applying. A lost connection or failed inspection shows one banner above every screen with Reconnect
+or Check again. Browser preview shows empty real states with native actions disabled.
 
 Settings offers optional GitHub Device Flow and defaults status sharing off before sign-in.
 The code lives only in renderer memory. Open GitHub is an explicit fixed native action.

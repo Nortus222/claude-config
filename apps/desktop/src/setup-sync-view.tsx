@@ -5,9 +5,6 @@ import { selectedLocal, type SetupChoice, type SetupSyncController, type SetupSy
 import { RunRecovery } from './run-recovery.tsx';
 import { changeTitle, errorText, itemLabel, type ItemLabel } from './copy.ts';
 
-// Vite defines `import.meta.env`; plain Node test runs have no CSS loader and skip the stylesheet.
-if (import.meta.env) void import('./changes.css');
-
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
 type Observed = InspectResult['items'][number];
