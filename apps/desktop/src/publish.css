@@ -1,21 +1,91 @@
-/* Publish screen, plus the draft line Profiles and Upstreams share. */
-.publish-view .action-error { margin: 4px 0 0; }
-.publish-view .confirm { border: 1px solid #37404c; background: #1a1f27; border-radius: 10px; padding: 12px 16px; display: grid; gap: 8px; }
-.publish-view .confirm p { margin: 0; }
-.publish-view .draft-intents li > span { margin-right: 8px; }
-.publish-view .publish-items { margin: 0; padding-left: 18px; }
-.publish-view .publish-items li + li { margin-top: 4px; }
-.publish-view .publish-files > summary { cursor: pointer; }
-.publish-view .publish-files > summary:focus-visible { outline: 2px solid #b1d9bf; outline-offset: 2px; }
-.publish-view .file-diff { margin-top: 12px; display: grid; gap: 6px; min-width: 0; }
-pre.line-diff { margin: 0; max-height: 360px; overflow: auto; background: #0d1015; border: 1px solid #262e38; border-radius: 6px; padding: 10px 0;
-  font-size: 11.5px; line-height: 1.55; color: #c9d2dc; white-space: pre-wrap; overflow-wrap: anywhere; }
-pre.line-diff > span { display: block; padding: 0 12px; }
-pre.line-diff > .hunk { color: #7d8896; margin-top: 6px; }
-pre.line-diff > .hunk:first-child { margin-top: 0; }
-pre.line-diff > .add { background: #1b2e22; color: #b1d9bf; }
-pre.line-diff > .remove { background: #2a1e1d; color: #efc2b9; }
-.draft-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px; color: #c3ccd6; }
-button.link { background: none; border: 0; padding: 0; color: #b1d9bf; cursor: pointer; font: inherit; }
-button.link:hover:enabled { text-decoration: underline; }
-button.link:focus-visible { outline: 2px solid #b1d9bf; outline-offset: 2px; }
+/* Author pages (Profiles, Upstreams, Publish) and the draft line they share. */
+.author-view {
+  display: grid;
+  gap: var(--space-4);
+}
+.draft-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+}
+.selectable {
+  user-select: all;
+}
+.confirm {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+}
+.action-error {
+  font-size: var(--text-small);
+}
+.unreadable-draft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+ol.draft-intents {
+  list-style: none;
+}
+.publish-items {
+  display: grid;
+  gap: 2px;
+}
+.publish-files[open] {
+  display: grid;
+  gap: var(--space-3);
+}
+.file-diff {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.file-diff h3 {
+  font-family: var(--mono);
+  font-size: var(--text-small);
+  font-weight: 500;
+}
+.capture-choices {
+  display: grid;
+  gap: var(--space-2);
+}
+.capture-choices legend {
+  margin-bottom: var(--space-2);
+}
+/* Upstreams: one row per source, its skills nested below once read. */
+.upstream-source > .row-main {
+  gap: var(--space-1);
+}
+.upstream-skills {
+  margin: 0;
+  border-top: 1px solid var(--separator);
+}
+.upstream-skills > .row {
+  padding-left: 0;
+  padding-right: 0;
+}
+.include-profiles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-1);
+}
+.pin-impact > fieldset {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+.impact-list {
+  columns: 2 200px;
+  font-size: var(--text-small);
+  color: var(--text-secondary);
+}

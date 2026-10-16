@@ -66,8 +66,16 @@ test('Settings reconnects the agent and keeps its version under Details', () => 
   const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', hello }, state: account.state, controller: account, machineController: c }));
   assert.match(markup, />Reconnect agent<\/button>/);
   assert.match(markup, /<details class="settings-details"><summary>Details<\/summary><p class="agent-version">Agent version a{64}<\/p><\/details>/);
-  assert.match(markup, /<p class="eyebrow">THIS MAC<\/p><h1>Settings/);
+  assert.match(markup, /<h1>Settings<\/h1>/); assert.doesNotMatch(markup, /eyebrow/);
   assert.doesNotMatch(markup, /Restart \/ reinstall agent|THIS MACHINE|protocol 3/);
+});
+test('a disabled Reconnect agent says why, next to it and as its title', () => {
+  const c = machine(); const account = new AccountController(null, c);
+  const applying = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: null, trusted: true, applying: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 } };
+  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status: applying }, state: account.state, controller: account, machineController: c }));
+  assert.match(markup, /Available when the current apply finishes\.[\s\S]*<button disabled="" title="Available when the current apply finishes\.">Reconnect agent<\/button>/);
+  const idle = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status: { ...applying, applying: false } }, state: account.state, controller: account, machineController: c }));
+  assert.match(idle, /<button>Reconnect agent<\/button>/);
 });
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };
 const hosted = { enabled: true, recovered: true, signingIn: false, accountId: null, login: null, machineId: null, auth: 'signed-out' as const, setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
@@ -263,7 +271,7 @@ test('pending sign-in shows only transient code, explicit browser action and can
 test('signed-in settings show identity, queue acknowledgement and profile following', () => {
   const c = machine(); const account = new AccountController(null, c);
   const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status }, state: { ...account.state, hosted: { ...hosted, auth: 'signed-in', accountId: 'account-a', login: 'fixture-login', machineId: 'machine-a', machine: { policy: 'notify', reportStatus: false }, setups: [{ setupId: 'setup-a', name: 'Offered fixture', repoUrl: 'https://example.com/fixture.git', profile: 'default', owned: true, latestRevision: 0 }], lastSyncAt: '2026-10-11T12:00:00Z' }, detail: 'Machine settings queued.' }, controller: account, machineController: c }));
-  for (const label of ['Signed in as fixture-login', 'Sign out', 'Sync now / retry', 'New machine name', 'Queue name change', 'Resume automatic apply', 'https://example.com/fixture.git', 'Machine settings queued']) assert.ok(markup.includes(label), label);
+  for (const label of ['Signed in as fixture-login', 'Sign out', 'Sync now / retry', 'New machine name', 'Queue name change', 'Resume automatic apply', 'https://example.com/fixture', 'Machine settings queued']) assert.ok(markup.includes(label), label);
   assert.doesNotMatch(markup, /Sign in with GitHub|checked=""/);
   assert.match(markup, /Follow this profile/);
   assert.doesNotMatch(markup, /Trust on this Mac|I trust this repository/);
@@ -322,7 +330,8 @@ test('following an offered profile in Settings lands on Changes with the follow 
   const element = OfferedSetup({ setup: { setupId: 'shared', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', owned: true, latestRevision: 0 }, controller: account, disabled: false, onFollowProfile: followFromSettings(sync, screen => visited.push(screen)) });
   const html = renderToStaticMarkup(element);
   assert.match(html, /Follow this profile/); assert.doesNotMatch(html, /Trust on this Mac/);
-  const button = element.props.children.find((child: any) => child?.type === 'button');
+  const find = (node: any): any => !node || typeof node !== 'object' ? null : node.type === 'button' ? node : [node.props?.children].flat().map(find).find(Boolean);
+  const button = find(element);
   await button.props.onClick();
   assert.deepEqual(visited, ['changes']);
   f.handlers.listRuns = () => ({ runs: [run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } })], nextBefore: null });

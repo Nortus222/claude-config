@@ -1,11 +1,36 @@
-/* Home: one line per fact about this Mac, each with its next action. */
-.home-lines { list-style: none; margin: 0; padding: 0; border: 1px solid #2c3440; border-radius: 10px; background: #151a21; }
-.home-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 14px 18px; border-top: 1px solid #262e38; min-width: 0; }
-.home-line:first-child { border-top: 0; }
-.home-line > p { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
-.home-line strong { font-weight: 600; color: #f1f4f7; }
-.home-line-attention { box-shadow: inset 3px 0 0 #e3c48f; }
-.home-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-.home-view button.danger { border-color: #7a4a43; color: #efc2b9; }
-.home-error { color: #efc2b9; font-size: 12px; flex-basis: 100%; overflow-wrap: anywhere; }
-.home-view button:focus-visible { outline: 2px solid #b1d9bf; outline-offset: 2px; }
+/* Home: one card of rows, one per fact about this Mac, each with its next action. */
+.home-view {
+  display: grid;
+  gap: var(--space-4);
+}
+ul.home-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+}
+.home-lines > .row:first-child {
+  border-top: 0;
+}
+.home-line strong {
+  font-weight: 600;
+}
+.home-line-attention > .row-main::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  background: var(--warning);
+  vertical-align: 1px;
+}
+.home-progress {
+  margin-top: var(--space-2);
+  max-width: 320px;
+}
+.home-error {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-size: var(--text-small);
+}

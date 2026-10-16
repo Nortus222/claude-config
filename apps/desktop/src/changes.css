@@ -1,20 +1,137 @@
-/* Changes: the preview panel, run card, On this Mac and Details. Shared setup-sync rules live in style.css. */
-.changes-preview { border: 1px solid #3d5a48; background: #151c18; border-radius: 10px; }
-.changes-preview .primary { min-width: 0; }
-.changes-preview .notice { margin-bottom: 0; }
-.changes-run { border: 1px solid #2c3440; border-radius: 10px; }
-.changes-run p { margin: 0; }
-.changes-label { min-width: 0; overflow-wrap: anywhere; }
-.changes-label strong { font-weight: 600; color: #e3e9ef; }
-.changes-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-.changes-list li, .changes-local .setup-sync-choice span { display: grid; gap: 2px; min-width: 0; }
-.changes-list small, .changes-local .setup-sync-choice small { color: #909ba9; font-size: 11px; }
-.changes-local-group { display: grid; gap: 6px; padding-top: 6px; border-top: 1px solid #262e38; }
-.changes-local-group button { justify-self: start; }
-.changes-details { margin: 0 0 14px; padding: 12px 20px; border: 1px solid #2c3440; border-radius: 10px; display: grid; gap: 10px; min-width: 0; }
-.changes-details > summary { cursor: pointer; color: #c3ccd6; font-weight: 600; }
-.changes-details :is(td, li, dd) { overflow-wrap: anywhere; }
-.changes-details td small { display: block; color: #909ba9; font-size: 11px; }
-.changes-details h3 { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
-.run-details > summary { cursor: pointer; color: #909ba9; font-size: 12px; }
-.run-details ul { margin: 0; padding-left: 16px; }
+/* Changes: the preview panel, run card, incoming rows, On this Mac and Details. */
+.setup-sync-view {
+  display: grid;
+  gap: var(--space-4);
+}
+.setup-sync-detail {
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+}
+.setup-sync-detail:empty {
+  display: none;
+}
+.changes-preview {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.preview-group {
+  display: grid;
+  gap: var(--space-1);
+}
+.changes-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.changes-label strong {
+  font-weight: 600;
+}
+.changes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+.changes-list li {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.changes-list small {
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+}
+.setup-sync-label {
+  margin: var(--space-2) 0 var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-tiny);
+}
+.setup-sync-warn {
+  color: var(--warning);
+  font-size: var(--text-small);
+}
+/* An incoming row keeps its choices and the values disclosure on one line until the values open. */
+.setup-sync-row > .row-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+}
+.setup-sync-values[open] {
+  flex-basis: 100%;
+}
+.setup-sync-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+}
+.setup-sync-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+.setup-sync-choice input {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.setup-sync-choice:has(input:disabled) {
+  cursor: default;
+  color: var(--text-secondary);
+}
+.setup-sync-pin {
+  display: block;
+}
+.pins-note {
+  padding: 0 var(--space-4) var(--space-2);
+}
+.local-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.local-text small {
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+}
+.section-foot {
+  padding-top: var(--space-1);
+}
+.group-foot {
+  padding: var(--space-2) var(--space-4) 0;
+}
+.inline-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+.inline-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.inline-field > input {
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+.changes-details > summary {
+  font-weight: 500;
+}
+.changes-details[open] {
+  display: grid;
+  gap: var(--space-3);
+}
+.changes-details h3 {
+  font-size: var(--text-small);
+}
+.run-details > summary {
+  font-size: var(--text-small);
+}
+.connection.disconnected {
+  background: var(--danger-soft);
+  color: var(--danger);
+}

@@ -79,6 +79,17 @@ const CHANGE_TITLES = {
 // The title of a run or preview of one change kind.
 export const changeTitle = (kind: OperationChange['kind']): string => CHANGE_TITLES[kind];
 
+// "3 changes", "1 change".
+export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+// "Nortus222/claude-config" for a GitHub URL; other repositories keep their URL.
+export const repoName = (url: string) => url.replace(/^(?:https:\/\/github\.com\/|git@github\.com:)/, '').replace(/\.git$/, '');
+// "12.0 MB": a download size for people, never raw bytes.
+export function byteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

@@ -95,7 +95,7 @@ test('the run card counts steps and backups instead of listing their keys and ID
 
 test('the Skills run heading says what happened in words, never a raw state', () => {
   const update = { kind: 'update' as const, only: ['skill:tdd'], authorManifest: false };
-  const heading = (run: ReturnType<typeof receipt>) => /aria-label="Skills run"><h2>([^<]*)<\/h2>/.exec(render({ run }))?.[1];
+  const heading = (run: ReturnType<typeof receipt>) => /aria-label="Skills run">[\s\S]*?<h2[^>]*>(?:<span class="spinner" aria-hidden="true"><\/span>)?([^<]*)<\/h2>/.exec(render({ run }))?.[1];
   assert.equal(heading(receipt('running', update)), 'Updating skills…');
   assert.equal(heading(receipt('succeeded', update)), 'Skills updated');
   assert.equal(heading(receipt('failed', update)), 'Update failed');

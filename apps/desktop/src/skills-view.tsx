@@ -52,14 +52,14 @@ export function rowState(row: SkillRow, observation?: Observation) {
 export function ChoiceControl({ row, state, disabled, controller }: { row: SkillRow; state: SkillsViewState; disabled: boolean; controller: SkillsController }) {
   const saving = state.saving && same(state.saving, row);
   const value: SkillChoice = row.choice === null ? 'inherit' : row.choice ? 'on' : 'off';
-  return <div>
+  return <div className="skills-choice">
     <div role="radiogroup" aria-label={`${row.name} on this Mac`} className="skills-seg" aria-busy={saving ? true : undefined}>
       {([['inherit', `Default · ${row.defaultEnabled ? 'On' : 'Off'}`], ['on', 'On'], ['off', 'Off']] as const).map(([choice, label]) => <label key={choice}>
         <input type="radio" name={`skill-${JSON.stringify([row.source, row.name])}`} value={choice} checked={value === choice} disabled={disabled}
           onChange={() => void controller.setChoice(row.source, row.name, choice)} /><span>{label}</span>
       </label>)}
     </div>
-    <p className="muted">{saving ? <span role="status">Saving…</span> : row.choice === null ? 'From the profile' : 'Your choice on this Mac'}</p>
+    <p className="row-sub">{saving ? <span role="status"><span className="spinner" aria-hidden="true" /> Saving…</span> : row.choice === null ? 'From the profile' : 'Your choice on this Mac'}</p>
   </div>;
 }
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
@@ -82,61 +82,70 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
   const choicePatch = choicePreview?.change.patch.kind === 'skill' ? choicePreview.change.patch : null;
   const preview = state.preview?.change.kind === 'update' && !active ? state.preview : null;
   const busy = machine.connection !== 'connected' || machine.pending || machine.initialReadPending || state.operation !== null || active || machine.run?.outcome === 'running' || machine.status?.applying;
+  const reloadDisabled = !!busy && !(active && state.error && !state.operation && machine.connection === 'connected');
+  // One error at a time: an error or a stale read replaces the status line instead of repeating it.
+  const alert = state.error ?? state.stale;
+  // While an apply holds this Mac, say so instead of the generic "reconnect or reload" line.
+  const applying = machine.status?.applying === true || machine.run?.outcome === 'running';
+  const busyNotice = state.native && !view && !alert && reloadDisabled && machine.connection === 'connected' && applying
+    ? 'This Mac is busy applying changes. Skills load when it finishes.' : null;
   return <div className="skills-view">
-    <header><div><p className="eyebrow">THIS MAC</p><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Choices stay on this Mac. Apply on Changes makes installation changes.</p></div>
-      <div>{onOpenChanges && waiting ? <button onClick={onOpenChanges}>Open Changes</button> : null}
-      {state.native ? <button disabled={!!busy && !(active && state.error && !state.operation && machine.connection === 'connected')} onClick={() => void controller.reload()}>{view ? 'Reload skills' : 'Load skills'}</button> : null}</div>
+    <header className="page-header"><div><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Apply on Changes makes installation changes.</p></div>
+      <div className="header-actions">{onOpenChanges && waiting ? <button onClick={onOpenChanges}>Open Changes</button> : null}
+      {state.native ? <button disabled={reloadDisabled} title={reloadDisabled ? blocked ?? (machine.connection === 'connected' ? 'Available when this Mac finishes its current work.' : 'Connect the agent first.') : undefined} onClick={() => void controller.reload()}>{view ? 'Reload skills' : 'Load skills'}</button> : null}</div>
     </header>
-    {!state.native ? <section className="form-section"><h2>Open the desktop app to see this Mac's skills</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
-      {state.error ? <p className="skills-alert" role="alert">{state.error}</p> : null}
-      {state.stale ? <p className="skills-alert" role="alert">{state.stale}</p> : null}
-      {blocked && view && !state.operation && !state.stale ? <p role="status">{blocked}</p> : null}
-      <p className="muted" role="status" aria-live="polite">{state.detail}</p>
-      {choicePreview && choicePatch ? <section className="form-section" aria-label="Choice preview"><h2>Review the changed choice</h2>
+    {!state.native ? <section className="card"><h2>Open the desktop app to see this Mac's skills</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
+      {state.error ? <p className="alert" role="alert">{state.error}</p> : null}
+      {state.stale ? <p className="alert" role="alert">{state.stale}</p> : null}
+      {blocked && view && !state.operation && !state.stale ? <p className="notice" role="status">{blocked}</p> : null}
+      {busyNotice ? <p className="notice busy-line"><span className="spinner" aria-hidden="true" /><span>{busyNotice}</span></p> : null}
+      <p className="muted skills-detail" role="status" aria-live="polite">{alert || busyNotice ? '' : state.detail}</p>
+      {choicePreview && choicePatch ? <section className="card" aria-label="Choice preview"><h2>Review the changed choice</h2>
         {choicePreview.machineIntent.intentChanges.map((change, index) => <p key={index}>{change.message}</p>)}
         {choicePreview.machineIntent.installationEffects.map((effect, index) => <p className="muted" key={index}>{effect}</p>)}
-        <button disabled={blocked !== null} onClick={() => void controller.setChoice(choicePatch.source, choicePatch.name, choicePatch.action === 'reset' ? 'inherit' : choicePatch.action === 'enable' ? 'on' : 'off')}>Retry saving choice</button>
+        <div className="actions"><button disabled={blocked !== null} onClick={() => void controller.setChoice(choicePatch.source, choicePatch.name, choicePatch.action === 'reset' ? 'inherit' : choicePatch.action === 'enable' ? 'on' : 'off')}>Retry saving choice</button></div>
       </section> : null}
-      {state.run ? <section className="form-section" aria-label="Skills run"><h2>{runHeading(state.run)}</h2>
-        {state.run.steps.length ? <p>{stepCounts(state.run.steps)}</p> : null}
-        {state.run.parity?.backupIds.length ? <p className="muted">{count(state.run.parity.backupIds.length, 'backup')} kept before changing files.</p> : null}
-        {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}
+      {state.run ? <section className="card" aria-label="Skills run"><div className="card-head"><div><h2 className="busy-line">{active ? <span className="spinner" aria-hidden="true" /> : null}{runHeading(state.run)}</h2>
+        {state.run.steps.length || state.run.parity?.backupIds.length ? <p>{state.run.steps.length ? stepCounts(state.run.steps) : ''}{state.run.steps.length && state.run.parity?.backupIds.length ? '. ' : ''}
+          {state.run.parity?.backupIds.length ? `${count(state.run.parity.backupIds.length, 'backup')} kept before changing files.` : ''}</p> : null}</div>
+        {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}</div>
       </section> : null}
       {view ? <>
-        {view.limitReason ? <p className="skills-alert" role="status">Skills inventory is incomplete: {view.limitReason}. Inspect the owning configuration before changing it.</p> : null}
-        <section className="form-section"><div className="skills-actions"><h2>Skill updates for this Mac</h2><button disabled={blocked !== null} onClick={() => void controller.check()}>Check upstream</button></div>
-          <p className="muted">Nothing installs until you preview and apply. Pins keep their existing policy.</p>
-          {check?.unavailable ? <p role="status">Upstream checks are unavailable for this machine.</p> : null}
-          {check?.limitReason ? <p role="status">The upstream check is incomplete: {check.limitReason}.</p> : null}
-          {check && !check.unavailable && !check.items.some(changed) ? <p>No upstream changes to review.</p> : null}
-          {check?.items.filter(changed).map(item => <div className="skills-change" key={item.key}>
-            {eligible.has(item.key) ? <label><input type="checkbox" aria-label={`Select ${item.name} for update`} checked={state.selected.includes(item.key)} disabled={blocked !== null} onChange={() => controller.toggle(item.key)} />{item.name}</label> : <strong>{item.name}</strong>}
-            <span>{item.source} · {UPSTREAM[item.state]} · {item.policy}</span>
-            {!eligible.has(item.key) ? <p className="muted">{item.prerequisite ?? 'Off on this Mac or unavailable for this update route.'}</p> : null}
-          </div>)}
-          {eligible.size ? <button disabled={blocked !== null || !state.selected.length} onClick={() => void controller.previewUpdate()}>Preview update · {state.selected.length} selected</button> : null}
+        {view.limitReason ? <p className="notice" role="status">Skills inventory is incomplete: {view.limitReason}. Inspect the owning configuration before changing it.</p> : null}
+        <section className="card"><div className="card-head"><div><h2>Skill updates for this Mac</h2><p>Nothing installs until you preview and apply. Pins keep their existing policy.</p></div>
+          <button disabled={blocked !== null} title={blocked ?? undefined} onClick={() => void controller.check()}>Check upstream</button></div>
+          {check?.unavailable ? <p className="muted" role="status">Upstream checks are unavailable for this machine.</p> : null}
+          {check?.limitReason ? <p className="muted" role="status">The upstream check is incomplete: {check.limitReason}.</p> : null}
+          {check && !check.unavailable && !check.items.some(changed) ? <p className="muted">No upstream changes to review.</p> : null}
+          {check?.items.some(changed) ? <ul className="rows">{check.items.filter(changed).map(item => <li className="row skills-change" key={item.key}>
+            <div className="row-main">{eligible.has(item.key) ? <label className="choice"><input type="checkbox" aria-label={`Select ${item.name} for update`} checked={state.selected.includes(item.key)} disabled={blocked !== null} onChange={() => controller.toggle(item.key)} /><span className="row-title">{item.name}</span></label> : <span className="row-title">{item.name}</span>}
+              <span className="row-sub">{item.source} · {item.policy}{!eligible.has(item.key) ? ` · ${item.prerequisite ?? 'Off on this Mac or unavailable for this update route.'}` : ''}</span></div>
+            <span className={`pill ${item.state === 'outdated' ? 'pill-accent' : 'pill-warning'}`}>{UPSTREAM[item.state]}</span>
+          </li>)}</ul> : null}
+          {eligible.size ? <div className="actions"><button className={preview ? undefined : 'primary'} disabled={blocked !== null || !state.selected.length} title={!state.selected.length ? 'Select at least one skill first.' : undefined} onClick={() => void controller.previewUpdate()}>Preview update · {state.selected.length} selected</button></div> : null}
           {preview ? <div className="skills-preview"><h3>Planned update steps</h3><ol className="steps" aria-label="Planned update steps">{preview.plan.steps.map((step, index) => <li key={index}>{step.summary}<small>{step.domain} · {step.action}</small></li>)}</ol>
-            {preview.plan.skipped.map((step, index) => <p key={index}>{step.key}: {step.reason}</p>)}
+            {preview.plan.skipped.map((step, index) => <p className="muted" key={index}>{step.key}: {step.reason}</p>)}
             {('actionEffects' in preview ? preview.actionEffects : [])?.map((effect, index) => <p className="muted" key={index}>{effect}</p>)}
-            <button className="primary" disabled={blocked !== null || !preview.plan.steps.length} onClick={() => void controller.applyUpdate()}>Apply update · {preview.plan.steps.length} steps</button>
+            <div className="actions"><button className="primary" disabled={blocked !== null || !preview.plan.steps.length} onClick={() => void controller.applyUpdate()}>Apply update · {preview.plan.steps.length} steps</button></div>
           </div> : null}
         </section>
         <div className="skills-toolbar"><input type="search" aria-label="Search skills" placeholder="Search skills or sources" value={query} onChange={event => setQuery(event.target.value)} />
           <select aria-label="Show" value={filter} onChange={event => setFilter(event.target.value as SkillsFilter)}>
             <option value="all">All skills</option><option value="choices">Your choices</option><option value="attention">Waiting to apply</option><option value="updates">Upstream changes</option>
-          </select><p className="muted">Default follows the profile. On and Off are saved on this Mac.</p>
+          </select><p className="row-sub">Default follows the profile. On and Off are saved on this Mac.</p>
         </div>
-        {!sources.length ? <p className="form-section">{view.items.length ? 'No skills match.' : 'This profile declares no skills.'}</p> : null}
+        {!sources.length ? <p className="card muted">{view.items.length ? 'No skills match.' : 'This profile declares no skills.'}</p> : null}
         {sources.map((source, index) => {
           const open = !collapsed.has(source.source), id = `skills-source-${index}`;
-          return <section className="form-section skills-source" key={source.source}><h2><button aria-expanded={open} aria-controls={id} onClick={() => setCollapsed(current => {
+          return <section className="card skills-source" key={source.source}><h2><button className="source-toggle" aria-expanded={open} aria-controls={id} onClick={() => setCollapsed(current => {
             const next = new Set(current); if (!next.delete(source.source)) next.add(source.source); return next;
-          })}>{source.source} · {source.skills.length}</button></h2>
-            {open ? <ul className="skills-rows" id={id}>{source.skills.map(row => {
+          })}><span className="chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>{source.source} <span className="pill">{source.skills.length}</span></button></h2>
+            {open ? <ul className="rows skills-rows" id={id}>{source.skills.map(row => {
               const matching = observations.filter(item => item.domain === 'skills' && item.label === row.name && (item.group === row.source || item.key === `skill:${row.name}`));
               const observed = matching.length === 1 ? matching[0] : undefined, disk = rowState(row, observed);
-              return <li className="skills-row" key={row.name}><div><h3>{row.name}</h3><p>{disk.installed} · {row.targets.join(' + ')} · {row.policy}{row.revision ? ` · ${row.revision}` : ''}</p>
-                {disk.detail ? <p className="muted">{disk.detail}</p> : null}<p className="muted">Declared by {row.declaredFrom.source}</p></div>
+              return <li className="row skills-row" key={row.name}><div className="row-main"><h3 className="row-title">{row.name}</h3>
+                <p className="row-sub">{disk.installed} · {row.targets.join(' + ')} · {row.policy}{row.revision ? ` · ${row.revision.slice(0, 7)}` : ''} · declared by {row.declaredFrom.source}</p>
+                {disk.detail ? <p className="row-sub">{disk.detail}</p> : null}</div>
                 <ChoiceControl row={row} state={state} disabled={blocked !== null} controller={controller} />
               </li>;
             })}</ul> : null}

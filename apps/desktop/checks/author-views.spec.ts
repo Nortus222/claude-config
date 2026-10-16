@@ -5,12 +5,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { ProfilesView } from '../src/profiles-view.tsx';
 import { UpstreamsView } from '../src/upstreams-view.tsx';
 import { PublishView } from '../src/publish-view.tsx';
-import { authorFixture, authorRun, draftPreview, draftId } from './support/author.ts';
+import { authorFixture, authorRun, draftPreview, draftId, draft } from './support/author.ts';
 
 const render = (View: typeof PublishView, f: Awaited<ReturnType<typeof authorFixture>>) => renderToStaticMarkup(createElement(View,{state:f.controller.state,controller:f.controller}));
 const publicationRun = (fields={}) => authorRun({kind:'publishDraft',draftId,digest:'b'.repeat(64)}, {state:'failed',result:{status:'needs-preview',message:'Main moved'},...fields});
 test('a needs-preview outcome asks for a new preview',async t=>{
-  const f=await authorFixture(t);f.controller.state={...f.controller.state,publicationRun:publicationRun()};
+  const f=await authorFixture(t);f.controller.state={...f.controller.state,publicationRun:publicationRun(),draft};
   const html=render(PublishView,f);assert.match(html,/Needs preview/);assert.match(html,/>Preview draft</);assert.doesNotMatch(html,/>Published</);
 });
 test('a published but unannounced run offers Announce',async t=>{
@@ -45,11 +45,11 @@ test('invalid draft intents disable Publish and show their reasons alongside pla
 });
 test('profiles show origins, read-only text and an unselected capture choice with affected profiles',async t=>{
   const f=await authorFixture(t);await f.controller.selectProfile('team');await f.controller.selectFile('claude:CLAUDE.md');await f.controller.captureFile('claude:CLAUDE.md');
-  const html=render(ProfilesView,f);assert.match(html,/From base/);assert.match(html,/repo text/);assert.match(html,/Update shared file/);assert.match(html,/Give this profile its own copy/);assert.match(html,/Affected profiles: base, team/);assert.doesNotMatch(html,/type="radio"[^>]*checked/);
+  const html=render(ProfilesView,f);assert.match(html,/from base/i);assert.match(html,/repo text/);assert.match(html,/Update shared file/);assert.match(html,/Give this profile its own copy/);assert.match(html,/Affected profiles: base, team/);assert.doesNotMatch(html,/type="radio"[^>]*checked/);
 });
 test('GitHub prerequisite states have distinct wording and actions',async t=>{
   const f=await authorFixture(t);
-  for(const [state,wording,action] of [['missing','GitHub CLI is not installed','Install GitHub CLI'],['signed-out','Not signed in to GitHub, or GitHub is unreachable','Sign in with GitHub'],['ready','GitHub is ready','Retry']] as const){
+  for(const [state,wording,action] of [['missing','GitHub CLI is not installed','Install GitHub CLI'],['signed-out','Not signed in to GitHub, or GitHub is unreachable','Sign in with GitHub'],['ready','Publishing uses your GitHub CLI sign-in','Ready']] as const){
     f.controller.state={...f.controller.state,gh:{state},error:state==='missing'?'gh is not installed':null,errorCode:state==='missing'?'APP_UNAVAILABLE':null};
     const html=render(PublishView,f);assert.ok(html.includes(wording));assert.ok(html.includes(action));
   }
@@ -89,7 +89,7 @@ test('profile issues read as text and the selected profile shows its own', async
   const html = render(ProfilesView,f);
   assert.doesNotMatch(html,/&quot;layer&quot;|\{&quot;/);
   assert.match(html,/broken<\/strong>: Invalid parent \(<code>extends<\/code>\)/);
-  assert.match(html,new RegExp(`<h3>${f.controller.state.selectedProfile}</h3>[\\s\\S]*Unknown skill source`));
+  assert.match(html,new RegExp(`Issues in ${f.controller.state.selectedProfile}</h3>[\\s\\S]*Unknown skill source`));
   assert.equal(html.match(/Unknown skill source/g)?.length, 1, 'the selected profile\'s issue is listed once, under it');
 });
 test('a succeeded run without push evidence does not claim publication', async t => {
@@ -126,7 +126,7 @@ test('No access names the repository before profiles can be loaded and offers a 
   const html = render(ProfilesView, f);
   assert.match(html, /No access to https:\/\/github.com\/example\/setup.git/);
   assert.match(html, /<button[^>]*>Reload profiles<\/button>/);
-  assert.match(render(PublishView, f), /No access to https:\/\/github.com\/example\/setup.git[\s\S]*<button[^>]*>Retry<\/button>/);
+  assert.match(render(PublishView, f), /<button[^>]*>Reload<\/button>[\s\S]*No access to https:\/\/github.com\/example\/setup.git/);
 });
 
 test('a corrupt draft has a Delete action beside its diagnostic', async t => {
@@ -171,7 +171,7 @@ test('Publish is a screen that lists each changed item per profile in words', as
     { profile: 'team', itemId: 'file:claude:CLAUDE.md', kind: 'file', change: 'removed' },
   ] });
   const html = render(PublishView, f), text = words(html);
-  assert.match(html, /<p class="eyebrow">MY PROFILES<\/p><h1>Publish<\/h1>/);
+  assert.match(html, /<h1>Publish<\/h1>/); assert.doesNotMatch(html, /eyebrow/);
   assert.match(text, /team: adds skill tdd from mattpocock\/skills/);
   assert.match(text, /base: changes Claude setting model/);
   assert.match(text, /team: removes Claude instructions \(CLAUDE\.md\)/);
@@ -211,7 +211,7 @@ test('Profiles and Upstreams have no publish panel and link to Publish from a dr
     const html = renderToStaticMarkup(createElement(View, { state: f.controller.state, controller: f.controller, onOpenPublish: () => {} }));
     assert.doesNotMatch(html, /Publish panel|Preview draft|GitHub|Publication outcome/);
     assert.match(html, /Saved to draft · 1 change · <button[^>]*>Review and publish →<\/button>/);
-    assert.match(html, /<p class="eyebrow">MY PROFILES<\/p>/);
+    assert.doesNotMatch(html, /eyebrow/);
     assert.doesNotMatch(render(View, f), /Review and publish/, 'no link without a Publish screen to open');
   }
 });
@@ -298,4 +298,24 @@ test('Abandon on Publish asks once and names the run before abandoning', async t
   await f.controller.abandon();
   assert.equal(f.calls.filter(c => c.name === 'abandonRun').length, 1); assert.equal(f.controller.state.run?.state, 'abandoned');
   assert.equal(f.controller.state.confirming, null);
+});
+test('without a draft, Publish shows one quiet line and no Review or Publish button', async t => {
+  const f = await authorFixture(t);
+  const html = render(PublishView, f);
+  assert.equal(f.controller.state.draft, null);
+  assert.match(html, /No draft yet\. Include a skill, pin a source or capture a file to start one\./);
+  for (const hidden of [/aria-label="Review and publish"/, />Publish<\/button>/, />Preview draft<\/button>/, />New draft<\/button>/, />Delete draft<\/button>/]) assert.doesNotMatch(html, hidden);
+});
+test('Profiles groups resolved skills by source with Included and Excluded status, excluded ones collapsed', async t => {
+  const f = await authorFixture(t);
+  const skills = [{ source: 'owner/a', name: 'tdd', included: true, from: 'skills-manifest.txt' }, { source: 'owner/b', name: 'grill', included: true, from: 'profiles/base.json' },
+    { source: 'owner/a', name: 'old', included: false, from: 'skills-manifest.txt' }];
+  const profiles = f.controller.state.profiles!;
+  f.controller.state = { ...f.controller.state, profiles: { ...profiles, profiles: profiles.profiles.map(p => p.name === f.controller.state.selectedProfile ? { ...p, skills } : p) } };
+  const html = render(ProfilesView, f), text = html.replace(/<[^>]+>/g, '\n');
+  assert.match(text, /2 included · 1 excluded/);
+  assert.match(text, /owner\/a\n+tdd\n+From skills-manifest\.txt\n+Included[\s\S]*owner\/b\n+grill\n+From profiles\/base\.json\n+Included/);
+  assert.doesNotMatch(text, /\nold\n/, 'excluded skills stay collapsed until asked for');
+  assert.match(html, /<button class="link" aria-pressed="false">Show 1 excluded skill<\/button>/);
+  assert.doesNotMatch(html, /<code>owner\/a:tdd<\/code>/);
 });

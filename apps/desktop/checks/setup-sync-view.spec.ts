@@ -17,12 +17,12 @@ async function page(t: test.TestContext, prepare: (f: Awaited<ReturnType<typeof 
 const buttons = (html: string) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map(match => match[1]!);
 // Buttons that start a change: the page has exactly one, inside the top preview panel.
 // The list of profiles to follow only previews, so its Follow buttons are left out.
-const applyButtons = (html: string) => buttons(html.replace(/<ul class="profile-choice-list"[\s\S]*?<\/ul>/, '')).filter(text => /^(Apply|Switch to|Follow |Hold \d)/.test(text));
+const applyButtons = (html: string) => buttons(html.replace(/<ul class="[^"]*profile-choice-list"[\s\S]*?<\/ul>/, '')).filter(text => /^(Apply|Switch to|Follow |Hold \d)/.test(text));
 const panel = (html: string) => /<section class="card changes-preview"[\s\S]*?<\/section>/.exec(html)?.[0] ?? '';
-const details = (html: string) => html.slice(html.indexOf('<details class="changes-details"'));
+const details = (html: string) => html.slice(html.search(/<details class="[^"]*changes-details"/));
 // What a reader sees or hears outside Details: text and accessible names.
 const outsideDetails = (html: string) => {
-  const visible = html.replace(/<details class="(changes-details|run-details)"[\s\S]*?<\/details>/g, '');
+  const visible = html.replace(/<details class="[^"]*(changes-details|run-details)"[\s\S]*?<\/details>/g, '');
   return [...visible.matchAll(/aria-label="([^"]*)"/g)].map(match => match[1]).join('\n') + '\n' + visible.replace(/<[^>]+>/g, '\n');
 };
 const followProfiles = (f: Awaited<ReturnType<typeof fixture>>) => {
@@ -31,7 +31,7 @@ const followProfiles = (f: Awaited<ReturnType<typeof fixture>>) => {
 
 test('Changes shows accessible values and warns that unchosen incoming items will be held', async t => {
   const { html } = await page(t); const text = html();
-  assert.match(text, /<p class="eyebrow">THIS MAC<\/p><h1>Changes<\/h1>/);
+  assert.match(text, /<h1>Changes<\/h1>/); assert.doesNotMatch(text, /eyebrow/);
   assert.match(text, /aria-label="Current value of /); assert.match(text, /aria-label="Offered value of /); assert.match(text, /mine/);
   assert.match(text, /Items you don&#x27;t choose will be held/); assert.deepEqual(applyButtons(text), []);
   assert.match(text, /keep this Mac&#x27;s override/); assert.match(text, /backed up first/);
@@ -89,7 +89,7 @@ test('a switch preview names the dropped holds and overrides before its Apply', 
   handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: ['skill:owner/repo/old'], overrides: ['skills.old'] }, actionEffects: ['Inspect only'] });
   await c.switchProfile('team');
   const text = html();
-  assert.match(text, /Following default from https:\/\/github.com\/example\/profiles.git/);
+  assert.match(text, /Following default from example\/profiles/);
   assert.match(text, /Profile/); assert.match(text, /Follow a shared link/);
   assert.ok(text.indexOf('Skill <strong>old</strong> from owner/repo') < text.indexOf('>Switch to team<'));
   assert.match(panel(text), /Overrides removed[\s\S]*Skill old/);
@@ -195,7 +195,12 @@ test('the Changes heading counts incoming rows like Home and the badge: not unch
   const { html } = await page(t, f => { f.handlers.setupReview = () => review({ rows }); });
   assert.match(html(), /<h2 id="changes-incoming-h">28 incoming changes from your profile · 4 on hold<\/h2>/);
   const quiet = await page(t, f => { f.handlers.setupReview = () => review({ rows: [rows.at(-1)] }); });
-  assert.match(quiet.html(), /<h2 id="changes-incoming-h">No incoming changes from your profile<\/h2>/);
+  assert.match(quiet.html(), /<h2 id="changes-incoming-h">Nothing incoming from your profile<\/h2>/);
+  // With no rows at all, the section is one quiet line: no hold notice, Preview or bulk choices.
+  const empty = (await page(t, f => { f.handlers.setupReview = () => review({ rows: [], pinGroups: [] }); })).html();
+  const section = /<section class="card setup-sync-review"[\s\S]*?<\/section>/.exec(empty)?.[0] ?? '';
+  assert.match(section, /Nothing incoming from your profile[\s\S]*You(&#x27;|')re up to date\./);
+  for (const hidden of [/>Preview<\/button>/, /will be held/, /Take all incoming/, /choices? made/]) assert.doesNotMatch(section, hidden);
 });
 
 test('Abandon on Changes asks once and names the run', async t => {
@@ -213,7 +218,7 @@ test('with nothing followed, Changes lists the setup repository profiles and Fol
   });
   handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: [], overrides: [] }, actionEffects: ['Inspect only'] });
   const text = html({ repoUrl: DEFAULT_REPO_URL });
-  assert.match(text, /Profiles in https:\/\/github.com\/Nortus222\/claude-config.git/);
+  assert.match(text, /Profiles in Nortus222\/claude-config/);
   assert.deepEqual(buttons(text).filter(label => label.startsWith('Follow ')), ['Follow default', 'Follow team']);
   const element = SetupProfiles({ state: c.state, controller: c, repoUrl: DEFAULT_REPO_URL })!;
   const follow = (element.props.children[1].props.children as any[]).find(item => item.key === 'team').props.children[1];

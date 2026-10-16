@@ -3,7 +3,7 @@ import type { InspectResult } from '@nortuscc/agent/ipc/protocol';
 import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/operations';
 import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { RunRecovery } from './run-recovery.tsx';
-import { changeTitle, errorText, itemLabel, type ItemLabel } from './copy.ts';
+import { changeTitle, errorText, itemLabel, repoName, type ItemLabel } from './copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 
 type Review = OperationOutput<'setupReview'>;
@@ -15,17 +15,22 @@ type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'choo
 type Props = { state: SetupSyncState; controller: Actions; onOpenProfiles?: () => void; repoUrl?: string };
 
 const CHANGE = { added: 'Added', changed: 'Changed', removed: 'Removed', unchanged: 'Unchanged' };
+const CHANGE_TONE = { added: 'pill-success', changed: 'pill-accent', removed: 'pill-danger', unchanged: '' };
 const CONNECTION = { connected: 'Connected', connecting: 'Connecting', disconnected: 'Disconnected', browser: 'Browser preview' };
 const RUN_STATE: Readonly<Record<RunView['state'], string>> = { accepted: 'Starting', running: 'In progress', succeeded: 'Done', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted', abandoned: 'Abandoned' };
+const RUN_TONE: Readonly<Record<RunView['state'], string>> = { accepted: 'pill-accent', running: 'pill-accent', succeeded: 'pill-success', failed: 'pill-danger', cancelled: '', interrupted: 'pill-warning', abandoned: '' };
 const AGENTS: Readonly<Record<string, string>> = { claude: 'Claude', codex: 'Codex' };
 // Why an item is waiting to apply, by its inspected state.
 const WAITING: Readonly<Record<string, string>> = {
   missing: 'Not installed on this Mac yet', 'off-pin': 'Not at the version your profile pins', disabled: 'Turned off; it will be removed from this Mac',
   'repo-ahead': 'Your profile has a newer version', unmanaged: 'Not set up from your profile yet',
 };
+// Waiting items shown before "Show all".
+const LOCAL_PREVIEW_ROWS = 8;
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
 const short = (revision: string) => revision.slice(0, 12);
 const plain = (text: string): ItemLabel => ({ lead: text, name: '', tail: '', text });
+const activeRun = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 
 // Labels an inspected item. Inspection keys (`config:<file>#<key>`, `skill:<name>`, `skill-link:<agent>:<name>`,
 // `integration:<id>`) map onto the setup item ids `itemLabel` knows; anything else falls back to the domain's label.
@@ -65,6 +70,15 @@ const STAGED: Readonly<Record<SetupChoice['action'], string>> = {
   release: "Release the hold and take your profile's value", takeTheirs: "Use your profile's value and replace this Mac's (backed up first)",
 };
 
+// Why reading and choosing are unavailable, or null when they are available. HOOK(controller): the eligibility
+// flags carry no reason; replace this guess with the controller's own busy reason and apply progress once it has them.
+function unavailableReason(state: SetupSyncState): string | null {
+  if (state.eligibility.read || state.pending || state.pagePending) return null;
+  if (state.connection !== 'connected') return 'Connect the agent to read changes.';
+  if (activeRun(state.run)) return 'Available when the current run finishes.';
+  return 'This Mac is busy applying changes. Reading and choosing resume when it finishes.';
+}
+
 // The panel's heading and its Apply button, in words for the kind of change previewed.
 function previewCopy(preview: ChangePreview, state: SetupSyncState): { title: string; apply: string } {
   const change = preview.change;
@@ -87,36 +101,43 @@ export function PreviewPanel({ state, controller }: { state: SetupSyncState; con
   if (!preview) return null;
   const change = preview.change, { title, apply } = previewCopy(preview, state);
   const dropped = 'droppedChoices' in preview ? preview.droppedChoices : null;
-  return <section className="card changes-preview" aria-labelledby="changes-preview-h"><p className="eyebrow">PREVIEW</p><h2 id="changes-preview-h">{title}</h2>
+  return <section className="card changes-preview" aria-labelledby="changes-preview-h">
+    <div className="card-head"><div><h2 id="changes-preview-h">{title}</h2>
+      <p>{change.kind === 'followProfile' ? `From ${repoName(change.repoUrl)}. ` : ''}Preview only. Nothing is written until you apply.</p></div></div>
     {state.previewNotice ? <p className="notice" role="status">{state.previewNotice}</p> : null}
-    {change.kind === 'followProfile' ? <p>From {change.repoUrl}</p> : null}
-    {dropped?.holds.length ? <div><h3>Holds that end with the switch</h3><ul aria-label="Dropped holds">{dropped.holds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></div> : null}
-    {dropped?.overrides.length ? <div><h3>Overrides removed</h3><ul aria-label="Dropped overrides">{dropped.overrides.map(path => <li key={path}>{overrideLabel(path)}</li>)}</ul></div> : null}
+    {dropped?.holds.length ? <div className="preview-group"><h3>Holds that end with the switch</h3><ul className="changes-list" aria-label="Dropped holds">{dropped.holds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></div> : null}
+    {dropped?.overrides.length ? <div className="preview-group"><h3>Overrides removed</h3><ul className="changes-list" aria-label="Dropped overrides">{dropped.overrides.map(path => <li key={path}>{overrideLabel(path)}</li>)}</ul></div> : null}
     {change.kind === 'setupApply' ? <ul className="changes-list" aria-label="Reviewed choices">{change.choices.map(choice => <li key={choice.itemId}><Label label={itemLabel(choice.itemId)} /><small>{STAGED[choice.action]}</small></li>)}</ul> : null}
     {change.kind === 'reconcile' ? <ul className="changes-list" aria-label="Changes to apply">{change.only.map(key => <li key={key}><Label label={keyLabel(key, state.inspection)} /></li>)}</ul>
       : preview.plan.steps.length ? <ol className="steps setup-sync-steps" aria-label="Planned steps">{preview.plan.steps.map((step, index) => <li key={index}><span>{step.summary}</span></li>)}</ol>
-      : change.kind === 'setupApply' ? <p>Nothing on this Mac changes yet. Apply saves your choices.</p> : null}
-    {preview.plan.skipped.length ? <div><h3>Left out</h3><ul className="changes-list" aria-label="Left out">{preview.plan.skipped.map((step, index) => <li key={index}><Label label={keyLabel(step.key, state.inspection)} /><small>{step.reason}</small></li>)}</ul></div> : null}
-    {'actionEffects' in preview ? preview.actionEffects?.map(effect => <p key={effect}>{effect}</p>) : null}
-    {change.kind === 'setupApply' ? <p>Items you don't choose will be held. Overrides and files your choices replace are backed up before writing.</p> : null}
+      : change.kind === 'setupApply' ? <p className="muted">Nothing on this Mac changes yet. Apply saves your choices.</p> : null}
+    {preview.plan.skipped.length ? <div className="preview-group"><h3>Left out</h3><ul className="changes-list" aria-label="Left out">{preview.plan.skipped.map((step, index) => <li key={index}><Label label={keyLabel(step.key, state.inspection)} /><small>{step.reason}</small></li>)}</ul></div> : null}
+    {'actionEffects' in preview ? preview.actionEffects?.map(effect => <p className="muted" key={effect}>{effect}</p>) : null}
+    {change.kind === 'setupApply' ? <p className="muted">Items you don't choose will be held. Overrides and files your choices replace are backed up before writing.</p> : null}
     <div className="setup-sync-actions"><button className="primary" disabled={!state.eligibility.apply} onClick={() => void controller.apply()}>{apply}</button>
       <button disabled={state.pending} onClick={() => controller.cancelPreview()}>Cancel</button></div>
   </section>;
 }
 
+// Planned steps of a run, when its acceptance records them.
+const plannedSteps = (run: RunView) => (run.intent as { parity?: { plannedKeys?: readonly string[] } }).parity?.plannedKeys?.length ?? 0;
+
 // One run: active, or started in this window. Interrupted and abandoned runs show as recovery instead.
 export function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: Pick<Actions, 'cancel'> }) {
   if (run.state === 'interrupted' || run.state === 'abandoned') return null;
   const result = run.result, ok = run.steps.filter(step => step.outcome === 'ok').length, failed = run.steps.filter(step => step.outcome === 'failed').length;
-  const outcome = !result ? (run.steps.length ? `${ok} of ${count(run.steps.length, 'step')} done${failed ? `, ${failed} failed` : ''}.` : 'Starting.')
+  const total = Math.max(plannedSteps(run), run.steps.length), running = activeRun(run);
+  const outcome = !result ? (run.steps.length ? `${ok} of ${count(total, 'step')} done${failed ? `, ${failed} failed` : ''}.` : 'Starting.')
     : result.status === 'done' ? `${count(result.ok, 'change')} applied${result.failed ? `, ${result.failed} failed` : ''}.`
     : result.status === 'cancelled' ? `Cancelled. ${count(result.remaining.length, 'change')} not started.`
     : errorText(result.message);
   return <section className="card changes-run" aria-labelledby="changes-run-h">
-    <h2 id="changes-run-h">{changeTitle(run.intent.change.kind)} · {RUN_STATE[run.state]}</h2>
-    <p role="status">{outcome}</p>
-    {run.installation ? <p>{run.installation.message}</p> : null}
-    {state.eligibility.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : null}
+    <div className="card-head"><div><h2 id="changes-run-h">{changeTitle(run.intent.change.kind)}</h2></div>
+      <div className="actions"><span className={`pill ${RUN_TONE[run.state]}`}>{running ? <span className="spinner" aria-hidden="true" /> : null}{RUN_STATE[run.state]}</span>
+        {state.eligibility.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : null}</div></div>
+    {running && total ? <progress aria-label={`${changeTitle(run.intent.change.kind)} progress`} value={run.steps.length} max={total} /> : null}
+    <p role="status" className={result && result.status !== 'done' && result.status !== 'cancelled' ? 'alert' : 'muted'}>{outcome}</p>
+    {run.installation ? <p className="muted">{run.installation.message}</p> : null}
   </section>;
 }
 
@@ -124,9 +145,9 @@ export function RunCard({ run, state, controller }: { run: RunView; state: Setup
 export function SetupProfiles({ state, controller, repoUrl }: { state: SetupSyncState; controller: Pick<SetupSyncController, 'followRepository'>; repoUrl: string }) {
   const available = state.profiles && !state.profiles.followed ? state.profiles.available : [];
   if (!available.length) return null;
-  return <div className="changes-local-group"><h3>Profiles in {repoUrl}</h3>
-    <ul className="profile-choice-list" aria-label="Profiles to follow">{available.map(profile => <li key={profile.name}>
-      <span><strong>{profile.name}</strong>{profile.extends ? <small>Builds on {profile.extends}</small> : null}</span>
+  return <div className="rows changes-local-group"><p className="group-label">Profiles in {repoName(repoUrl)}</p>
+    <ul className="rows profile-choice-list" aria-label="Profiles to follow">{available.map(profile => <li className="row" key={profile.name}>
+      <span className="row-main"><strong>{profile.name}</strong>{profile.extends ? <small className="row-sub">Builds on {profile.extends}</small> : null}</span>
       <button disabled={!state.eligibility.read} onClick={() => void controller.followRepository(repoUrl, profile.name)}>Follow {profile.name}</button>
     </li>)}</ul></div>;
 }
@@ -136,14 +157,20 @@ function Following({ state, controller, repoUrl = DEFAULT_REPO_URL }: Props) {
   const [link, setLink] = React.useState('');
   const followed = state.profiles?.followed;
   return <section className="card setup-sync-summary" aria-labelledby="changes-following-h">
-    <p className="eyebrow">FOLLOWING</p><h2 id="changes-following-h">{followed ? `Following ${followed.profile} from ${followed.repoUrl}` : source?.repository ? `Using ${source.repository}` : "This Mac doesn't follow a profile yet"}</h2>
-    {state.profileNotice ? <p className="notice">{state.profileNotice}</p> : null}
+    <h2 id="changes-following-h">{followed ? `Following ${followed.profile} from ${repoName(followed.repoUrl)}` : source?.repository ? `Using ${source.repository}` : "This Mac doesn't follow a profile yet"}</h2>
+    {state.profileNotice ? <p className={state.profiles ? 'notice' : 'alert'}>{state.profileNotice}</p> : null}
     <SetupProfiles state={state} controller={controller} repoUrl={repoUrl} />
-    {followed ? <label>Profile <select aria-label="Profile" value={state.switchTarget ?? followed.profile} disabled={!state.eligibility.read} onChange={event => void controller.switchProfile(event.target.value)}>{state.profiles?.available.map(profile => <option key={profile.name} value={profile.name}>{profile.name}</option>)}</select></label> : null}
-    <form onSubmit={event => { event.preventDefault(); void controller.followSharedLink(link); }}><label>Follow a shared link <input value={link} onChange={event => setLink(event.target.value)} disabled={!state.eligibility.read} placeholder="nortuscc://follow/…" /></label><button disabled={!state.eligibility.read || !link.trim()}>Preview follow</button></form>
-    {state.sources.length > 1 ? <label>Source <select value={source?.setupId ?? ''} disabled={!state.eligibility.read}
-      onChange={event => void controller.selectSource(event.target.value)}>{state.sources.map((item, index) => <option key={item.setupId} value={item.setupId}>{item.repository ?? `Source ${index + 1}`}</option>)}</select></label> : null}
-    {source && !source.trusted ? <p className="notice">Not trusted on this Mac.</p> : null}
+    <ul className="rows">
+      {followed ? <li className="row"><label className="row-main" htmlFor="changes-profile">Profile</label>
+        <div className="row-trail"><select id="changes-profile" aria-label="Profile" value={state.switchTarget ?? followed.profile} disabled={!state.eligibility.read} onChange={event => void controller.switchProfile(event.target.value)}>{state.profiles?.available.map(profile => <option key={profile.name} value={profile.name}>{profile.name}</option>)}</select></div></li> : null}
+      <li className="row"><form className="inline-form" onSubmit={event => { event.preventDefault(); void controller.followSharedLink(link); }}>
+        <label className="row-main inline-field"><span>Follow a shared link</span><input value={link} onChange={event => setLink(event.target.value)} disabled={!state.eligibility.read} placeholder="nortuscc://follow/…" /></label>
+        <button disabled={!state.eligibility.read || !link.trim()}>Preview follow</button></form></li>
+      {state.sources.length > 1 ? <li className="row"><label className="row-main" htmlFor="changes-source">Source</label>
+        <div className="row-trail"><select id="changes-source" value={source?.setupId ?? ''} disabled={!state.eligibility.read}
+          onChange={event => void controller.selectSource(event.target.value)}>{state.sources.map((item, index) => <option key={item.setupId} value={item.setupId}>{item.repository ?? `Source ${index + 1}`}</option>)}</select></div></li> : null}
+      {source && !source.trusted ? <li className="row"><p className="row-main">Not trusted on this Mac.</p><span className="pill pill-warning">Untrusted</span></li> : null}
+    </ul>
   </section>;
 }
 
@@ -153,21 +180,22 @@ function Row({ row, index, state, controller }: { row: ReviewRow; index: number;
   const chosen = staged?.action === 'accept' && row.held ? { ...staged, action: 'release' as const } : staged;
   const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
   const label = itemLabel(row.itemId);
-  return <li className="setup-sync-row">
-    <div className="setup-sync-row-head"><Label label={label} /><span className="setup-sync-tag">{CHANGE[row.change]}</span></div>
-    {row.held ? <small>On hold at the current value</small> : null}
-    {row.conflict ? <small>This Mac overrides this value</small> : null}
-    <details className="setup-sync-values"><summary>Values and differences</summary>
-      {([['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const).map(([name, value]) => <div key={name}>
-        <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
-      </div>)}
-      {row.truncated ? <p className="setup-sync-warn">Values are shortened. Only part of each value is shown.</p> : null}
-    </details>
-    <fieldset className="setup-sync-choices"><legend>Choice for {label.text}</legend>
-      {actions.map(action => <label key={action} className="setup-sync-choice"><input type="radio" name={`incoming-${index}`} value={action}
-        checked={chosen?.action === action} disabled={!state.eligibility.choose} onChange={() => controller.choose({ itemId: row.itemId, action })} />{pairLabel(row, action)}</label>)}
-      {!chosen ? <p className="setup-sync-note">No choice selected.</p> : null}
-    </fieldset>
+  return <li className="row setup-sync-row">
+    <div className="row-main"><span className="row-title"><Label label={label} /></span>
+      {row.held || row.conflict ? <span className="row-sub">{[row.held ? 'On hold at the current value' : '', row.conflict ? 'This Mac overrides this value' : ''].filter(Boolean).join(' · ')}</span> : null}</div>
+    <div className="row-trail"><span className={`pill ${CHANGE_TONE[row.change]}`}>{CHANGE[row.change]}</span></div>
+    <div className="row-detail">
+      <fieldset className="setup-sync-choices"><legend className="sr-only">Choice for {label.text}</legend>
+        {actions.map(action => <label key={action} className="setup-sync-choice"><input type="radio" name={`incoming-${index}`} value={action}
+          checked={chosen?.action === action} disabled={!state.eligibility.choose} onChange={() => controller.choose({ itemId: row.itemId, action })} />{pairLabel(row, action)}</label>)}
+      </fieldset>
+      <details className="setup-sync-values"><summary>Values and differences</summary>
+        {([['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const).map(([name, value]) => <div key={name}>
+          <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
+        </div>)}
+        {row.truncated ? <p className="setup-sync-warn">Values are shortened. Only part of each value is shown.</p> : null}
+      </details>
+    </div>
   </li>;
 }
 
@@ -176,15 +204,22 @@ function Pins({ review, state, controller }: { review: Review; state: SetupSyncS
   const onPage = new Set(review.rows.map(row => row.itemId));
   const groups = review.pinGroups.filter(group => group.itemIds.some(id => onPage.has(id)));
   if (!groups.length) return null;
-  return <div className="setup-sync-pins" role="group" aria-label="Source pins"><h3>Source pins</h3>
-    <p className="setup-sync-note">A pin moves for a whole source. Choose the same action for every affected item, including rows on other pages.</p>
-    {groups.map(group => <fieldset key={group.source} className="setup-sync-pin"><legend>{group.source}</legend>
-      <p>{count(group.itemIds.length, 'affected item')}, {group.itemIds.filter(id => !onPage.has(id)).length} not on this page</p>
-      <div className="setup-sync-actions"><button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('accept', group.source)}>Take this group</button>
-        <button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('hold', group.source)}>Hold this group</button></div>
-      <details><summary>Affected items</summary><ul>{group.itemIds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></details>
-      {state.groupErrors[group.source] ? <p className="alert" role="alert">{state.groupErrors[group.source]}</p> : null}
-    </fieldset>)}
+  return <div className="rows setup-sync-pins" role="group" aria-label="Source pins">
+    <p className="group-label">Source pins</p>
+    <p className="row-sub pins-note">A pin moves a whole source, so choose one action for all its items, including those on other pages.</p>
+    {groups.map(group => { const elsewhere = group.itemIds.filter(id => !onPage.has(id)).length; return <fieldset key={group.source} className="setup-sync-pin">
+      <legend className="sr-only">{group.source}</legend>
+      <div className="row">
+        <div className="row-main"><span className="row-title" aria-hidden="true">{group.source}</span>
+          <span className="row-sub">{count(group.itemIds.length, 'affected item')}, {elsewhere} not on this page</span></div>
+        <div className="row-trail"><button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('accept', group.source)}>Take this group</button>
+          <button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('hold', group.source)}>Hold this group</button></div>
+        <div className="row-detail">
+          <details><summary>Affected items</summary><ul className="changes-list">{group.itemIds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></details>
+          {state.groupErrors[group.source] ? <p className="alert" role="alert">{state.groupErrors[group.source]}</p> : null}
+        </div>
+      </div>
+    </fieldset>; })}
   </div>;
 }
 
@@ -192,48 +227,55 @@ function Incoming({ review, state, controller }: { review: Review; state: SetupS
   const can = state.eligibility, { incoming, held } = incomingCounts(review);
   const from = state.profiles?.followed?.profile ?? 'your profile';
   const page = state.pageIndex ? ` · page ${state.pageIndex + 1}` : '';
-  return <section className="card setup-sync-review" aria-labelledby="changes-incoming-h"><p className="eyebrow">INCOMING</p>
-    <h2 id="changes-incoming-h">{incoming + held ? `${count(incoming, 'incoming change')} from ${from}${held ? ` · ${held} on hold` : ''}${page}` : `No incoming changes from ${from}${page}`}</h2>
-    {review.rows.some(row => row.change !== 'unchanged') ? <div className="setup-sync-actions" role="group" aria-label="Choose for every incoming row">
-      <button disabled={!can.choose} onClick={() => controller.chooseAll('accept')}>Take all incoming</button>
-      <button disabled={!can.choose} onClick={() => controller.chooseAll('hold')}>Hold all incoming</button></div> : null}
+  const rows = review.rows.length > 0;
+  return <section className="card setup-sync-review" aria-labelledby="changes-incoming-h">
+    <div className="card-head"><div><h2 id="changes-incoming-h">{incoming + held ? `${count(incoming, 'incoming change')} from ${from}${held ? ` · ${held} on hold` : ''}${page}` : `Nothing incoming from ${from}${page}`}</h2>
+      <p>{rows ? "Choose for each item. Items you don't choose will be held." : "You're up to date."}</p></div>
+      {review.rows.some(row => row.change !== 'unchanged') ? <div className="actions" role="group" aria-label="Choose for every incoming row">
+        <button disabled={!can.choose} onClick={() => controller.chooseAll('accept')}>Take all incoming</button>
+        <button disabled={!can.choose} onClick={() => controller.chooseAll('hold')}>Hold all incoming</button></div> : null}</div>
     {review.pinGroups.length ? <Pins review={review} state={state} controller={controller} /> : null}
-    <ul className="setup-sync-rows">{review.rows.map((row, index) => <Row key={row.itemId} row={row} index={index} state={state} controller={controller} />)}</ul>
+    {rows ? <ul className="rows setup-sync-rows">{review.rows.map((row, index) => <Row key={row.itemId} row={row} index={index} state={state} controller={controller} />)}</ul> : null}
     {review.nextCursor || state.pageIndex ? <nav className="setup-sync-actions" aria-label="Review pages"><button disabled={!can.browse || !state.pageIndex} onClick={() => void controller.page('previous')}>Previous page</button>
       <button disabled={!can.browse || !review.nextCursor} onClick={() => void controller.page('next')}>Next page</button></nav> : null}
-    <p className="notice">Items you don't choose will be held.</p><div className="setup-sync-actions"><button disabled={!can.preview} onClick={() => void controller.preview()}>Preview</button><span>{count(state.choices.length, 'choice')} made. Preview writes nothing.</span></div>
+    {rows ? <div className="setup-sync-actions section-foot"><button className="primary" disabled={!can.preview} title={can.preview ? undefined : state.choices.length ? undefined : 'Choose at least one item first.'} onClick={() => void controller.preview()}>Preview</button>
+      <span className="reason">{count(state.choices.length, 'choice')} made. Preview writes nothing.</span></div> : null}
     {state.previewError && !Object.keys(state.groupErrors).length ? <p className="alert" role="alert">{state.previewError}</p> : null}
   </section>;
 }
 
 // This Mac's own items: those waiting to apply are checked into one reconcile; the rest name their next step.
 function OnThisMac({ state, controller, onOpenProfiles }: Props) {
+  const [all, setAll] = React.useState(false);
   const { inspection, eligibility: can } = state;
-  if (!inspection) return <section className="card changes-local" aria-labelledby="changes-local-h"><p className="eyebrow">ON THIS MAC</p><h2 id="changes-local-h">This Mac</h2>
-    <p className="setup-sync-note">This Mac hasn't been inspected yet.</p></section>;
+  if (!inspection) return <section className="card changes-local" aria-labelledby="changes-local-h"><h2 id="changes-local-h">On this Mac</h2>
+    <p className="muted">This Mac hasn't been inspected yet.</p></section>;
   const excluded = new Set(state.excluded), selected = selectedLocal(state).length;
   const waiting = inspection.items.filter(item => item.disposition === 'apply');
   const captured = inspection.items.filter(item => item.disposition === 'capture');
   const blocked = inspection.items.filter(item => item.disposition === 'blocked');
   const issues = inspection.profile.issues.length, unread = inspection.probeErrors.length;
-  return <section className="card changes-local" aria-labelledby="changes-local-h"><p className="eyebrow">ON THIS MAC</p>
-    <h2 id="changes-local-h">{waiting.length ? `${count(waiting.length, 'change')} waiting to apply on this Mac` : 'Nothing waiting to apply on this Mac'}</h2>
-    {issues ? <p className="notice">Your profile has {count(issues, 'problem')}, so changes can’t be applied to this Mac. Open Details below to see {issues === 1 ? 'it' : 'them'}.</p> : null}
+  const shown = all ? waiting : waiting.slice(0, LOCAL_PREVIEW_ROWS);
+  return <section className="card changes-local" aria-labelledby="changes-local-h">
+    <div className="card-head"><div><h2 id="changes-local-h">{waiting.length ? `${count(waiting.length, 'change')} waiting to apply on this Mac` : 'Nothing waiting to apply on this Mac'}</h2>
+      {waiting.length ? <p>Uncheck anything you want to leave for now.</p> : null}</div></div>
+    {issues ? <p className="alert">Your profile has {count(issues, 'problem')}, so changes can’t be applied to this Mac. Open Details below to see {issues === 1 ? 'it' : 'them'}.</p> : null}
     {unread ? <p className="notice">{count(unread, 'part')} of this Mac couldn’t be read. Open Details below to see why.</p> : null}
     {waiting.length ? <>
-      <ul className="setup-sync-rows">{waiting.map(item => { const label = observedLabel(item); return <li key={item.key} className="setup-sync-row">
-        <label className="setup-sync-choice"><input type="checkbox" aria-label={`Include ${label.text}`} checked={!excluded.has(item.key)} disabled={!can.local} onChange={() => controller.toggleLocal(item.key)} />
-          <span><Label label={label} /><small>{WAITING[item.state] ?? item.note ?? 'Waiting to apply'}</small></span></label></li>; })}</ul>
-      <div className="setup-sync-actions"><button disabled={!can.previewLocal} onClick={() => void controller.previewLocal()}>Preview</button><span>{selected} of {waiting.length} included. Preview writes nothing.</span></div>
+      <ul className="rows setup-sync-rows">{shown.map(item => { const label = observedLabel(item); return <li key={item.key} className="row setup-sync-row">
+        <label className="setup-sync-choice row-main"><input type="checkbox" aria-label={`Include ${label.text}`} checked={!excluded.has(item.key)} disabled={!can.local} onChange={() => controller.toggleLocal(item.key)} />
+          <span className="local-text"><Label label={label} /><small>{WAITING[item.state] ?? item.note ?? 'Waiting to apply'}</small></span></label></li>; })}
+        {waiting.length > LOCAL_PREVIEW_ROWS ? <li className="row"><button className="link" aria-expanded={all} onClick={() => setAll(!all)}>{all ? 'Show fewer' : `Show all ${waiting.length}`}</button></li> : null}</ul>
+      <div className="setup-sync-actions section-foot"><button className="primary" disabled={!can.previewLocal} onClick={() => void controller.previewLocal()}>Preview</button><span className="reason">{selected} of {waiting.length} included. Preview writes nothing.</span></div>
     </> : null}
     {state.localError ? <p className="alert" role="alert">{state.localError}</p> : null}
-    {captured.length ? <div className="changes-local-group"><h3>Changed on this Mac</h3>
-      <p className="setup-sync-note">These differ from your profile. Save them to a profile draft to keep them.</p>
-      <ul className="changes-list">{captured.map(item => <li key={item.key}><Label label={observedLabel(item)} /></li>)}</ul>
-      {onOpenProfiles ? <button onClick={onOpenProfiles}>Open Profiles</button> : null}</div> : null}
-    {blocked.length ? <div className="changes-local-group"><h3>Can’t be applied</h3>
-      <ul className="changes-list">{blocked.map(item => <li key={item.key}><Label label={observedLabel(item)} /><small>{item.note ?? 'This Mac’s copy needs fixing by hand.'}</small></li>)}</ul>
-      <p className="setup-sync-note">Fix these on this Mac, then reload.</p></div> : null}
+    {captured.length ? <div className="rows changes-local-group"><p className="group-label">Changed on this Mac</p>
+      <div className="row"><p className="row-sub row-main">These differ from your profile. Save them to a profile draft to keep them.</p>
+        {onOpenProfiles ? <div className="row-trail"><button onClick={onOpenProfiles}>Open Profiles</button></div> : null}</div>
+      <ul className="rows">{captured.map(item => <li className="row" key={item.key}><Label label={observedLabel(item)} /></li>)}</ul></div> : null}
+    {blocked.length ? <div className="rows changes-local-group"><p className="group-label">Can’t be applied</p>
+      <ul className="rows">{blocked.map(item => <li className="row" key={item.key}><span className="row-main"><Label label={observedLabel(item)} /><small className="row-sub">{item.note ?? 'This Mac’s copy needs fixing by hand.'}</small></span></li>)}</ul>
+      <p className="row-sub group-foot">Fix these on this Mac, then reload.</p></div> : null}
   </section>;
 }
 
@@ -241,7 +283,7 @@ function OnThisMac({ state, controller, onOpenProfiles }: Props) {
 function Details({ state }: { state: SetupSyncState }) {
   const { inspection, review } = state;
   if (!inspection && !review) return null;
-  return <details className="changes-details"><summary>Details</summary>
+  return <details className="details-card changes-details"><summary>Details</summary>
     <dl className="setup-sync-facts">
       {inspection ? <><dt>Repository</dt><dd><code>{inspection.profile.repo}</code></dd>
         <dt>Revision</dt><dd><code>{inspection.profile.revision ? short(inspection.profile.revision) : 'Unknown'}</code></dd></> : null}
@@ -264,13 +306,17 @@ function Details({ state }: { state: SetupSyncState }) {
 // Changes: one preview panel holding the page's only Apply, the current run, the followed profile, incoming
 // changes and this Mac's own items, then Details.
 export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Props) {
-  if (!state.native) return <div className="setup-sync-view changes-view"><h1>Changes</h1><p className="notice">Open the desktop app to review changes. Browser preview has no agent connection.</p></div>;
+  if (!state.native) return <div className="setup-sync-view changes-view"><header className="page-header"><div><h1>Changes</h1></div></header>
+    <p className="notice">Open the desktop app to review changes. Browser preview has no agent connection.</p></div>;
   const { review, run, eligibility: can } = state;
+  const reason = unavailableReason(state);
   return <div className="setup-sync-view changes-view">
-    <header><div><p className="eyebrow">THIS MAC</p><h1>Changes</h1><p className="intro">What your profile brings and what this Mac still needs. Preview, then apply.</p></div>
-      <div className="setup-sync-actions"><button disabled={!can.read} onClick={() => void controller.reload()}>Reload</button>
-        <button disabled={!can.refetch} onClick={() => void controller.refetch()}>Check for new changes</button><span className={`connection ${state.connection}`}>{CONNECTION[state.connection]}</span></div></header>
+    <header className="page-header"><div><h1>Changes</h1><p className="intro">What your profile brings and what this Mac still needs.</p></div>
+      <div className="header-actions">{state.connection !== 'connected' ? <span className={`pill connection ${state.connection}`}>{CONNECTION[state.connection]}</span> : null}
+        <button disabled={!can.read} title={reason ?? undefined} onClick={() => void controller.reload()}>Reload</button>
+        <button disabled={!can.refetch} title={reason ?? undefined} onClick={() => void controller.refetch()}>Check for new changes</button></div></header>
     {state.error && !Object.keys(state.groupErrors).length ? <p className="alert" role="alert">{state.error}</p> : null}
+    {reason && !activeRun(run) ? <p className="notice busy-line">{state.connection === 'connected' ? <span className="spinner" aria-hidden="true" /> : null}<span>{reason}</span></p> : null}
     <p className="setup-sync-detail" role="status">{state.pending ? 'Reading…' : state.message}</p>
     <PreviewPanel state={state} controller={controller} />
     {run ? <RunCard run={run} state={state} controller={controller} /> : null}

@@ -8,7 +8,7 @@ import type { UpdateViewState } from './update-controller.ts';
 import type { MachineController, ViewState } from './controller.ts';
 import { incomingCounts, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { draftCount, type HomeState } from './home-controller.ts';
-import { errorText } from './copy.ts';
+import { errorText, repoName } from './copy.ts';
 
 export type Screen = 'home' | 'changes' | 'skills' | 'profiles' | 'upstreams' | 'publish' | 'settings';
 // Counts shown beside a screen's name: undecided incoming changes, unpublished drafts, an app update.
@@ -84,7 +84,7 @@ export function ShellView({ screen, navigate, children, machine, onReconnect, on
           <div className="nav-group nav-settings"><NavButton screen="settings" label="Settings" current={screen} badges={badges} navigate={navigate} /></div>
         </nav>
       </aside>
-      <main>{banner}{children}</main>
+      <main><div className="page">{banner}{children}</div></main>
     </div>
   );
 }
@@ -108,7 +108,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
       <p className="intro">Prepare the local setup and background agent. Review configuration changes before applying them.</p>
       <section className="form-section">
         <h2>Setup repository</h2>
-        <p><code>{DEFAULT_REPO_URL}</code></p>
+        <p className="muted">{DEFAULT_REPO_URL}</p>
         <fieldset disabled={disabled}>
           <legend>Configurations to manage</legend>
           {picks.map(([key, label]) => (
@@ -206,10 +206,10 @@ export function StartupBoundary({ setup, setupController, machine, machineContro
 
 export function OfferedSetup({ setup, controller, disabled, onFollowProfile }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean; onFollowProfile?: (setupId: string) => void | Promise<void> }) {
   if (setup.profile) return (
-    <div className="offered-setup">
-      <h3>{setup.name}</h3><p><code>{setup.repoUrl}</code> · {setup.profile}</p>
-      <button disabled={disabled || !onFollowProfile} onClick={() => onFollowProfile?.(setup.setupId)}>Follow this profile</button>
-    </div>
+    <li className="row offered-setup">
+      <div className="row-main"><h3 className="row-title">{setup.name}</h3><p className="row-sub">{repoName(setup.repoUrl)} · {setup.profile}</p></div>
+      <div className="row-trail"><button disabled={disabled || !onFollowProfile} onClick={() => onFollowProfile?.(setup.setupId)}>Follow this profile</button></div>
+    </li>
   );
   return <LegacyOfferedSetup setup={setup} controller={controller} disabled={disabled} />;
 }
@@ -217,14 +217,14 @@ export function OfferedSetup({ setup, controller, disabled, onFollowProfile }: {
 function LegacyOfferedSetup({ setup, controller, disabled }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean }) {
   const [consent, setConsent] = useState(false);
   return (
-    <div className="offered-setup">
-      <h3>{setup.name}</h3><p><code>{setup.repoUrl}</code></p>
-      <label className="choice">
-        <input type="checkbox" disabled={disabled} checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-        I trust this repository to supply setup changes on this Mac.
-      </label>
-      <button disabled={disabled || !consent} onClick={() => void controller.trustSetup(setup.setupId, consent)}>Trust on this Mac</button>
-    </div>
+    <li className="row offered-setup">
+      <div className="row-main"><h3 className="row-title">{setup.name}</h3><p className="row-sub">{repoName(setup.repoUrl)}</p>
+        <label className="choice">
+          <input type="checkbox" disabled={disabled} checked={consent} onChange={(event) => setConsent(event.target.checked)} />
+          I trust this repository to supply setup changes on this Mac.
+        </label></div>
+      <div className="row-trail"><button disabled={disabled || !consent} onClick={() => void controller.trustSetup(setup.setupId, consent)}>Trust on this Mac</button></div>
+    </li>
   );
 }
 
@@ -237,87 +237,88 @@ export function SettingsView({ machine, state, controller, machineController, on
   const disabled = !native || state.pending;
   const authenticated = hosted?.auth === 'signed-in';
   const pending = state.flow === 'pending' && !authenticated;
+  const reconnect = reconnectReason(machine);
   return (
     <>
-      <header><div><p className="eyebrow">THIS MAC</p><h1>Settings</h1><p className="intro">Account access is optional. Review and apply work locally.</p></div></header>
-      <section className="form-section">
-        <h2>Account</h2>
-        {!native ? <p>{machine.detail}</p> : null}
-        {hosted ? (
-          <>
-            <p>{authenticated ? `Signed in as ${hosted.login ?? 'GitHub account'}` : hosted.auth === 'unauthenticated' ? 'Authorization expired' : pending ? 'Authorization pending' : 'Signed out'}</p>
-            {authenticated ? <button disabled={disabled} onClick={() => void controller.signOut()}>Sign out</button> : pending ? (
-              <>
-                <p>Complete GitHub authorization to sign in.</p>
-                {state.code ? (
-                  <>
-                    <p className="device-code" aria-label="GitHub device code">{state.code.userCode}</p>
-                    <p className="muted">This code expires. A code alone does not complete sign-in.</p>
-                    <button disabled={disabled} onClick={() => void controller.openGitHub()}>Open GitHub</button>
-                  </>
-                ) : <p className="muted">The code is unavailable in this window. Cancel to start again.</p>}
-                <button disabled={!native} onClick={() => void controller.signOut()}>Cancel sign-in</button>
-              </>
-            ) : (
-              <>
-                <label className="choice">
-                  <input type="checkbox" disabled={disabled || !hosted.enabled} checked={state.reportStatus} onChange={(event) => controller.chooseReporting(event.target.checked)} />
-                  Share this machine's status summary
-                </label>
-                <p className="muted">Includes policy, agent types, setup adoption and drift counts. No configuration values or file contents.</p>
-                <button disabled={disabled || !hosted.enabled} onClick={() => void controller.signIn()}>Sign in with GitHub</button>
-              </>
-            )}
-            {!hosted.enabled ? <p>Hosted accounts are disabled for this agent.</p> : null}
-            <div className="sync-state">
-              <p>Last successful sync: {hosted.lastSyncAt ?? 'Never'}</p>
-              {hosted.retryAt ? <p role="status">Retry after: {hosted.retryAt}</p> : null}
-              {hosted.error ? <p role="alert">Account service: {hosted.error}</p> : null}
-              {authenticated ? <button disabled={disabled} onClick={() => void controller.syncNow()}>Sync now / retry</button> : null}
-            </div>
-          </>
-        ) : <p className="muted">Account state has not been loaded.</p>}
-        <button disabled={disabled} onClick={() => void controller.refresh()}>Refresh account</button>
+      <header className="page-header"><div><h1>Settings</h1><p className="intro">Account access is optional. Review and apply work locally.</p></div></header>
+      <section className="card" aria-labelledby="settings-account-h">
+        <h2 id="settings-account-h">Account</h2>
+        <ul className="rows">
+          {!native ? <li className="row"><p className="row-sub">{machine.detail}</p></li> : null}
+          {hosted ? <>
+            <li className="row">
+              <div className="row-main"><p className="row-title">{authenticated ? `Signed in as ${hosted.login ?? 'GitHub account'}` : hosted.auth === 'unauthenticated' ? 'Authorization expired' : pending ? 'Authorization pending' : 'Signed out'}</p>
+                {pending ? <p className="row-sub">Complete GitHub authorization to sign in.</p> : !hosted.enabled ? <p className="row-sub">Hosted accounts are disabled for this agent.</p> : null}</div>
+              <div className="row-trail">
+                {authenticated ? <button disabled={disabled} onClick={() => void controller.signOut()}>Sign out</button>
+                  : pending ? <button disabled={!native} onClick={() => void controller.signOut()}>Cancel sign-in</button>
+                  : <button disabled={disabled || !hosted.enabled} onClick={() => void controller.signIn()}>Sign in with GitHub</button>}
+              </div>
+            </li>
+            {pending ? <li className="row">{state.code ? <>
+              <div className="row-main"><p className="device-code" aria-label="GitHub device code">{state.code.userCode}</p>
+                <p className="row-sub">This code expires. A code alone does not complete sign-in.</p></div>
+              <div className="row-trail"><button disabled={disabled} onClick={() => void controller.openGitHub()}>Open GitHub</button></div>
+            </> : <p className="row-sub">The code is unavailable in this window. Cancel to start again.</p>}</li> : null}
+            {!authenticated && !pending ? <li className="row"><label className="choice">
+              <input type="checkbox" disabled={disabled || !hosted.enabled} checked={state.reportStatus} onChange={(event) => controller.chooseReporting(event.target.checked)} />
+              <span className="row-main"><span>Share this machine's status summary</span>
+                <span className="row-sub">Includes policy, agent types, setup adoption and drift counts. No configuration values or file contents.</span></span>
+            </label></li> : null}
+            <li className="row sync-state">
+              <div className="row-main"><p>Last successful sync: {hosted.lastSyncAt ?? 'Never'}</p>
+                {hosted.retryAt ? <p className="row-sub" role="status">Retry after: {hosted.retryAt}</p> : null}
+                {hosted.error ? <p className="alert" role="alert">Account service: {hosted.error}</p> : null}</div>
+              <div className="row-trail">{authenticated ? <button disabled={disabled} onClick={() => void controller.syncNow()}>Sync now / retry</button> : null}
+                <button disabled={disabled} onClick={() => void controller.refresh()}>Refresh account</button></div>
+            </li>
+          </> : <li className="row"><p className="row-sub">Account state has not been loaded.</p>
+            <div className="row-trail"><button disabled={disabled} onClick={() => void controller.refresh()}>Refresh account</button></div></li>}
+        </ul>
         <p className="feedback" role={state.flow === 'error' ? 'alert' : 'status'}>{state.detail}</p>
       </section>
-      <section className="form-section">
-        <h2>Machine</h2>
-        <label className="field">Apply policy
-          <select disabled={disabled} value={machine.status?.policy ?? machine.hello?.policy ?? 'notify'} onChange={(event) => void controller.setPolicy(event.target.value as Policy)}>
-            <option value="notify">Notify</option><option value="manual">Manual</option><option value="auto-apply">Auto apply</option>
-          </select>
-        </label>
-        {machine.status?.paused ? (
-          <div className="prerequisite"><p>Automatic apply paused: {machine.status.paused.reason}</p><button disabled={disabled} onClick={() => void controller.resume()}>Resume automatic apply</button></div>
-        ) : null}
-        {authenticated ? (
-          <>
-            <form onSubmit={(event) => { event.preventDefault(); if (name) void controller.machineSettings({ name }); }}>
+      <section className="card" aria-labelledby="settings-machine-h">
+        <h2 id="settings-machine-h">Machine</h2>
+        <ul className="rows">
+          <li className="row"><label className="row-main" htmlFor="settings-policy"><span className="row-title">Apply policy</span>
+            <span className="row-sub">How the agent handles incoming changes.</span></label>
+            <div className="row-trail"><select id="settings-policy" disabled={disabled} value={machine.status?.policy ?? machine.hello?.policy ?? 'notify'} onChange={(event) => void controller.setPolicy(event.target.value as Policy)}>
+              <option value="notify">Notify</option><option value="manual">Manual</option><option value="auto-apply">Auto apply</option>
+            </select></div></li>
+          {machine.status?.paused ? <li className="row"><div className="row-main"><p className="row-title">Automatic apply paused</p><p className="row-sub">{machine.status.paused.reason}</p></div>
+            <div className="row-trail"><button disabled={disabled} onClick={() => void controller.resume()}>Resume automatic apply</button></div></li> : null}
+          {authenticated ? <>
+            <li className="row"><form className="row-main" onSubmit={(event) => { event.preventDefault(); if (name) void controller.machineSettings({ name }); }}>
               <label className="field">New machine name
-                <input type="text" value={name} maxLength={200} disabled={disabled} onChange={(event) => setName(event.target.value)} />
+                <span className="actions"><input type="text" value={name} maxLength={200} disabled={disabled} onChange={(event) => setName(event.target.value)} />
+                  <button disabled={disabled || !name}>Queue name change</button></span>
               </label>
-              <button disabled={disabled || !name}>Queue name change</button>
-              <p className="muted">The service does not return the saved name here. Acknowledgement confirms a queued update.</p>
-            </form>
-            <label className="choice">
+              <p className="row-sub">The service does not return the saved name here. Acknowledgement confirms a queued update.</p>
+            </form></li>
+            <li className="row"><label className="choice">
               <input type="checkbox" disabled={disabled || !hosted.machine} checked={hosted.machine?.reportStatus ?? false} onChange={(event) => void controller.machineSettings({ reportStatus: event.target.checked })} />
-              Share this machine's status summary
-            </label>
-            <p className="muted">Displayed reporting settings include local queued changes.</p>
-          </>
-        ) : null}
-        <button disabled={machine.connection === 'browser' || machine.pending || (native && (machine.status?.applying === true || machine.run?.outcome === 'running'))} onClick={() => void machineController.restart()}>Reconnect agent</button>
-        {machine.hello ? <details className="settings-details"><summary>Details</summary>
-          <p className="agent-version">Agent version {machine.hello.agentVersion}</p>
-        </details> : null}
+              <span className="row-main"><span>Share this machine's status summary</span><span className="row-sub">Displayed reporting settings include local queued changes.</span></span>
+            </label></li>
+          </> : null}
+          <li className="row"><div className="row-main"><p className="row-title">Local agent</p><p className="row-sub">{reconnect ?? 'Restarts the background agent on this Mac.'}</p></div>
+            <div className="row-trail"><button disabled={reconnect !== null} title={reconnect ?? undefined} onClick={() => void machineController.restart()}>Reconnect agent</button></div>
+            {machine.hello ? <details className="settings-details"><summary>Details</summary><p className="agent-version">Agent version {machine.hello.agentVersion}</p></details> : null}</li>
+        </ul>
       </section>
       {authenticated && hosted.setups.length ? (
-        <section className="form-section">
-          <h2>Offered setups</h2>
-          <p>Account membership does not grant trust. Review each repository before consenting.</p>
-          {hosted.setups.map((setup) => <OfferedSetup key={`${machine.session}:${hosted.accountId}:${setup.setupId}:${setup.repoUrl}`} setup={setup} controller={controller} disabled={disabled} onFollowProfile={onFollowProfile} />)}
+        <section className="card" aria-labelledby="settings-offered-h">
+          <div className="card-head"><div><h2 id="settings-offered-h">Offered setups</h2><p>Account membership does not grant trust. Review each repository before consenting.</p></div></div>
+          <ul className="rows">{hosted.setups.map((setup) => <OfferedSetup key={`${machine.session}:${hosted.accountId}:${setup.setupId}:${setup.repoUrl}`} setup={setup} controller={controller} disabled={disabled} onFollowProfile={onFollowProfile} />)}</ul>
         </section>
       ) : null}
     </>
   );
+}
+
+// Why Reconnect agent is unavailable, or null when it is available.
+function reconnectReason(machine: ViewState): string | null {
+  if (machine.connection === 'browser') return 'Open the desktop app to reconnect the agent.';
+  if (machine.pending) return 'Waiting for the agent to answer.';
+  if (machine.connection === 'connected' && (machine.status?.applying === true || machine.run?.outcome === 'running')) return 'Available when the current apply finishes.';
+  return null;
 }

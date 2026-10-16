@@ -1,7 +1,7 @@
 import React from 'react';
 import type { OperationOutput, RunView } from '@nortuscc/agent/operations';
 import type { AuthorAction, AuthorController, AuthorIntent, AuthorState } from './author-controller.ts';
-import { changeTitle, errorText, itemLabel, relativeTime } from './copy.ts';
+import { changeTitle, errorText, itemLabel, plural, relativeTime, repoName } from './copy.ts';
 import { lineDiff } from './line-diff.ts';
 import { RunRecovery } from './run-recovery.tsx';
 
@@ -12,11 +12,13 @@ type ProfileIssues = NonNullable<OperationOutput<'authorProfiles'>['issues']>;
 type Draft = NonNullable<AuthorState['draft']>;
 type DraftPreview = OperationOutput<'draftPreview'>;
 
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+// Why read and write actions are unavailable, shown as their buttons' titles. HOOK(controller): canRead and
+// canWrite carry no reason; replace these with the controller's own once it has them.
+export const READ_REASON = 'Reconnect the agent and finish any app update first.';
+export const WRITE_REASON = 'Available when this Mac finishes its current work.';
+
 const list = (names: readonly string[]) => names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 const short = (revision: string) => revision.slice(0, 7);
-// "example/setup" for a GitHub URL; other repositories keep their URL.
-const repoName = (url: string) => url.replace(/^(?:https:\/\/github\.com\/|git@github\.com:)/, '').replace(/\.git$/, '');
 const active = (run: RunView | null | undefined) => run?.state === 'accepted' || run?.state === 'running';
 const PUBLICATION_KINDS: readonly string[] = ['publishDraft', 'announcePublication'];
 
@@ -45,8 +47,8 @@ function authorErrorText(state: AuthorState): string {
 export function AuthorFeedback({ state }: Pick<AuthorProps, 'state'>) {
   return <>
     {!state.canRead && !state.pending ? <p className="notice">Reconnect the local agent and finish any app maintenance to read author settings.</p> : null}
-    {state.pending ? <p role="status">Reading or saving author settings…</p> : null}
-    {state.message ? <p role="status">{state.message}</p> : null}
+    {state.pending ? <p className="muted busy-line" role="status"><span className="spinner" aria-hidden="true" /> Reading or saving author settings…</p> : null}
+    {state.message ? <p className="muted" role="status">{state.message}</p> : null}
     {state.error && !state.failedAction ? <p className="alert" role="alert">{authorErrorText(state)}</p> : null}
   </>;
 }
@@ -74,7 +76,7 @@ export function RunStatus({ state, controller, page }: AuthorProps & { page: 'pu
   if (!shown) return null;
   const message = run.result && 'message' in run.result ? ` ${run.result.message}` : '';
   return <>
-    {active(run) ? <p role="status">{`${changeTitle(kind)}… `}<button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel</button></p>
+    {active(run) ? <p className="notice busy-line" role="status"><span className="spinner" aria-hidden="true" />{`${changeTitle(kind)}… `}<button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel</button></p>
       : <p className="alert" role="alert">{`${changeTitle(kind)} ${run.state === 'failed' ? 'failed' : 'was cancelled'}.${message}`}</p>}
     <ActionError state={state} action="cancel" />
   </>;
@@ -104,24 +106,28 @@ function itemSentence(item: DraftPreview['items'][number]) {
 const draftAge = (draft: Draft) => relativeTime(draft.createdAt) || 'an unknown date';
 const draftLabel = (draft: Draft) => `Draft from ${draftAge(draft)} · ${plural(draft.intents.length, 'change')}`;
 
+const GH = { missing: ['Not installed', 'pill-warning'], 'signed-out': ['Signed out', 'pill-warning'], ready: ['Ready', 'pill-success'], error: ['Unavailable', 'pill-danger'] } as const;
 function GitHubCard({ state, controller }: AuthorProps) {
   const signingIn = state.run?.intent.change.kind === 'ghLogin' && active(state.run);
   const code = signingIn ? state.run?.ghCode : null;
   const ready = state.gh?.state === 'ready';
-  return <section className="card" aria-label="GitHub publishing access"><h2>{ready ? 'GitHub' : 'Connect GitHub CLI for publishing'}</h2>
-    <p>{state.gh?.state === 'missing' ? 'GitHub CLI is not installed.' : state.gh?.state === 'signed-out' ? 'Not signed in to GitHub, or GitHub is unreachable.'
-      : ready ? 'GitHub is ready. Publishing uses your GitHub CLI sign-in.' : 'GitHub state is unavailable.'}</p>
+  const [label, tone] = state.gh ? GH[state.gh.state] ?? ['Unknown', ''] : ['Unknown', ''];
+  return <section className="card" aria-label="GitHub publishing access">
+    <div className="card-head"><div><h2>{ready ? 'GitHub' : 'Connect GitHub CLI for publishing'}</h2>
+      <p>{state.gh?.state === 'missing' ? 'GitHub CLI is not installed.' : state.gh?.state === 'signed-out' ? 'Not signed in to GitHub, or GitHub is unreachable.'
+        : ready ? 'Publishing uses your GitHub CLI sign-in.' : 'GitHub state is unavailable.'}</p></div>
+      <span className={`pill ${tone}`}>{label}</span></div>
     {signingIn ? <>
-      <p role="status">GitHub sign-in is pending. Complete authorization in your browser.</p>
-      {code ? <p className="device-code" aria-label="GitHub one-time code">{code.code}</p> : <p>Waiting for GitHub's one-time code. Retry to read the current run.</p>}
+      <p className="muted busy-line" role="status"><span className="spinner" aria-hidden="true" /> GitHub sign-in is pending. Complete authorization in your browser.</p>
+      {code ? <p className="device-code" aria-label="GitHub one-time code">{code.code}</p> : <p className="muted">Waiting for GitHub's one-time code. Retry to read the current run.</p>}
     </> : null}
-    <div className="form-actions">
-      {state.gh?.state === 'missing' ? <button onClick={() => void controller.openGitHub('installCli')}>Install GitHub CLI</button> : null}
-      {code ? <button onClick={() => void controller.openGitHub('deviceLogin')}>Open GitHub</button> : null}
-      {!signingIn && !ready && state.gh?.state !== 'missing' ? <button disabled={!state.canWrite} onClick={() => void controller.signIn()}>Sign in with GitHub</button> : null}
+    {!ready || signingIn ? <div className="actions">
+      {state.gh?.state === 'missing' ? <button className="primary" onClick={() => void controller.openGitHub('installCli')}>Install GitHub CLI</button> : null}
+      {code ? <button className="primary" onClick={() => void controller.openGitHub('deviceLogin')}>Open GitHub</button> : null}
+      {!signingIn && !ready && state.gh?.state !== 'missing' ? <button className="primary" disabled={!state.canWrite} title={state.canWrite ? undefined : WRITE_REASON} onClick={() => void controller.signIn()}>Sign in with GitHub</button> : null}
       {signingIn ? <button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel sign-in</button> : null}
-      <button disabled={!state.canRead} onClick={() => void controller.reload()}>Retry</button>
-    </div>
+      <button disabled={!state.canRead} title={state.canRead ? undefined : READ_REASON} onClick={() => void controller.reload()}>Retry</button>
+    </div> : null}
     <ActionError state={state} action="signIn" /><ActionError state={state} action="openGitHub" />
     {signingIn ? <ActionError state={state} action="cancel" /> : null}
   </section>;
@@ -132,24 +138,27 @@ function DraftCard({ state, controller, drafts }: AuthorProps & { drafts: readon
   const confirmedDraft = drafts.find(d => d.id === confirming);
   const unreadable = state.drafts.filter((d): d is Extract<typeof d, { error: string }> => 'error' in d);
   const invalid = state.draftPreview?.draftId === state.draft?.id ? state.draftPreview?.invalid ?? [] : [];
-  return <section className="card" aria-label="Draft"><h2>Draft</h2>
-    <p>Drafts stay on this Mac until you review and publish them.</p>
+  const writeTitle = state.canWrite ? undefined : WRITE_REASON;
+  return <section className="card" aria-label="Draft">
+    <div className="card-head"><div><h2>Draft</h2><p>Drafts stay on this Mac until you publish them.</p></div>
+      {!confirming && (drafts.length || state.draft) ? <div className="actions">
+        {drafts.length ? <button disabled={!state.canWrite} title={writeTitle} onClick={() => controller.newDraft()}>New draft</button> : null}
+        {state.draft ? <button disabled={!state.canWrite} title={writeTitle} onClick={() => controller.askDelete()}>Delete draft</button> : null}</div> : null}</div>
     {drafts.length ? <label className="field">Draft<select value={state.draft?.id ?? ''} disabled={!state.canWrite} onChange={e => controller.selectDraft(e.target.value)}>
       <option value="">New draft</option>{drafts.map(d => <option key={d.id} value={d.id}>{draftLabel(d)}</option>)}
     </select></label> : null}
     {confirming ? <div className="confirm" role="group" aria-label="Confirm delete">
       <p>{confirmedDraft ? `Delete the draft from ${draftAge(confirmedDraft)} with ${plural(confirmedDraft.intents.length, 'change')}? This can't be undone.` : 'Delete this unreadable draft? This can\'t be undone.'}</p>
-      <div className="form-actions"><button disabled={!state.canWrite} onClick={() => void controller.deleteDraft(confirming)}>Delete draft</button>
+      <div className="form-actions"><button className="danger" disabled={!state.canWrite} onClick={() => void controller.deleteDraft(confirming)}>Delete draft</button>
         <button onClick={() => controller.dismiss()}>Keep draft</button></div>
-    </div> : <div className="form-actions"><button disabled={!state.canWrite} onClick={() => controller.newDraft()}>New draft</button>
-      <button disabled={!state.canWrite || !state.draft} onClick={() => controller.askDelete()}>Delete draft</button></div>}
+    </div> : null}
     <ActionError state={state} action="deleteDraft" />
-    {unreadable.map(d => <div className="alert" key={d.id}><p>{`A saved draft can't be read: ${d.error}`}</p>
+    {unreadable.map(d => <div className="unreadable-draft" key={d.id}><p className="alert">{`A saved draft can't be read: ${d.error}`}</p>
       <button disabled={!state.canWrite} onClick={() => controller.askDelete(d.id)}>Delete unreadable draft</button></div>)}
-    {state.draft ? <><h3>Changes in this draft</h3><ol className="draft-intents" aria-label="Draft changes">{state.draft.intents.map((intent, index) => <li key={index}>
-      <span>{intentText(intent)}</span> <button disabled={!state.canWrite} aria-label={`Remove change ${index + 1}`} onClick={() => void controller.removeIntent(index)}>Remove</button>
-      {invalid.filter(i => i.index === index).map(i => <p className="alert" role="alert" key={i.reason}>{i.reason}</p>)}
-    </li>)}</ol></> : <p>No draft selected. Include a skill, pin a source or capture a file to start one.</p>}
+    {state.draft ? <ol className="rows draft-intents" aria-label="Draft changes">{state.draft.intents.map((intent, index) => <li className="row" key={index}>
+      <span className="row-main">{intentText(intent)}</span> <button disabled={!state.canWrite} aria-label={`Remove change ${index + 1}`} onClick={() => void controller.removeIntent(index)}>Remove</button>
+      {invalid.filter(i => i.index === index).map(i => <p className="row-detail alert" role="alert" key={i.reason}>{i.reason}</p>)}
+    </li>)}</ol> : <p className="muted">No draft yet. Include a skill, pin a source or capture a file to start one.</p>}
     <ActionError state={state} action="removeIntent" />
   </section>;
 }
@@ -166,30 +175,42 @@ function FileDiff({ file }: { file: DraftPreview['diff'][number] }) {
   </div>;
 }
 
+// Why Publish is unavailable, or null when it is available.
+function publishReason(state: AuthorState): string | null {
+  if (state.canPublish) return null;
+  if (!state.canWrite) return WRITE_REASON;
+  if (state.gh?.state !== 'ready') return 'Connect GitHub CLI first.';
+  if (!state.draftPreview || state.preview?.change.kind !== 'publishDraft') return 'Preview the draft first.';
+  if (state.draftPreview.invalid.length) return 'Correct the invalid changes first.';
+  return 'Preview the draft again.';
+}
+
 function ReviewCard({ state, controller }: AuthorProps) {
   const preview = state.draftPreview;
   // Items grouped by profile, in the order the agent first lists each profile.
   const items = preview ? [...new Set(preview.items.map(item => item.profile))].flatMap(profile => preview.items.filter(item => item.profile === profile)) : [];
   const repo = state.profiles ? repoName(state.profiles.repoUrl) : 'the profile repository';
-  return <section className="card" aria-label="Review and publish"><h2>Review</h2>
-    <div className="form-actions"><button disabled={!state.canWrite || !state.draft} onClick={() => void controller.previewDraft()}>Preview draft</button></div>
+  const reason = publishReason(state);
+  return <section className="card" aria-label="Review and publish">
+    <div className="card-head"><div><h2>Review</h2><p>{preview ? preview.affectedProfiles.length ? `Updates ${list(preview.affectedProfiles)}.` : 'Updates no profiles.' : 'Preview the draft to see what changes in each profile.'}</p></div>
+      <button className={preview ? undefined : 'primary'} disabled={!state.canWrite || !state.draft} title={state.canWrite ? undefined : WRITE_REASON} onClick={() => void controller.previewDraft()}>Preview draft</button></div>
     <ActionError state={state} action="preview" />
     {preview ? <>
-      <p>{preview.affectedProfiles.length ? `Updates ${list(preview.affectedProfiles)}.` : 'Updates no profiles.'}</p>
       {items.length ? <ul className="publish-items" aria-label="Changed items">{items.map((item, index) => <li key={index}>{itemSentence(item)}</li>)}</ul> : null}
-      {preview.itemsTruncated ? <p role="status">{`Showing the first ${plural(items.length, 'changed item')}. Publishing includes every change.`}</p> : null}
+      {preview.itemsTruncated ? <p className="muted" role="status">{`Showing the first ${plural(items.length, 'changed item')}. Publishing includes every change.`}</p> : null}
       {preview.invalid.filter(issue => issue.index === null).map((issue, index) => <p className="alert" role="alert" key={index}>{issue.reason}</p>)}
-      {preview.invalid.length ? <p role="alert">Publish is disabled until every invalid change or profile is corrected.</p> : null}
+      {preview.invalid.length ? <p className="alert" role="alert">Publish is disabled until every invalid change or profile is corrected.</p> : null}
       {preview.diff.length ? <details className="publish-files"><summary>{`Files (${preview.diff.length})`}</summary>
-        {preview.truncated ? <p role="status">Diff preview is truncated. Publication includes the full files.</p> : null}
+        {preview.truncated ? <p className="muted" role="status">Diff preview is truncated. Publication includes the full files.</p> : null}
         {preview.diff.map(file => <FileDiff key={file.path} file={file} />)}
-      </details> : <p>No file changes.</p>}
-    </> : <p>Preview the draft to see what changes in each profile.</p>}
+      </details> : <p className="muted">No file changes.</p>}
+    </> : null}
     {state.confirming?.action === 'publish' && state.canPublish ? <div className="confirm" role="group" aria-label="Confirm publish">
       <p>{`Publish ${plural(state.draft?.intents.length ?? 0, 'change')} to ${repo}? This pushes to main and updates ${preview?.affectedProfiles.length ? list(preview.affectedProfiles) : 'no profiles'}.`}</p>
       <div className="form-actions"><button className="primary" disabled={!state.canPublish} onClick={() => void controller.publish()}>Confirm publish</button>
         <button onClick={() => controller.dismiss()}>Cancel</button></div>
-    </div> : <div className="form-actions"><button className="primary" disabled={!state.canPublish} onClick={() => controller.askPublish()}>Publish</button></div>}
+    </div> : <div className="form-actions"><button className="primary" disabled={!state.canPublish} title={reason ?? undefined} onClick={() => controller.askPublish()}>Publish</button>
+      {reason && preview ? <span className="reason">{reason}</span> : null}</div>}
     <ActionError state={state} action="publish" />
   </section>;
 }
@@ -206,18 +227,20 @@ function OutcomeCard({ state, controller, run }: AuthorProps & { run: RunView })
   const pending = pushed && (recovery?.action === 'announce' || !!evidence?.pending.length || evidence?.tagged === false);
   const status = unknown ? 'Push outcome unknown. Re-check reads the run again without pushing.' : pending ? 'Published, not yet announced' : pushed ? 'Published'
     : needsPreview ? 'Needs preview. Main changed; review a new preview before publishing.' : active(run) ? ENDED[run.state] : `${ENDED[run.state]} Push is not confirmed.`;
-  return <section className="card" aria-label="Publication outcome"><h2>Last publication</h2>
-    <p role="status">{status}</p>
-    {active(run) && state.run?.runId === run.runId ? <button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel</button> : null}
+  const [pill, tone] = unknown ? ['Unknown', 'pill-warning'] : pending ? ['Not announced', 'pill-warning'] : pushed ? ['Published', 'pill-success']
+    : needsPreview ? ['Needs preview', 'pill-warning'] : active(run) ? ['Publishing', 'pill-accent'] : ['Not confirmed', 'pill-danger'];
+  const facts = [pushed && evidence?.commit ? `Commit ${short(evidence.commit)}.` : '', evidence?.announced.length ? `Announced to ${list(evidence.announced)}.` : '',
+    pushed && evidence?.pending.length ? `Not yet announced to ${list(evidence.pending)}.` : '', pushed && evidence?.tagged === false ? 'The release tag is not confirmed.' : ''].filter(Boolean);
+  return <section className="card" aria-label="Publication outcome">
+    <div className="card-head"><div><h2>Last publication</h2><p role="status">{status}</p></div>
+      <div className="actions"><span className={`pill ${tone}`} aria-hidden="true">{active(run) ? <span className="spinner" /> : null}{pill}</span>
+        {active(run) && state.run?.runId === run.runId ? <button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel</button> : null}
+        {unknown ? <button className="primary" disabled={!state.canRead} onClick={() => void controller.recheck()}>Re-check</button>
+          : pending ? <button className="primary" disabled={!state.canWrite} title={state.canWrite ? undefined : WRITE_REASON} onClick={() => void controller.announce()}>Announce</button> : null}</div></div>
     {state.run?.runId === run.runId ? <ActionError state={state} action="cancel" /> : null}
-    {pushed && evidence?.commit ? <p>{`Commit ${short(evidence.commit)}.`}</p> : null}
-    {evidence?.announced.length ? <p>{`Announced to ${list(evidence.announced)}.`}</p> : null}
-    {pushed && evidence?.pending.length ? <p>{`Not yet announced to ${list(evidence.pending)}.`}</p> : null}
-    {pushed && evidence?.tagged === false ? <p>The release tag is not confirmed.</p> : null}
-    {evidence?.unannounceable?.map(issue => <p role="alert" key={issue.profile}>{issue.profile}: Can't announce: {issue.reason}</p>)}
+    {facts.length ? <p className="muted">{facts.join(' ')}</p> : null}
+    {evidence?.unannounceable?.map(issue => <p className="alert" role="alert" key={issue.profile}>{issue.profile}: Can't announce: {issue.reason}</p>)}
     {run.result && 'message' in run.result ? <p className="muted">{run.result.message}</p> : null}
-    {unknown ? <button disabled={!state.canRead} onClick={() => void controller.recheck()}>Re-check</button>
-      : pending ? <button disabled={!state.canWrite} onClick={() => void controller.announce()}>Announce</button> : null}
     <ActionError state={state} action="recheck" /><ActionError state={state} action="announce" />
   </section>;
 }
@@ -227,18 +250,18 @@ export function PublishView({ state, controller }: AuthorProps) {
   const drafts = state.drafts.filter((d): d is Draft => 'intents' in d && d.repoUrl === state.profiles?.repoUrl);
   const reviewed = state.preview && 'actionEffects' in state.preview && !PUBLICATION_KINDS.includes(state.preview.change.kind) ? state.preview : null;
   return <div className="author-view publish-view">
-    <header><div><p className="eyebrow">MY PROFILES</p><h1>Publish</h1>
+    <header className="page-header"><div><h1>Publish</h1>
       <p className="intro">{state.profiles ? `Review your draft, then publish it to ${repoName(state.profiles.repoUrl)}.` : 'Review your draft, then publish it to your profile repository.'}</p></div>
-      <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload</button></header>
+      <div className="header-actions"><button disabled={!state.canRead} title={state.canRead ? undefined : READ_REASON} onClick={() => void controller.reload()}>Reload</button></div></header>
     <AuthorFeedback state={state} />
     <RunStatus state={state} controller={controller} page="publish" />
     <GitHubCard state={state} controller={controller} />
-    <DraftCard state={state} controller={controller} drafts={drafts} />
-    <ReviewCard state={state} controller={controller} />
     {state.publicationRun ? <OutcomeCard state={state} controller={controller} run={state.publicationRun} /> : null}
+    <DraftCard state={state} controller={controller} drafts={drafts} />
+    {state.draft ? <ReviewCard state={state} controller={controller} /> : null}
     {reviewed ? <section className="card" aria-label="Reviewed action"><h2>{changeTitle(reviewed.change.kind)}</h2>
       <ul>{(reviewed.actionEffects ?? []).map(effect => <li key={effect}>{effect}</li>)}</ul>
-      <button disabled={!state.canWrite} onClick={() => void controller.applyReviewed()}>Apply reviewed action</button>
+      <div className="actions"><button className="primary" disabled={!state.canWrite} onClick={() => void controller.applyReviewed()}>Apply reviewed action</button></div>
     </section> : null}
     <ActionError state={state} action="applyReviewed" />
     {state.run ? <RunRecovery run={state.run} disabled={!state.canWrite} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()}

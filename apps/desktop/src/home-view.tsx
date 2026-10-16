@@ -5,7 +5,7 @@ import { incomingCounts, MACHINE_KINDS, type SetupSyncState } from './setup-sync
 import { AUTHOR_RUN_KINDS } from './controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
-import { changeTitle } from './copy.ts';
+import { changeTitle, plural, repoName } from './copy.ts';
 
 export type HomeScreen = 'changes' | 'publish' | 'settings';
 export type HomeProps = {
@@ -13,22 +13,38 @@ export type HomeProps = {
   navigate: (screen: HomeScreen) => void; controller: HomeController;
 };
 
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-// "Nortus222/claude-config" for a GitHub URL; other repositories keep their URL.
-const repoName = (url: string) => url.replace(/^(?:https:\/\/github\.com\/|git@github\.com:)/, '').replace(/\.git$/, '');
 const POLICY = { 'auto-apply': 'applies incoming changes automatically', notify: 'tells you about incoming changes', manual: 'waits for you to check for changes' } as const;
 
+// One fact about this Mac with its next action; attention lines carry a warning mark.
 function Line({ tone, children, action }: { tone?: 'attention'; children: ReactNode; action: ReactNode }) {
-  return <li className={tone ? `home-line home-line-${tone}` : 'home-line'}><p>{children}</p><div className="home-actions">{action}</div></li>;
+  return <li className={tone ? `home-line row home-line-${tone}` : 'home-line row'}><p className="row-main">{children}</p><div className="row-trail home-actions">{action}</div></li>;
 }
 
-function agentLine({ machine }: HomeProps, open: (screen: HomeScreen) => ReactNode): ReactNode {
-  const status = machine.status;
+// Progress of the apply this Mac is running: the Changes run when one is active (it records its planned
+// steps), else this window's own run. HOOK(controller): an apply the agent started itself (first run,
+// auto-apply) reports no steps or total to the renderer; show its progress here once the machine state has it.
+function applyProgress({ machine, changes }: HomeProps): { done: number; total: number } {
+  const run = changes.run;
+  if (run && (run.state === 'accepted' || run.state === 'running')) {
+    const planned = (run.intent as { parity?: { plannedKeys?: readonly string[] } }).parity?.plannedKeys?.length ?? 0;
+    return { done: run.steps.length, total: Math.max(planned, run.steps.length) };
+  }
+  if (machine.run?.outcome !== 'running') return { done: 0, total: 0 };
+  return { done: machine.run.steps.filter(step => step.status !== 'pending' && step.status !== 'running').length, total: machine.run.steps.length };
+}
+
+function agentLine(props: HomeProps, open: (screen: HomeScreen) => ReactNode): ReactNode {
+  const status = props.machine.status, machine = props.machine;
   if (machine.connection === 'browser') return <Line action={open('settings')}>Browser preview. Open the desktop app to see this Mac.</Line>;
   if (machine.connection === 'connecting') return <Line action={open('settings')}>Connecting to the agent…</Line>;
   if (machine.connection === 'disconnected') return <Line tone="attention" action={open('settings')}>The agent isn’t connected.</Line>;
   if (status?.error) return <Line tone="attention" action={open('settings')}>The agent couldn’t check this Mac. Details are in Settings.</Line>;
-  if (status?.applying) return <Line action={open('changes')}>The agent is applying changes.</Line>;
+  if (status?.applying) {
+    const { done, total } = applyProgress(props);
+    return <Line action={open('changes')}><span className="busy-line"><span className="spinner" aria-hidden="true" />
+      <span>The agent is applying changes{total ? ` · ${done} of ${plural(total, 'step')} done` : ''}.</span></span>
+      {total ? <progress className="home-progress" aria-label="Apply progress" value={done} max={total} /> : null}</Line>;
+  }
   if (status?.paused) return <Line tone="attention" action={open('settings')}>Automatic apply is paused.</Line>;
   return <Line action={open('settings')}>The agent is running{status ? ` and ${POLICY[status.policy]}` : ''}.</Line>;
 }
@@ -66,15 +82,15 @@ export function HomeView(props: HomeProps) {
   const phase = update.update?.enabled ? update.update.phase : null;
   const version = update.update?.availableVersion;
   return <div className="home-view">
-    <header><div><p className="eyebrow">THIS MAC</p><h1>Home</h1></div></header>
-    <ul className="home-lines" aria-label="This Mac">
+    <header className="page-header"><div><h1>Home</h1><p className="intro">What this Mac follows and what needs your attention.</p></div></header>
+    <ul className="card home-lines" aria-label="This Mac">
       {agentLine(props, open)}
       {changes.profiles ? followed
         ? <Line action={open('changes', 'Switch profile')}>Following <strong>{followed.profile}</strong> from <strong>{repoName(followed.repoUrl)}</strong></Line>
         : <Line action={open('changes', 'Choose a profile')}>This Mac doesn’t follow a profile yet.</Line> : null}
       {review ? incoming + held > 0
         ? <Line action={open('changes')}>{plural(incoming, 'incoming change')}{more}{held ? ` · ${held}${more} on hold` : ''}</Line>
-        : <Line action={open('changes', 'Open Changes')}>No incoming changes.</Line> : null}
+        : <Line action={open('changes', 'Open Changes')}>No incoming changes. You’re up to date.</Line> : null}
       {waiting ? <Line action={open('changes')}>{plural(waiting, 'change')} waiting to apply on this Mac</Line> : null}
       {changedHere ? <Line action={open('changes')}>{plural(changedHere, 'item')} changed on this Mac</Line> : null}
       {interruptedRuns(home.runs).map(run => interruptedLine(run, props))}

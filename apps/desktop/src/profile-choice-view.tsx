@@ -34,13 +34,13 @@ export function ProfileChoiceView({ state, controller, repoUrl, onDone }: { stat
     {state.run ? <RunCard run={state.run} state={state} controller={controller} /> : null}
     <section className="card" aria-labelledby="profile-choice-h"><h2 id="profile-choice-h">Profiles</h2>
       {state.profileNotice ? <p className="notice">{state.profileNotice}</p> : null}
-      {state.profiles ? <ul className="profile-choice-list">{state.profiles.available.map(profile => <li key={profile.name} aria-current={profile.name === current ? 'true' : undefined}>
-        <span><strong>{profile.name}</strong>{profile.name === current ? <small>Current</small> : null}{profile.extends ? <small>Builds on {profile.extends}</small> : null}</span>
+      {state.profiles ? <ul className="rows profile-choice-list">{state.profiles.available.map(profile => <li className="row" key={profile.name} aria-current={profile.name === current ? 'true' : undefined}>
+        <span className="row-main"><strong>{profile.name}</strong>{profile.name === current ? <small className="pill pill-success">Current</small> : null}{profile.extends ? <small className="row-sub">Builds on {profile.extends}</small> : null}</span>
         {profile.name === current ? null : <button disabled={!can.read} onClick={() => controller.followRepository(repoUrl, profile.name)}>Follow {profile.name}</button>}
-      </li>)}</ul> : <p className="setup-sync-note">Reading profiles…</p>}
+      </li>)}</ul> : <p className="muted">Reading profiles…</p>}
     </section>
     <section className="card" aria-labelledby="profile-choice-link-h"><h2 id="profile-choice-link-h">Follow a shared link instead</h2>
-      <form className="setup-sync-actions" onSubmit={followLink}><label>Shared link <input name="link" required disabled={!can.read} placeholder="nortuscc://follow/…" /></label>
+      <form className="inline-form" onSubmit={followLink}><label className="inline-field"><span>Shared link</span><input name="link" required disabled={!can.read} placeholder="nortuscc://follow/…" /></label>
         <button disabled={!can.read}>Preview follow</button></form>
     </section>
     <div className="setup-sync-actions"><button disabled={state.pending} onClick={keep}>{current ? `Keep ${current}` : 'Decide later'}</button></div>
