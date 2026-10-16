@@ -215,7 +215,7 @@ export const makeAgentRuns = (driver: {
         }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         publicationResult: result => Effect.gen(function* () {
           const receipt = yield* find(runId);
-          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, state: result.status === 'succeeded' ? 'succeeded' : 'failed', result }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication result') });
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, state: result.status === 'succeeded' ? 'succeeded' : result.status === 'interrupted' ? 'interrupted' : 'failed', result }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication result') });
           yield* save({ ...receipt, view, inFlight: null });
         }),
         addition: update => Effect.gen(function* () {
@@ -238,12 +238,16 @@ export const makeAgentRuns = (driver: {
         }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         finished: progress => Effect.gen(function* () {
           const receipt = yield* find(runId);
+          if (!durabilityFailed && receipt.view.publication?.pushed && receipt.view.result?.status === 'succeeded') {
+            if (progress.type === 'failed') yield* save({ ...receipt, view: { ...receipt.view, result: { ...receipt.view.result, message: bounded(`${receipt.view.result.message}. ${progress.message}`) } } });
+            return;
+          }
           if (!durabilityFailed && receipt.view.publication && receipt.view.result !== null
             && (receipt.view.result.status !== 'succeeded' || progress.type === 'done')) return;
           const result: NonNullable<RunView['result']> = durabilityFailed ? { status: 'interrupted', message: 'Run receipt could not be saved; inspect the machine before trying again' } : progress.type === 'failed' ? { status: 'failed', message: bounded(progress.message) }
             : progress.type === 'cancelled' ? { status: 'cancelled', remaining: [...progress.remaining] }
             : { status: 'done', ok: progress.ok, failed: progress.failed };
-          const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status;
+          const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status === 'needs-preview' ? 'failed' : result.status;
           const ended = { ...receipt, inFlight: result.status === 'done' || result.status === 'cancelled' ? null : receipt.inFlight, view: { ...receipt.view, state, result } };
           yield* save(ended).pipe(Effect.catch(cause => {
             const interrupted: RunReceipt = { ...ended, view: decodeRunView({ ...ended.view, state: 'interrupted', ...(ended.view.parity ? { parity: { ...ended.view.parity, state: 'needsInspection' as const } } : {}), ...(ended.view.intent.skillAddition ? {

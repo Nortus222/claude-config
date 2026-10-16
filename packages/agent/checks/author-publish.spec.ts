@@ -11,10 +11,11 @@ import { machineGit } from '@nortuscc/source-watch';
 import { HostedFailure, HostedTransport, MachineTokenStore, hostedStore, makeHostedClient, type HostedRequest, type HostedResponse } from '@nortuscc/hosted-client';
 import { parseSyncQuery, type RevisionRecord, type SetupRecord } from '@nortuscc/hosted-protocol';
 import { authorWorkspaceLayer, GIT_TIMEOUT_MS } from '../src/author/workspace.ts';
-import { DraftStore, draftStore, type Draft } from '../src/author/drafts.ts';
+import { DraftStore, DraftStoreError, draftStore, type Draft } from '../src/author/drafts.ts';
 import { makeAuthorPublisher } from '../src/author/publish.ts';
 import { makeAgentRuns, operationDigest, type RunLifecycle } from '../src/runs.ts';
 import { RunStore, RunStoreError, runStore } from '../src/run-store.ts';
+import type { SessionError } from '../src/ipc/session.ts';
 import type { PreparedParityChange } from '../src/operations/parity.ts';
 
 const fixture = async (t: TestContext) => {
@@ -35,6 +36,7 @@ const fixture = async (t: TestContext) => {
   const processes = Layer.effect(Processes, Effect.map(Processes, real => ({ run: (c: Command) => {
     const replacement = intercept?.(c); if (replacement) return replacement;
     if (c.cmd === 'gh') {
+      if (c.args[0] === '--version' || c.args[0] === 'auth') return Effect.succeed({ code: 0, stdout: '' });
       assert.deepEqual(c.args, ['api', 'user']);
       return Effect.succeed({ code: 0, stdout: '{"login":"fixture","id":42}' });
     }
@@ -86,6 +88,7 @@ const fixture = async (t: TestContext) => {
     const client = yield* makeHostedClient({ now: () => new Date(clock), readPolicy: Effect.succeed({ policy: 'notify', policySource: 'default' }), onPolicy: () => Effect.void });
     yield* client.startSignIn({ os: 'macos', agents: ['claude'] }); clock += 1000; yield* client.pollSignIn();
     const owner = yield* makeAuthorPublisher(client);
+    const withDrafts = (service: DraftStore['Service']) => run(makeAuthorPublisher(client).pipe(Effect.provideService(DraftStore, service), Effect.provide(layer)));
     const drafts = yield* DraftStore; const runStore = yield* RunStore;
     const run = <A, E>(body: Effect.Effect<A, E>) => Effect.runPromise(body);
     const save = (intents: Draft['intents'] = [{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'new\n', choice: { kind: 'updateShared' } }]) => {
@@ -102,7 +105,7 @@ const fixture = async (t: TestContext) => {
       const id = randomUUID(); const accepted = yield* runs.submit({ requestId: id, inputDigest: operationDigest(id), planId: id, actor: 'app' });
       return yield* runs.get(accepted.runId);
     })).pipe(Effect.provideService(RunStore, receiptStore)));
-    return { owner, client, drafts, runStore, save, execute, run, git, origin, checkout, first, revisions, setups,
+    return { owner, withDrafts, client, drafts, runStore, save, execute, run, git, origin, checkout, first, revisions, setups,
       intercept: (f: typeof intercept) => { intercept = f; }, failHosted: (value: boolean) => { hostedFailure = value; }, loseHostedReply: (code: 'network' | 'revision_conflict' = 'network') => { lostHostedReply = code; }, failProfile: (profile?: string) => { failedProfile = profile; },
       move: (path = 'rival.txt', text = 'rival\n') => { git(checkout, 'pull', '-q', '--ff-only', 'origin', 'main'); mkdirSync(join(checkout, path, '..'), { recursive: true }); writeFileSync(join(checkout, path), text); git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'rival'); git(checkout, 'push', '-q', 'origin', 'main'); },
     };
@@ -132,7 +135,7 @@ test('publish refuses when the replayed diff no longer matches the preview', asy
   const prepared = await f.run(f.owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest }));
   await f.run(f.drafts.write({ ...draft, intents: [{ ...draft.intents[0]!, text: 'changed\n' } as Draft['intents'][number]] }));
   const result = await f.execute(prepared);
-  assert.equal(result.result?.status, 'needs-preview'); assert.equal(f.git(f.origin, 'rev-parse', 'main'), f.first);
+  assert.equal(result.result?.status, 'needs-preview'); assert.deepEqual(result.publication?.pending, []); assert.equal(f.git(f.origin, 'rev-parse', 'main'), f.first);
 });
 
 test('a push rejected because main moved asks for a new preview and pushes nothing', async t => {
@@ -223,11 +226,16 @@ test('announcement compares against the previous announced commit and includes s
 });
 
 test('announcing an older run does not append a revision after a newer commit', async t => {
-  const f = await fixture(t); f.failHosted(true); const old = await publish(f, await f.save()); f.failHosted(false);
+  const f = await fixture(t); f.failHosted(true); const draft = await f.save(); const old = await publish(f, draft); f.failHosted(false);
   const latest = await publish(f, await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'later\n', choice: { kind: 'updateShared' } }]));
   const count = f.revisions.length;
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: old.runId })));
-  assert.equal(f.revisions.length, count); assert.deepEqual(result.publication?.pending, ['base', 'personal']);
+  assert.equal(f.revisions.length, count); assert.deepEqual(result.publication?.pending, []);
+  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'personal']);
+  assert.ok(result.publication?.unannounceable?.every(p => /newer|divergent/i.test(p.reason)));
+  assert.equal((await f.run(f.owner.recoverPublication(result))).action, null);
+  assert.equal((await f.run(f.owner.recoverPublication(old))).action, null);
+  assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
   assert.ok(f.revisions.every(r => r.commitSha === latest.publication?.commit));
 });
 
@@ -235,13 +243,13 @@ test('recovery recognizes a published commit after main advances and stays uncer
   const f = await fixture(t); f.failHosted(true); const original = await publish(f, await f.save()); f.move();
   assert.deepEqual(await f.run(f.owner.recoverPublication(original)), { published: true, action: 'announce' });
   f.intercept(c => c.args.includes('fetch') ? Effect.succeed({ code: 1, stdout: '', stderr: 'offline' }) : undefined);
-  assert.deepEqual(await f.run(f.owner.recoverPublication(original)), { published: 'unknown', action: null });
+  assert.deepEqual(await f.run(f.owner.recoverPublication(original)), { published: 'unknown', action: 're-check' });
 });
 
 test('an invalid intent never publishes the valid portion of a draft', async t => {
   const f = await fixture(t); const draft = await f.save([{ kind: 'createProfile', profile: 'new', extends: 'missing' }]);
   const preview = await f.run(f.owner.previewDraft(draft.id)); assert.equal(preview.invalid.length, 1);
-  const result = await publish(f, draft); assert.equal(result.result?.status, 'needs-preview'); assert.equal(f.git(f.origin, 'rev-parse', 'main'), f.first);
+  const result = await publish(f, draft); assert.equal(result.result?.status, 'needs-preview'); assert.deepEqual(result.publication?.pending, []); assert.equal(f.git(f.origin, 'rev-parse', 'main'), f.first);
 });
 
 test('a draft edited after publication is retained when its older commit is announced', async t => {
@@ -258,11 +266,12 @@ test('announcement includes the enabled integrations required environment names'
   assert.equal(f.revisions.length, 2); assert.deepEqual(f.revisions[0]!.requiredEnv, ['SERVER_KEY']);
 });
 
-test('an existing commit with contradictory hosted items remains pending', async t => {
+test('an existing commit with contradictory hosted items cannot be announced', async t => {
   const f = await fixture(t); const original = await publish(f, await f.save());
   f.revisions[0] = { ...f.revisions[0]!, items: [] };
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
-  assert.deepEqual(result.publication?.pending, ['base']); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
+  assert.deepEqual(result.publication?.unannounceable, [{ profile: 'base', reason: 'Existing hosted revision has different publication metadata' }]);
 });
 
 test('a failed durable commit checkpoint prevents the push', async t => {
@@ -310,21 +319,117 @@ test('switching a profile to an existing file with identical bytes changes no re
   assert.deepEqual(preview.affectedProfiles, []);
 });
 
-test('a crash after push recovers from the run receipt and Announce completes it', async t => {
+test('a defect after push succeeds with pending announcements and Announce completes it', async t => {
   const f = await fixture(t); const draft = await f.save();
   f.intercept(c => c.args.includes('ls-remote') ? Effect.die('process stopped after push') : undefined);
-  await assert.rejects(publish(f, draft), /process stopped after push/);
+  const published = await publish(f, draft);
+  assert.equal(published.result?.status, 'succeeded');
+  assert.match(published.result!.message, /announcement/i);
   const receipt = (await f.run(f.runStore.read))[0]!; f.intercept(undefined);
   assert.deepEqual(await f.run(f.owner.recoverPublication(receipt.view)), { published: true, action: 'announce' });
   const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: receipt.view.runId })));
   assert.deepEqual(result.publication?.pending, []); assert.equal(f.revisions.length, 2);
   const original = (await f.run(f.runStore.read)).find(r => r.view.runId === receipt.view.runId)!;
-  assert.equal(original.view.state, 'interrupted');
+  assert.equal(original.view.state, 'succeeded');
 });
 
-test('a failed final session checkpoint overrides success while retaining the published evidence', async t => {
+test('a failure after publication retains success and reports the failure as a note', async t => {
   const f = await fixture(t); const draft = await f.save(); const preview = await f.run(f.owner.previewDraft(draft.id));
   const prepared = await f.run(f.owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest }));
   const result = await f.execute(prepared, f.runStore, { type: 'failed', message: 'Final session checkpoint failed' });
-  assert.equal(result.result?.status, 'failed'); assert.equal(result.publication?.pushed, true);
+  assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
+  assert.match(result.result!.message, /Final session checkpoint failed/);
+});
+
+test('a push that lands while the follow-up fetch fails is still treated as published', async t => {
+  const f = await fixture(t); const draft = await f.save(); let pushed = false; let fetches = 0;
+  f.intercept(c => {
+    if (c.args.includes('HEAD:main')) {
+      f.git(c.cwd!, 'push', '-q', 'origin', 'HEAD:main'); pushed = true;
+      return Effect.succeed({ code: 1, stdout: '', stderr: 'reply lost' });
+    }
+    if (pushed && c.args.includes('fetch') && fetches++ === 0) return Effect.succeed({ code: 1, stdout: '', stderr: 'offline' });
+    return undefined;
+  });
+  const result = await publish(f, draft);
+  assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
+  assert.equal(result.publication?.tagged, true); assert.equal(f.revisions.length, 2);
+  assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
+});
+
+test('an unknown push outcome offers re-check and can later be announced', async t => {
+  const f = await fixture(t); const draft = await f.save(); let pushed = false;
+  f.intercept(c => {
+    if (c.args.includes('HEAD:main')) {
+      f.git(c.cwd!, 'push', '-q', 'origin', 'HEAD:main'); pushed = true;
+      return Effect.succeed({ code: 1, stdout: '', stderr: 'reply lost' });
+    }
+    return pushed && c.args.includes('fetch') ? Effect.succeed({ code: 1, stdout: '', stderr: 'Permission denied' }) : undefined;
+  });
+  const result = await publish(f, draft);
+  assert.equal(result.state, 'interrupted'); assert.equal(result.result?.status, 'interrupted');
+  assert.match(result.result!.message, /push outcome is unknown/i);
+  assert.deepEqual(result.publication?.pending, []);
+  assert.deepEqual(await f.run(f.owner.recoverPublication(result)), { published: 'unknown', action: 're-check' });
+  assert.ok(await f.run(f.drafts.read(draft.id)));
+  f.intercept(undefined);
+  assert.deepEqual(await f.run(f.owner.recoverPublication(result)), { published: true, action: 'announce' });
+  const announced = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: result.runId })));
+  assert.equal(announced.result?.status, 'succeeded'); assert.equal(f.revisions.length, 2);
+});
+
+test('missing drafts and runs without publications keep actionable invalid-request errors', async t => {
+  const f = await fixture(t); const missing = randomUUID();
+  for (const effect of [f.owner.previewDraft(missing), f.owner.preparePublish({ kind: 'publishDraft', draftId: missing, digest: 'a'.repeat(64) })]) {
+    const error = await f.run(Effect.flip(effect as Effect.Effect<unknown, SessionError>));
+    assert.equal(error.code, 'INVALID_REQUEST'); assert.match(error.message, /Draft does not exist/);
+  }
+  const error = await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: missing }).pipe(Effect.flip));
+  assert.equal(error.code, 'INVALID_REQUEST'); assert.match(error.message, /Run has no publication/);
+});
+
+test('preview and publish distinguish GitHub sign-in from repository access', async t => {
+  const f = await fixture(t); const draft = await f.save();
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  for (const signedOut of [true, false]) {
+    f.intercept(c => {
+      if (c.cmd === 'gh' && c.args[0] === 'auth') return Effect.succeed({ code: signedOut ? 1 : 0, stdout: '' });
+      return c.args.includes('fetch') ? Effect.succeed({ code: 1, stdout: '', stderr: 'Repository not found' }) : undefined;
+    });
+    for (const effect of [f.owner.previewDraft(draft.id), f.owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest })]) {
+      const error = await f.run(Effect.flip(effect as Effect.Effect<unknown, SessionError>));
+      assert.equal(error.code, signedOut ? 'NOT_SIGNED_IN' : 'UNAUTHORIZED');
+      assert.match(error.message, signedOut ? /gh.*sign.*in/i : /access.*repository/i);
+    }
+  }
+});
+
+for (const [name, settings, integrations, reason] of [
+  ['invalid required environment names', {}, { 'mcp-server:sample': { requiresEnv: ['BAD-NAME'] } }, /environment/i],
+  ['unsupported item identities', { 'has space': true }, {}, /item/i],
+  ['more than 500 first-publication items', Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`key${i}`, true])), {}, /500|item/i],
+] as const) test(`publication records ${name} as terminal and releases the draft`, async t => {
+  const f = await fixture(t);
+  if (Object.keys(settings).length) f.move('claude/settings.keys.json', JSON.stringify(settings));
+  if (Object.keys(integrations).length) f.move('integrations.json', JSON.stringify({ version: 1, integrations: Object.entries(integrations).map(([id, fields]) => ({ id, label: 'Server', target: 'codex', type: 'mcp', command: 'server', default: true, ...fields })) }));
+  const draft = await f.save(); const result = await publish(f, draft);
+  assert.equal(result.result?.status, 'succeeded'); assert.deepEqual(result.publication?.pending, []);
+  assert.deepEqual(result.publication?.unannounceable?.map(p => p.profile), ['base', 'personal']);
+  assert.ok(result.publication?.unannounceable?.every(p => reason.test(p.reason)));
+  assert.equal((await f.run(f.owner.recoverPublication(result))).action, null);
+  assert.equal(await f.run(f.drafts.read(draft.id)), undefined); assert.equal(f.revisions.length, 0);
+  const retried = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: result.runId })));
+  assert.deepEqual(retried.publication?.pending, []);
+  assert.deepEqual(retried.publication?.unannounceable, result.publication?.unannounceable);
+  assert.equal(f.revisions.length, 0);
+});
+
+test('draft cleanup failure is a note on a successful published run', async t => {
+  const f = await fixture(t); const draft = await f.save();
+  const owner = await f.withDrafts({ ...f.drafts, delete: () => Effect.fail(new DraftStoreError('disk unavailable')) });
+  const preview = await f.run(owner.previewDraft(draft.id));
+  const result = await f.execute(await f.run(owner.preparePublish({ kind: 'publishDraft', draftId: draft.id, digest: preview.digest })));
+  assert.equal(result.result?.status, 'succeeded'); assert.equal(result.publication?.pushed, true);
+  assert.deepEqual(result.publication?.pending, []); assert.match(result.result!.message, /draft cleanup/i);
+  assert.ok(await f.run(f.drafts.read(draft.id))); assert.equal(f.revisions.length, 2);
 });

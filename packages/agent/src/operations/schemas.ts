@@ -239,7 +239,7 @@ const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsCh
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
 export const ChangePreviewSchema = Schema.Union([PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
-export const PublicationResultSchema = Schema.Struct({ status: Schema.Literals(['succeeded', 'needs-preview']), message: Text });
+export const PublicationResultSchema = Schema.Struct({ status: Schema.Literals(['succeeded', 'needs-preview', 'interrupted']), message: Text });
 export const RunTerminalResultSchema = Schema.Union([
   PublicationResultSchema,
   Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
@@ -270,7 +270,9 @@ export const SkillInstallationSchema = Schema.Struct({
   nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
 });
 const intentFields = { requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema };
-export const PublicationSchema = Schema.Struct({ commit: Schema.NullOr(AuthorHeadSchema), pushed: Schema.Boolean, tagged: Schema.Boolean, announced: Schema.Array(ProfileNameSchema), pending: Schema.Array(ProfileNameSchema) });
+export const PublicationSchema = Schema.Struct({ commit: Schema.NullOr(AuthorHeadSchema), pushed: Schema.Boolean, tagged: Schema.Boolean, announced: Schema.Array(ProfileNameSchema), pending: Schema.Array(ProfileNameSchema),
+  unannounceable: Schema.optionalKey(Schema.Array(Schema.Struct({ profile: ProfileNameSchema, reason: Text }))),
+});
 const runFields = {
   publication: Schema.optionalKey(PublicationSchema),
   actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),

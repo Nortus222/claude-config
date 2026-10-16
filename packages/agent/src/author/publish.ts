@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { Effect, Semaphore } from 'effect';
-import { canonical, MachinePaths } from '@nortuscc/machine';
+import { Effect, Schema, Semaphore } from 'effect';
+import { canonical, MachinePaths, Processes } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, resolveNamedProfile } from '@nortuscc/profile-engine';
-import { diffItems, hasProfile, normalizeRepoUrl, readDocuments, resolvedItemValues, type Documents } from '@nortuscc/sync';
+import { AccessDenied, diffItems, hasProfile, normalizeRepoUrl, readDocuments, resolvedItemValues, type Documents } from '@nortuscc/sync';
 import { Git, IGNORES_FILE } from '@nortuscc/source-watch';
 import type { HostedClient } from '@nortuscc/hosted-client';
-import type { RevisionItem } from '@nortuscc/hosted-protocol';
+import { EnvNameSchema, MAX_ITEMS, RevisionItemSchema, RevisionPublicationSchema, type RevisionItem } from '@nortuscc/hosted-protocol';
 import { SessionError } from '../ipc/session.ts';
 import { RunStore } from '../run-store.ts';
 import type { RunLifecycle } from '../runs.ts';
@@ -15,6 +15,7 @@ import type { PreparedParityChange } from '../operations/parity.ts';
 import { DraftStore, type Draft } from './drafts.ts';
 import { AuthorWorkspace } from './workspace.ts';
 import { replay } from './replay.ts';
+import { ghStatus } from './gh.ts';
 
 export type DraftPreview = {
   draftId: string; base: string; digest: string;
@@ -40,6 +41,18 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
   const runs = yield* RunStore;
   const paths = yield* MachinePaths;
   const git = yield* Git;
+  const processes = yield* Processes;
+  const sessionError = (error: unknown, message = 'Publication could not be completed') => Effect.gen(function* () {
+    if (error instanceof SessionError) return yield* Effect.fail(error);
+    if (error instanceof AccessDenied) {
+      const status = yield* ghStatus().pipe(Effect.provideService(Processes, processes));
+      if (status === 'signed-out') return yield* Effect.fail(new SessionError('NOT_SIGNED_IN', 'gh is not signed in; sign in to GitHub before publishing'));
+      if (status === 'missing') return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'gh is not installed'));
+      if (status === 'ready') return yield* Effect.fail(new SessionError('UNAUTHORIZED', `No access to repository ${error.repoUrl}`));
+      return yield* Effect.fail(failed('GitHub sign-in status is unavailable'));
+    }
+    return yield* Effect.fail(failed(message));
+  });
   const gate = yield* Semaphore.make(1);
   const previews = new Map<string, { base: string; digest: string }>();
   const dirFor = (repoUrl: string) => join(paths.stateRoot, 'agent', 'author', createHash('sha256').update(repoUrl).digest('hex').slice(0, 16));
@@ -71,7 +84,7 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
   });
   const previewDraft = (id: string): Effect.Effect<DraftPreview, SessionError> => Effect.flatMap(readDraft(id), preview).pipe(
     Effect.tap(result => Effect.sync(() => { previews.set(id, { base: result.base, digest: result.digest }); })),
-    gate.withPermit, Effect.mapError(() => failed('Draft preview is unavailable')));
+    gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable')));
   const prepared = (change: Extract<OperationChange, { kind: 'publishDraft' | 'announcePublication' }>, target: Target, baseDigest: string, commit?: string) => Effect.gen(function* () {
     const currentGeneration = String(yield* generation);
     const key = change.kind === 'publishDraft' ? `publish:${target.draftId}` : `announce:${change.runId}`;
@@ -86,12 +99,14 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
       actionEffects: [change.kind === 'publishDraft' ? 'Push to main, tag the commit and announce each changed profile' : 'Retry tags and missing profile announcements'], nextActions: [] }) };
   });
   const checkpoint = (lifecycle: RunLifecycle, publication: Publication) => lifecycle.publication(publication);
-  const complete = (lifecycle: RunLifecycle, acceptance: Acceptance, publication: Publication) => Effect.gen(function* () {
+  const complete = (lifecycle: RunLifecycle, acceptance: Acceptance, publication: Publication, notes: string[]) => Effect.gen(function* () {
     yield* checkpoint(lifecycle, publication);
     yield* lifecycle.parity({ kind: acceptance.kind, state: 'committed', committedKeys: acceptance.plannedKeys, remainingKeys: [], backupIds: [] });
-    yield* lifecycle.publicationResult({ status: 'succeeded', message: publication.pending.length || !publication.tagged ? 'Published, not yet announced' : 'Published and announced' });
+    const message = publication.pending.length || !publication.tagged ? 'Published, not yet announced'
+      : publication.unannounceable?.length ? 'Published; some profiles cannot be announced' : 'Published and announced';
+    yield* lifecycle.publicationResult({ status: 'succeeded', message: [message, ...notes].join('. ') });
   });
-  const announce = (target: Target, publication: Publication, lifecycle: RunLifecycle) => Effect.gen(function* () {
+  const announce = (target: Target, publication: Publication, lifecycle: RunLifecycle, notes: string[]) => Effect.gen(function* () {
     const commit = publication.commit!; const dir = dirFor(target.repoUrl);
     // Tag and hosted failures cannot undo a published commit. Keep its targets for Announce.
     const tagged = yield* workspace.tag(dir, commit).pipe(Effect.match({ onSuccess: () => true, onFailure: () => false }));
@@ -114,21 +129,27 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
           if (previous) {
             // Never append an older or divergent commit after a later announcement.
             const ancestor = yield* git.run(['merge-base', previous.commitSha, commit], { cwd: dir });
-            if (ancestor.trim() !== previous.commitSha) return false;
+            if (ancestor.trim() !== previous.commitSha) return 'A newer or divergent commit has already been announced';
           }
           const before = previous ? yield* documentsAt(dir, previous.commitSha) : {};
           const items = changedItems(before, after, profile);
           const desired = resolveNamedProfile({ documents: after, name: profile });
           const requiredEnv = [...new Set(desired.integrations.filter(i => i.enabled).flatMap(i => Array.isArray(i.declaration.requiresEnv) ? i.declaration.requiresEnv.filter((name): name is string => typeof name === 'string') : []))].sort();
-          const publication = { number: (previous?.number ?? 0) + 1, commitSha: commit, tag: `nortuscc/${commit}`, changelog: '', items, requiredEnv };
-          if (existing) return existing.tag === publication.tag && canonical(existing.items) === canonical(items) && canonical(existing.requiredEnv) === canonical(requiredEnv);
-          return yield* client.publishRevision(setup.setupId, publication).pipe(Effect.matchEffect({ onSuccess: () => Effect.succeed(true),
+          const revision = { number: (previous?.number ?? 0) + 1, commitSha: commit, tag: `nortuscc/${commit}`, changelog: '', items, requiredEnv };
+          if (requiredEnv.some(name => !Schema.is(EnvNameSchema)(name))) return 'Required environment names are unsupported by hosted announcements';
+          if (items.length > MAX_ITEMS) return `Hosted announcements allow at most ${MAX_ITEMS} items per revision`;
+          if (items.some(item => !Schema.is(RevisionItemSchema)(item))) return 'Item identities are unsupported by hosted announcements';
+          if (!Schema.is(RevisionPublicationSchema)(revision)) return 'Revision metadata exceeds hosted announcement limits';
+          if (existing) return existing.tag === revision.tag && canonical(existing.items) === canonical(items) && canonical(existing.requiredEnv) === canonical(requiredEnv)
+            ? true : 'Existing hosted revision has different publication metadata';
+          return yield* client.publishRevision(setup.setupId, revision).pipe(Effect.matchEffect({ onSuccess: () => Effect.succeed(true),
             // A committed request can lose its reply. A 409 must be reconciled, never blindly renumbered.
-            onFailure: () => Effect.map(client.listRevisions(setup.setupId), latest => latest.some(r => r.commitSha === commit && r.tag === publication.tag && canonical(r.items) === canonical(items) && canonical(r.requiredEnv) === canonical(requiredEnv))),
+            onFailure: () => Effect.map(client.listRevisions(setup.setupId), latest => latest.some(r => r.commitSha === commit && r.tag === revision.tag && canonical(r.items) === canonical(items) && canonical(r.requiredEnv) === canonical(requiredEnv))),
           }));
         }).pipe(Effect.catch(() => Effect.succeed(false)));
-        if (result) {
-          publication.announced = [...new Set([...publication.announced, profile])].sort();
+        if (result !== false) {
+          if (result === true) publication.announced = [...new Set([...publication.announced, profile])].sort();
+          else publication.unannounceable = [...(publication.unannounceable ?? []), { profile, reason: result }];
           publication.pending = publication.pending.filter(p => p !== profile);
           yield* checkpoint(lifecycle, publication);
         }
@@ -136,11 +157,21 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
     });
     yield* hosted.pipe(Effect.catch(() => Effect.void));
     if (publication.pending.length === 0) {
-      const current = yield* drafts.read(target.draftId);
-      if (current && digest(current) === target.draftDigest) {
-        yield* drafts.delete(target.draftId); previews.delete(target.draftId);
-      }
+      yield* Effect.gen(function* () {
+        const current = yield* drafts.read(target.draftId);
+        if (current && digest(current) === target.draftDigest) {
+          yield* drafts.delete(target.draftId); previews.delete(target.draftId);
+        }
+      }).pipe(Effect.catchCause(() => Effect.sync(() => { notes.push('Draft cleanup failed; the draft was retained'); })));
     }
+  });
+  const finishPublished = (target: Target, acceptance: Acceptance, publication: Publication, lifecycle: RunLifecycle) => Effect.gen(function* () {
+    const notes: string[] = [];
+    yield* Effect.gen(function* () {
+      yield* checkpoint(lifecycle, publication);
+      yield* announce(target, publication, lifecycle, notes);
+    }).pipe(Effect.catchCause(() => Effect.sync(() => { notes.push('Tagging or announcement did not complete; retry Announce'); })));
+    yield* complete(lifecycle, acceptance, publication, notes);
   });
   const preparePublish = (change: { kind: 'publishDraft'; draftId: string; digest: string }): Effect.Effect<PreparedParityChange, SessionError> => Effect.gen(function* () {
     const draft = yield* readDraft(change.draftId);
@@ -154,7 +185,7 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
         if (signal.aborted) return;
         const latestDraft = yield* readDraft(change.draftId);
         const latest = yield* preview(latestDraft);
-        const publication: Publication = { commit: null, pushed: false, tagged: false, announced: [], pending: [...target.profiles] };
+        const publication: Publication = { commit: null, pushed: false, tagged: false, announced: [], pending: [] };
         yield* checkpoint(lifecycle, publication);
         if (seen?.digest !== change.digest || latestDraft.repoUrl !== target.repoUrl || latest.base !== target.base || latest.digest !== change.digest || latest.invalid.length || !latest.diff.length) {
           yield* lifecycle.publicationResult({ status: 'needs-preview', message: 'Draft or main changed; preview again' }); return;
@@ -166,26 +197,42 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
             yield* checkpoint(lifecycle, publication).pipe(Effect.orDie);
           }),
         });
-        if (outcome.kind === 'moved') {
-          const published = publication.commit ? yield* workspace.isPublished(dirFor(target.repoUrl), publication.commit) : false;
-          if (published !== true) {
-            if (published === 'unknown') return yield* Effect.fail(failed('Push outcome is unknown; inspect the publication before retrying'));
+        const published = outcome.kind === 'pushed' ? true : publication.commit
+          ? yield* workspace.isPublished(dirFor(target.repoUrl), publication.commit) : false;
+        if (published === 'unknown') {
+          yield* lifecycle.publicationResult({ status: 'interrupted', message: 'Push outcome is unknown; re-check this publication before retrying' }); return;
+        }
+        if (!published) {
+          if (outcome.kind === 'moved') {
             yield* lifecycle.publicationResult({ status: 'needs-preview', message: 'Remote main moved; preview again' }); return;
           }
-        } else if (outcome.kind !== 'pushed') {
-          yield* lifecycle.finished({ type: 'failed', message: outcome.kind === 'denied' ? `No permission to push to ${target.repoUrl}` : outcome.detail }); return;
+          if (outcome.kind !== 'pushed') {
+            yield* lifecycle.finished({ type: 'failed', message: outcome.kind === 'denied' ? `No permission to push to ${target.repoUrl}` : outcome.detail }); return;
+          }
         }
-        publication.pushed = true; yield* checkpoint(lifecycle, publication);
-        yield* announce(target, publication, lifecycle);
-        yield* complete(lifecycle, plan.acceptance, publication);
-      }).pipe(gate.withPermit, Effect.mapError(error => error instanceof SessionError ? error : failed())),
+        publication.pushed = true; publication.pending = [...target.profiles];
+        yield* finishPublished(target, plan.acceptance, publication, lifecycle);
+      }).pipe(gate.withPermit, Effect.catch(error => sessionError(error))),
     } satisfies PreparedParityChange;
-  }).pipe(gate.withPermit, Effect.mapError(error => error instanceof SessionError ? error : failed()));
+  }).pipe(gate.withPermit, Effect.catch(error => sessionError(error)));
+  // A later Announce receipt settles the original run without rewriting its history.
+  const evidenceFor = (target: Target, publication: NonNullable<RunView['publication']>) => Effect.map(runs.read, receipts => {
+    const latest = receipts.filter(receipt => {
+      const acceptance = receipt.view.intent.parity;
+      return receipt.view.state === 'succeeded' && receipt.view.publication?.pushed && receipt.view.publication.commit === publication.commit
+        && (acceptance?.kind === 'publishDraft' || acceptance?.kind === 'announcePublication')
+        && canonical(acceptance.publication) === canonical(target);
+    }).sort((a, b) => b.sequence - a.sequence)[0];
+    return latest?.view.publication ?? publication;
+  }).pipe(Effect.catch(() => Effect.succeed(publication)));
   const recoverPublication = (run: RunView) => Effect.gen(function* () {
     const acceptance = run.intent.parity;
     if ((acceptance?.kind !== 'publishDraft' && acceptance?.kind !== 'announcePublication') || !run.publication?.commit) return { published: false as const, action: 're-preview' as const };
     const published = yield* workspace.isPublished(dirFor(acceptance.publication.repoUrl), run.publication.commit);
-    return { published, action: published === true ? 'announce' as const : published === false ? 're-preview' as const : null };
+    const evidence = yield* evidenceFor(acceptance.publication, run.publication);
+    const needsAnnouncement = !evidence.pushed || !evidence.tagged || evidence.pending.length > 0;
+    return { published, action: published === true ? needsAnnouncement ? 'announce' as const : null
+      : published === false ? 're-preview' as const : 're-check' as const };
   }).pipe(gate.withPermit);
   const prepareAnnounce = (change: { kind: 'announcePublication'; runId: string }): Effect.Effect<PreparedParityChange, SessionError> => Effect.gen(function* () {
     const receipt = (yield* runs.read).find(r => r.view.runId === change.runId);
@@ -199,12 +246,13 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
         if (signal.aborted) return;
         const published = yield* workspace.isPublished(dirFor(target.repoUrl), commit);
         if (published !== true) return yield* Effect.fail(failed('Publication is not confirmed on remote main'));
-        const publication: Publication = { commit, pushed: true, tagged: false, announced: [], pending: [...target.profiles] };
-        yield* checkpoint(lifecycle, publication);
-        yield* announce(target, publication, lifecycle);
-        yield* complete(lifecycle, plan.acceptance, publication);
-      }).pipe(gate.withPermit, Effect.mapError(error => error instanceof SessionError ? error : failed())),
+        const unannounceable = (yield* evidenceFor(target, receipt.view.publication!)).unannounceable;
+        const publication: Publication = { commit, pushed: true, tagged: false, announced: [],
+          pending: target.profiles.filter(profile => !unannounceable?.some(p => p.profile === profile)),
+          ...(unannounceable ? { unannounceable: [...unannounceable] } : {}) };
+        yield* finishPublished(target, plan.acceptance, publication, lifecycle);
+      }).pipe(gate.withPermit, Effect.catch(error => sessionError(error))),
     } satisfies PreparedParityChange;
-  }).pipe(gate.withPermit, Effect.mapError(() => failed()));
+  }).pipe(gate.withPermit, Effect.catch(error => sessionError(error)));
   return { previewDraft, preparePublish, prepareAnnounce, recoverPublication };
 });
