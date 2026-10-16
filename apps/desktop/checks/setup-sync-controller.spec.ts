@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { skillRun } from './support/skill-run.ts';
-import { SetupSyncController, selectedLocal } from '../src/setup-sync-controller.ts';
+import { SetupSyncController, selectedLocal, incomingCounts } from '../src/setup-sync-controller.ts';
 import { fixture, review, run, flush, deferred, change, preview as changePreview, localItems, localChange, localRun } from './support/setup-sync.ts';
 
 async function setup(t: test.TestContext, options: { maintenance?: () => boolean } = {}) {
@@ -510,4 +510,10 @@ test('a page left before connecting does not load, and loads when entered later'
   assert.equal(f.calls.some(c => c.name === 'setupReview'), false);
   controller.enter(); await flush();
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 1);
+});
+
+test('incoming counts leave out unchanged rows and count rows on hold apart', () => {
+  const row = (change: 'changed' | 'unchanged' | 'added', held: boolean) => ({ itemId: `setting:${change}${held}`, kind: 'setting' as const, change, held, conflict: false });
+  assert.deepEqual(incomingCounts(review({ rows: [row('changed', false), row('added', false), row('changed', true), row('unchanged', false), row('unchanged', true)] })), { incoming: 2, held: 2 });
+  assert.deepEqual(incomingCounts(null), { incoming: 0, held: 0 });
 });

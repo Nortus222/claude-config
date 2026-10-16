@@ -1,7 +1,7 @@
 import React from 'react';
 import type { InspectResult } from '@nortuscc/agent/ipc/protocol';
 import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/operations';
-import { selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
+import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { RunRecovery } from './run-recovery.tsx';
 import { changeTitle, errorText, itemLabel, type ItemLabel } from './copy.ts';
 
@@ -174,11 +174,12 @@ function Pins({ review, state, controller }: { review: Review; state: SetupSyncS
 }
 
 function Incoming({ review, state, controller }: { review: Review; state: SetupSyncState; controller: Actions }) {
-  const can = state.eligibility, incoming = review.rows.filter(row => row.change !== 'unchanged').length;
+  const can = state.eligibility, { incoming, held } = incomingCounts(review);
   const from = state.profiles?.followed?.profile ?? 'your profile';
+  const page = state.pageIndex ? ` · page ${state.pageIndex + 1}` : '';
   return <section className="card setup-sync-review" aria-labelledby="changes-incoming-h"><p className="eyebrow">INCOMING</p>
-    <h2 id="changes-incoming-h">{review.rows.length ? `${count(incoming, 'incoming change')} from ${from}${state.pageIndex ? ` · page ${state.pageIndex + 1}` : ''}` : `No incoming changes from ${from}`}</h2>
-    {incoming ? <div className="setup-sync-actions" role="group" aria-label="Choose for every incoming row">
+    <h2 id="changes-incoming-h">{incoming + held ? `${count(incoming, 'incoming change')} from ${from}${held ? ` · ${held} on hold` : ''}${page}` : `No incoming changes from ${from}${page}`}</h2>
+    {review.rows.some(row => row.change !== 'unchanged') ? <div className="setup-sync-actions" role="group" aria-label="Choose for every incoming row">
       <button disabled={!can.choose} onClick={() => controller.chooseAll('accept')}>Take all incoming</button>
       <button disabled={!can.choose} onClick={() => controller.chooseAll('hold')}>Hold all incoming</button></div> : null}
     {review.pinGroups.length ? <Pins review={review} state={state} controller={controller} /> : null}

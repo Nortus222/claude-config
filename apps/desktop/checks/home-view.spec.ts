@@ -10,7 +10,9 @@ import type { ViewState } from '../src/controller.ts';
 import { fixture, review, run, status } from './support/setup-sync.ts';
 import { authorRun, draft, draftId } from './support/author.ts';
 
-const rows = Array.from({ length: 32 }, (_, i) => ({ itemId: `skill:owner/repo/s${i}`, kind: 'skill' as const, change: 'changed' as const, held: i < 4, conflict: false }));
+// 28 incoming, 4 on hold, and 3 unchanged rows (overrides and pin siblings) that count as neither.
+const rows = [...Array.from({ length: 32 }, (_, i) => ({ itemId: `skill:owner/repo/s${i}`, kind: 'skill' as const, change: 'changed' as const, held: i < 4, conflict: false })),
+  ...Array.from({ length: 3 }, (_, i) => ({ itemId: `skill:owner/repo/u${i}`, kind: 'skill' as const, change: 'unchanged' as const, held: false, conflict: false }))];
 const followed = { repoUrl: 'https://github.com/Nortus222/claude-config.git', profile: 'personal', setupId: null };
 const published = authorRun({ kind: 'publishDraft', draftId, digest: 'b'.repeat(64) }, { runId: 'publish-run', state: 'succeeded',
   publication: { commit: 'c'.repeat(40), pushed: true, tagged: true, announced: [], pending: ['team'] } });

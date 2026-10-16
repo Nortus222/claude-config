@@ -1,7 +1,7 @@
 import React, { type ReactNode } from 'react';
 import type { RunView } from '@nortuscc/agent/operations';
 import type { ViewState } from './controller.ts';
-import type { SetupSyncState } from './setup-sync-controller.ts';
+import { incomingCounts, type SetupSyncState } from './setup-sync-controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
 import { changeTitle } from './copy.ts';
@@ -54,8 +54,7 @@ export function HomeView(props: HomeProps) {
     <button onClick={() => navigate(screen)}>{label}</button>;
   const followed = changes.profiles?.followed;
   const review = changes.review;
-  const held = review?.rows.filter(row => row.held).length ?? 0;
-  const incoming = (review?.rows.length ?? 0) - held;
+  const { incoming, held } = incomingCounts(review);
   const more = review?.nextCursor ? '+' : '';
   const items = machine.inspection?.items ?? [];
   const waiting = items.filter(item => item.disposition === 'apply').length;

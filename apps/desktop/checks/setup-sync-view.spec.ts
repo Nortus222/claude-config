@@ -172,3 +172,12 @@ test('profile listing failures appear inline while the cached review stays visib
   assert.match(text, /Profile clone unavailable/);
   assert.match(text, /aria-label="Current value of /);
 });
+
+test('the Changes heading counts incoming rows like Home and the badge: not unchanged, not on hold', async t => {
+  const rows = [...Array.from({ length: 32 }, (_, i) => ({ itemId: `setting:s${i}`, kind: 'setting' as const, change: 'changed' as const, held: i < 4, conflict: false })),
+    { itemId: 'setting:u', kind: 'setting' as const, change: 'unchanged' as const, held: false, conflict: false }];
+  const { html } = await page(t, f => { f.handlers.setupReview = () => review({ rows }); });
+  assert.match(html(), /<h2 id="changes-incoming-h">28 incoming changes from your profile · 4 on hold<\/h2>/);
+  const quiet = await page(t, f => { f.handlers.setupReview = () => review({ rows: [rows.at(-1)] }); });
+  assert.match(quiet.html(), /<h2 id="changes-incoming-h">No incoming changes from your profile<\/h2>/);
+});

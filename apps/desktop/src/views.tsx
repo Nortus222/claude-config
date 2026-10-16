@@ -6,18 +6,18 @@ import type { SetupController, SetupViewState } from './setup-controller.ts';
 import type { AccountController, AccountViewState } from './account-controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import type { MachineController, ViewState } from './controller.ts';
-import type { SetupSyncController, SetupSyncState } from './setup-sync-controller.ts';
+import { incomingCounts, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { draftCount, type HomeState } from './home-controller.ts';
 import { errorText } from './copy.ts';
 
 export type Screen = 'home' | 'changes' | 'skills' | 'profiles' | 'upstreams' | 'publish' | 'settings';
 // Counts shown beside a screen's name: undecided incoming changes, unpublished drafts, an app update.
 export type NavBadges = { readonly changes?: number; readonly publish?: number; readonly settings?: boolean };
-// Badges from the Changes review (rows not on hold), Home's local drafts and the updater.
+// Badges from the Changes review (incoming rows not on hold), Home's local drafts and the updater.
 export function navBadges(changes: Pick<SetupSyncState, 'review'>, home: Pick<HomeState, 'drafts'>, update: UpdateViewState): NavBadges {
   const phase = update.update?.enabled ? update.update.phase : null;
   return {
-    changes: changes.review?.rows.filter(row => !row.held).length ?? 0,
+    changes: incomingCounts(changes.review).incoming,
     publish: draftCount(home.drafts),
     settings: phase === 'available' || phase === 'verified',
   };

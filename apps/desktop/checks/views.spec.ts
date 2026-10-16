@@ -40,7 +40,8 @@ test('navigation badges count undecided incoming changes and drafts and flag an 
 test('badge counts come from review rows not on hold, readable drafts and an available or verified update', async () => {
   const { review } = await import('./support/setup-sync.ts');
   const { draft } = await import('./support/author.ts');
-  const rows = [true, false, false].map((held, index) => ({ itemId: `setting:${index}`, kind: 'setting' as const, change: 'changed' as const, held, conflict: false }));
+  const rows = [...[true, false, false].map((held, index) => ({ itemId: `setting:${index}`, kind: 'setting' as const, change: 'changed' as const, held, conflict: false })),
+    { itemId: 'setting:unchanged', kind: 'setting' as const, change: 'unchanged' as const, held: false, conflict: false }];
   const update = (phase: 'current' | 'available' | 'verified', enabled = true): UpdateViewState => ({ native: true, pending: false, retry: null, detail: '', deferred: false,
     update: { installedVersion: '0.1.5', enabled, automaticChecks: false, phase, availableVersion: '0.1.6', notes: null, downloadedBytes: 0, totalBytes: null, diagnostic: null } });
   const drafts = [draft, { id: 'broken', error: 'unreadable' }] as never;
