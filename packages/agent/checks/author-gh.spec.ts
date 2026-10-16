@@ -8,7 +8,9 @@ const run = <A, E>(effect: Effect.Effect<A, E, Processes>, fake: Processes['Serv
   Effect.runPromise(effect.pipe(Effect.provide(Layer.succeed(Processes, { run: fake }))));
 
 test('ghStatus distinguishes missing, signed out, ready and unexpected failures', async () => {
-  assert.equal(await run(ghStatus(), () => Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'spawn gh ENOENT' }))), 'missing');
+  assert.equal(await run(ghStatus(), () => Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'spawn gh ENOENT', code: 'ENOENT' }))), 'missing');
+  // Bun reports a missing executable without ENOENT in its message; the error code decides.
+  assert.equal(await run(ghStatus(), () => Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'Executable not found in $PATH: "gh"', code: 'ENOENT' }))), 'missing');
   for (const [code, expected] of [[0, 'ready'], [1, 'signed-out'], [4, 'signed-out'], [2, 'error']] as const) {
     assert.equal(await run(ghStatus(), command => {
       assert.equal(command.cmd, 'gh');
@@ -41,7 +43,7 @@ test('ghLogin reports the one-time code once while the process is running', asyn
 });
 
 test('ghLogin returns missing, signed-out or error when authorization cannot finish', async () => {
-  assert.equal(await run(ghLogin(() => assert.fail('no code')), () => Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'spawn gh ENOENT' }))), 'missing');
+  assert.equal(await run(ghLogin(() => assert.fail('no code')), () => Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'Executable not found in $PATH: "gh"', code: 'ENOENT' }))), 'missing');
   for (const [code, expected] of [[1, 'error'], [2, 'signed-out'], [4, 'signed-out']] as const) {
     assert.equal(await run(ghLogin(() => assert.fail('no code')), () => Effect.succeed({ code, stdout: '' })), expected);
   }

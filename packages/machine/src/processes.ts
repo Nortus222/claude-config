@@ -119,7 +119,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           if (err.code !== 'EPIPE' && err.code !== 'EOF') resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: 'stdin write failed' })));
         });
         if (command.input !== undefined) child.stdin?.end(command.input, 'utf8');
-        child.on('error', (err) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message }))));
+        child.on('error', (err: NodeJS.ErrnoException) => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd, reason: err.message, ...(typeof err.code === 'string' ? { code: err.code } : {}) }))));
         child.on('close', (code, signal) => {
           closed = true;
           if (exceeded) return;

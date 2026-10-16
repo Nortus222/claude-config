@@ -11,7 +11,8 @@ const command = (args: readonly string[], onOutput?: Command['onOutput']): Comma
   cmd: 'gh', args, output: 'capture', stderr: 'capture',
   captureLimit: { stdout: GH_OUTPUT_BYTES, stderr: GH_OUTPUT_BYTES }, onOutput,
 });
-const launchState = (error: { reason: string }): GhState => /\bENOENT\b/.test(error.reason) ? 'missing' : 'error';
+// Runtimes word a missing executable differently; only its errno code is reliable.
+const launchState = (error: { readonly code?: string }): GhState => error.code === 'ENOENT' ? 'missing' : 'error';
 
 export const ghStatus = (): Effect.Effect<GhState, never, Processes> => Effect.gen(function* () {
   const processes = yield* Processes;

@@ -25,6 +25,10 @@ test('a command that cannot launch fails with LaunchFailed', async () => {
   const exit = await run(Processes.use((p) => p.run({ cmd: '/no/such/tool', args: [], output: 'capture' })));
   assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('LaunchFailed'));
 });
+test('a missing executable carries its error code, not only its message', async () => {
+  const exit = await run(Processes.use((p) => Effect.flip(p.run({ cmd: 'nortuscc-definitely-missing-command', args: [], output: 'capture' }))));
+  assert.ok(Exit.isSuccess(exit)); assert.equal(exit.value._tag, 'LaunchFailed'); assert.equal('code' in exit.value && exit.value.code, 'ENOENT');
+});
 
 // A POSIX shell script; the .cmd shim tests cover PATH lookup on Windows.
 test('the path option replaces PATH for the child', { skip: process.platform === 'win32' }, async () => {
