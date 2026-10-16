@@ -68,7 +68,7 @@ test('the page reports a choice as saved only after its run succeeds', async () 
   f.box.run = receipt('succeeded'); f.box.rows = inventory([row('tdd', { choice: false, enabled: false })]);
   f.emit({ event: 'operation-run', runId: 'run-1' }); await f.skills.idle();
   assert.match(f.skills.state.detail, /Saved.*Off/); assert.equal(f.skills.state.view!.items[0]!.choice, false); assert.equal(f.skills.state.saving, null);
-  assert.match(f.skills.state.detail, /Review & apply/);
+  assert.match(f.skills.state.detail, /Apply on Changes/); assert.doesNotMatch(f.skills.state.detail, /Review & apply/);
 });
 test('a status for another run does not mark this save complete', async () => {
   const f = await loaded(); await f.skills.setChoice('owner/skills', 'tdd', 'off');
