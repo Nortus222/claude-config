@@ -55,8 +55,8 @@ function App() {
   const [profileSettled, setProfileSettled] = useState(false);
   const choosingProfile = profileChoiceDue(setupState, state, profileSettled);
   const settleProfile = () => { setProfileSettled(true); setScreen('home'); };
-  // Re-entered once the agent is connected and its first read is done, so the review and profiles load.
-  useEffect(() => { if (screen === 'home' || screen === 'changes') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync, state.connection, state.session, state.initialReadPending]);
+  // The controller loads the review and profiles itself once the agent is connected and its first read is done.
+  useEffect(() => { if (screen === 'home' || screen === 'changes') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
   useEffect(() => { if (choosingProfile && followApplied(setupSyncState)) settleProfile(); }, [choosingProfile, setupSyncState]);
   useEffect(() => { setupSync.refresh(); }, [setupSync, updateState.update?.phase]);
   useEffect(() => { if (AUTHOR_SCREENS.has(screen)) author.enter(); else author.leave(); }, [author, screen, state.session, state.connection]);
