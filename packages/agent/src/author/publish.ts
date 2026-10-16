@@ -35,7 +35,7 @@ const changedItems = (before: Documents, after: Documents, profile: string): Rev
     change: item.before === undefined ? 'added' : item.after === undefined ? 'removed' : 'changed' }));
 
 // Capture services once. The session owns apply serialization; this gate also serializes private-clone reads.
-export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Effect<number> = Effect.succeed(0)) => Effect.gen(function* () {
+export const makeAuthorPublisher = (client: HostedClient | undefined, generation: Effect.Effect<number> = Effect.succeed(0)) => Effect.gen(function* () {
   const workspace = yield* AuthorWorkspace;
   const drafts = yield* DraftStore;
   const runs = yield* RunStore;
@@ -113,6 +113,7 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
     if (!tagged) return;
     publication.tagged = true; yield* checkpoint(lifecycle, publication);
     const hosted = Effect.gen(function* () {
+      if (!client) return;
       const state = yield* client.sync();
       if (target.accountId !== null && state.accountId !== target.accountId) return yield* Effect.fail(failed('Hosted account changed'));
       const after = yield* documentsAt(dir, commit);
@@ -177,7 +178,7 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
     const draft = yield* readDraft(change.draftId);
     const seen = previews.get(draft.id);
     const accepted = yield* preview(draft);
-    const state = yield* client.state;
+    const state = yield* (client?.state ?? Effect.succeed({ accountId: null }));
     const target: Target = { repoUrl: draft.repoUrl, base: seen?.base ?? accepted.base, draftId: draft.id, draftDigest: digest(draft), profiles: accepted.affectedProfiles, accountId: state.accountId };
     const plan = yield* prepared(change, target, change.digest);
     return { ...plan, revalidate: Effect.void,
@@ -254,5 +255,5 @@ export const makeAuthorPublisher = (client: HostedClient, generation: Effect.Eff
       }).pipe(gate.withPermit, Effect.catch(error => sessionError(error))),
     } satisfies PreparedParityChange;
   }).pipe(gate.withPermit, Effect.catch(error => sessionError(error)));
-  return { previewDraft, preparePublish, prepareAnnounce, recoverPublication };
+  return { previewDraftValue: (draft: Draft) => preview(draft).pipe(gate.withPermit, Effect.catch(error => sessionError(error, 'Draft preview is unavailable'))), previewDraft, preparePublish, prepareAnnounce, recoverPublication };
 });

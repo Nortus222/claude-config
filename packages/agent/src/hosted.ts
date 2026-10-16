@@ -193,6 +193,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     return current;
   }));
   return {
+    authorClient: client,
     selectOperationSetup: (setupId: string) => Effect.gen(function* () {
       const current = yield* client.state;
       const offered = current.setups.find(s => s.setupId === setupId);

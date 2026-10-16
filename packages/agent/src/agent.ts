@@ -43,6 +43,7 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly authorClient?: import('@nortuscc/hosted-client').HostedClient;
   readonly operationDomains?: AgentDomains;
   readonly signInFlow?: HostedRuntime['signInFlow'];
   readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
@@ -186,6 +187,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       legacyGeneration: Effect.gen(function* () { return legacyGeneration + (hosted ? yield* hosted.generation : 0); }),
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
+        authorClient: hosted.authorClient,
         signInFlow: hosted.signInFlow,
         freshInspection: hosted.inspectPrimary,
         afterPerson: hosted.afterPerson,

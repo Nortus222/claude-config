@@ -2,10 +2,25 @@ import { Schema } from 'effect';
 import { ContextResultSchema } from './schemas.ts';
 
 export const capabilityInventory = {
+  authorProfiles: {available:true},
+  authorFile: {available:true},
+  upstreams: {available:true},
+  discoverUpstream: {available:true},
+  upstreamSkill: {available:true},
+  drafts: {available:true},
+  draftPreview: {available:true},
+  ghState: {available:true},
+  editDraft: {available:true},
+  removeDraftIntent: {available:true},
+  deleteDraft: {available:true},
+  ghLogin: {available:true},
+  publishDraft: {available:true},
+  announcePublication: {available:true},
+
   listBackups: {available:true}, pruneBackups: {available:true},
   agentStatus: {available:true}, accountState: {available:true},
   setPolicy: {available:true}, resume: {available:true}, signIn: {available:true}, signOut: {available:true}, syncAccount: {available:true}, patchMachineMetadata: {available:true},
-  sourceDecision: {available:true}, watchSources: {available:true}, inspectSourceDiff: {available:true}, pinImpact: {available:true}, draftChangelog: {available:true},
+  sourceDecision: {available:false,reason:'Use draft intents and publishDraft'}, watchSources: {available:true}, inspectSourceDiff: {available:true}, pinImpact: {available:true}, draftChangelog: {available:true},
   setupReview: { available: true }, setupApply: { available: true },
   inspectSetups: { available: true }, incomingChanges: { available: true }, prepareTrustRequest: { available: true }, syncDecision: { available: true }, inspectUpdates: { available: true }, inspectIntent: { available: true }, machineIntent: { available: true }, getContext: { available: true }, inspect: { available: true }, previewChange: { available: true },
   applyChange: { available: true }, getRun: { available: true }, listRuns: { available: true },

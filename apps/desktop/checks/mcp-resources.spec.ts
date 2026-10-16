@@ -49,10 +49,10 @@ test('post-signing Bun hash refresh updates only the Bun fingerprint after bytes
 });
 
 
-const runtimeImport = /(?:packages\/machine\/src\/(?!(?:paths|errors)\.ts$)|packages\/profile-engine\/src\/(?!intent-value\.ts$)|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/;
+const runtimeImport = /(?:packages\/machine\/src\/(?!(?:paths|errors)\.ts$)|packages\/profile-engine\/src\/(?!(?:intent-value|author-values|files)\.ts$|files\.json$)|packages\/agent\/src\/skill-operations|node_modules\/yaml\/)/;
 
 test('metadata exceptions allow only exact pure leaves', () => {
-  assert.doesNotMatch('packages/profile-engine/src/intent-value.ts', runtimeImport);
+  for (const leaf of ['intent-value.ts', 'author-values.ts', 'files.ts', 'files.json']) assert.doesNotMatch(`packages/profile-engine/src/${leaf}`, runtimeImport);
   for (const path of ['intent-value.ts-runtime.ts', 'intent-value.ts/runtime.ts', 'intent-value.tsx']) assert.match(`packages/profile-engine/src/${path}`, runtimeImport);
 });
 

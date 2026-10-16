@@ -1,15 +1,9 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer, Schema, Semaphore } from 'effect';
 import { Backups, Fs, MachinePaths } from '@nortuscc/machine';
-import { IntentSchema } from './intents.ts';
+import { DraftSchema, UUID } from './draft-schema.ts';
+export { DraftSchema } from './draft-schema.ts';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/u;
-export const DraftSchema = Schema.Struct({
-  version: Schema.Literal(1), id: Schema.String.check(Schema.isPattern(UUID)),
-  repoUrl: Schema.String.check(Schema.isNonEmpty()),
-  createdAt: Schema.String.check(Schema.makeFilter(value => Number.isFinite(Date.parse(value)))),
-  intents: Schema.Array(IntentSchema),
-});
 export type Draft = typeof DraftSchema.Type;
 export type DraftListEntry = Draft | { readonly id: string; readonly error: string };
 export class DraftStoreError extends Error {}

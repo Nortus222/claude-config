@@ -1,6 +1,7 @@
+import { makeAuthorOperations, isAuthorChange, type AuthorRead } from '../operations/author.ts';
 import { prepareBackupOperation, readBackupOperation } from '../operations/backups.ts';
 import { isAccountChange, prepareAccountOperation, readAccountOperation } from '../operations/account.ts';
-import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
+import { readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
@@ -20,7 +21,6 @@ import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } fro
 import { readSetupReview, prepareSetupApply } from '../operations/setup.ts';
 import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
-import { prepareCaptureChange } from '../operations/capture.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
@@ -46,6 +46,15 @@ type Client = 'app' | 'cli' | 'mcp';
 
 // One person's preview and at most one run, over the agent's latest job inspection.
 export type AgentSession = {
+  readonly authorProfiles: (input: OperationInput<'authorProfiles'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorProfiles'>, SessionError>;
+  readonly authorFile: (input: OperationInput<'authorFile'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorFile'>, SessionError>;
+  readonly upstreams: (input: OperationInput<'upstreams'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'upstreams'>, SessionError>;
+  readonly discoverUpstream: (input: OperationInput<'discoverUpstream'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'discoverUpstream'>, SessionError>;
+  readonly upstreamSkill: (input: OperationInput<'upstreamSkill'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'upstreamSkill'>, SessionError>;
+  readonly drafts: (input: OperationInput<'drafts'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'drafts'>, SessionError>;
+  readonly draftPreview: (input: OperationInput<'draftPreview'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftPreview'>, SessionError>;
+  readonly ghState: (input: OperationInput<'ghState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'ghState'>, SessionError>;
+
   readonly listBackups: (input: OperationInput<'listBackups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'listBackups'>, SessionError>;
   readonly agentStatus: (input: OperationInput<'agentStatus'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'agentStatus'>, SessionError>;
   readonly accountState: (input: OperationInput<'accountState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'accountState'>, SessionError>;
@@ -163,6 +172,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const intentOperations = yield* makeIntentOperations({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0),
       freshInspection: (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.map(job => job.inspection), Effect.provideContext(context)), invalidate: skillOperations.clear });
 
+    let author: Effect.Success<ReturnType<typeof makeAuthorOperations>> | undefined;
+    const authorOperations = Effect.suspend(() => author ? Effect.succeed(author) : makeAuthorOperations(handle).pipe(Effect.tap(owner => Effect.sync(() => { author = owner; })))).pipe(Effect.provideContext(context));
+    const authorRead = <N extends AuthorRead>(name: N, input: OperationInput<N>) => handle.exclusive(Effect.flatMap(authorOperations, owner => owner.read(name, input)));
+
     let previewed: Previewed | undefined;
     let active: Active | undefined;
     const clock = yield* AgentClock;
@@ -249,14 +262,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
-    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' | 'update' | 'sourceDecision' }>, inspection: JobInspection) => Effect.gen(function* () {
-      const sourceGeneration = yield* (handle.generation ?? Effect.succeed(0));
-      const setup = change.kind === 'sourceDecision' && handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE', 'Configured source trust is unavailable'))) : undefined;
-      if (setup && !setup.trusted) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Trust this repository in the app before editing source policy'));
-      const setupIdentity = JSON.stringify(setup);
-      const prepared = yield* (change.kind === 'sourceDecision' ? prepareSourceDecision(change, inspection, configuredPaths) : change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
+    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<OperationChange, { kind: 'update' }>, inspection: JobInspection) => Effect.gen(function* () {
+      const prepared = yield* (change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
       const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
-      if (change.kind === 'sourceDecision' && (generation !== String(sourceGeneration) || (yield* handle.inspection) !== inspection)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Source observation changed; inspect again'));
       return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
         execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {
           const successful = new Set<string>();
@@ -274,7 +282,6 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             })).pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
         },
         revalidate: Effect.gen(function* () {
-          if (change.kind === 'sourceDecision' && handle.selectOperationSetup && JSON.stringify(yield* handle.selectOperationSetup('local')) !== setupIdentity) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Configured source trust changed; inspect again'));
           const fresh = yield* (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.provideContext(context));
           if (!fresh.inspection || canonical(fresh.inspection.desired) !== canonical(inspection.desired) || canonical(fresh.inspection.revision) !== canonical(inspection.revision))
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
@@ -288,6 +295,16 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'capture' || input.change.kind === 'sourceDecision' || input.change.kind === 'update' && input.change.authorManifest)
+        return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Use draft intents and publishDraft for author changes'));
+      if (isAuthorChange(input.change)) {
+        if (active) return yield* Effect.fail(busy);
+        const change = input.change;
+        return yield* handle.exclusive(Effect.gen(function* () {
+          const owner = yield* authorOperations;
+          return yield* retainParityChange(yield* owner.prepare(change));
+        }));
+      }
       if (input.change.kind === 'pruneBackups') {
         if (active) return yield* Effect.fail(busy);
         return yield* handle.exclusive(Effect.gen(function* () {
@@ -327,7 +344,6 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         if (active) return yield* Effect.fail(busy);
         return yield* skillOperations.previewAddSkill({ scope: input.scope, candidateId: input.change.candidateId, targets: input.change.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
       }
-      if (input.change.kind === 'publishDraft' || input.change.kind === 'announcePublication') return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Author operations are not configured'));
       if (active) return yield* Effect.fail(busy);
       const inspection = yield* handle.inspection;
       if (!inspection) return yield* Effect.fail(new SessionError('NO_REPORT', 'Inspect the machine before previewing'));
@@ -637,7 +653,24 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       if((yield* (handle.generation??Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Account observation changed; inspect again'));
       return result;
     }));
+    const recoverAuthorRun = (run: import('../operations/index.ts').RunView) => !run.publication || run.result === null ? Effect.succeed(run)
+      : handle.exclusive(Effect.flatMap(authorOperations, owner => owner.recoverPublication(run))).pipe(
+        Effect.map(publicationRecovery => ({ ...run, publicationRecovery })),
+        Effect.catch(() => Effect.succeed({ ...run, publicationRecovery: { published: 'unknown' as const, action: 're-check' as const } })),
+      );
+    const publicRuns: AgentRuns = { ...agentRuns,
+      get: id => agentRuns.get(id).pipe(Effect.flatMap(recoverAuthorRun)),
+    };
     const session: AgentSession = {
+      authorProfiles: input => authorRead('authorProfiles', input),
+      authorFile: input => authorRead('authorFile', input),
+      upstreams: input => authorRead('upstreams', input),
+      discoverUpstream: input => authorRead('discoverUpstream', input),
+      upstreamSkill: input => authorRead('upstreamSkill', input),
+      drafts: input => authorRead('drafts', input),
+      draftPreview: input => authorRead('draftPreview', input),
+      ghState: input => authorRead('ghState', input),
+
       listBackups: input => handle.exclusive(Effect.gen(function* () {
         const generation = yield* (handle.generation ?? Effect.succeed(0)), inspection = yield* handle.inspection;
         const result = yield* readBackupOperation(input, generation).pipe(Effect.provideContext(context));
@@ -663,7 +696,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       })),
       incomingChanges: input => syncRead('incomingChanges', input),
       prepareTrustRequest: input => syncRead('prepareTrustRequest', input),
-      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
+      runs: publicRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
         const generation = yield* (handle.generation ?? Effect.succeed(0));
         const inspection = yield* handle.inspection;
         const unchanged = Effect.gen(function* () {

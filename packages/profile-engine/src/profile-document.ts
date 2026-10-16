@@ -1,11 +1,11 @@
+import { PROFILE_NAME, isProfileName } from './author-values.ts';
+export { isProfileName } from './author-values.ts';
 import { Schema } from 'effect';
 import type { Input } from './model.ts';
 import { decode, issue, parseJson } from './issues.ts';
 import { FILES } from './files.ts';
 import { isSkillAdditionName, normalizeSkillSource } from './overrides.ts';
 
-const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
-export const isProfileName = (name: string): boolean => PROFILE_NAME.test(name);
 const Name = Schema.String.check(Schema.isPattern(PROFILE_NAME));
 const Text = Schema.String.check(Schema.isNonEmpty());
 const SkillSelection = Schema.Struct({ source: Text, names: Schema.Array(Text) });

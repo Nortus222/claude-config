@@ -40,7 +40,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {authorProfiles:'nortuscc_author_profiles',authorFile:'nortuscc_author_file',upstreams:'nortuscc_upstreams',discoverUpstream:'nortuscc_discover_upstream',upstreamSkill:'nortuscc_upstream_skill',drafts:'nortuscc_drafts',draftPreview:'nortuscc_draft_preview',ghState:'nortuscc_gh_state',setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -350,35 +350,12 @@ for (const runtime of runtimes) for (const modern of [false, true]) {
     assert.equal((await client.call('watchSources',{path:'/private'})).result.isError,true);
     assert.equal((await client.call('pinImpact',{sourceId:'unknown/repo',revision:to})).result.isError,true);
   });
-  test(`${runtime}: ${modern ? 'modern' : 'legacy'} backed-up source decisions use authenticated MCP`, {timeout:60000}, async t => {
-    const root=tempDir(t),repo=makeRepo(root);
-    const from=repo.commit('source baseline',{'skills/one/SKILL.md':'old','skills/two/SKILL.md':'same'}),to=repo.commit('source changed',{'skills/one/SKILL.md':'new'});
-    const s=await agent('app',{sourceDecisions:true,sourceReads:{url:repo.url,from}});t.after(s.close);
-    const original=s.m.read(join(s.m.paths.repo,'skill-pins.json')),index=readFileSync(join(s.m.paths.repo,'.git/index')),head=gitSync(s.m.paths.repo,'rev-parse','HEAD');
-    const client=open(runtime,s.m.paths.stateRoot,modern);t.after(client.close);await client.initialize();
-    assert.equal(output('getContext',await client.call('getContext')).capabilities.sourceDecision.available,true);
-    for(const action of ['pin','unpin','ignore','unignore']) {
-      output('inspect',await client.call('inspect'));
-      const change={kind:'sourceDecision',sourceId:'owner/repo',action,...(['pin','ignore'].includes(action)?{revision:to}:{})};
-      const p=output('previewChange',await client.call('previewChange',{change}));
-      assert.equal(p.sourceDecision.observedRevision,to);assert.equal(p.sourceDecision.redacted,true);assert.equal(p.sourceDecision.machinePolicy.length,2);
-      if(action==='pin')assert.equal(p.sourceDecision.impact.length,2);
-      const request={planId:p.planId,requestId:'source-'+action};
-      const accepted=output('applyChange',await client.call('applyChange',request));let run=accepted.run;
-      for(let n=0;n<300 && !run.result;n++){await new Promise(resolve=>setTimeout(resolve,10));run=output('getRun',await client.call('getRun',{runId:run.runId}));}
-      assert.equal(run.state,'succeeded');assert.equal(run.parity.kind,'sourceDecision');assert.equal(run.intent.parity.author.head,head);assert.equal(run.parity.committedKeys[0],`source:owner/repo/${action}`);
-      assert.equal(output('applyChange',await client.call('applyChange',request)).run.runId,run.runId);
-      if(action==='pin')assert.equal(s.m.read(join(s.m.paths.backups,run.parity.backupIds[0],'author/skill-pins.json')),original);
-      assert.equal(s.m.read(join(s.m.root,'setup/head/skill-pins.json')),JSON.stringify({version:1,pins:{'owner/repo':from}}));
-    }
-    assert.equal(JSON.parse(s.m.read(join(s.m.paths.repo,'source-ignores.json'))!).note,'keep');
-    assert.deepEqual(readFileSync(join(s.m.paths.repo,'.git/index')),index);assert.equal(gitSync(s.m.paths.repo,'rev-parse','HEAD'),head);
-    assert.equal((await client.call('previewChange',{change:{kind:'sourceDecision',sourceId:'owner/repo',action:'unpin',revision:to}})).result.isError,true);
-    output('inspect',await client.call('inspect'));
-    const stale=output('previewChange',await client.call('previewChange',{change:{kind:'sourceDecision',sourceId:'owner/repo',action:'pin',revision:to}}));
-    repo.commit('moving source',{'skills/one/SKILL.md':'newer'});
-    const refused=await client.call('applyChange',{planId:stale.planId,requestId:'source-stale'});assert.equal(refused.result.isError,true);assert.equal(refused.result.structuredContent.error.code,'UNKNOWN_PLAN');
-    assert.doesNotMatch(JSON.stringify(refused),/file:|upstream|source-watch-/);
+  test(`${runtime}: retired source decisions cannot write through MCP`, async t => {
+    const s = await agent(); t.after(s.close);
+    const client = open(runtime, s.m.paths.stateRoot, modern); t.after(client.close); await client.initialize();
+    assert.equal(output('getContext', await client.call('getContext')).capabilities.sourceDecision.available, false);
+    const reply = await client.call('previewChange', { change: { kind: 'sourceDecision', sourceId: 'owner/repo', action: 'unpin' } });
+    assert.equal(reply.result.isError, true);
   });
   test(`${runtime}: ${modern ? 'modern 2026' : 'legacy 2025'} opening, shared tools and reconnectable agent runs`, { timeout: 30_000 }, async t => {
     const s = await agent(); t.after(s.close);
@@ -657,27 +634,14 @@ test('selected MCP reconciliation and document restoration recover after a lost 
   assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
 });
 
-test('MCP capture from an arbitrary cwd binds the configured author and preserves the observation snapshot', { timeout: 30_000 }, async t => {
+test('MCP refuses retired checkout capture from an arbitrary cwd', async t => {
   const s = await agent(); t.after(s.close);
-  s.m.write(join(s.m.paths.repo, 'claude/settings.keys.json'), '{  "theme": "dark"  }\r\n');
-  const git = (...args: string[]) => execFileSync('git', ['-C', s.m.paths.repo, ...args], { env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
-  git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'author');
-  s.m.write(join(s.m.paths.claude, 'settings.json'), '{"theme":"light"}\n');
-  const snapshot = s.m.read(join(s.m.root, 'setup/head/claude/settings.keys.json'));
-  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
-  output('inspect', await client.call('inspect', {}));
-  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'capture', only: ['config:claude:settings.json#theme'], targets: ['claude'], takeLocal: true, allowShrink: false } }));
-  assert.equal(preview.capture.checkout, s.m.paths.repo); assert.equal(preview.capture.redacted, true);
-  const request = { planId: preview.planId, requestId: 'capture-author' };
-  const accepted = output('applyChange', await client.call('applyChange', request)).run;
-  let run = accepted;
-  for (let attempt = 0; attempt < 200 && !run.result; attempt++) { await new Promise(resolve => setTimeout(resolve, 10)); run = output('getRun', await client.call('getRun', { runId: accepted.runId })); }
-  assert.equal(run.state, 'succeeded'); assert.equal(run.intent.parity.author.checkout, s.m.paths.repo);
-  assert.equal(output('applyChange', await client.call('applyChange', request)).run.runId, run.runId);
-  assert.equal(s.m.read(join(s.m.paths.repo, 'claude/settings.keys.json')), '{  "theme": "light"  }\r\n');
-  assert.equal(s.m.read(join(s.m.root, 'setup/head/claude/settings.keys.json')), snapshot);
+  const before = s.m.read(join(s.m.paths.repo, 'claude/settings.keys.json'));
+  const client = open(process.execPath, s.m.paths.stateRoot, true); t.after(client.close); await client.initialize();
+  const reply = await client.call('previewChange', { change: { kind: 'capture', only: ['config:claude:settings.json#theme'], targets: ['claude'], takeLocal: true, allowShrink: false } });
+  assert.equal(reply.result.isError, true);
+  assert.equal(s.m.read(join(s.m.paths.repo, 'claude/settings.keys.json')), before);
 });
-
 
 test('dedicated MCP update read and explicit machine-only update recover a lost acceptance reply', { timeout: 30_000 }, async t => {
   const diagnostics: string[] = [];
@@ -787,4 +751,22 @@ test('MCP sync remains strict when an independent integrations manifest is inval
   assert.equal(s.m.read(join(s.m.paths.stateRoot, 'decisions.json')), before);
   assert.equal(s.m.read(join(s.m.paths.stateRoot, 'sync.json')), undefined);
   assert.deepEqual(output('listRuns', await client.call('listRuns', { limit: 10 })).runs, []);
+});
+
+test('MCP lists and deletes corrupt author drafts through the shared durable workflow', async t => {
+  const s = await agent(); t.after(s.close);
+  const id = '00000000-0000-4000-8000-000000000003';
+  s.m.write(join(s.m.paths.stateRoot, 'agent/author/drafts', id + '.json'), '{');
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const drafts = output('drafts', await client.call('drafts'));
+  assert.equal(drafts.drafts[0].id, id); assert.equal(typeof drafts.drafts[0].error, 'string');
+  const preview = output('previewChange', await client.call('previewChange', { change: { kind: 'deleteDraft', draftId: id } }));
+  const accepted = output('applyChange', await client.call('applyChange', { planId: preview.planId, requestId: 'delete-author-draft' }));
+  let run = accepted.run;
+  for (let attempt = 0; attempt < 200 && !run.result; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    run = output('getRun', await client.call('getRun', { runId: run.runId }));
+  }
+  assert.equal(run.state, 'succeeded'); assert.deepEqual(output('drafts', await client.call('drafts')), { drafts: [] });
+  assert.equal((await client.call('discoverUpstream', { source: 'https://user:secret@github.com/owner/repo' })).result.isError, true);
 });

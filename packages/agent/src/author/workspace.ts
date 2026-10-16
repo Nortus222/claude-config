@@ -5,7 +5,7 @@ import { Backups, Fs, MachinePaths, Processes } from '@nortuscc/machine';
 import { AccessDenied, GitFailed, gitAuthArgs } from '@nortuscc/sync';
 
 export const GIT_TIMEOUT_MS = 120_000;
-const GIT_OUTPUT_BYTES = 1024 * 1024;
+export const GIT_OUTPUT_BYTES = 1024 * 1024;
 const MAIN = 'refs/remotes/origin/main';
 const denied = (reason: string) => /authentication failed|permission.*denied|access denied|could not read (?:username|password)|terminal prompts disabled|authorization failed|repository not found|protected branch|GH006|GH013|returned error:?\s*(?:401|403|404)/i.test(reason);
 const hash = (url: string) => createHash('sha256').update(url).digest('hex').slice(0, 16);

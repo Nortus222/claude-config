@@ -1,5 +1,6 @@
+import { utf8ByteLength } from '@nortuscc/hosted-protocol';
 import { Schema } from 'effect';
-import { FILES, isProfileName, isSkillAdditionName, normalizeSkillSource } from '@nortuscc/profile-engine';
+import { FILES, isProfileName, isSkillAdditionName, normalizeSkillSource } from '@nortuscc/profile-engine/author-values';
 
 export type Intent =
   | { kind: 'createProfile'; profile: string; extends: string | null }
@@ -35,7 +36,7 @@ export const IntentSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('setFile'), profile: Profile, fileId: FileId, path: Schema.NullOr(RepoPath) }),
   Schema.Struct({ kind: Schema.Literal('setIntegration'), profile: Profile, id: Schema.String.check(Schema.isNonEmpty()), include: Schema.Boolean }),
   Schema.Struct({ kind: Schema.Literal('captureFile'), profile: Profile, fileId: FileId,
-    text: Schema.String.check(Schema.makeFilter(value => Buffer.byteLength(value, 'utf8') <= CAPTURE_MAX_BYTES)),
+    text: Schema.String.check(Schema.makeFilter(value => utf8ByteLength(value) <= CAPTURE_MAX_BYTES)),
     choice: Schema.Union([
       Schema.Struct({ kind: Schema.Literal('updateShared') }),
       Schema.Struct({ kind: Schema.Literal('ownCopy'), repoPath: CopyPath }),

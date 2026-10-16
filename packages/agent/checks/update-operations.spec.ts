@@ -109,34 +109,32 @@ test('machine-only selected updates, adoption and scoped prune preserve snapshot
  const folder = readdirSync(f.m.paths.backups)[0]!; assert.match(f.m.read(join(f.m.paths.backups,folder,'skill-lock.json'))!,/gone/); assert.equal(f.m.read(join(f.m.paths.backups,folder,'claude/skills/one/SKILL.md')),'# old one\n');
 });
 
-test('explicit author update backs up dirty bytes and writes only the reviewed result', async () => {
+test('author manifest updates are retired without installer or checkout effects', async () => {
  const f = await fixture(); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'));
  await f.within(s => Effect.gen(function* () {
-  const p = yield* s.previewChange(update(['skill:gone','skill:two'],true)); assert.ok('authorManifest' in p && p.authorManifest?.documents.length === 1); assert.doesNotMatch(JSON.stringify(p),/dirty author bytes/);
-  const run = yield* submit(s,p.planId); assert.equal(run.state,'succeeded'); assert.ok(run.parity?.committedKeys.includes('skills:manifest'));
+  assert.equal((yield* Effect.flip(s.previewChange(update(['skill:gone','skill:two'],true)))).code, 'INVALID_REQUEST');
+  assert.equal(f.calls.length, 0);
  }));
- assert.match(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/one\ntwo/); assert.doesNotMatch(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/gone/);
- const folder = readdirSync(f.m.paths.backups)[0]!; assert.equal(f.m.read(join(f.m.paths.backups,folder,'author/skills-manifest.txt')),before);
+ assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')), before);
 });
 
-test('partial installer outcomes refuse changed author proposals and retain machine and recovery facts', async () => {
- for (const failure of ['before','after','author'] as const) {
+test('partial machine installer outcomes retain recovery facts without author writes', async () => {
+ for (const failure of ['before','after'] as const) {
   const f = await fixture({ fail: failure }); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt')); let runId = ''; let committed: readonly string[] = [];
   await f.within(s => Effect.gen(function* () {
-   const p = yield* s.previewChange(update(['skill:two'],true)); const run = yield* submit(s,p.planId,failure); runId = run.runId; committed = run.parity?.committedKeys ?? []; assert.equal(run.state,'failed',failure); assert.ok(run.parity?.backupIds.length);
+   const p = yield* s.previewChange(update(['skill:two'])); const run = yield* submit(s,p.planId,failure); runId = run.runId; committed = run.parity?.committedKeys ?? []; assert.equal(run.state,'failed',failure); assert.ok(run.parity?.backupIds.length);
    assert.doesNotMatch(JSON.stringify(run),/PRIVATE/);
-   if (failure === 'before') assert.ok(!run.parity?.committedKeys.includes('skills:manifest'));
-   if (failure === 'after') assert.ok(run.parity?.committedKeys.includes('skills:manifest'));
+   assert.ok(!run.parity?.committedKeys.includes('skills:manifest'));
   }));
-  if (failure !== 'after') assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
+  assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
   const callCount = f.calls.length; await f.within(s => Effect.gen(function* () { const recovered = yield* s.runs.get(runId); assert.equal(recovered.state,'failed'); assert.deepEqual(recovered.parity?.committedKeys,committed); assert.equal(f.calls.length,callCount); }));
  }
 });
 
-test('author bytes, holds and native lock changes invalidate previews; unreadable lock never becomes absence', async () => {
- for (const changed of ['author','lock','holds'] as const) {
+test('holds and native lock changes invalidate previews; unreadable lock never becomes absence', async () => {
+ for (const changed of ['lock','holds'] as const) {
   const f = await fixture(); await f.within(s => Effect.gen(function* () {
-   const p = yield* s.previewChange(update(['skill:two'],true)); f.m.write(changed === 'author' ? join(f.m.paths.repo,'skills-manifest.txt') : changed === 'lock' ? f.lockPath : join(f.m.paths.stateRoot,'sync.json'),'{}');
+   const p = yield* s.previewChange(update(['skill:two'])); f.m.write(changed === 'lock' ? f.lockPath : join(f.m.paths.stateRoot,'sync.json'),'{}');
    assert.equal((yield* Effect.flip(s.runs.submit({ planId: p.planId,requestId: changed,inputDigest: operationDigest(p.planId),actor:'mcp' }))).code,'UNKNOWN_PLAN'); assert.equal(f.calls.length,0);
   }));
  }
@@ -152,7 +150,7 @@ test('unsupported native mapping refuses before effects; author false needs no u
 
 test('scoped prune never claims a completed global prune when another native agent retains shared content', async () => {
  const f = await fixture({ retained: true }); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:gone'],true)); const run = yield* submit(s,p.planId); assert.equal(run.state,'failed'); assert.ok(!run.parity?.committedKeys.includes('skills:remove')); assert.ok(!run.parity?.committedKeys.includes('skills:manifest')); }));
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:gone'])); const run = yield* submit(s,p.planId); assert.equal(run.state,'failed'); assert.ok(!run.parity?.committedKeys.includes('skills:remove')); assert.ok(!run.parity?.committedKeys.includes('skills:manifest')); }));
  assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true); assert.equal(existsSync(join(f.m.paths.claude,'skills/gone')),false); assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
  assert.ok(f.calls.every(c => c.args[1] === 'skills@1.7.2'));
 });
@@ -167,10 +165,10 @@ test('addition overlaid on a base declaration with a distinct native selector ne
  }));
 });
 
-test('explicit author update preserves a held declaration and exact source discovery never offers adoption', async () => {
+test('machine-only updates preserve held author declarations and exact sources never offer adoption', async () => {
  const f = await fixture(); f.m.write(join(f.m.paths.repo,'skills-manifest.txt'),'[owner/repo]\none\ngone\nheld\n');
  f.m.write(join(f.m.paths.stateRoot,'sync.json'),JSON.stringify({ version:1, held: { 'skill:owner/repo/held': H } }));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'],true)); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'])); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
  assert.match(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/held/);
  const exact = await fixture({ exact: true }); await exact.within(s => Effect.gen(function* () { const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); assert.ok(!read.items.some(i => i.state === 'available')); yield* Effect.flip(s.previewChange(update(['skill:two']))); assert.equal(exact.calls.length,0); }));
 });
@@ -179,8 +177,8 @@ test('explicit author update preserves a held declaration and exact source disco
 test('a held skill absent from the author stays absent even when installed locally', async () => {
  const f = await fixture(); f.m.write(join(f.m.paths.repo,'skills-manifest.txt'),'[owner/repo]\none\n');
  f.m.write(join(f.m.paths.stateRoot,'sync.json'),JSON.stringify({ version:1, held: { 'skill:owner/repo/gone': H } }));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'],true)); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
- const author = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!; assert.match(author,/one\ntwo/); assert.doesNotMatch(author,/gone/); assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true);
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'])); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
+ const author = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!; assert.equal(author,'[owner/repo]\none\n'); assert.doesNotMatch(author,/gone/); assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true);
 });
 
 
