@@ -27,6 +27,8 @@ export type DesktopEntryInput = {
   readonly user?: string;
   readonly processes?: Layer.Layer<Processes>;
   readonly probe?: typeof probeLoginEnvironment;
+  // Appended to the login PATH on macOS; defaults to Homebrew's prefixes.
+  readonly toolDirectories?: ReadonlyArray<string>;
   readonly signal?: AbortSignal;
   readonly bootstrapTimeoutMs?: number;
   readonly stdin?: AsyncIterable<string | Uint8Array>;
@@ -52,7 +54,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
       // Every helper, the registered service's PATH and the agent's tools (git, npx, gh) see Homebrew.
-      return (input.platform ?? process.platform) === 'darwin' ? { ...result, env: withToolDirectories(result.env, MACOS_TOOL_DIRECTORIES) } : result;
+      return (input.platform ?? process.platform) === 'darwin' ? { ...result, env: withToolDirectories(result.env, input.toolDirectories ?? MACOS_TOOL_DIRECTORIES) } : result;
     } catch (error) { trace.record('login_probe', signal.aborted ? 'cancelled' : 'failed'); throw error; }
   }, catch: error => error }).pipe(Effect.uninterruptible);
   trace.record('entry', 'started');
