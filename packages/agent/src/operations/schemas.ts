@@ -281,7 +281,7 @@ const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsCh
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
 export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: AuthorHeadSchema, digest: DigestSchema,
   diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String) })),
-  invalid: Schema.Array(Schema.Struct({ index: CountSchema, reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema) });
+  invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema) });
 const AuthorLocalPreviewSchema = Schema.Struct({ ...previewFields, skillAddition: Schema.optionalKey(Schema.Never), change: AuthorLocalChangeSchema,
   draftId: Schema.NullOr(DraftIdSchema), draft: Schema.NullOr(DraftPreviewSchema), actionEffects: Schema.Array(Text) });
 export const ChangePreviewSchema = Schema.Union([FollowPreviewSchema, AuthorLocalPreviewSchema, PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);

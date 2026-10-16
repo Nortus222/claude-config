@@ -443,3 +443,30 @@ test('publishing a settings capture keeps private machine keys out of Git', asyn
   assert.equal(result.publication?.pushed, true);
   assert.deepEqual(JSON.parse(f.git(f.origin, 'show', 'main:claude/settings.keys.json')), { model: 'new' });
 });
+
+
+test('preview rejects resolution issues in every profile before publishing', async t => {
+  const f = await fixture(t);
+  f.move('profiles/other.json', '{"extends":"missing"}');
+  const before = f.git(f.origin, 'rev-parse', 'main');
+  const draft = await f.save();
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.ok(preview.invalid.some(issue => issue.reason.includes('other') && issue.reason.includes('missing')));
+  const result = await publish(f, draft);
+  assert.equal(result.result?.status, 'needs-preview');
+  assert.equal(f.git(f.origin, 'rev-parse', 'main'), before);
+  assert.equal(f.revisions.length, 0);
+});
+
+test('announce refuses a previously published profile with resolution issues', async t => {
+  const f = await fixture(t); f.failHosted(true);
+  const original = await publish(f, await f.save());
+  f.move('profiles/personal.json', '{"extends":"missing"}');
+  const commit = f.git(f.origin, 'rev-parse', 'main');
+  const receipt = (await f.run(f.runStore.read)).find(r => r.view.runId === original.runId)!;
+  await f.run(f.runStore.write({ ...receipt, view: { ...receipt.view, publication: { ...receipt.view.publication!, commit } } }));
+  f.failHosted(false);
+  const result = await f.execute(await f.run(f.owner.prepareAnnounce({ kind: 'announcePublication', runId: original.runId })));
+  assert.ok(result.publication?.unannounceable?.some(issue => issue.profile === 'personal' && issue.reason.includes('missing')));
+  assert.ok(!f.revisions.some(revision => f.setups.find(s => s.setupId === revision.setupId)?.profile === 'personal'));
+});

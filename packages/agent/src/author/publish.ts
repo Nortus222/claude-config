@@ -20,7 +20,7 @@ import { ghStatus } from './gh.ts';
 export type DraftPreview = {
   draftId: string; base: string; digest: string;
   diff: { path: string; before: string | null; after: string | null }[];
-  invalid: { index: number; reason: string }[]; affectedProfiles: string[];
+  invalid: { index: number | null; profile?: string; reason: string }[]; affectedProfiles: string[];
 };
 type Publication = { -readonly [K in keyof NonNullable<RunView['publication']>]: NonNullable<RunView['publication']>[K] };
 type Acceptance = Extract<ParityAcceptance, { kind: 'publishDraft' | 'announcePublication' }>;
@@ -80,7 +80,9 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     const diff = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(path => before[path] === after[path] ? []
       : [{ path, before: before[path] ?? null, after: after[path] ?? null }]);
     const affectedProfiles = [...new Set([...profiles(before), ...profiles(after)])].sort().filter(profile => changedItems(before, after, profile).length > 0);
-    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid: replayed.invalid, affectedProfiles } satisfies DraftPreview;
+    const invalid = [...replayed.invalid, ...profiles(after).flatMap(profile => resolveNamedProfile({ documents: after, name: profile }).issues
+      .map(issue => ({ index: null, profile, reason: `${profile}: ${issue.message}` })))];
+    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles } satisfies DraftPreview;
   });
   const previewDraft = (id: string): Effect.Effect<DraftPreview, SessionError> => Effect.flatMap(readDraft(id), preview).pipe(
     Effect.tap(result => Effect.sync(() => { previews.set(id, { base: result.base, digest: result.digest }); })),
@@ -119,6 +121,8 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
       const after = yield* documentsAt(dir, commit);
       for (const profile of [...publication.pending]) {
         const result = yield* Effect.gen(function* () {
+          const desired = resolveNamedProfile({ documents: after, name: profile });
+          if (desired.issues.length) return desired.issues.map(issue => issue.message).join('; ');
           const current = yield* client.state;
           if (target.accountId !== null && current.accountId !== target.accountId) return yield* Effect.fail(failed('Hosted account changed'));
           const setup = current.setups.find(s => s.owned && normalizeRepoUrl(s.repoUrl) === normalizeRepoUrl(target.repoUrl) && s.profile === profile)
@@ -134,7 +138,6 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
           }
           const before = previous ? yield* documentsAt(dir, previous.commitSha) : {};
           const items = changedItems(before, after, profile);
-          const desired = resolveNamedProfile({ documents: after, name: profile });
           const requiredEnv = [...new Set(desired.integrations.filter(i => i.enabled).flatMap(i => Array.isArray(i.declaration.requiresEnv) ? i.declaration.requiresEnv.filter((name): name is string => typeof name === 'string') : []))].sort();
           const revision = { number: (previous?.number ?? 0) + 1, commitSha: commit, tag: `nortuscc/${commit}`, changelog: '', items, requiredEnv };
           if (requiredEnv.some(name => !Schema.is(EnvNameSchema)(name))) return 'Required environment names are unsupported by hosted announcements';

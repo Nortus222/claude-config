@@ -61,3 +61,13 @@ test('a succeeded run without push evidence does not claim publication', async t
   f.controller.state = {...f.controller.state,publicationRun:publicationRun({state:'succeeded',result:{status:'done',ok:1,failed:0}})};
   const html = render(PublishView,f);assert.match(html,/Push is not confirmed/);assert.doesNotMatch(html,/>Published</);
 });
+
+
+test('profile resolution failures disable Publish and show the profile reason', async t => {
+  const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  f.handlers.draftPreview = () => draftPreview({ invalid: [{ index: null, profile: 'other', reason: 'other: missing parent profile' }] });
+  await f.controller.previewDraft();
+  const html = render(PublishView, f);
+  assert.match(html, /other: missing parent profile/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Publish<\/button>/);
+});
