@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { skillRun } from './support/skill-run.ts';
 import { SetupSyncController, selectedLocal, incomingCounts } from '../src/setup-sync-controller.ts';
-import { fixture, review, run, flush, deferred, change, preview as changePreview, localItems, localChange, localRun } from './support/setup-sync.ts';
+import { fixture, review, run, flush, deferred, change, preview as changePreview, localItems, localChange, localRun, status } from './support/setup-sync.ts';
 
 async function setup(t: test.TestContext, options: { maintenance?: () => boolean } = {}) {
   const f = await fixture(); const controller = new SetupSyncController(f.bridge, f.machine, options);
@@ -81,6 +81,21 @@ test('a finished setup Apply reloads the review so applied rows leave it', async
   f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
   assert.deepEqual(f.controller.state.review?.rows, []); assert.equal(f.controller.state.run?.state, 'succeeded');
+});
+test('a setup Apply seen finishing before this Mac stops applying re-reads the review once reading is allowed', async t => {
+  const f = await setup(t); f.controller.enter(); await flush();
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview(); await f.controller.apply();
+  // The machine still shows the agent applying when this controller reads the succeeded run.
+  f.agent.applying = true; f.emit({ version: 3, event: 'status', runId: 'setup-run', status: status({ applying: true }) }); await flush();
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  f.handlers.setupReview = () => review({ rows: [] });
+  f.handlers.getRun = () => run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
+  assert.equal(f.controller.state.run?.state, 'succeeded'); assert.equal(f.controller.state.review, null);
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews);
+  f.agent.applying = false; f.emit({ version: 3, event: 'status', status: status({ applying: false }) }); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.deepEqual(f.controller.state.review?.rows, []);
 });
 test('a setup Apply that finished before its reply also reloads the review', async t => {
   const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();

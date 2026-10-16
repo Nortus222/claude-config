@@ -76,7 +76,8 @@ export class SetupSyncController {
   private machine: MachineController;
   private maintenance: () => boolean;
   private inMaintenance = false;
-  // The session the review was last loaded in, so an entered page loads it once per session as soon as it can.
+  // The session the review was last loaded in, so an entered page loads it once per session as soon as it
+  // can; an invalidation clears it.
   private loaded: number | null = null;
   // The request of an Apply whose reply was lost; Reload looks for its run.
   private lost: string | null = null;
@@ -134,8 +135,9 @@ export class SetupSyncController {
       local, previewLocal: local && !this.state.inspection!.profile.issues.length && selectedLocal(this.state).length > 0 } };
     for (const listener of this.listeners) listener();
   }
-  // An entered page without a review loads it the first time reading is allowed in a session: after the
-  // first connection, a Reconnect, the machine's first inspection, or the end of maintenance or a run.
+  // An entered page without a review loads it the first time reading is allowed in a session or after an
+  // invalidation: after the first connection, a Reconnect, the machine's first inspection, or the end of
+  // maintenance or a run.
   // Called on those outside changes only, never mid-action.
   private autoload() {
     if (this.visible && !this.state.review && this.state.eligibility.read && this.loaded !== this.machine.state.session) void this.load(false);
@@ -152,13 +154,12 @@ export class SetupSyncController {
   leave() { this.visible = false; }
   refresh() {
     const maintenance = this.maintenance(), entering = maintenance && !this.inMaintenance;
-    // Leaving maintenance lets an entered page load the review it discarded.
-    if (!maintenance && this.inMaintenance) this.loaded = null;
     this.inMaintenance = maintenance;
     if (entering) this.invalidate(); else this.update({});
     this.autoload();
   }
-  invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {}, previewError: null, localError: null, previewNotice: null, switchTarget: null }); }
+  // Discards the review and its choices; an entered page loads it again as soon as reading is allowed.
+  invalidate() { this.epoch++; this.issued.clear(); this.loaded = null; this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {}, previewError: null, localError: null, previewNotice: null, switchTarget: null }); }
   // Adopts the run of an Apply whose reply was lost, whatever its state, else the newest machine run that
   // is active or interrupted. Another finished run found here is history, not something this window did.
   private async discoverRun() {

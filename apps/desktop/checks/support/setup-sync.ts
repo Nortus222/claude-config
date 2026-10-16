@@ -26,6 +26,8 @@ export async function fixture(options: { connect?: boolean } = {}) {
   // The machine inspection `inspect_machine` answers; tests replace its items, then call `machine.inspect()`.
   const report: { profile: { repo: string; revision: string | null; overrides: string; issues: { layer: 'base' | 'pin' | 'machine' | 'profile'; source: string; path: string; message: string }[] }; items: any[]; probeErrors: string[] } =
     { profile: { repo: '/repo', revision: 'abc', overrides: '/overrides', issues: [] }, items: [], probeErrors: [] };
+  // Fields of the status `agent_status` and `inspect_machine` report, so a test can keep the agent applying.
+  const agent: Record<string, unknown> = {};
   const handlers: Record<string, (input: any) => unknown> = {
     inspectProfiles: () => ({ followed: null, available: [{ name: 'default', extends: null }] }),
     inspectSetups: () => ({ generation: '1', items: [{ setupId: 'local', trusted: true, repository: '/repo', accountId: null }], nextCursor: null }),
@@ -36,11 +38,11 @@ export async function fixture(options: { connect?: boolean } = {}) {
   const bridge: Bridge = { subscribe: async receive => { listeners.add(receive); return () => { listeners.delete(receive); }; }, invoke: async (command, args) => {
     const issuedGeneration = generation; commands.push(command);
     if (command === 'operation') { const name = String(args!.name); calls.push({ name, input: args!.input }); return { generation: issuedGeneration, data: await handlers[name]!(args!.input) }; }
-    return { generation: issuedGeneration, data: command === 'agent_status' ? status() : command === 'inspect_machine'
-      ? { ...report, status: status() } : null };
+    return { generation: issuedGeneration, data: command === 'agent_status' ? status(agent) : command === 'inspect_machine'
+      ? { ...report, status: status(agent) } : null };
   } };
   const machine = new MachineController(bridge); if (options.connect !== false) await machine.connect();
-  return { bridge, machine, handlers, calls, commands, report, emit: (event: HostEvent extends infer E ? E extends HostEvent ? Omit<E, 'generation'> : never : never) => { for (const receive of listeners) receive({ ...event, generation } as HostEvent); },
+  return { bridge, machine, handlers, calls, commands, report, agent, emit: (event: HostEvent extends infer E ? E extends HostEvent ? Omit<E, 'generation'> : never : never) => { for (const receive of listeners) receive({ ...event, generation } as HostEvent); },
     reconnect: async () => { generation++; await machine.connect(); await flush(); } };
 }
 // One inspected item of each kind the Changes page shows: two waiting to apply, one changed on this Mac,
