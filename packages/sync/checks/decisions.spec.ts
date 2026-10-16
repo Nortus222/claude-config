@@ -503,3 +503,21 @@ test('the CLI compatibility policy checks tentative desired validity without rel
     }
   } finally { f.close(); }
 });
+
+test('decision observation compares the followed profile before machine overrides', async () => {
+  const f = fixture();
+  try {
+    for (const name of ['old', 'head']) {
+      const dir = join(f.root, name);
+      mkdirSync(join(dir, 'profiles'));
+      writeFileSync(join(dir, 'skills-manifest.txt'), '[example/skills]\ntdd\n');
+      writeFileSync(join(dir, 'profiles/child.json'), json({ extends: 'base' }));
+      writeFileSync(join(dir, 'profiles/base.json'), json(name === 'head' ? { skills: { remove: [{ source: 'example/skills', names: ['tdd'] }] } } : {}));
+    }
+    const { observeSyncSource } = await import('../src/index.ts');
+    const observed = await f.run(observeSyncSource({ ...f.source, profile: 'child' }, []));
+    assert.ok(observed.changes.some(change => change.itemId === 'skill:example/skills/tdd'));
+    assert.equal(JSON.parse(observed.beforeValues.get('skill:example/skills/tdd')!).install, true);
+    assert.equal(JSON.parse(observed.afterValues.get('skill:example/skills/tdd')!).install, false);
+  } finally { f.close(); }
+});

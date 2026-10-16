@@ -42,7 +42,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {inspectProfiles:'nortuscc_inspect_profiles',inspectShareLink:'nortuscc_inspect_share_link',setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -184,6 +184,12 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boole
   await m.run(Effect.gen(function* () {
     const processes=fixtureProcesses(yield* Processes,m.root,inputs.sourceReads?.url);
     const hosted = inputs.metadata ? yield* makeHostedRuntime({
+      registerSetup: () => Effect.die('Unexpected setup registration'),
+      publishRevision: () => Effect.die('Unexpected publication'),
+      listRevisions: () => Effect.succeed([]),
+      publicSetup: () => Effect.die('Unexpected public setup read'),
+      subscribe: () => Effect.void,
+      unsubscribe: () => Effect.void,
       state: Effect.sync(metadataState), signInFlow: Effect.succeed(null), recover: () => Effect.sync(metadataState), sync: () => Effect.sync(metadataState),
       revisions: () => Effect.succeed([]), reportStatus: () => Effect.void, enqueueDecision: () => Effect.die('Unexpected decision'),
       enqueueMachine: patch => Effect.sync(() => { metadataPatches.push(patch); }),

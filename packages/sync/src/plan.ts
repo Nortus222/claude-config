@@ -1,8 +1,8 @@
 import { Effect } from 'effect';
-import { INTEGRATIONS_SOURCE, type MachineOverrides } from '@nortuscc/profile-engine';
+import { INTEGRATIONS_SOURCE, type MachineOverrides, type ProfileInvalid } from '@nortuscc/profile-engine';
 import type { Fs, FsFailed, LaunchFailed, Processes } from '@nortuscc/machine';
-import { desiredOfDocuments } from './documents.ts';
-import { composeDocuments } from './compose.ts';
+import { desiredOfDocuments, hasProfile } from './documents.ts';
+import { composeDocumentsWithStaleHolds } from './compose.ts';
 import { commitDocuments } from './git.ts';
 import { diffItems, itemValues, parseItemId, type ItemChange, type ItemValues } from './items.ts';
 import type { RevisionUnavailable } from './source.ts';
@@ -10,7 +10,7 @@ import type { Holds } from './store.ts';
 
 // An incoming item a machine override shadows: shown, never resolved silently.
 export type Conflict = { readonly itemId: string; readonly override: string };
-export type Incoming = { readonly changes: ReadonlyArray<ItemChange>; readonly conflicts: ReadonlyArray<Conflict> };
+export type Incoming = { readonly changes: ReadonlyArray<ItemChange>; readonly conflicts: ReadonlyArray<Conflict>; readonly staleHolds: ReadonlyArray<string> };
 
 // What upstream changed since the applied commit, as this machine sees it: an item counts when its
 // value moved between the applied and head commits, and its old value is what this machine holds
@@ -93,20 +93,23 @@ export const nextHolds = (input: {
 export const incoming = (input: {
   readonly repo: string;
   readonly applied: string;
+  readonly profile?: string;
   readonly head: string;
   readonly holds: Holds;
   readonly overrides: MachineOverrides;
   readonly validation?: 'cli-independent-integrations';
-}): Effect.Effect<Incoming, FsFailed | LaunchFailed | RevisionUnavailable, Fs | Processes> =>
+}): Effect.Effect<Incoming, FsFailed | LaunchFailed | RevisionUnavailable | ProfileInvalid, Fs | Processes> =>
   Effect.gen(function* () {
-    if (input.applied === input.head) return { changes: [], conflicts: [] };
+    if (input.applied === input.head && Object.keys(input.holds).length === 0) return { changes: [], conflicts: [], staleHolds: [] };
     const appliedDocuments = yield* commitDocuments(input.repo, input.applied);
-    const currentDocuments = yield* composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds });
+    const { documents: currentDocuments, staleHolds } = hasProfile(appliedDocuments, input.profile)
+      ? yield* composeDocumentsWithStaleHolds({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds, profile: input.profile })
+      : { documents: appliedDocuments, staleHolds: (yield* composeDocumentsWithStaleHolds({ repo: input.repo, head: { kind: 'commit', commit: input.head }, held: input.holds, profile: input.profile })).staleHolds };
     const headDocuments = yield* commitDocuments(input.repo, input.head);
     // Invalid integration declarations are unavailable, not evidence that every integration was removed.
     const unavailableIntegrations = input.validation === 'cli-independent-integrations'
       && [appliedDocuments, currentDocuments, headDocuments].some(documents => desiredOfDocuments(documents).issues.some(issue => issue.layer === 'base' && issue.source === INTEGRATIONS_SOURCE));
-    const changes = incomingChanges({ rawApplied: itemValues(appliedDocuments), current: itemValues(currentDocuments), head: itemValues(headDocuments) })
+    const changes = incomingChanges({ rawApplied: itemValues(appliedDocuments, input.profile), current: itemValues(currentDocuments, input.profile), head: itemValues(headDocuments, input.profile) })
       .filter(change => !unavailableIntegrations || change.kind !== 'integration');
-    return { changes, conflicts: conflictsOf(changes, input.overrides) };
+    return { changes, conflicts: conflictsOf(changes, input.overrides), staleHolds };
   });

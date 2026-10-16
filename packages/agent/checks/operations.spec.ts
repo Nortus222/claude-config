@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['inspectProfiles','inspectShareLink','listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
@@ -72,6 +72,20 @@ test('preview, run and follow-up outputs decode strictly', () => {
   assert.deepEqual(decodeRunView(run), run);
   for (const bad of [{ ...preview, extra: 1 }, { ...preview, scope: { kind: 'profile' } }, { ...preview, nextActions: [{ kind: 'promote_to_profile', capability: { available: false, reason: 'Unavailable' }, requiredDestination: 'profile', authorization: true }] }]) assert.throws(() => decodeOperationOutput('previewChange', bad));
   for (const bad of [{ ...run, runId: 'x'.repeat(101) }, { ...run, intent: { ...run.intent, command: 'install' } }, { ...run, result: { status: 'done', ok: -1, failed: 0 } }, { ...run, steps: [{ key: 'x', outcome: 'ok', note: '', token: 'secret' }] }]) assert.throws(() => decodeRunView(bad));
+});
+
+test('intent and machine inspection wire results preserve profile origins and issues', () => {
+  const from = { layer: 'profile', source: 'profiles/personal.json' };
+  const intent = { generation: 'g', nextCursor: null, items: [
+    { kind: 'skill', source: 'owner/skills', name: 'review', choice: null, defaultEnabled: true, enabled: true, from, declaredFrom: from, targets: ['codex'], policy: 'upstream' },
+    { kind: 'issue', ...from, message: 'Configuration input is invalid; inspect the owning document in the app' },
+  ] };
+  assert.deepEqual(decodeOperationOutput('inspectIntent', intent), intent);
+  const inspection = {
+    profile: { repo: '/r', revision: null, overrides: '/o', issues: [{ ...from, path: 'extends', message: 'Missing parent' }] },
+    items: [{ key: 'skill:owner/skills/review', domain: 'skills', label: 'review', group: 'owner/skills', state: 'missing', disposition: 'apply', from }], probeErrors: [],
+  };
+  assert.deepEqual(decodeInspectResult(inspection), inspection);
 });
 
 test('legacy IPC machine result schemas remain compatible with shared operation plans', () => {

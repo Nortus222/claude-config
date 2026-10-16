@@ -1,5 +1,5 @@
 import type {
-  DeviceStartRequest, MachineRecord, RevisionRecord, StatusSummary, SyncedDecision,
+  DeviceStartRequest, MachineRecord, RevisionRecord, StatusSummary, SyncedDecision, PublicSetup,
 } from '@nortuscc/hosted-protocol';
 
 interface Document {
@@ -12,6 +12,7 @@ export interface SetupReservation {
   readonly setupId: string;
   readonly name: string;
   readonly repoUrl: string;
+  readonly profile: string;
   readonly createdAt: string;
   readonly state: 'reserved' | 'ready';
   readonly publishedHead: number;
@@ -81,10 +82,16 @@ export interface SetupDocument extends Document {
   readonly ownerAccountId: string;
   readonly name: string;
   readonly repoUrl: string;
+  readonly profile: string;
   readonly latestRevision: number;
   readonly createdAt: string;
   readonly publicationDay: string | null;
   readonly publicationsToday: number;
+}
+
+export interface SubscriptionDocument extends Document, PublicSetup {
+  readonly type: 'subscription';
+  readonly accountId: string;
 }
 
 export interface RevisionDocument extends Document, RevisionRecord {
@@ -122,4 +129,11 @@ export interface DeviceSessionDocument extends Document {
 }
 
 export type ServiceDocument = AccountDocument | MachineDocument | IssuanceFenceDocument | DeviceReservationDocument | DecisionDocument | StatusDocument
-  | SetupDocument | RevisionDocument | IdentityDocument | DeviceSessionDocument;
+  | SetupDocument | SubscriptionDocument | RevisionDocument | IdentityDocument | DeviceSessionDocument;
+
+// Legacy v1 records predate profile selection; keep their identity and checkpoints.
+export function normalizeDocument(document: ServiceDocument): ServiceDocument {
+  if (document.type === 'setup') return { ...document, profile:document.profile ?? 'default' };
+  if (document.type === 'account') return { ...document, setups:document.setups.map(setup => ({ ...setup, profile:setup.profile ?? 'default' })) };
+  return document;
+}

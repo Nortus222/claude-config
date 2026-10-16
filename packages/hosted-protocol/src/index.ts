@@ -10,3 +10,4 @@ export * from './sync.ts';
 export * from './status.ts';
 export * from './errors.ts';
 export * from './service.ts';
+export * from './subscriptions.ts';

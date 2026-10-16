@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { Context, Effect, Layer, Option } from 'effect';
 import { Processes, type LaunchFailed } from '@nortuscc/machine';
 import { readDocuments, type Documents } from './documents.ts';
 import { RevisionUnavailable } from './source.ts';
@@ -14,11 +14,32 @@ export const revParse = (repo: string, revision: string): Effect.Effect<string |
     : Effect.map(git(repo, ['rev-parse', '--verify', '--quiet', `${revision}^{commit}`]), ({ code, stdout }) =>
       (code === 0 && stdout.trim() !== '' ? stdout.trim() : undefined));
 
-// A commit's profile documents, read from git objects alone.
+// Documents already read at a resolved commit, keyed by repository and SHA. A commit's objects never
+// change, so a source that provides this reads each commit once instead of once per caller; every
+// read otherwise costs one git process per document.
+export class CommitDocumentsCache extends Context.Service<CommitDocumentsCache, Map<string, Documents>>()('sync/CommitDocumentsCache') {}
+const CACHED_COMMITS = 32;
+export const commitDocumentsCache: Layer.Layer<CommitDocumentsCache> = Layer.sync(CommitDocumentsCache, () => new Map());
+
+// A commit's profile documents, read from git objects alone. The commit must exist in `repo`.
 export const commitDocuments = (repo: string, commit: string): Effect.Effect<Documents, RevisionUnavailable | LaunchFailed, Processes> =>
   Effect.gen(function* () {
     const sha = yield* revParse(repo, commit);
     if (sha === undefined) return yield* Effect.fail(new RevisionUnavailable({ revision: commit, reason: 'no such commit in the checkout' }));
+    const cache = Option.getOrUndefined(yield* Effect.serviceOption(CommitDocumentsCache));
+    const key = `${repo}\0${sha}`;
+    const documents = cache?.get(key) ?? (yield* readCommitDocuments(repo, commit, sha));
+    if (cache !== undefined) {
+      // Most recently read last, so eviction drops the least recently read commit.
+      cache.delete(key);
+      cache.set(key, documents);
+      if (cache.size > CACHED_COMMITS) cache.delete(cache.keys().next().value!);
+    }
+    return documents;
+  });
+
+const readCommitDocuments = (repo: string, commit: string, sha: string): Effect.Effect<Documents, RevisionUnavailable | LaunchFailed, Processes> =>
+  Effect.gen(function* () {
     const listed = yield* git(repo, ['ls-tree', '-r', '-z', '--name-only', sha]);
     if (listed.code !== 0) return yield* Effect.fail(new RevisionUnavailable({ revision: commit, reason: 'its tree could not be listed' }));
     const tree = new Set(listed.stdout.split('\0').filter(Boolean));
@@ -28,7 +49,7 @@ export const commitDocuments = (repo: string, commit: string): Effect.Effect<Doc
         const blob = yield* git(repo, ['cat-file', 'blob', `${sha}:${path}`]);
         if (blob.code !== 0) return yield* Effect.fail(new RevisionUnavailable({ revision: commit, reason: `${path} could not be read` }));
         return blob.stdout;
-      }));
+      }), [...tree].some(path => path.startsWith('profiles/')) ? [...tree].filter(path => /^profiles\/[^/]+\.json$/.test(path)).map(path => path.slice('profiles/'.length)) : undefined);
   });
 
 // Whether `ancestor` is reachable from `descendant`; undefined when git cannot tell.

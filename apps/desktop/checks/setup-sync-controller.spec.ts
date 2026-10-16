@@ -202,6 +202,74 @@ test('a read started during Abandon cannot replace its terminal receipt', async 
   assert.equal(f.controller.state.run?.state, 'abandoned');
 });
 
+test('Switch profile shows the dropped holds before Apply', async t => {
+  const f = await setup(t);
+  f.handlers.inspectProfiles = () => ({ followed: { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null }, available: [{ name: 'default', extends: null }, { name: 'small', extends: null }] });
+  await f.controller.reload();
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: ['skill:owner/repo/old'], overrides: [] } });
+  await f.controller.switchProfile('small');
+  assert.ok(f.controller.state.preview && 'droppedChoices' in f.controller.state.preview);
+  assert.deepEqual(f.controller.state.preview.droppedChoices.holds, ['skill:owner/repo/old']);
+  assert.equal(f.controller.state.preview?.change.kind, 'followProfile');
+  assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
+  assert.equal(f.controller.state.eligibility.apply, true);
+});
+
+test('shared links and bare IDs require readable access and preview before applying', async t => {
+  const f = await setup(t);
+  const metadata = { setupId: 'team', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'team', latestRevision: 1 };
+  f.handlers.inspectShareLink = () => ({ ...metadata, access: 'denied' });
+  await f.controller.followSharedLink('nortuscc://follow/team');
+  assert.equal(f.calls.filter(call => call.name === 'inspectShareLink').at(-1)?.input.setupId, 'team');
+  assert.equal(f.calls.some(call => call.name === 'previewChange'), false);
+  assert.match(f.controller.state.error ?? '', /access denied/);
+  f.handlers.inspectShareLink = () => ({ ...metadata, access: 'readable' });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  await f.controller.followSharedLink('team');
+  assert.equal(f.controller.state.preview?.change.kind, 'followProfile');
+  assert.equal(f.calls.some(call => call.name === 'applyChange'), false);
+});
+
+test('an already completed profile Apply refreshes the following header and review', async t => {
+  const f = await setup(t);
+  const followed = { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null };
+  f.handlers.inspectProfiles = () => ({ followed, available: [{ name: 'default', extends: null }, { name: 'small', extends: null }] });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  await f.controller.reload(); await f.controller.switchProfile('small');
+  f.handlers.applyChange = () => { followed.profile = 'small'; return { status: 'started', run: run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } }) }; };
+  const reviews = f.calls.filter(call => call.name === 'setupReview').length;
+  await f.controller.apply();
+  assert.ok(f.calls.filter(call => call.name === 'setupReview').length > reviews);
+  assert.equal(f.controller.state.profiles?.followed?.profile, 'small');
+});
+
+test('a readable profile follow can be applied when the previous repository is untrusted', async t => {
+  const f = await setup(t);
+  f.emit({ version: 3, event: 'status', status: { ...f.machine.state.status!, trusted: false } });
+  f.handlers.inspectShareLink = () => ({ setupId: 'team', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'team', latestRevision: 1, access: 'readable' });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  await f.controller.followSharedLink('team');
+  assert.equal(f.controller.state.eligibility.apply, true);
+});
+
+
+test('the Setup page loads its cached review when profile listing is unavailable', async t => {
+  const f = await setup(t);
+  f.handlers.inspectProfiles = () => { throw new Error('Profile clone unavailable'); };
+  const reviews = f.calls.filter(call => call.name === 'setupReview').length;
+  await f.controller.reload();
+  assert.equal(f.controller.state.review?.rows[0]?.after, 'new');
+  assert.equal(f.controller.state.source?.setupId, 'local');
+  assert.equal(f.controller.state.eligibility.choose, true);
+  assert.equal(f.calls.filter(call => call.name === 'setupReview').length, reviews + 1);
+  assert.equal(f.calls.filter(call => call.name === 'setupReview').at(-1)?.input.refetch, false);
+  assert.match(f.controller.state.profileNotice ?? '', /Profile clone unavailable/);
+  assert.equal(f.controller.state.profiles, null);
+  f.handlers.inspectProfiles = () => ({ followed: null, available: [{ name: 'default', extends: null }] });
+  await f.controller.reload();
+  assert.equal(f.controller.state.profileNotice, null);
+});
+
 test('an interrupted setup run beyond the first page is still offered for recovery', async t => {
   const f = await setup(t);
   const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });

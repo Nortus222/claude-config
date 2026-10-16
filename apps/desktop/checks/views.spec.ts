@@ -3,7 +3,7 @@ import { skillRun } from './support/skill-run.ts';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SetupView, StartupBoundary, updateAttention, SettingsView, OverviewView, ResolvedView, ShellView, screenForReview } from '../src/views.tsx';
+import { OfferedSetup, SetupView, StartupBoundary, updateAttention, SettingsView, OverviewView, ResolvedView, ShellView, screenForReview } from '../src/views.tsx';
 import { UpdateController } from '../src/update-controller.ts';
 import { UpdateView } from '../src/update-view.tsx';
 import { ReviewView } from '../src/review-view.tsx';
@@ -212,12 +212,13 @@ test('pending sign-in shows only transient code, explicit browser action and can
   assert.match(markup, /ABCD-1234/); assert.match(markup, /Open GitHub/); assert.match(markup, /Cancel sign-in/); assert.match(markup, /Retry after:.*2026-10-11T12:10:00Z/); assert.match(markup, /rate_limited/);
   assert.doesNotMatch(markup, /Sign in with GitHub/);
 });
-test('signed-in settings show identity, queue acknowledgement and explicit unchecked repository consent', () => {
+test('signed-in settings show identity, queue acknowledgement and profile following', () => {
   const c = machine(); const account = new AccountController(null, c);
-  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status }, state: { ...account.state, hosted: { ...hosted, auth: 'signed-in', accountId: 'account-a', login: 'fixture-login', machineId: 'machine-a', machine: { policy: 'notify', reportStatus: false }, setups: [{ setupId: 'setup-a', name: 'Offered fixture', repoUrl: 'https://example.com/fixture.git', latestRevision: 0 }], lastSyncAt: '2026-10-11T12:00:00Z' }, detail: 'Machine settings queued.' }, controller: account, machineController: c }));
-  for (const label of ['Signed in as fixture-login', 'Sign out', 'Sync now / retry', 'New machine name', 'Queue name change', 'Resume automatic apply', 'https://example.com/fixture.git', 'I trust this repository', 'Machine settings queued']) assert.ok(markup.includes(label), label);
+  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status }, state: { ...account.state, hosted: { ...hosted, auth: 'signed-in', accountId: 'account-a', login: 'fixture-login', machineId: 'machine-a', machine: { policy: 'notify', reportStatus: false }, setups: [{ setupId: 'setup-a', name: 'Offered fixture', repoUrl: 'https://example.com/fixture.git', profile: 'default', owned: true, latestRevision: 0 }], lastSyncAt: '2026-10-11T12:00:00Z' }, detail: 'Machine settings queued.' }, controller: account, machineController: c }));
+  for (const label of ['Signed in as fixture-login', 'Sign out', 'Sync now / retry', 'New machine name', 'Queue name change', 'Resume automatic apply', 'https://example.com/fixture.git', 'Machine settings queued']) assert.ok(markup.includes(label), label);
   assert.doesNotMatch(markup, /Sign in with GitHub|checked=""/);
-  assert.match(markup, /button disabled="">Trust on this Mac/);
+  assert.match(markup, /Follow this profile/);
+  assert.doesNotMatch(markup, /Trust on this Mac|I trust this repository/);
 });
 test('overview and resolved render only current inspection counts and provenance', () => {
   const c = machine();
@@ -331,4 +332,23 @@ for(const state of ['awaiting-user','expired','needsInspection'] as const) test(
 test('machine intent view names reset rather than implying an installation effect', () => {
  const text=semanticMarkup(semanticRun({kind:'machineIntent',patch:{kind:'manageConfig',action:'reset'}},{intentState:'saved',routingEffects:[]}));
  assert.match(text,/manageConfig: reset/);assert.match(text,/does not physically remove content/);
+});
+
+test('offered profile setups are followed through the profile preview', async t => {
+  const { fixture, run } = await import('./support/setup-sync.ts');
+  const { SetupSyncController } = await import('../src/setup-sync-controller.ts');
+  const f = await fixture(); const sync = new SetupSyncController(f.bridge, f.machine);
+  t.after(() => { sync.dispose(); f.machine.dispose(); });
+  f.handlers.inspectShareLink = input => ({ setupId: input.setupId, name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', latestRevision: 0, access: 'readable' });
+  f.handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: [], overrides: [] }, actionEffects: ['Inspect only'] });
+  const account = new AccountController(null, f.machine);
+  const element = OfferedSetup({ setup: { setupId: 'shared', name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', owned: true, latestRevision: 0 }, controller: account, disabled: false, onFollowProfile: id => sync.followSharedLink(id) });
+  const html = renderToStaticMarkup(element);
+  assert.match(html, /Follow this profile/); assert.doesNotMatch(html, /Trust on this Mac/);
+  const button = element.props.children.find((child: any) => child?.type === 'button');
+  await button.props.onClick();
+  f.handlers.listRuns = () => ({ runs: [run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } })], nextBefore: null });
+  sync.enter(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sync.state.preview?.change, { kind: 'followProfile', repoUrl: 'https://github.com/example/profiles.git', profile: 'small', setupId: 'shared' });
+  assert.equal(f.calls.some(call => call.name === 'applyChange'), false);
 });

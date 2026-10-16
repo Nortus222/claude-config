@@ -7,6 +7,7 @@ type Review = OperationOutput<'setupReview'>;
 type Source = OperationOutput<'inspectSetups'>['items'][number];
 export type SetupChoice = Extract<ChangePreview['change'], { kind: 'setupApply' }>['choices'][number];
 export type SetupSyncState = {
+  profiles: OperationOutput<'inspectProfiles'> | null; profileNotice: string | null;
   native: boolean; connection: MachineController['state']['connection']; sources: readonly Source[]; source: Source | null;
   review: Review | null; choices: readonly SetupChoice[]; preview: ChangePreview | null; run: RunView | null;
   pending: boolean; pagePending: boolean; pageIndex: number; error: string | null; message: string;
@@ -38,7 +39,7 @@ export class SetupSyncController {
   private inMaintenance = false;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
-    this.state = { native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
+    this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
       pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {},
       eligibility: { read: false, refetch: false, choose: false, preview: false, apply: false, cancel: false, browse: false } };
     let session = machine.state.session, connection = machine.state.connection;
@@ -70,7 +71,7 @@ export class SetupSyncController {
     const idle = free && !this.state.pending && !this.state.pagePending;
     const choose = idle && !!this.state.review && !!this.state.source?.trusted && this.machine.state.status?.trusted !== false;
     this.state = { ...this.state, eligibility: { read: idle, refetch: idle && !!this.state.source?.trusted, choose,
-      preview: choose && this.state.choices.length > 0, apply: idle && this.machine.state.status?.trusted !== false && !!this.state.preview,
+      preview: choose && this.state.choices.length > 0, apply: idle && !!this.state.preview && (this.state.preview.change.kind === 'followProfile' || this.machine.state.status?.trusted !== false),
       cancel: connected && active(this.state.run), browse: choose } };
     for (const listener of this.listeners) listener();
   }
@@ -81,7 +82,7 @@ export class SetupSyncController {
     const reply = await operation(this.bridge!, name, input);
     return this.current(mark) && this.machine.ownsSession(mark.token, reply) ? reply.data : undefined;
   }
-  enter() { this.visible = true; if (!this.state.run) void this.discoverRun(); if (!this.state.review) void this.reload(); }
+  enter() { this.visible = true; if (!this.state.run && !this.state.preview) void this.discoverRun(); if (!this.state.review && !this.state.preview) void this.reload(); }
   leave() { this.visible = false; }
   refresh() {
     const maintenance = this.maintenance(), entering = maintenance && !this.inMaintenance;
@@ -98,7 +99,7 @@ export class SetupSyncController {
       for (let page = 0; page < MAX_RUN_PAGES; page++) {
         const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: PAGE_SIZE, ...(before ? { before } : {}) });
         if (!result || serial !== this.runRead || active(this.state.run) || this.state.pending) return;
-        const run = result.runs.find(run => run.intent.change.kind === 'setupApply');
+        const run = result.runs.find(run => run.intent.change.kind === 'setupApply' || run.intent.change.kind === 'followProfile');
         if (run) { this.update({ run, preview: null }); await this.readRun(run.runId); return; }
         if (!result.nextBefore || cursors.has(result.nextBefore)) return;
         before = result.nextBefore;
@@ -111,8 +112,11 @@ export class SetupSyncController {
     const mark = this.mark(), serial = ++this.runRead;
     try {
       const run = await this.call(mark, 'getRun', { scope: SCOPE, runId });
-      if (run?.runId === runId && serial === this.runRead && this.state.run?.runId === runId)
+      if (run?.runId === runId && serial === this.runRead && this.state.run?.runId === runId) {
+        const switched = active(this.state.run) && run.state === 'succeeded' && run.intent.change.kind === 'followProfile';
         this.update({ run, preview: null, message: `Run ${run.state}` });
+        if (switched) { this.invalidate(); await this.reload(); }
+      }
     } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: message(error) }); }
   }
   private receive(event: HostEvent) {
@@ -132,14 +136,22 @@ export class SetupSyncController {
   private async load(refetch: boolean) {
     if (!this.state.eligibility.read) return;
     this.epoch++; this.issued.clear(); this.cursors = [undefined];
-    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, groupErrors: {} });
+    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, profiles: null, profileNotice: null, groupErrors: {} });
     try {
+      let profiles: SetupSyncState['profiles'] = null;
+      try {
+        profiles = await this.call(mark, 'inspectProfiles', { scope: SCOPE }) ?? null;
+      } catch (error) {
+        if (this.current(mark)) this.update({ profileNotice: `Profiles could not be listed: ${message(error)}. Reload to retry.` });
+      }
+      if (!this.current(mark)) return;
+      this.update({ profiles });
       const sources: Source[] = []; let cursor: string | undefined;
       do {
         const result = await this.call(mark, 'inspectSetups', { scope: SCOPE, limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
         if (!result) return; sources.push(...result.items); cursor = result.nextCursor ?? undefined;
       } while (cursor);
-      const source = sources.find(source => source.setupId === this.state.source?.setupId) ?? sources.find(source => source.trusted) ?? sources[0] ?? null;
+      const source = sources.find(source => profiles?.followed && source.setupId === (profiles.followed.setupId ?? 'local')) ?? sources.find(source => source.setupId === this.state.source?.setupId) ?? sources.find(source => source.trusted) ?? sources[0] ?? null;
       this.update({ sources, source });
       if (!source?.trusted) { this.update({ message: source ? 'Trust this repository in Settings before reviewing changes.' : 'No setup is available.' }); return; }
       const review = await this.call(mark, 'setupReview', { scope: SCOPE, setupId: source.setupId, limit: PAGE_SIZE, refetch });
@@ -172,6 +184,28 @@ export class SetupSyncController {
     } catch (error) { if (this.current(mark)) { this.issued.clear(); this.update({ review: null, preview: null, choices: [], error: message(error) }); } }
     finally { if (this.current(mark)) this.update({ pagePending: false }); }
   }
+  async switchProfile(profile: string) {
+    if (!this.state.eligibility.read || !this.state.profiles?.available.some(item => item.name === profile)) return;
+    const followed = this.state.profiles.followed;
+    if (!followed) return;
+    // Another profile in the same repository follows Git until its own share link is chosen.
+    await this.prepare({ kind: 'followProfile', repoUrl: followed.repoUrl, profile, setupId: null });
+  }
+  async followSharedLink(link: string) {
+    if (!this.state.eligibility.read) return;
+    const setupId = link.trim().replace(/^nortuscc:\/\/follow\//, '');
+    const mark = this.mark(); this.update({ pending: true, preview: null, error: null });
+    let change: Extract<ChangePreview['change'], { kind: 'followProfile' }> | undefined;
+    try {
+      const setup = await this.call(mark, 'inspectShareLink', { scope: SCOPE, setupId });
+      if (setup) {
+        if (setup.access !== 'readable') throw new Error(setup.access === 'denied' ? 'Git read access denied. No subscription was created.' : 'Repository access is unreachable. Try again when it is available.');
+        change = { kind: 'followProfile', repoUrl: setup.repoUrl, profile: setup.profile, setupId: setup.setupId };
+      }
+    } catch (error) { if (this.current(mark)) this.update({ error: message(error) }); }
+    finally { if (this.current(mark)) this.update({ pending: false }); }
+    if (change && this.current(mark)) await this.prepare(change);
+  }
   async preview() {
     const review = this.state.review;
     if (!this.state.eligibility.preview || !review) return;
@@ -196,13 +230,18 @@ export class SetupSyncController {
     if (!this.state.eligibility.apply || !preview) return;
     this.runRead++;
     const mark = this.mark(); this.update({ pending: true, preview: null, error: null });
+    let switched = false;
     try {
       const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId: crypto.randomUUID() });
       if (!result) return;
       if (result.status === 'stale') this.update({ message: 'Setup changed. Preview again before applying.' });
-      else { this.update({ run: result.run, choices: [], message: `Run ${result.run.state}` }); await this.readRun(result.run.runId); }
+      else {
+        this.update({ run: result.run, choices: [], message: `Run ${result.run.state}` });
+        switched = preview.change.kind === 'followProfile' && result.run.state === 'succeeded';
+        if (!switched) await this.readRun(result.run.runId);
+      }
     } catch (error) { if (this.current(mark)) this.update({ error: `${message(error)}. Apply completion is unconfirmed. Reload to inspect runs before retrying.` }); }
-    finally { if (this.current(mark)) this.update({ pending: false }); }
+    finally { if (this.current(mark)) { this.update({ pending: false }); if (switched) { this.invalidate(); await this.reload(); } } }
   }
   async repreview() {
     const run = this.state.run;

@@ -10,10 +10,19 @@ import { nestedSecretComplaints } from './secrets.ts';
 import { normalizeSkillSource } from './overrides.ts';
 import { resolveSkillAdditions } from './skill-additions.ts';
 
+// Per-item decisions made by the profile chain, before pins and machine choices.
+export type ProfileLayers = {
+  readonly files: ReadonlyMap<string, { readonly managed: boolean; readonly from: Origin }>;
+  readonly skills: ReadonlyMap<string, { readonly install: boolean; readonly from: Origin }>;
+  readonly integrations: ReadonlyMap<string, Origin>;
+};
+
 type ResolveInput = {
   readonly base: BaseProfile;
   readonly pins?: Input<Pins>;
   readonly overrides?: Input<MachineOverrides>;
+  readonly layers?: ProfileLayers;
+  readonly declaredSources?: readonly string[];
 };
 
 // Layers pins and machine overrides over the base profile and records which layer decided every
@@ -23,6 +32,8 @@ export function resolveProfile({
   base,
   pins = { value: {}, source: PINS_SOURCE, issues: [] },
   overrides = { value: {}, source: 'overrides', issues: [] },
+  layers,
+  declaredSources = [],
 }: ResolveInput): DesiredConfig {
   const issues: Issue[] = [...base.issues, ...pins.issues, ...overrides.issues];
   const chosen = overrides.value;
@@ -34,7 +45,7 @@ export function resolveProfile({
       complain(`settings.${fileId}`, `'${fileId}' is not a settings document the profile declares`);
     }
   }
-  const files = base.files.map((file) => resolveFile(file, base, chosen, machine, complain));
+  const files = base.files.map((file) => resolveFile(file, base, chosen, machine, complain, layers?.files.get(file.id)));
 
   const additions = chosen.skillAdditions ?? [];
   const declaredSkills = new Set([...base.skills.flatMap((g) => g.skills), ...additions.map(a => a.name)]);
@@ -42,9 +53,9 @@ export function resolveProfile({
     if (!declaredSkills.has(name)) complain(`skills.${name}`, `skill '${name}' is not in the skills manifest`);
   }
   const sourceKey = (source: string) => additions.length ? normalizeSkillSource(source) ?? source : source;
-  const declaredSources = new Set([...base.skills.map((g) => sourceKey(g.source)), ...additions.map(a => sourceKey(a.source))]);
+  const sources = new Set([...base.skills.map((g) => sourceKey(g.source)), ...additions.map(a => sourceKey(a.source)), ...declaredSources.map(sourceKey)]);
   for (const source of Object.keys(pins.value)) {
-    if (!declaredSources.has(sourceKey(source))) {
+    if (!sources.has(sourceKey(source))) {
       issues.push(issue('pin', pins.source, `pins.${source}`, `source '${source}' is not in the skills manifest`));
     }
   }
@@ -53,13 +64,15 @@ export function resolveProfile({
     group.skills.map((name) => {
       const choice = own(chosen.skills, name);
       const ref = own(pins.value, group.source);
+      const layer = layers?.skills.get(`${group.source}/${name}`);
       return {
         name,
         source: group.source,
         exact: group.exact,
         optional: group.optional,
-        install: choice ?? !group.optional,
-        from: choice === undefined ? { layer: 'base' as const, source: SKILLS_SOURCE } : machine,
+        install: choice ?? layer?.install ?? !group.optional,
+        from: choice === undefined ? layer?.from ?? { layer: 'base' as const, source: SKILLS_SOURCE } : machine,
+        ...(layer === undefined ? {} : { declaredFrom: layer.from }),
         ...(ref === undefined ? {} : { pin: { ref, from: pinOrigin } }),
       };
     }),
@@ -78,7 +91,7 @@ export function resolveProfile({
       id: declaration.id,
       declaration,
       enabled: choice ?? declaration.default,
-      from: choice === undefined ? { layer: 'base' as const, source: INTEGRATIONS_SOURCE } : machine,
+      from: choice === undefined ? layers?.integrations.get(declaration.id) ?? { layer: 'base' as const, source: INTEGRATIONS_SOURCE } : machine,
     };
   });
 
@@ -96,15 +109,16 @@ function resolveFile(
   chosen: MachineOverrides,
   machine: Origin,
   complain: (path: string, message: string) => void,
+  layer?: { readonly managed: boolean; readonly from: Origin },
 ): ResolvedFile {
   const decided = chosen.manageConfig !== undefined || chosen.configTargets !== undefined;
-  const managed = chosen.manageConfig !== false && (chosen.configTargets?.includes(file.target) ?? true);
-  const resolved: ResolvedFile = { ...file, managed, from: decided ? machine : { layer: 'base', source: FILES_SOURCE } };
+  const managed = layer?.managed !== false && chosen.manageConfig !== false && (chosen.configTargets?.includes(file.target) ?? true);
+  const resolved: ResolvedFile = { ...file, managed, from: decided ? machine : layer?.from ?? { layer: 'base', source: FILES_SOURCE } };
   if (file.mode !== 'merge-keys') return resolved;
 
   const owned = base.settings[file.id];
   const keys: Record<string, { value: unknown; from: Origin }> = {};
-  for (const [key, value] of Object.entries(owned ?? {})) keys[key] = { value, from: { layer: 'base', source: file.src } };
+  for (const [key, value] of Object.entries(owned ?? {})) keys[key] = { value, from: layer?.from ?? { layer: 'base', source: file.src } };
 
   for (const [key, value] of Object.entries(chosen.settings?.[file.id] ?? {})) {
     const path = `settings.${file.id}.${key}`;

@@ -64,8 +64,9 @@ per IP per hour. Those require service state; schemas cannot enforce them.
 Each named schema has a corresponding inferred type with the `Schema` suffix
 removed. Objects are exact shapes, including nested objects. These are explicit
 wire projections, not storage documents. No document `type`, storage `version`,
-token hash or speculative visibility field belongs in them. Setups are private in
-this phase.
+token hash or speculative visibility field belongs in them. Setup metadata is public
+by opaque link to authenticated accounts. Revision reads require ownership or a
+subscription; publishing remains owner-only.
 
 | Schema | Shape | Endpoint response |
 | --- | --- | --- |
@@ -75,8 +76,9 @@ this phase.
 | `DevicePollRequestSchema` | `{ pendingId }` | Request to `POST /auth/device/poll` |
 | `DevicePollPendingSchema` | `{ interval }` | `202`, authorization pending or slow down |
 | `DevicePollSuccessSchema` | `{ accountId, login, machineId, token, defaultPolicy }` | `200`, signed in |
-| `SetupRegistrationSchema` | `{ name, repoUrl }` | Request to `POST /setups` |
-| `SetupRecordSchema` | `{ setupId, name, repoUrl, latestRevision, createdAt }` | `201`, successful setup registration |
+| `SetupRegistrationSchema` | `{ name, repoUrl, profile }` | Request to `POST /setups` |
+| `SetupRecordSchema` | `{ setupId, name, repoUrl, profile, latestRevision, createdAt }` | `201` for creation, `200` for an existing owned repository/profile |
+| `PublicSetupSchema` | `{ setupId, name, repoUrl, profile, latestRevision }` | `200` from `GET /setups/:id/public` |
 | `SetupsResponseSchema` | `{ setups: SetupRecord[] }` | `200` from `GET /setups` |
 | `RevisionPublicationSchema` | `{ number, commitSha, tag, changelog, items, requiredEnv }` | Request to `POST /setups/:id/revisions` |
 | `RevisionRecordSchema` | Publication fields plus `{ setupId, publishedAt, machineId }` | `201`, successful revision publication |
@@ -136,8 +138,8 @@ summary, so a machine with reporting disabled must return `status: null`. Decisi
 sync continues. Team sharing requires a separate future opt-in. Local-only mode
 keeps working without an account.
 
-Status writes, sign-out, machine deletion and account deletion return `204` without
-a JSON body. Conditional sync returns `304` without a body. There is no schema for
+Subscription PUT/DELETE, status writes, sign-out, machine deletion and account
+deletion return `204` without a JSON body. Conditional sync returns `304` without a body. There is no schema for
 either empty body. Health uses the minimal `HealthResponseSchema`. `AccountExportSchema` contains
 account identity and public metadata records. Its account object is exactly
 `{ accountId, githubId, login, seq, defaultPolicy, createdAt }`, with a positive
@@ -167,7 +169,8 @@ The source design's slimmer sync projections are deliberate:
   `publishedAt` or publisher `machineId`.
 - `SyncMachineSchema` contains only `{ policy, reportStatus }`. It contains no
   default policy or trust.
-- `SyncSetupSchema` contains only `{ setupId, name, repoUrl, latestRevision }`.
+- `SyncSetupSchema` contains `{ setupId, name, repoUrl, profile, latestRevision, owned }`
+  and optional `closed: true` for a deleted subscribed setup.
 
 Sync revisions are ordered oldest first within each setup, without duplicates.
 Revisions and decisions must reference a returned setup and cannot exceed its
@@ -177,7 +180,9 @@ seconds; its service default is 900, with client jitter of +/-20%.
 V1 sync is complete, not a paginated feed. It delivers every revision after each
 supplied setup cursor, including more than 50 records. A client durably stores the
 contiguous record range before advancing its setup cursor to `latestRevision`.
-Truncated or incomplete responses must not advance that cursor. The schema alone
+Truncated or incomplete responses must not advance that cursor. Closed subscriptions
+return their retained metadata and checkpoint without revision records; clients keep
+the existing cache and show the closure. The schema alone
 cannot prove query-relative completeness. A future paginated sync needs an explicit
 delivered cursor and cannot silently cap v1 responses. Account `seq` and per-setup
 revision cursors are separate checkpoints.
@@ -245,3 +250,28 @@ when a later revision leaves the item unchanged; a later item change needs a new
 decision. The hosted client must adapt the local timestamp replacement rule to
 this authoritative ordering. A partial processing failure leaves an unprocessed
 suffix so retry cannot move an older decision after a later successful one.
+
+## Profile setups and subscriptions
+
+Setup registration is idempotent per owner, normalized repository URL and profile.
+A retry returns the existing record with `200`, retaining its name, repository reference,
+creation time and revision head. Concurrent retries and incomplete materialization reuse
+the same reservation, including when the setup budget is full.
+
+Profile names match `^[a-z0-9][a-z0-9-]{0,62}$`. A setup ID identifies one profile;
+revision and decision bodies do not repeat its name. Legacy stored setups and cached
+sync setups acquire `profile: default`; cached legacy setups are owned.
+
+`PUT /subscriptions/:id` follows an existing open setup and `DELETE` stops following
+it. Both are idempotent and return `204`. Subscriptions live in the follower's account
+partition and share its ten-setup budget with owned setups. Sync includes owned and
+subscribed setups, but personal decisions remain private to the account. A newly
+followed setup without a revision cursor also returns its saved personal decisions,
+even when those predate `since`. Account
+export retains owned setup records and the account's decisions; deleting an account
+removes its subscriptions and closes only its owned setups.
+
+The required `profile` and `owned` response fields change strict v1 decoding. The
+service is not deployed; deploy matching service and client versions together before
+using this contract. The service stores metadata only and cannot prove Git access.
+The following agent must prove repository access before subscribing.

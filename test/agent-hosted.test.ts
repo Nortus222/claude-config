@@ -7,7 +7,7 @@ import { machine, runCli } from './support/cli.ts';
 
 const skip = process.platform === 'win32' ? 'Unix IPC only' : false;
 const state = { enabled: true, recovered: true, signingIn: false, accountId: 'account1', login: 'person', machineId: 'machine1', auth: 'signed-in',
-  setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/example/setup', latestRevision: 2 }], machine: { policy: 'notify', reportStatus: true }, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
+  setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/example/setup', profile: 'default', owned: true, latestRevision: 2 }], machine: { policy: 'notify', reportStatus: true }, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 
 test('hosted CLI sends thin strict requests and prints safe device code/offers/settings', { skip }, async (t) => {
   const fixture = machine({ repo: 'checkout' });

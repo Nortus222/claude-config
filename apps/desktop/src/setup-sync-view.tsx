@@ -5,13 +5,18 @@ import { RunRecovery } from './run-recovery.tsx';
 
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
-type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'abandon' | 'page' | 'selectSource'>;
+type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'>;
 const CHANGE = { added: 'Added', changed: 'Changed', removed: 'Removed', unchanged: 'Unchanged' };
 
 function SourceSummary({ state, controller }: { state: SetupSyncState; controller: Actions }) {
   const { source, review } = state;
+  const [link, setLink] = React.useState('');
+  const followed = state.profiles?.followed;
   return <section className="card setup-sync-summary" aria-labelledby="setup-sync-source-h">
-    <p className="eyebrow">SETUP REPOSITORY</p><h2 id="setup-sync-source-h">{source?.repository ?? 'No setup selected'}</h2>
+    <p className="eyebrow">SETUP REPOSITORY</p><h2 id="setup-sync-source-h">{followed ? `Following ${followed.profile} from ${followed.repoUrl}` : source?.repository ?? 'No setup selected'}</h2>
+    {state.profileNotice ? <p className="notice">{state.profileNotice}</p> : null}
+    {followed ? <label>Switch profile <select aria-label="Switch profile" value={followed.profile} disabled={!state.eligibility.read} onChange={event => void controller.switchProfile(event.target.value)}>{state.profiles?.available.map(profile => <option key={profile.name} value={profile.name}>{profile.name}</option>)}</select></label> : null}
+    <form onSubmit={event => { event.preventDefault(); void controller.followSharedLink(link); }}><label>Follow a shared link <input value={link} onChange={event => setLink(event.target.value)} disabled={!state.eligibility.read} placeholder="nortuscc://follow/… or setup ID" /></label><button disabled={!state.eligibility.read || !link.trim()}>Preview follow</button></form>
     {state.sources.length > 1 ? <label>Setup <select value={source?.setupId ?? ''} disabled={!state.eligibility.read}
       onChange={event => void controller.selectSource(event.target.value)}>{state.sources.map(source => <option key={source.setupId} value={source.setupId}>{source.repository ?? source.setupId}</option>)}</select></label> : null}
     {source ? <p>{source.accountId ? 'Hosted setup' : 'Local setup'} · {source.trusted ? 'Trusted on this Mac' : 'Not trusted on this Mac'}</p> : null}
@@ -62,6 +67,7 @@ function PreviewPanel({ state, controller }: { state: SetupSyncState; controller
   const preview = state.preview;
   if (!preview) return null;
   return <section className="card setup-sync-preview" aria-labelledby="setup-sync-preview-h"><p className="eyebrow">PREVIEW</p><h2 id="setup-sync-preview-h">Planned changes</h2>
+    {'droppedChoices' in preview ? <div><h3>Choices removed on switch</h3><ul aria-label="Dropped holds">{preview.droppedChoices.holds.map(id => <li key={id}>Hold: <code>{id}</code></li>)}</ul><ul aria-label="Dropped overrides">{preview.droppedChoices.overrides.map(id => <li key={id}>Override: <code>{id}</code></li>)}</ul></div> : null}
     {preview.change.kind === 'setupApply' ? <ul aria-label="Reviewed choices">{preview.change.choices.map(choice => <li key={choice.itemId}><code>{choice.itemId}</code> {({ accept: 'Take the setup value and keep local overrides', hold: 'Hold at the current Setup value', release: 'Release the hold and take the setup value', takeTheirs: 'Use the setup value and replace the local value (backed up first)' })[choice.action]}</li>)}</ul> : null}
     {preview.plan.steps.length ? <ol className="steps setup-sync-steps" aria-label="Planned steps">{preview.plan.steps.map((step, index) => <li key={`${index}:${step.key}`}><span>{step.summary}</span><small>{step.domain} · {step.action}</small></li>)}</ol>
       : <p>No machine steps are planned. Apply saves the reviewed choices.</p>}

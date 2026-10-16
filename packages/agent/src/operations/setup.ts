@@ -52,7 +52,7 @@ const inputs = (handle: AgentHandle, setupId: string, refetch = true) => Effect.
   if (overrides.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Repair machine overrides before reviewing setup changes'));
   const holds = yield* (yield* SyncStore).read, decisions = yield* (yield* DecisionsStore).read;
   const inspection = yield* handle.inspection;
-  const identity = digest({ account: selected.accountId, repository: selected.repository });
+  const identity = digest({ account: selected.accountId, repository: selected.repository, profile: selected.source.profile });
   const cached = reviewedHeads.get(handle)?.get(setupId);
   const revision = cached?.identity === identity && cached.inspection === inspection ? cached.revision
     : inspection?.revision && revisionSetupId(inspection.revision) === setupId ? inspection.revision : undefined;
@@ -62,10 +62,10 @@ const inputs = (handle: AgentHandle, setupId: string, refetch = true) => Effect.
   reviewedHeads.set(handle, heads);
   return { selected, overrides, holds, decisions, observed };
 });
-const textOf = (documents: Documents, id: string, value: string | undefined) => {
-  const ref = parseItemId(id), desired = desiredOfDocuments(documents);
+const textOf = (documents: Documents, id: string, value: string | undefined, profile?: string) => {
+  const ref = parseItemId(id), desired = desiredOfDocuments(documents, undefined, profile);
   const file = ref?.kind === 'file' ? desired.files.find(file => file.id === ref.fileId) : undefined;
-  if (file) return documents[file.src];
+  if (file) return file.managed ? documents[file.src] : value;
   const declaration = ref?.kind === 'integration' ? desired.integrations.find(item => item.id === ref.id)?.declaration : undefined;
   return declaration?.type === 'hook' && typeof declaration.file === 'string'
     ? `${value}\n\n${declaration.file}\n${documents[declaration.file] ?? ''}` : value;
@@ -73,11 +73,11 @@ const textOf = (documents: Documents, id: string, value: string | undefined) => 
 // Incoming choices include hook-only changes and siblings sharing an incoming item's source pin.
 const incomingItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
   const { observed, holds } = input;
-  const before = itemValues(observed.before), after = itemValues(observed.after);
+  const before = observed.beforeValues, after = observed.afterValues;
   const inventory = [...new Set([...before.keys(), ...after.keys()])];
   const ids = new Set([...observed.changes.map(c => c.itemId),
-    ...inventory.filter(id => textOf(observed.before, id, before.get(id)) !== textOf(observed.after, id, after.get(id)))]);
-  for (const group of setupPinGroups(observed.before, observed.after, Object.keys(holds)))
+    ...inventory.filter(id => textOf(observed.before, id, before.get(id), observed.profile) !== textOf(observed.after, id, after.get(id), observed.profile))]);
+  for (const group of setupPinGroups(observed.before, observed.after, Object.keys(holds), observed.profile))
     if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
   return [...ids].sort();
 };
@@ -85,10 +85,10 @@ const incomingItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
 const reviewItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
   const ids = new Set([
     ...incomingItemIds(input), ...Object.keys(input.holds),
-    ...[...itemValues(input.observed.before).keys(), ...itemValues(input.observed.after).keys()]
+    ...[...input.observed.beforeValues.keys(), ...input.observed.afterValues.keys()]
       .filter(id => overrideOf(id, input.overrides.value) !== undefined),
   ]);
-  for (const group of setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds)))
+  for (const group of setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds), input.observed.profile))
     if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
   return [...ids].sort();
 };
@@ -97,12 +97,12 @@ export const readSetupReview = (handle: AgentHandle, input: OperationInput<'setu
   Effect.gen(function* () {
     const context = yield* inputs(handle, input.setupId, input.refetch);
     const { selected, overrides, holds, decisions, observed } = context;
-    const before = itemValues(observed.before), after = itemValues(observed.after);
-    const pinGroups = setupPinGroups(observed.before, observed.after, Object.keys(holds));
+    const before = observed.beforeValues, after = observed.afterValues;
+    const pinGroups = setupPinGroups(observed.before, observed.after, Object.keys(holds), observed.profile);
     const rows: SetupReview['rows'] = reviewItemIds(context).map(itemId => {
       const ref = parseItemId(itemId)!;
       const change = { itemId, kind: ref.kind, before: before.get(itemId), after: after.get(itemId) };
-      const values = { before: textOf(observed.before, itemId, change.before), after: textOf(observed.after, itemId, change.after), mine: mineOf(itemId, overrides.value) };
+      const values = { before: textOf(observed.before, itemId, change.before, observed.profile), after: textOf(observed.after, itemId, change.after, observed.profile), mine: mineOf(itemId, overrides.value) };
       let truncated = false;
       const bounded = Object.fromEntries(Object.entries(values).flatMap(([key, value]) => {
         if (value === undefined) return [];
@@ -150,7 +150,7 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
         if (seen.has(choice.itemId)) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Choose each setup item once'));
         seen.add(choice.itemId);
       }
-      yield* Effect.try({ try: () => validateSetupPinChoices(setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds)), change.choices),
+      yield* Effect.try({ try: () => validateSetupPinChoices(setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds), input.observed.profile), change.choices),
         catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
       const choices = [...change.choices, ...incomingItemIds(input)
         .filter(id => !seen.has(id) && input.observed.offers.some(offer => offer.itemId === id))
@@ -178,10 +178,10 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
       const effective = yield* input.selected.source.effective(nextDecisions, { holds: nextHolds, overrides: { ...input.overrides, value: nextOverrides } });
       if (effective.effective.desired.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Selected setup choices cannot be composed'));
       const accepted = nextDecisions.filter(d => d.setupId === change.setupId && d.decision === 'accept' && input.observed.offers.some(o => o.itemId === d.itemId && (typeof o.revision === 'string' ? d.commit === o.revision : d.revision === o.revision.number))).map(d => d.itemId);
-      const expected = yield* Effect.try({ try: () => composeSetupChoices({ current: input.observed.before, offered: input.observed.after, accepted, holds: nextHolds }),
+      const expected = yield* Effect.try({ try: () => composeSetupChoices({ current: input.observed.before, offered: input.observed.after, accepted, holds: nextHolds, profile: input.observed.profile }),
         catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
       const actual = yield* worktreeDocuments(effective.effective.repo);
-      yield* Effect.try({ try: () => validateSetupComposition(expected, actual), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
+      yield* Effect.try({ try: () => validateSetupComposition(expected, actual, input.observed.profile), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
       // Advancing a local commit replays holds over head. Prove that replay preserves the reviewed bytes.
       if (typeof input.observed.head === 'string') {
         let replay = input.observed.after;
@@ -189,9 +189,9 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
         for (const id of Object.keys(nextHolds).sort()) {
           const origin = nextHolds[id]!;
           if (!origins.has(origin)) origins.set(origin, yield* worktreeDocuments((yield* input.selected.source.load(origin)).repo));
-          replay = patchItem(replay, id, origins.get(origin)!);
+          replay = patchItem(replay, id, origins.get(origin)!, input.observed.profile);
         }
-        yield* Effect.try({ try: () => validateSetupComposition(expected, replay), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
+        yield* Effect.try({ try: () => validateSetupComposition(expected, replay, input.observed.profile), catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
       }
       const jobPaths = { ...paths, repo: effective.effective.repo };
       const domains = handle.operationDomains?.(jobPaths);

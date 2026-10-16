@@ -89,6 +89,7 @@ export const setupSourceLayer = (
       Effect.catchTag('LaunchFailed', (e) => unavailable(revision, e.message)),
       Effect.catchTag('FsFailed', (e) => Effect.die(e)),
       Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
     );
 
   const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) =>
@@ -118,6 +119,7 @@ export const setupSourceLayer = (
       Effect.catchTag('LaunchFailed', (e) => unavailable('HEAD', e.message)),
       Effect.catchTag('FsFailed', (e) => Effect.die(e)),
       Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
       Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
     );
 
@@ -131,6 +133,7 @@ export const setupSourceLayer = (
     Effect.catchTag('LaunchFailed', (e) => unavailable('HEAD', e.message)),
     Effect.catchTag('FsFailed', (e) => Effect.die(e)),
     Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
     Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
   );
 

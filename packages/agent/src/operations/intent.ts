@@ -68,6 +68,7 @@ export const makeIntentOperations = (options: {
   const observeRouting = (desired: DesiredConfig, id: McpRoutingFileId) => inspectMcpRouting(desired, id).pipe(Effect.provideService(StateStore, { ...stateStore, read: peekMachineState }));
   const files = Layer.succeed(ProfileFiles, {
     readText: path => fs.readText(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))), exists: fs.exists,
+    list: path => fs.list(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))),
   });
   const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(files));
   const ready = Effect.gen(function* () {

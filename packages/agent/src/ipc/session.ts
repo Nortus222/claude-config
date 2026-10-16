@@ -1,3 +1,4 @@
+import { prepareProfileOperation, readProfileOperation } from '../operations/profiles.ts';
 import { prepareBackupOperation, readBackupOperation } from '../operations/backups.ts';
 import { isAccountChange, prepareAccountOperation, readAccountOperation } from '../operations/account.ts';
 import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
@@ -57,6 +58,8 @@ export type AgentSession = {
   readonly inspectSourceDiff: (input: OperationInput<'inspectSourceDiff'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSourceDiff'>, SessionError>;
   readonly pinImpact: (input: OperationInput<'pinImpact'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'pinImpact'>, SessionError>;
   readonly draftChangelog: (input: OperationInput<'draftChangelog'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftChangelog'>, SessionError>;
+  readonly inspectProfiles: (input: OperationInput<'inspectProfiles'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectProfiles'>, SessionError>;
+  readonly inspectShareLink: (input: OperationInput<'inspectShareLink'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectShareLink'>, SessionError>;
   readonly inspectSetups: (input: OperationInput<'inspectSetups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSetups'>, SessionError>;
   readonly setupReview: (input: OperationInput<'setupReview'>) => Effect.Effect<import('../operations/index.ts').SetupReview, SessionError>;
   readonly incomingChanges: (input: OperationInput<'incomingChanges'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'incomingChanges'>, SessionError>;
@@ -308,12 +311,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return yield* retainParityChange(prepared);
         }));
       }
-      if (input.change.kind === 'syncDecision' || input.change.kind === 'setupApply') {
+      if (input.change.kind === 'followProfile' || input.change.kind === 'syncDecision' || input.change.kind === 'setupApply') {
         if (active) return yield* Effect.fail(busy);
         const change = input.change;
         return yield* handle.exclusive(Effect.gen(function* () {
           const generation = yield* (handle.generation ?? Effect.succeed(0));
-          const prepared = yield* (change.kind === 'setupApply' ? prepareSetupApply(handle, change, generation) : prepareSyncOperation(handle, change, generation)).pipe(Effect.provideContext(context));
+          const prepared = yield* (change.kind === 'followProfile' ? prepareProfileOperation(handle, change, generation) : change.kind === 'setupApply' ? prepareSetupApply(handle, change, generation) : prepareSyncOperation(handle, change, generation)).pipe(Effect.provideContext(context));
           if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation)
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed'));
           return yield* retainParityChange(prepared);
@@ -419,7 +422,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               const incomplete = evidence.remainingKeys.length > 0;
               const checkpoint = yield* Effect.exit(observer.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : signal.aborted ? 'partial' : incomplete ? 'needsInspection' : 'committed' }));
               yield* release;
-              const terminal = Exit.isFailure(exit) || Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
+              const terminal = Exit.isFailure(exit) ? { type: 'failed' as const, message: prepared.preview.change.kind === 'followProfile' ? describe(Cause.squash(exit.cause)) : 'Operation stopped; inspect before retrying' }
+                : Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
                 : signal.aborted ? { type: 'cancelled' as const, remaining: [...evidence.remainingKeys] }
                 : incomplete ? { type: 'failed' as const, message: 'Operation completion was not observed; inspect before retrying' }
                 : { type: 'done' as const, ok: evidence.committedKeys.length, failed: 0 };
@@ -650,6 +654,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       inspectSourceDiff: input => sourceRead('inspectSourceDiff',input),
       pinImpact: input => sourceRead('pinImpact',input),
       draftChangelog: input => sourceRead('draftChangelog',input),
+      inspectProfiles: input => readProfileOperation(handle, 'inspectProfiles', input).pipe(Effect.provideContext(context)),
+      inspectShareLink: input => handle.exclusive(readProfileOperation(handle, 'inspectShareLink', input).pipe(Effect.provideContext(context))),
       inspectSetups: input => syncRead('inspectSetups', input),
       setupReview: input => handle.exclusive(Effect.gen(function* () {
         const args = yield* Effect.try({ try: () => decodeOperationInput('setupReview', input), catch: () => new SessionError('INVALID_REQUEST', 'Invalid setup review') });
