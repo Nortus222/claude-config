@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { FILES } from '@nortuscc/profile-engine/author-values';
-import { AuthorFeedback, AuthorIssues, PublishView, type AuthorProps } from './publish-view.tsx';
+import { AuthorFeedback, AuthorIssues, DraftLine, RunStatus, type AuthorPageProps } from './publish-view.tsx';
 
-export function ProfilesView({ state, controller }: AuthorProps) {
+export function ProfilesView({ state, controller, onOpenPublish }: AuthorPageProps) {
   const [choice, setChoice] = useState<'updateShared' | 'ownCopy' | null>(null);
   const [repoPath, setRepoPath] = useState('');
   const profile = state.profiles?.profiles.find(p => p.name === state.selectedProfile);
@@ -10,9 +10,9 @@ export function ProfilesView({ state, controller }: AuthorProps) {
   const [copyMessage, setCopyMessage] = useState('');
   const shareLink = profile?.setupId ? `nortuscc://follow/${profile.setupId}` : null;
   return <div className="author-view">
-    <header><div><p className="eyebrow">AUTHOR</p><h1>Profiles</h1><p className="intro">Resolved profile skills and files, with their origins.</p></div>
+    <header><div><p className="eyebrow">MY PROFILES</p><h1>Profiles</h1><p className="intro">Resolved profile skills and files, with their origins.</p></div>
       <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload profiles</button></header>
-    <AuthorFeedback state={state} /><AuthorIssues issues={state.profiles?.issues} except={profile?.name} />
+    <AuthorFeedback state={state} /><RunStatus state={state} controller={controller} page="author" /><DraftLine state={state} onOpenPublish={onOpenPublish} /><AuthorIssues issues={state.profiles?.issues} except={profile?.name} />
     <section className="card"><h2>Profiles</h2>
       {state.profiles ? <p><code>{state.profiles.repoUrl}</code></p> : null}
       <label className="field">Selected profile<select disabled={!state.canRead} value={state.selectedProfile} onChange={e => {setChoice(null); setCopyMessage(''); void controller.selectProfile(e.target.value);}}>
@@ -48,6 +48,5 @@ export function ProfilesView({ state, controller }: AuthorProps) {
         if (choice) void controller.saveCapture(choice === 'updateShared' ? {kind:'updateShared'} : {kind:'ownCopy',repoPath});
       }}>Add capture to draft</button>
     </section> : null}
-    <PublishView state={state} controller={controller} />
   </div>;
 }
