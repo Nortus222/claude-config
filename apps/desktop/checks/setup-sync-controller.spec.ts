@@ -220,6 +220,44 @@ test('a stale incoming Apply drops the agent replacement, re-reads the review an
   await f.controller.preview();
   assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { ...change, revision: newer, choices: [{ itemId: 'setting:b', action: 'hold' }] });
 });
+test('a stale incoming Apply drops a whole pin group when one of its rows changed', async t => {
+  const f = await setup(t);
+  const rows = [{ itemId: 'skill:owner/repo/one', kind: 'skill' as const, change: 'changed' as const, held: false, conflict: false, before: 'a', after: 'b' },
+    { itemId: 'skill:owner/repo/two', kind: 'skill' as const, change: 'changed' as const, held: false, conflict: false, before: 'a', after: 'b' },
+    { itemId: 'setting:a', kind: 'setting' as const, change: 'changed' as const, held: false, conflict: false, before: 'old', after: 'new' }];
+  const pinGroups = [{ source: 'owner/repo', itemIds: ['skill:owner/repo/one', 'skill:owner/repo/two'] }];
+  f.handlers.setupReview = () => review({ rows, pinGroups }); await f.controller.reload();
+  f.controller.chooseAll('accept');
+  await f.controller.preview();
+  f.handlers.applyChange = () => ({ status: 'stale', preview: changePreview({ planId: 'replacement' }) });
+  f.handlers.setupReview = () => review({ rows: [{ ...rows[0]!, after: 'c' }, rows[1]!, rows[2]!], pinGroups });
+  await f.controller.apply();
+  assert.deepEqual(f.controller.state.choices, [{ itemId: 'setting:a', action: 'accept' }]);
+  assert.equal(f.controller.state.previewError, 'Your profile changed. Review the new values and choose again.');
+});
+test('a stale incoming Apply whose review cannot be re-read yet asks for a fresh review instead of keeping choices', async t => {
+  const f = await setup(t); f.controller.enter(); await flush();
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  // The agent starts applying something else, so reading is not allowed when the stale reply lands.
+  f.handlers.applyChange = () => { f.agent.applying = true; f.emit({ version: 3, event: 'status', status: status({ applying: true }) }); return { status: 'stale', preview: changePreview({ planId: 'replacement' }) }; };
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  await f.controller.apply(); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews);
+  assert.equal(f.controller.state.review, null); assert.deepEqual(f.controller.state.choices, []); assert.equal(f.controller.state.preview, null);
+  assert.match(f.controller.state.message, /fresh review/);
+  f.agent.applying = false; f.emit({ version: 3, event: 'status', status: status({ applying: false }) }); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.ok(f.controller.state.review); assert.equal(f.controller.state.message, '');
+});
+test('a stale incoming Apply whose rows read the same keeps the choices and says only this Mac changed', async t => {
+  const f = await setup(t);
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); f.controller.choose({ itemId: 'setting:b', action: 'hold' }); await f.controller.preview();
+  f.handlers.applyChange = () => ({ status: 'stale', preview: changePreview({ planId: 'replacement' }) });
+  await f.controller.apply();
+  assert.deepEqual(f.controller.state.choices, [{ itemId: 'setting:a', action: 'accept' }, { itemId: 'setting:b', action: 'hold' }]);
+  assert.equal(f.controller.state.previewError, 'This Mac changed. Preview again.');
+  assert.equal(f.controller.state.preview, null); assert.equal(f.controller.state.eligibility.preview, true);
+});
 test('On this Mac previews a reconcile of the included items and never the legacy preview', async t => {
   const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();
   assert.equal(f.controller.state.inspection?.items.length, 5);

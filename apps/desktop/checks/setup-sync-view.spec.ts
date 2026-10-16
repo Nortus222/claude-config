@@ -103,7 +103,9 @@ test('a stale reconcile shows the updated plan with its notice', async t => {
 });
 test('a stale incoming Apply asks to choose again beside the review, with no Apply offered', async t => {
   const { c, html, handlers } = await page(t); c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview();
-  const fresh = { ...c.state.preview!, planId: 'fresh' }; handlers.applyChange = () => ({ status: 'stale', preview: fresh }); await c.apply();
+  const fresh = { ...c.state.preview!, planId: 'fresh' }; handlers.applyChange = () => ({ status: 'stale', preview: fresh });
+  handlers.setupReview = () => review({ rows: [{ itemId: 'setting:a', kind: 'setting', change: 'changed', held: false, conflict: false, before: 'old', after: 'newer' }] });
+  await c.apply();
   const text = html();
   assert.equal(panel(text), ''); assert.deepEqual(applyButtons(text), []);
   assert.match(text, /Your profile changed. Review the new values and choose again./);
