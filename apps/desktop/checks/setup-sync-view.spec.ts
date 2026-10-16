@@ -156,6 +156,18 @@ test('outside Details there are no IDs, raw keys, run states or ISO times', asyn
     assert.doesNotMatch(seen, raw);
 });
 
+test('the Changes run card counts failed steps while running and when done', async t => {
+  const steps = [{ key: 'setting:a', outcome: 'ok' as const, note: 'Written' }, { key: 'setting:b', outcome: 'failed' as const, note: 'Permission denied' }];
+  const { c, html, handlers, emit } = await page(t);
+  handlers.getRun = () => run({ steps });
+  c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview(); await c.apply(); await flush();
+  const card = () => /<section class="card changes-run"[\s\S]*?<\/section>/.exec(html())?.[0] ?? '';
+  assert.match(card(), /1 of 2 steps done, 1 failed\./);
+  handlers.getRun = () => run({ state: 'failed', steps, result: { status: 'done', ok: 1, failed: 1 } });
+  emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
+  assert.match(card(), /1 change applied, 1 failed\./);
+});
+
 test('an interrupted reconcile names its change and offers Re-preview and Abandon', async t => {
   const interrupted = localRun({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
   const { c, html } = await page(t, f => { f.report.items = localItems(); f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; });

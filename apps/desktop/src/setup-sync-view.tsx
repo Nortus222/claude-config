@@ -104,8 +104,8 @@ function PreviewPanel({ state, controller }: Props) {
 // One run: active, or started in this window. Interrupted and abandoned runs show as recovery instead.
 function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: Actions }) {
   if (run.state === 'interrupted' || run.state === 'abandoned') return null;
-  const result = run.result, ok = run.steps.filter(step => step.outcome === 'ok').length;
-  const outcome = !result ? (run.steps.length ? `${ok} of ${count(run.steps.length, 'step')} done.` : 'Starting.')
+  const result = run.result, ok = run.steps.filter(step => step.outcome === 'ok').length, failed = run.steps.filter(step => step.outcome === 'failed').length;
+  const outcome = !result ? (run.steps.length ? `${ok} of ${count(run.steps.length, 'step')} done${failed ? `, ${failed} failed` : ''}.` : 'Starting.')
     : result.status === 'done' ? `${count(result.ok, 'change')} applied${result.failed ? `, ${result.failed} failed` : ''}.`
     : result.status === 'cancelled' ? `Cancelled. ${count(result.remaining.length, 'change')} not started.`
     : errorText(result.message);
