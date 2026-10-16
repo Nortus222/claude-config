@@ -345,6 +345,7 @@ export const serveIpc = (input: {
           let result: unknown;
           switch (request.operation) {
             case 'authorProfiles': result = yield* session.authorProfiles(request.input); break;
+            case 'machineFile': result = yield* session.machineFile(request.input); break;
             case 'authorFile': result = yield* session.authorFile(request.input); break;
             case 'upstreams': result = yield* session.upstreams(request.input); break;
             case 'discoverUpstream': result = yield* session.discoverUpstream(request.input); break;

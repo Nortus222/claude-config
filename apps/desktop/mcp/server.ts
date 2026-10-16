@@ -6,6 +6,7 @@ import type { AppAgentClient } from './client.ts';
 export const toolNames = {
   inspectProfiles: 'nortuscc_inspect_profiles', inspectShareLink: 'nortuscc_inspect_share_link',
   authorProfiles: 'nortuscc_author_profiles',
+  machineFile: 'nortuscc_machine_file',
   authorFile: 'nortuscc_author_file',
   upstreams: 'nortuscc_upstreams',
   discoverUpstream: 'nortuscc_discover_upstream',
@@ -30,6 +31,7 @@ const descriptions: Record<OperationName, string> = {
   inspectProfiles: 'Read the followed profile and available named profiles.',
   inspectShareLink: 'Read shared setup metadata and prove Git read access before following. No subscription is created.',
   authorProfiles: 'Read all author profiles, inherited skills and files with their declaring documents.',
+  machineFile: 'Read a built-in capturable file from this machine. Refuse capture if absent or truncated; never save partial text.',
   authorFile: 'Read a selected resolved author file from the private clone; truncated bytes cannot authorize capture.',
   upstreams: 'Read sources across all profiles and locally browsed sources, pins and cached discovery.',
   discoverUpstream: 'Discover the complete revision-bound skill list using the pinned skills CLI; unavailable results expose no partial list.',

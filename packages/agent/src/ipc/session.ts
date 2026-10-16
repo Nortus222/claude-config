@@ -48,6 +48,7 @@ type Client = 'app' | 'cli' | 'mcp';
 // One person's preview and machine run, plus an independent GitHub sign-in.
 export type AgentSession = {
   readonly authorProfiles: (input: OperationInput<'authorProfiles'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorProfiles'>, SessionError>;
+  readonly machineFile: (input: OperationInput<'machineFile'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'machineFile'>, SessionError>;
   readonly authorFile: (input: OperationInput<'authorFile'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorFile'>, SessionError>;
   readonly upstreams: (input: OperationInput<'upstreams'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'upstreams'>, SessionError>;
   readonly discoverUpstream: (input: OperationInput<'discoverUpstream'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'discoverUpstream'>, SessionError>;
@@ -673,6 +674,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     };
     const session: AgentSession = {
       authorProfiles: input => authorRead('authorProfiles', input),
+      machineFile: input => authorRead('machineFile', input),
       authorFile: input => authorRead('authorFile', input),
       upstreams: input => authorRead('upstreams', input),
       discoverUpstream: input => authorRead('discoverUpstream', input),

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/operations/coverage.ts';
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
-const reads = ['inspectProfiles','inspectShareLink','authorProfiles','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
+const reads = ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
 const changes = ['followProfile','reconcile', 'machineIntent', 'editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {

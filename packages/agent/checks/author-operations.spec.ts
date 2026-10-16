@@ -411,3 +411,21 @@ test('author reads complete while the scheduler job permit is held', async t => 
     assert.equal(completed._tag, 'Some');
   }));
 });
+
+test('machine file read returns current text', async t => {
+  const f = await fixture(t); f.m.write(join(f.m.paths.claude, 'CLAUDE.md'), '\uFEFFcurrent machine text é\n');
+  await f.within(s => Effect.gen(function* () {
+    assert.deepEqual(yield* read(s, 'machineFile', { fileId: 'claude:CLAUDE.md' }), { fileId: 'claude:CLAUDE.md', exists: true, text: '\uFEFFcurrent machine text é\n', truncated: false });
+    assert.deepEqual(yield* read(s, 'machineFile', { fileId: 'codex:AGENTS.md' }), { fileId: 'codex:AGENTS.md', exists: false, text: '', truncated: false });
+  }));
+  for (const fileId of ['codex:config.toml', 'codex:models-static.json', '../secret'])
+    assert.throws(() => decodeRequest({ version: 3, id: 'read', command: 'operation', operation: 'machineFile', input: { fileId } }));
+});
+test('oversized machine file is reported truncated and cannot be captured', async t => {
+  const f = await fixture(t); f.m.write(join(f.m.paths.claude, 'CLAUDE.md'), 'x'.repeat(262_145));
+  await f.within(s => Effect.gen(function* () {
+    const value = (yield* read(s, 'machineFile', { fileId: 'claude:CLAUDE.md' })) as { text: string; truncated: boolean };
+    assert.equal(value.truncated, true); assert.equal(Buffer.byteLength(value.text), 262_144);
+    assert.throws(() => decodeOperationInput('previewChange', { change: { kind: 'editDraft', draftId: null, intent: { kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'x'.repeat(262_145), choice: {kind:'updateShared'} } } }));
+  }));
+});
