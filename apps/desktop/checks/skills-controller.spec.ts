@@ -52,6 +52,7 @@ test('intent pagination preserves all source-qualified rows and rejects a changi
 });
 test('malformed intent replies never expose partial rows', async () => {
   const f = await loaded({ inspectIntent: () => ({ invalid: true }) }); assert.equal(f.skills.state.view, null); assert.match(f.skills.state.error!, /response/i);
+  assert.doesNotMatch(f.skills.state.detail, /Reading/, 'a failed read does not keep its progress line');
 });
 test('choosing Default sends reset and shows the profile default', async () => {
   const f = await loaded(); f.box.rows = inventory([row('tdd', { choice: false, enabled: false })]); await f.skills.reload();

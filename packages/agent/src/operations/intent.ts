@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Effect, Exit, Layer } from 'effect';
-import { loadProfile, normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
+import { normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
 import { Backups, backupsForRun, canonical, Fs, inspectMcpRouting, mcpRoutingEvidence, MachinePaths, machinePaths, OverridesStore, overridesPath, peekMachineState, persistMachineIntent, proposeMachineIntent, releasedRouting, setMcpRouting, StateStore, type McpRoutingFileId } from '@nortuscc/machine';
 import { AgentClock } from '../clock.ts';
 import { safeOwnerString } from './safety.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { RunLifecycle } from '../runs.ts';
-import type { JobInspection } from '../job.ts';
+import { resolveInspection, type JobInspection } from '../job.ts';
 import { decodeOperationInput, decodeOperationOutput, type ChangePreview, type OperationInput, type OperationOutput, type ParityAcceptance, type ParityRunEvidence } from './index.ts';
 import type { PreparedParityChange } from './parity.ts';
 
@@ -70,7 +70,9 @@ export const makeIntentOperations = (options: {
     readText: path => fs.readText(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))), exists: fs.exists,
     list: path => fs.list(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))),
   });
-  const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(files));
+  // A named profile that no longer resolves cleanly is an invalid intent, as root issues are.
+  const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => resolveInspection(inspection, overrides).pipe(
+    Effect.catchTag('ProfileInvalid', () => Effect.fail(invalid())), Effect.provide(files));
   const ready = Effect.gen(function* () {
     const inspection = yield* options.inspection;
     if (!inspection) return yield* Effect.fail(refused('NO_REPORT', 'Inspect the machine before reading or changing intent'));

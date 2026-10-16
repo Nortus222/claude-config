@@ -7,11 +7,11 @@ import {
   sourceOf, skillLockPath, agentSkillsDirs, inspectSkills, type Plan, type SkillCandidate,
 } from '@nortuscc/machine';
 import {
-  loadProfile, normalizeSkillSource, ProfileFiles, ReadFailed, TARGETS,
+  normalizeSkillSource, ProfileFiles, ReadFailed, TARGETS,
   type DesiredConfig, type Input, type MachineOverrides, type SkillAddition,
 } from '@nortuscc/profile-engine';
 import { AgentClock } from './clock.ts';
-import type { JobInspection } from './job.ts';
+import { resolveInspection, type JobInspection } from './job.ts';
 import { decodeOperationInput, decodeOperationOutput, type ChangePreview, type OperationInput, type OperationScope, type SkillCandidateResult } from './operations/index.ts';
 import type { ErrorCode } from './ipc/protocol.ts';
 
@@ -140,6 +140,8 @@ export const makeSkillOperations = (options: {
     exists: fs.exists,
     list: path => fs.list(path).pipe(Effect.mapError(e => new ReadFailed({ path, reason: e.message }))),
   });
+  const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => resolveInspection(inspection, overrides).pipe(
+    Effect.catchTag('ProfileInvalid', () => refuse('PROFILE_INVALID', 'Skill addition conflicts with existing declarations or source-wide revisions')), Effect.provide(profileFiles));
   const previewSkillChange = (input: OperationInput<'previewChange'>) => bounded(Effect.gen(function* () {
     const args = yield* Effect.try({ try: () => decodeOperationInput('previewChange', input), catch: () => new SkillOperationError('INVALID_REQUEST', 'Invalid skill addition') });
     if (args.scope.kind !== 'machine') return yield* refuse('UNSUPPORTED_SCOPE', 'Skill additions support machine scope only');
@@ -153,7 +155,7 @@ export const makeSkillOperations = (options: {
     const generation = yield* options.generation;
     const targets = overrides.value.manageConfig === false ? [] : overrides.value.configTargets ?? TARGETS;
     if (change.targets.some(t => !targets.includes(t))) return yield* refuse('TARGET_UNAVAILABLE', 'A selected target is unavailable in setup context; configure it in the app or select a configured target');
-    const baseline = yield* loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(profileFiles));
+    const baseline = yield* resolve(inspection, overrides);
     if (canonical(baseline) !== canonical(inspection.desired)) return yield* refuse('UNKNOWN_PLAN', 'The composed setup or overrides changed; inspect and resolve again');
     const pin = pinFor(baseline, c.source);
     let acceptedTree: readonly TreeEntry[] | undefined;
@@ -194,7 +196,7 @@ export const makeSkillOperations = (options: {
     const tentative: Input<MachineOverrides> = { ...overrides, source: overridesPath(inspection.paths), value: { ...overrides.value,
       skillAdditions: [...(overrides.value.skillAdditions ?? []).filter(a => !(a.source === c.source && a.name === c.installedName)), after],
       ...(enable ? { skills: { ...overrides.value.skills, [c.installedName]: true } } : {}) } };
-    const desired = yield* loadProfile(inspection.paths.repo, { overrides: tentative }).pipe(Effect.provide(profileFiles));
+    const desired = yield* resolve(inspection, tentative);
     if (desired.issues.length) return yield* refuse('PROFILE_INVALID', 'Skill addition conflicts with existing declarations or source-wide revisions');
     const selected = desired.skills.find(s => s.name === c.installedName && normalizeSkillSource(s.source) === c.source);
     if (!selected?.install) return yield* refuse('PROFILE_INVALID', 'The selected skill is disabled in desired configuration');
@@ -214,7 +216,7 @@ export const makeSkillOperations = (options: {
     }] : [] };
     if ((yield* clock.now).getTime() >= retained.expires) return yield* refuse('UNKNOWN_PLAN', 'Candidate expired during preview; resolve and review again');
     if (generation !== (yield* options.generation) || canonical(yield* store.read) !== canonical(overrides)
-      || canonical(yield* loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(profileFiles))) !== canonical(baseline)) return yield* refuse('UNKNOWN_PLAN', 'The setup changed during preview; inspect and resolve again');
+      || canonical(yield* resolve(inspection, overrides)) !== canonical(baseline)) return yield* refuse('UNKNOWN_PLAN', 'The setup changed during preview; inspect and resolve again');
     const preview: ChangePreview = { planId: randomUUID(), scope: { kind: 'machine' }, change, generation: String(generation), plan: additionRunPlan(selectedPlan, c.installedName), nextActions: [],
       skillAddition: { candidate: project(change.candidateId, c), declaration: { before, after, changed: before.length !== 1 || canonical(before[0]) !== canonical(after) },
         ...(enable ? { enablement: { before: false, after: true } } : {}), installationTargets: after.targets,
