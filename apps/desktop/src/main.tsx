@@ -16,15 +16,15 @@ import { ReviewView } from './review-view.tsx';
 import { OverviewView, ResolvedView, SettingsView, StartupBoundary, updateAttention, ShellView, screenForReview, type Screen } from './views.tsx';
 import './style.css';
 
-const skillsMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
+const appMaintenance = (phase: string | undefined) => ['waiting', 'installing', 'restarting', 'recovery'].includes(phase ?? '') ? 'An app update is installing or needs recovery.' : null;
 
 function App() {
   const [controllers] = useState(() => {
     const bridge = nativeAvailable() ? nativeBridge : null;
     const machine = new MachineController(bridge);
     const updates = new UpdateController(bridge ? nativeUpdateBridge : null);
-    const setupSync = new SetupSyncController(bridge, machine, { maintenance: () => ['waiting', 'installing', 'restarting'].includes(updates.state.update?.phase ?? '') });
-    const skills = new SkillsController(bridge, machine, { maintenance: () => skillsMaintenance(updates.state.update?.phase) });
+    const setupSync = new SetupSyncController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
+    const skills = new SkillsController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) });
     return { machine, skills, connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
   });
   const { machine, account, setup, updates, connections, setupSync, skills } = controllers;
@@ -73,7 +73,7 @@ function App() {
       {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
       {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
       {screen === 'setup' ? <SetupSyncView state={setupSyncState} controller={setupSync} /> : null}
-      {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={skillsMaintenance(updateState.update?.phase)} /> : null}
+      {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} /> : null}
       {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
       {screen === 'settings' ? <>
         <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />
