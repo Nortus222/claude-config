@@ -18,6 +18,7 @@ import { patchItem } from './patch.ts';
 import { overrideOf } from './plan.ts';
 import { SetupsStore, setupsStore } from './setups.ts';
 import { snapshotFromDocuments } from './snapshots.ts';
+import { droppedOnSwitch, retainedOverrides } from './resolved-items.ts';
 import {
   RevisionMismatch, RevisionUnavailable, SetupSource, type AppliedEvidence, type HostedBaseline, type Revision,
 } from './source.ts';
@@ -158,10 +159,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
         try: () => {
           const cached: unknown = JSON.parse(prior);
           if (!Array.isArray(cached)) throw new Error();
-          return cached.map(r => decodeHosted(SyncRevisionSchema, r)).length;
+          const decoded = cached.map(r => decodeHosted(SyncRevisionSchema, r));
+          if (decoded.some((r, i) => r.setupId !== options.setupId || r.number !== i + 1)) throw new Error();
+          return decoded.length;
         },
         catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }),
-      });
+      }).pipe(Effect.catch(() => Effect.succeed(-1)));
       if (range.length > priorCount) {
         yield* Backups.use(b => b.preserve(verifiedRecords, verifiedRelative, undefined, { private: true })).pipe(
           Effect.provide(backupsForRun(now()).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), Layer.succeed(Fs, fs))))),
@@ -274,6 +277,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     return yield* snapshotFromDocuments({ documents: content, repoUrl: options.repoUrl, profile, stateRoot: snapshotsRoot, overrides, now: now() });
   });
 
+  // Historical and mixed snapshots can predate an overridden item; keep its choice on disk.
+  const historicalSnapshot = (documents: Documents, overrides: Input<MachineOverrides>) => {
+    const dropped = droppedOnSwitch({ holds: {}, overrides: overrides.value, to: desiredOfDocuments(documents, undefined, profile) });
+    return snapshot(documents, { ...overrides, value: retainedOverrides(overrides.value, dropped.overrides) });
+  };
+
   const offeredItems = Effect.gen(function* () {
     const { repo } = yield* repository;
     const range = yield* records;
@@ -297,12 +306,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   });
   const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
     const composed = yield* compose(decisions, choices);
-    return { applied: { ...yield* snapshot(composed.appliedDocuments, composed.overrides), revision: null }, effective: yield* snapshot(composed.documents, composed.overrides), conflicts: composed.conflicts };
+    return { applied: { ...yield* historicalSnapshot(composed.appliedDocuments, composed.overrides), revision: null }, effective: yield* historicalSnapshot(composed.documents, composed.overrides), conflicts: composed.conflicts };
   });
   const current = Effect.gen(function* () {
     const { repo, linked } = yield* repository;
     const baseline = yield* readBaseline(repo, linked);
-    return yield* snapshot(yield* baselineDocuments(repo, baseline, new Map()), yield* (yield* OverridesStore).read);
+    return yield* historicalSnapshot(yield* baselineDocuments(repo, baseline, new Map()), yield* (yield* OverridesStore).read);
   });
   const baseline = Effect.gen(function* () { const { repo, linked } = yield* repository; return yield* readBaseline(repo, linked); });
   const recordApplied = (evidence: AppliedEvidence) => Effect.gen(function* () {

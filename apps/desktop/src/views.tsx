@@ -225,7 +225,17 @@ export function ResolvedView({ state, controller }: { state: ViewState; controll
   );
 }
 
-function OfferedSetup({ setup, controller, disabled }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean }) {
+export function OfferedSetup({ setup, controller, disabled, onFollowProfile }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean; onFollowProfile?: (setupId: string) => void | Promise<void> }) {
+  if (setup.profile) return (
+    <div className="offered-setup">
+      <h3>{setup.name}</h3><p><code>{setup.repoUrl}</code> · {setup.profile}</p>
+      <button disabled={disabled || !onFollowProfile} onClick={() => onFollowProfile?.(setup.setupId)}>Follow this profile</button>
+    </div>
+  );
+  return <LegacyOfferedSetup setup={setup} controller={controller} disabled={disabled} />;
+}
+
+function LegacyOfferedSetup({ setup, controller, disabled }: { setup: WireHostedState['setups'][number]; controller: AccountController; disabled: boolean }) {
   const [consent, setConsent] = useState(false);
   return (
     <div className="offered-setup">
@@ -239,8 +249,8 @@ function OfferedSetup({ setup, controller, disabled }: { setup: WireHostedState[
   );
 }
 
-export function SettingsView({ machine, state, controller, machineController }: {
-  machine: ViewState; state: AccountViewState; controller: AccountController; machineController: MachineController;
+export function SettingsView({ machine, state, controller, machineController, onFollowProfile }: {
+  machine: ViewState; state: AccountViewState; controller: AccountController; machineController: MachineController; onFollowProfile?: (setupId: string) => void | Promise<void>;
 }) {
   const [name, setName] = useState('');
   const hosted = state.hosted;
@@ -323,7 +333,7 @@ export function SettingsView({ machine, state, controller, machineController }: 
         <section className="form-section">
           <h2>Offered setups</h2>
           <p>Account membership does not grant trust. Review each repository before consenting.</p>
-          {hosted.setups.map((setup) => <OfferedSetup key={`${machine.session}:${hosted.accountId}:${setup.setupId}:${setup.repoUrl}`} setup={setup} controller={controller} disabled={disabled} />)}
+          {hosted.setups.map((setup) => <OfferedSetup key={`${machine.session}:${hosted.accountId}:${setup.setupId}:${setup.repoUrl}`} setup={setup} controller={controller} disabled={disabled} onFollowProfile={onFollowProfile} />)}
         </section>
       ) : null}
     </>

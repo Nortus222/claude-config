@@ -85,7 +85,7 @@ function App() {
       {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} /> : null}
       {screen === 'resolved' ? <ResolvedView state={state} controller={machine} /> : null}
       {screen === 'settings' ? <>
-        <SettingsView machine={state} state={accountState} controller={account} machineController={machine} />
+        <SettingsView machine={state} state={accountState} controller={account} machineController={machine} onFollowProfile={setupId => { const following = setupSync.followSharedLink(setupId); setScreen('setup'); return following; }} />
         <ConnectionsView state={connectionsState} controller={connections} />
         <UpdateView state={updateState} controller={updates} />
       </> : null}

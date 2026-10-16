@@ -7,6 +7,12 @@ export type LoginEnvironment = { readonly env: Readonly<Record<string, string>>;
 export const DEFAULT_TOOLS = ['npx', 'claude', 'codex'] as const;
 export const SHELL_STARTUP_VARIABLES = ['ZDOTDIR', 'XDG_CONFIG_HOME', 'ENV'] as const;
 
+type ScheduleTimeout = (callback: () => void, ms: number) => () => void;
+const scheduleTimeout: ScheduleTimeout = (callback, ms) => {
+  const timer = setTimeout(callback, ms);
+  return () => clearTimeout(timer);
+};
+
 const MARK = '__NORTUSCC_ENV__';
 const MAX_OUTPUT = 1_048_576;
 const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
@@ -32,7 +38,7 @@ const parse = (text: string | undefined): Record<string, string> | undefined => 
 };
 
 // Stops the detached probe group once capture ends and joins the child and pipes before settling.
-const capture = (shell: string, script: string, env: Readonly<Record<string, string | undefined>>, timeoutMs: number, progress: StartupDiagnostics['record'], signal?: AbortSignal) =>
+const capture = (shell: string, script: string, env: Readonly<Record<string, string | undefined>>, timeoutMs: number, progress: StartupDiagnostics['record'], signal?: AbortSignal, schedule: ScheduleTimeout = scheduleTimeout) =>
   new Promise<string | undefined>((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException('Login environment probe cancelled', 'AbortError')); return; }
     let phase: StartupPhase = 'shell_spawn';
@@ -50,7 +56,7 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
       if (settled) return;
       settled = true;
       complete = settle;
-      clearTimeout(timer);
+      cancelTimeout();
       signal?.removeEventListener('abort', cancelled);
       progress(phase, status);
       progress('probe_cleanup', 'started');
@@ -60,7 +66,7 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
         // Already gone.
       }
     };
-    const timer = setTimeout(() => finish('timed_out', () => reject(new Error(`timed out after ${timeoutMs} ms`))), timeoutMs);
+    const cancelTimeout = schedule(() => finish('timed_out', () => reject(new Error(`timed out after ${timeoutMs} ms`))), timeoutMs);
     signal?.addEventListener('abort', cancelled, { once: true });
     if (signal?.aborted) cancelled();
     child.once('spawn', () => {
@@ -103,6 +109,7 @@ export async function probeLoginEnvironment(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
   readonly runtime?: string;
+  readonly scheduleTimeout?: ScheduleTimeout;
   readonly onProgress?: StartupDiagnostics['record'];
   readonly signal?: AbortSignal;
 }): Promise<LoginEnvironment> {
@@ -112,7 +119,7 @@ export async function probeLoginEnvironment(input: {
     try { input.onProgress?.(phase, status); } catch {}
   };
   try {
-    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000, progress, input.signal));
+    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000, progress, input.signal, input.scheduleTimeout));
     input.signal?.throwIfAborted();
     if (found) return { env: found };
     return { env: fallback, error: `login shell ${shell} reported no environment; using the app's` };

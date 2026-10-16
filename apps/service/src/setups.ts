@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { decodeRequestBody, MAX_SETUPS, SetupRegistrationSchema, type SetupRecord } from '@nortuscc/hosted-protocol';
+import { decodeRequestBody, MAX_SETUPS, normalizeRepoUrl, SetupRegistrationSchema, type SetupRecord } from '@nortuscc/hosted-protocol';
 import type { AuthenticatedPrincipal } from './auth.ts';
 import type { AccountDocument, SetupDocument, SetupReservation } from './documents.ts';
 import type { Store, PartitionSnapshot } from './store.ts';
@@ -84,12 +84,14 @@ export function setupRoute(request: ServiceRequest, principal: AuthenticatedPrin
     if (request.method !== 'POST') return undefined;
     const registration = yield* Effect.try({ try:() => decodeRequestBody(SetupRegistrationSchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
     const reservation: SetupReservation = { setupId:newId(now()),...registration,createdAt:new Date(now()).toISOString(),state:'reserved',publishedHead:0 };
-    yield* changeAccount(store,principal.accountId,(snapshot,account) => {
+    const selected = yield* changeAccount(store,principal.accountId,(snapshot,account) => {
+      const existing = account.setups.find(setup => setup.profile === registration.profile && normalizeRepoUrl(setup.repoUrl) === normalizeRepoUrl(registration.repoUrl));
+      if (existing) return { mutations:[],value:{ reservation:existing,created:false } };
       if (account.setups.length + snapshot.documents.filter(d => d.type === 'subscription').length >= MAX_SETUPS) throw new ServiceFailure({ code:'limit_reached' });
-      return { mutations:[{ type:'upsert',document:{ ...account,setups:[...account.setups,reservation] } }],value:undefined };
+      return { mutations:[{ type:'upsert',document:{ ...account,setups:[...account.setups,reservation] } }],value:{ reservation,created:true } };
     });
-    const setup = yield* materialize(store,principal.accountId,reservation);
+    const setup = yield* materialize(store,principal.accountId,selected.reservation);
     yield* reconcileSetup(store,principal.accountId,setup);
-    return { status:201,body:projectSetup(setup) };
+    return { status:selected.created ? 201 : 200,body:projectSetup(setup) };
   });
 }

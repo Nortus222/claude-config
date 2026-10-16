@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
@@ -139,9 +140,21 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
   const shell = join(f.home, 'slow-login-shell');
   writeFileSync(shell, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(shell, 0o755);
   const controller = new AbortController(); t.after(() => controller.abort());
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  let expire: (() => void) | undefined;
+  let deadlineCleared = false;
   const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
     env: { ...f.input.env, SHELL: shell, API_TOKEN: 'secret-never-in-trace' },
-    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100 }) });
+    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100,
+      scheduleTimeout: (callback, ms) => {
+        assert.equal(ms, 100); expire = callback;
+        return () => { deadlineCleared = true; };
+      },
+      onProgress: (phase, status) => {
+        input.onProgress?.(phase, status);
+        if (phase === 'shell_ready' && status === 'started') { now = 100; expire!(); }
+      } }) });
   let conn: AgentConnection | undefined;
   try {
     const until = Date.now() + 3000;
@@ -152,7 +165,9 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
     assert.ok(conn, f.stderr.join(''));
     const ready = startupRecords(f.stderr);
     assert.ok(ready.some(r => r.phase === 'shell_ready' && r.status === 'timed_out'));
-    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs >= 80));
+    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs === 100));
+    assert.equal(deadlineCleared, true);
+    assert.ok(ready.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
     assert.ok(ready.some(r => r.phase === 'ipc' && r.status === 'completed'));
     assert.equal(f.stderr.join('').includes('secret-never-in-trace'), false);
     await conn.request({ command: 'shutdown' });

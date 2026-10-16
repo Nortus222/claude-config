@@ -6,7 +6,7 @@ import { DeviceStartRequestSchema, DeviceStartResponseSchema, DevicePollPendingS
   IdSchema, RevisionCursorSchema, SetupRegistrationSchema, SetupRecordSchema, RevisionPublicationSchema, RevisionRecordSchema, RevisionsResponseSchema, PublicSetupSchema,
   type SetupRegistration, type SetupRecord, type RevisionPublication, type RevisionRecord, type PublicSetup,
   IsoTimeSchema, StatusSummarySchema, type StatusSummary,
-  decodeHosted, decodeRequestBody, formatSyncQuery, jsonByteLength, MAX_DECISIONS, MAX_REQUEST_BODY_BYTES,
+  decodeHosted, decodeRequestBody, normalizeRepoUrl, formatSyncQuery, jsonByteLength, MAX_DECISIONS, MAX_REQUEST_BODY_BYTES,
   type DeviceStartRequest, type MachinePatch, type Policy, type SyncRevision, type SyncedDecision, type SyncMachine, type SyncSetup } from '@nortuscc/hosted-protocol';
 import { HostedFailure, HostedTransport, type HostedFailureCode, type HostedRequest } from './transport.ts';
 import { MachineTokenStore } from './token.ts';
@@ -302,9 +302,10 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     registerSetup: input => Effect.gen(function* () {
       const body = yield* decode(SetupRegistrationSchema, input, true);
       const result = yield* metadataRequest({ method:'POST', path:'/setups', body });
-      if (result.status !== 201) return yield* Effect.fail(invalidResponse());
+      if (result.status !== 201 && result.status !== 200) return yield* Effect.fail(invalidResponse());
       const setup = yield* decode(SetupRecordSchema, result.body);
-      if (setup.name !== body.name || setup.repoUrl !== body.repoUrl || setup.profile !== body.profile) return yield* Effect.fail(invalidResponse());
+      if (setup.profile !== body.profile || normalizeRepoUrl(setup.repoUrl) !== normalizeRepoUrl(body.repoUrl)
+        || result.status === 201 && (setup.name !== body.name || setup.repoUrl !== body.repoUrl)) return yield* Effect.fail(invalidResponse());
       const a = yield* requireAccount;
       yield* updateAccount(a.accountId, withoutEtag);
       return setup;

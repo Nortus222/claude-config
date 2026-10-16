@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -176,4 +176,26 @@ test('an explicitly cleared applied baseline offers every item as added and does
       }), null, profile);
     });
   }
+});
+
+for (const corrupt of ['{broken metadata', '[{}]']) test(`reachable hosted metadata repairs a corrupt verified cache: ${corrupt}`, async t => {
+  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const announced = f.publish();
+  await f.run(s => s.load(announced), 'setup-1');
+  const cacheDir = join(f.paths.stateRoot, 'agent/follow');
+  const cache = readdirSync(cacheDir).find(name => name.endsWith('.json'))!;
+  assert.ok(cache);
+  writeFileSync(join(cacheDir, cache), corrupt);
+  await f.run(s => Effect.gen(function* () {
+    assert.deepEqual((yield* s.fetch).head, announced);
+    assert.equal(f.text(yield* s.load(announced)), '# first\n');
+  }), 'setup-1');
+  assert.deepEqual(JSON.parse(readFileSync(join(cacheDir, cache), 'utf8')), [announced]);
+  const backups = readdirSync(f.paths.backups, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).map(entry => readFileSync(join(entry.parentPath, entry.name), 'utf8'));
+  assert.ok(backups.includes(corrupt));
+  f.offline();
+  await f.run(s => Effect.gen(function* () {
+    assert.deepEqual((yield* s.fetch).head, announced);
+    assert.equal(f.text(yield* s.load(announced)), '# first\n');
+  }), 'setup-1');
 });
