@@ -723,3 +723,64 @@ test('the installed app service accepts late registration and advertises real ru
     assert.ok(f.commands.every(command=>command.cmd!=='launchctl'));
   } finally {conn?.close();controller.abort();assert.equal(await running,0);}
 });
+
+test('a corrupt followed store leaves the agent running with the setup source unavailable', { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+  const path = join(f.stateRoot, 'agent/followed.json');
+  writeFileSync(path, '{invalid');
+  writeFileSync(join(f.stateRoot, 'agent/setups.json'), JSON.stringify({ version: 1, setups: [
+    { setupId: null, repoUrl: null, checkout: f.repo, trustedAt: '2026-10-16T00:00:00Z' },
+  ] }));
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal });
+  let conn: AgentConnection | undefined;
+  const until = Date.now() + 5000;
+  try {
+    while (!conn && Date.now() < until) {
+      try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); }
+      catch { await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.ok(conn, f.stderr.join(''));
+    let status: { error?: string } | undefined;
+    while (!status && Date.now() < until) {
+      try { status = await conn.request({ command: 'status' }); }
+      catch (error) { if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error; await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.equal(status?.error, 'REVISION_UNAVAILABLE');
+    await assert.rejects(conn.request({ command: 'operation', operation: 'setupReview', input: { setupId: 'local', refetch: true, limit: 100 } }),
+      error => error instanceof AgentError && error.code === 'INSPECT_FAILED');
+    assert.equal(readFileSync(path, 'utf8'), '{invalid');
+    assert.ok(f.commands.every(c => c.cmd === 'git' && c.args.includes('get-url')), 'only the setup review trust check reads the CLI origin');
+    await conn.request({ command: 'shutdown' });
+  } finally { conn?.close(); controller.abort(); await running; }
+  assert.equal(await running, 0);
+});
+
+test('a foreground agent follows its private source after the CLI checkout disappears', { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  rmSync(f.repo, { recursive: true, force: true });
+  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+  writeFileSync(join(f.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed: { repoUrl: 'https://github.com/example/followed.git', profile: 'default', setupId: null } }));
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal });
+  let conn: AgentConnection | undefined;
+  const until = Date.now() + 5000;
+  while (!conn && Date.now() < until) {
+    try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); }
+    catch { await new Promise(done => setTimeout(done, 10)); }
+  }
+  assert.ok(conn, f.stderr.join(''));
+  try {
+    let status: { error?: string } | undefined;
+    while (!status && Date.now() < until) {
+      try { status = await conn.request({ command: 'status' }); }
+      catch (error) { if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error; await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.equal(status?.error, 'REVISION_UNAVAILABLE');
+    assert.ok(f.commands.some(c => c.cmd === 'git' && c.args.includes('ls-remote')), 'the selected private source checks access');
+    assert.equal(f.commands.some(c => c.cwd === f.repo), false);
+    await conn.request({ command: 'shutdown' });
+    assert.equal(await running, 0);
+  } finally { conn.close(); controller.abort(); }
+});

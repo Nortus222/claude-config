@@ -9,6 +9,9 @@ import {
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
+import { fetchFollowedMain, privateFollowedRepository } from './followed-repository.ts';
+import { gitAuthArgs } from './git-auth.ts';
+import type { FollowedProfile } from './followed.ts';
 import { commitDocuments, FETCH_TIMEOUT_MS, originUrl, revParse } from './git.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
@@ -39,8 +42,10 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   readonly records: Effect.Effect<ReadonlyArray<SyncRevision>, unknown>;
   readonly processes?: Layer.Layer<Processes>;
   readonly now?: () => Date;
+  // A followed selection owns its clone independently of the legacy CLI checkout/account.
+  readonly followed?: FollowedProfile;
 }): Layer.Layer<SetupSource> => {
-  const profile = options.profile;
+  const profile = options.followed?.profile ?? options.profile;
   const valuesOf = (documents: Documents) => itemValues(documents, profile);
   const patch = (head: Documents, id: string, held: Documents) => patchItem(head, id, held, profile);
   const now = options.now ?? (() => new Date());
@@ -53,6 +58,9 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   const baselineRelative = join('agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
   const baselinePath = join(paths.stateRoot, baselineRelative);
   const clone = join(paths.stateRoot, 'agent', 'checkouts', options.accountId, repoKey, options.setupId);
+  const hooks = join(paths.stateRoot, 'agent', 'empty-hooks');
+  const verifiedRelative = join('agent', 'follow', `${scope}.json`);
+  const verifiedRecords = join(paths.stateRoot, verifiedRelative);
   const snapshotsRoot = join(paths.stateRoot, 'agent', 'hosted', options.accountId, repoKey, options.setupId);
   const git = (repo: string, args: ReadonlyArray<string>) => Processes.use((p) => p.run({ cmd: 'git', args, cwd: repo, output: 'capture', stderr: 'capture' }));
 
@@ -62,6 +70,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     }, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'invalid hosted source identity' }) });
     const active = yield* options.currentAccountId.pipe(Effect.catch(() => unavailable('HEAD', 'active account unavailable')));
     if (active !== options.accountId) return yield* unavailable('HEAD', 'the active account changed');
+    if (options.followed) return { checkout: null };
     const setups = yield* (yield* SetupsStore).read;
     const entry = setups?.find((s) => s.accountId === options.accountId && s.setupId === options.setupId && s.repoUrl !== null && normalizeRepoUrl(s.repoUrl) === repoIdentity);
     if (!entry) return yield* unavailable('HEAD', 'the hosted setup is not trusted for this account and repository');
@@ -70,6 +79,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
 
   const repository = Effect.gen(function* () {
     const entry = yield* consent;
+    if (options.followed) return { repo: yield* privateFollowedRepository(paths, options.followed), linked: false };
     const repo = entry.checkout ?? clone;
     const fs = yield* Fs;
     const origin = entry.checkout === null
@@ -100,7 +110,11 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   });
 
   const records = Effect.gen(function* () {
-    const values = yield* options.records.pipe(Effect.catch(() => unavailable('HEAD', 'hosted revision metadata unavailable')));
+    const values = yield* options.records.pipe(Effect.catch(() => options.followed
+      ? Fs.use(fs => fs.readText(verifiedRecords)).pipe(Effect.flatMap(text => text === undefined
+        ? unavailable('HEAD', 'no previously verified hosted revision')
+        : Effect.try({ try: () => JSON.parse(text) as ReadonlyArray<SyncRevision>, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }) })))
+      : unavailable('HEAD', 'hosted revision metadata unavailable')));
     return yield* Effect.try({ try: () => {
       const decoded = values.map((r) => decodeHosted(SyncRevisionSchema, r));
       if (decoded.length === 0 || decoded.some((r, i) => r.setupId !== options.setupId || r.number !== i + 1)) throw new Error();
@@ -117,7 +131,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       const verifiedRef = `refs/nortuscc/hosted/${scope}/verified/${record.number}-${hash(record)}`;
       const fetchedRef = `refs/nortuscc/hosted/${scope}/candidate/${record.number}`;
       const fetched = yield* Processes.use((p) => p.run({
-        cmd: 'git', args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
+        cmd: 'git', args: [...(options.followed ? gitAuthArgs(hooks) : []), '-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
         cwd: repo, env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
       })).pipe(Effect.timeoutOption(FETCH_TIMEOUT_MS), Effect.map((result) => result._tag === 'Some' && result.value.code === 0), Effect.catchTag('LaunchFailed', () => Effect.succeed(false)));
       const sha = yield* revParse(repo, fetched ? fetchedRef : verifiedRef);
@@ -131,6 +145,26 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       if (fetched && (yield* git(repo, ['update-ref', verifiedRef, sha])).code !== 0) return yield* unavailable(record, 'verified revision cache could not be recorded');
       documents.set(sha, current);
       previous = current;
+    }
+    if (options.followed) {
+      const fs = yield* Fs;
+      const text = JSON.stringify(range) + '\n';
+      // A load of an older revision must not roll back the offline head.
+      const prior = yield* fs.readText(verifiedRecords);
+      const priorCount = prior === undefined ? 0 : yield* Effect.try({
+        try: () => {
+          const cached: unknown = JSON.parse(prior);
+          if (!Array.isArray(cached)) throw new Error();
+          return cached.map(r => decodeHosted(SyncRevisionSchema, r)).length;
+        },
+        catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }),
+      });
+      if (range.length > priorCount) {
+        yield* Backups.use(b => b.preserve(verifiedRecords, verifiedRelative, undefined, { private: true })).pipe(
+          Effect.provide(backupsForRun(now()).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), Layer.succeed(Fs, fs))))),
+        );
+        yield* fs.writeTextAtomic(verifiedRecords, text);
+      }
     }
     return documents;
   });
@@ -147,9 +181,10 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       return { revisionApplied, origins: origins as Readonly<Record<string, string>> };
     }, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'hosted baseline is invalid' }) });
     const origins: Record<string, string> = {};
-    if (linked) {
-      let commit: string | undefined;
-      let holds: Readonly<Record<string, string>> = {};
+    const migrated = options.followed ? yield* revParse(repo, 'refs/nortuscc/migration/applied') : undefined;
+    if (linked || migrated !== undefined) {
+      let commit: string | undefined = migrated;
+      let holds: Readonly<Record<string, string>> = migrated === undefined ? {} : yield* (yield* SyncStore).read;
       if (repo === paths.repo) {
         const recorded = yield* fs.readText(join(paths.stateRoot, 'state.json'));
         if (recorded !== undefined) {
@@ -244,7 +279,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     for (const revision of range) for (const item of revision.items) offers.set(item.id, revision);
     return [...offers].map(([itemId, revision]) => ({ itemId, revision }));
   });
-  const fetch = Effect.gen(function* () { yield* repository; const range = yield* records; return { head: range[range.length - 1]! }; });
+  const fetch = Effect.gen(function* () {
+    const { repo } = yield* repository;
+    if (options.followed) yield* fetchFollowedMain(paths, repo, options.repoUrl).pipe(Effect.ignore);
+    const range = yield* records;
+    return { head: range[range.length - 1]! };
+  });
   const load = (revision: Revision) => Effect.gen(function* () {
     const { repo } = yield* repository;
     const range = yield* records;
@@ -317,6 +357,6 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const available = <A>(effect: Effect.Effect<A, unknown, Services>) => provide(effect).pipe(
       Effect.catchTag('RevisionMismatch', () => unavailable('HEAD', 'hosted baseline unavailable')),
     );
-    return { setupId: options.setupId, profile, offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
+    return { setupId: options.setupId, ...(profile === undefined ? {} : { profile }), offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
   })).pipe(Layer.provide(services));
 };
