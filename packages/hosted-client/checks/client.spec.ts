@@ -11,7 +11,7 @@ import { HostedFailure, HostedStore, HostedTransport, MachineTokenStore, hostedS
 const revision = (number: number, setupId = 'setup1') => ({ setupId, number, commitSha: number.toString(16).padStart(40, '0'),
   tag: `r${number}`, changelog: '', items: [{ id: 'file:claude/CLAUDE.md', kind: 'file' as const, change: 'changed' as const }], requiredEnv: [] });
 const delta = (over: Partial<SyncResponse> = {}): SyncResponse => ({ seq: 1, decisions: [], revisions: [revision(1)],
-  machine: { policy: 'notify', reportStatus: true }, setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/a/b', latestRevision: 1 }], pollAfter: 900, ...over });
+  machine: { policy: 'notify', reportStatus: true }, setups: [{ setupId: 'setup1', name: 'Setup', repoUrl: 'https://github.com/a/b', profile: 'default', owned: true, latestRevision: 1 }], pollAfter: 900, ...over });
 const local = (over: Partial<Decision> = {}): Decision => ({ setupId: 'setup1', itemId: 'file:claude/CLAUDE.md', revision: 1, commit: null,
   decision: 'accept', decidedAt: '2026-10-07T01:00:00Z', machineId: 'machine1', source: 'local', ...over });
 const synced = (over: Partial<SyncedDecision> = {}): SyncedDecision => ({ setupId: 'setup1', itemId: 'file:claude/CLAUDE.md', revision: 1,
@@ -655,3 +655,170 @@ for (const transition of ['complete', 'partial-complete', 'sign-out', 'partial-s
     assert.equal(await run(f.client.signInFlow), null);
   });
 }
+
+
+test('publishRevision then listRevisions round-trips', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  const registration = { name:'Personal', repoUrl:'https://github.com/a/b', profile:'personal' };
+  const setup = { ...registration, setupId:'setup1', latestRevision:0, createdAt:'2026-10-07T00:00:00Z' };
+  f.actions.push(req => { assert.equal(req.path, '/setups'); assert.deepEqual(req.body, registration); return Effect.succeed({ status:201, body:setup }); });
+  assert.deepEqual(await run(f.client.registerSetup(registration)), setup);
+  const { setupId, ...publication } = revision(1);
+  const record = { ...publication, setupId, publishedAt:'2026-10-07T00:00:00Z', machineId:'machine1' };
+  f.actions.push(req => { assert.deepEqual(req.body, publication); return Effect.succeed({ status:201, body:record }); });
+  assert.deepEqual(await run(f.client.publishRevision(setupId, publication)), record);
+  f.actions.push(req => { assert.equal(req.path, '/setups/setup1/revisions?after=0'); return Effect.succeed({ status:200, body:{ revisions:[record], nextAfter:1 } }); });
+  f.actions.push(req => { assert.equal(req.path, '/setups/setup1/revisions?after=1'); return Effect.succeed({ status:200, body:{ revisions:[], nextAfter:null } }); });
+  assert.deepEqual(await run(f.client.listRevisions(setupId)), [record]);
+});
+
+test('subscribe then sync includes the subscribed setup', async (t) => {
+  const f = await fixture(t); await f.signIn();
+  const metadata = { setupId:'setup1', name:'Shared', repoUrl:'https://github.com/a/b', profile:'team', latestRevision:1 };
+  f.actions.push(req => { assert.equal(req.path, '/setups/setup1/public'); return Effect.succeed({ status:200, body:metadata }); });
+  assert.deepEqual(await run(f.client.publicSetup('setup1')), metadata);
+  f.actions.push(req => { assert.equal(req.method, 'PUT'); assert.equal(req.path, '/subscriptions/setup1'); return Effect.succeed({ status:204 }); });
+  await run(f.client.subscribe('setup1'));
+  f.setResponse(delta({ setups:[{ ...metadata, owned:false }] }));
+  assert.deepEqual((await run(f.client.sync())).setups, [{ ...metadata, owned:false }]);
+  f.actions.push(req => { assert.equal(req.method, 'DELETE'); assert.equal(req.path, '/subscriptions/setup1'); return Effect.succeed({ status:204 }); });
+  await run(f.client.unsubscribe('setup1'));
+  f.setResponse(delta({ setups:[], revisions:[] }));
+  assert.deepEqual((await run(f.client.sync())).setups, []);
+});
+
+test('legacy cached setups gain default profile and ownership without losing cursors', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.sync());
+  const path = join(f.paths.stateRoot, 'agent', 'sync.json');
+  const legacy = JSON.parse(await readFile(path, 'utf8'));
+  for (const setup of legacy.accounts[0].setups) { delete setup.profile; delete setup.owned; }
+  await writeFile(path, JSON.stringify(legacy));
+  await f.restart();
+  const account = (await run(f.services.store.read)).accounts[0]!;
+  assert.deepEqual(account.cursors, [{ setupId:'setup1', revision:1 }]);
+  assert.equal(account.setups[0]!.profile, 'default'); assert.equal(account.setups[0]!.owned, true);
+  await run(f.services.store.update(doc => doc));
+  const migrated = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(migrated.accounts[0].setups[0].profile, 'default');
+  assert.equal(migrated.accounts[0].setups[0].owned, true);
+});
+
+test('a closed subscription preserves cached revisions and accepts closure without missing records', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.sync());
+  f.setResponse(delta({ revisions:[], setups:[{ ...delta().setups[0]!, owned:false, closed:true, latestRevision:2 }] }));
+  const state = await run(f.client.sync());
+  assert.equal(state.setups[0]!.closed, true);
+  assert.deepEqual(await run(f.client.revisions('setup1')), [revision(1)]);
+  await f.restart(); assert.equal((await run(f.client.state)).setups[0]!.closed, true);
+});
+
+test('sync recovers when another machine unsubscribes a cached setup', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.sync());
+  await run(f.client.enqueueDecision(local()));
+  f.actions.push(() => Effect.fail(new HostedFailure({ code:'not_found', status:404 })));
+  f.actions.push(() => Effect.fail(new HostedFailure({ code:'not_found', status:404 })));
+  f.actions.push(req => { assert.equal(new URLSearchParams(req.path.split('?')[1]).get('setups'), null); return Effect.succeed({ status:200, body:delta({ seq:2, setups:[], revisions:[] }) }); });
+  assert.deepEqual((await run(f.client.sync())).setups, []);
+  const account = (await run(f.services.store.read)).accounts[0]!;
+  assert.deepEqual(account.cursors, []); assert.deepEqual(account.outbox, []);
+  assert.deepEqual(await run(f.services.decisions.read), []);
+});
+
+test('a queued decision for a closed setup is dropped and later decisions for a healthy setup still flush', async (t) => {
+  for (const afterClosure of [false, true]) await t.test(afterClosure ? 'queued after closure' : 'queued before closure', async (t) => {
+    const f = await fixture(t); await f.signIn();
+    const subscribed = { ...delta().setups[0]!, owned:false };
+    const healthy = { ...delta().setups[0]!, setupId:'setup2' };
+    f.setResponse(delta({ setups:[subscribed, healthy], revisions:[revision(1), revision(1, 'setup2')] }));
+    await run(f.client.sync());
+    f.setResponse(delta({ setups:[{ ...subscribed, closed:true }, healthy], revisions:[] }));
+    if (afterClosure) await run(f.client.sync());
+    await run(f.client.enqueueDecision(local()));
+    await run(f.client.enqueueDecision(local({ setupId:'setup2' })));
+    f.actions.push(req => {
+      assert.equal(req.path, '/decisions');
+      return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+    });
+    assert.equal((await run(f.client.sync())).setups[0]!.closed, true);
+    const account = (await run(f.services.store.read)).accounts[0]!;
+    assert.deepEqual(account.outbox.map(e => e.kind === 'decision' ? e.decision.setupId : e.kind), ['setup2']);
+    assert.deepEqual((await run(f.services.decisions.read)).map(d => d.setupId), ['setup2']);
+    await f.restart();
+    await run(f.client.sync());
+    assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+    const sent = f.requests.filter(req => req.path === '/decisions').at(-1)!;
+    assert.deepEqual(sent.body, { decisions:[{ setupId:'setup2', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }] });
+  });
+});
+
+test('a decision queued for a known-closed setup is dropped even when sync is not modified', async (t) => {
+  for (const persisted of [false, true]) await t.test(persisted ? 'persisted outbox after restart' : 'newly enqueued decision', async (t) => {
+    const f = await fixture(t); await f.signIn();
+    const subscribed = { ...delta().setups[0]!, owned:false };
+    const healthy = { ...delta().setups[0]!, setupId:'setup2' };
+    f.setResponse(delta({ setups:[subscribed, healthy], revisions:[revision(1), revision(1, 'setup2')] }));
+    await run(f.client.sync());
+    f.setResponse(delta({ setups:[{ ...subscribed, closed:true }, healthy], revisions:[] }));
+    await run(f.client.sync());
+    if (persisted) {
+      // An older client could leave a decision queued after learning of closure.
+      await run(f.services.store.update(doc => ({ ...doc, accounts:doc.accounts.map(a => ({ ...a, outbox:[{
+        kind:'decision', decision:{ setupId:'setup1', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }, decidedAt:local().decidedAt,
+      }] })) })));
+      await f.restart();
+    } else {
+      await run(f.client.enqueueDecision(local()));
+      assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+      assert.deepEqual(await run(f.services.decisions.read), []);
+    }
+    await run(f.client.enqueueDecision(local({ setupId:'setup2' })));
+    const before = f.requests.length;
+    f.actions.push(req => {
+      assert.equal(req.path, '/decisions');
+      const { decisions } = req.body as { decisions: Decision[] };
+      if (decisions.some(d => d.setupId === 'setup1')) return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+      return Effect.succeed({ status:200, body:{ seq:100, results:decisions.map(d => ({ setupId:d.setupId, itemId:d.itemId, outcome:'stored' })) } });
+    });
+    f.actions.push(req => {
+      assert.equal(req.method, 'GET'); assert.match(req.path, /^\/sync\?/); assert.equal(req.etag, 'etag1');
+      return Effect.succeed({ status:304 });
+    });
+    assert.equal((await run(f.client.sync())).setups[0]!.closed, true);
+    assert.deepEqual(f.requests.slice(before).map(req => req.body).filter(Boolean), [
+      { decisions:[{ setupId:'setup2', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }] },
+    ]);
+    assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+    assert.deepEqual((await run(f.services.decisions.read)).map(d => d.setupId), ['setup2']);
+    assert.deepEqual(await run(f.client.revisions('setup1')), [revision(1)]);
+  });
+});
+
+test('a machine update 404 is still reported', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.sync());
+  f.setResponse(delta({ revisions:[] }));
+  await run(f.client.enqueueMachine({ name:'Renamed' }));
+  const before = f.requests.length;
+  f.actions.push(req => {
+    assert.equal(req.method, 'PATCH');
+    assert.equal(req.path, '/machines/machine1');
+    return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+  });
+  await assert.rejects(run(f.client.sync()), /not_found/);
+  assert.equal((await run(f.client.state)).error, 'not_found');
+  assert.equal(f.requests.length, before + 1);
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, [{ kind:'machine', patch:{ name:'Renamed' } }]);
+});
+
+test('metadata methods reject invalid input and mismatched response identities', async (t) => {
+  const f = await fixture(t); await f.signIn(); const count = f.requests.length;
+  await assert.rejects(run(f.client.publicSetup('../other')), /invalid_request/);
+  await assert.rejects(run(f.client.subscribe('local')), /invalid_request/);
+  await assert.rejects(run(f.client.listRevisions('setup1', -1)), /invalid_request/);
+  assert.equal(f.requests.length, count);
+  f.actions.push(() => Effect.succeed({ status:200, body:{ setupId:'other', name:'Other', repoUrl:'https://github.com/a/b', profile:'default', latestRevision:1 } }));
+  await assert.rejects(run(f.client.publicSetup('setup1')), /invalid_response/);
+  const record = { ...revision(1), publishedAt:'2026-10-07T00:00:00Z', machineId:'machine1' };
+  f.actions.push(() => Effect.succeed({ status:200, body:{ revisions:[record], nextAfter:1 } }));
+  f.actions.push(() => Effect.succeed({ status:200, body:{ revisions:[record], nextAfter:1 } }));
+  await assert.rejects(run(f.client.listRevisions('setup1')), /invalid_response/);
+});

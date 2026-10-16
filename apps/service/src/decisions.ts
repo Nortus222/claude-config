@@ -5,7 +5,7 @@ import type { DecisionDocument } from './documents.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
 import type { Store, Mutation } from './store.ts';
 import { ServiceFailure } from './errors.ts';
-import { ownedSetup } from './setups.ts';
+import { readableSetup } from './subscriptions.ts';
 import { changeAccount, reserveReceipt } from './machines.ts';
 
 // Decode structure first so private or malformed fields cannot masquerade as count overflow.
@@ -24,7 +24,7 @@ export function decisionRoute(request: ServiceRequest, principal: AuthenticatedP
     const sent = yield* Effect.try({ try:() => decodeDecisionRequest(request.body),catch:(error) => error instanceof ServiceFailure ? error : new ServiceFailure({ code:'invalid' }) });
     const ticket = yield* reserveReceipt(store,principal.accountId);
     for (const setupId of new Set(sent.decisions.map((d) => d.setupId))) {
-      const { snapshot } = yield* ownedSetup(store,principal.accountId,setupId);
+      const { snapshot } = yield* readableSetup(store,principal.accountId,setupId);
       for (const decision of sent.decisions.filter((d) => d.setupId === setupId)) {
         const revision = snapshot.documents.find((d) => d.type === 'revision' && d.number === decision.revision);
         if (!revision || revision.type !== 'revision' || !revision.items.some((i) => i.id === decision.itemId)) return yield* Effect.fail(new ServiceFailure({ code:'invalid' }));

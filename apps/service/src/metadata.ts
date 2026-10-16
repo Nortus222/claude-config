@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
 import { ServiceFailure } from './errors.ts';
 import type { ServiceOptions } from './service.ts';
+import { subscriptionRoute } from './subscriptions.ts';
 import { setupRoute } from './setups.ts';
 import { revisionRoute } from './revisions.ts';
 import { syncRoute } from './sync.ts';
@@ -9,7 +10,7 @@ import { statusRoute } from './status.ts';
 import { accountRoute } from './account.ts';
 export function metadataHandler(now: () => number, pollAfter: number): NonNullable<ServiceOptions['metadata']> {
   return (request,principal,store) => Effect.gen(function* () {
-    for (const route of [setupRoute(request,principal,store,now),revisionRoute(request,principal,store,now),syncRoute(request,principal,store,pollAfter),decisionRoute(request,principal,store,now),statusRoute(request,principal,store),accountRoute(request,principal,store,now)]) {
+    for (const route of [subscriptionRoute(request,principal,store),setupRoute(request,principal,store,now),revisionRoute(request,principal,store,now),syncRoute(request,principal,store,pollAfter),decisionRoute(request,principal,store,now),statusRoute(request,principal,store),accountRoute(request,principal,store,now)]) {
       const response = yield* route;
       if (response) return response;
     }

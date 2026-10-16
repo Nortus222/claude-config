@@ -4,7 +4,9 @@ import { ItemIdSchema, parseItemId } from './items.ts';
 import { RepoUrlSchema } from './repo-url.ts';
 import { MAX_CHANGELOG_BYTES, MAX_ITEMS, MAX_REVISION_BYTES, MAX_REVISIONS, MAX_SETUPS, jsonByteLength, utf8ByteLength } from './decode.ts';
 
-export const SetupRegistrationSchema = Schema.Struct({ name: DisplayNameSchema, repoUrl: RepoUrlSchema });
+export const ProfileNameSchema = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,62}$/));
+export type ProfileName = typeof ProfileNameSchema.Type;
+export const SetupRegistrationSchema = Schema.Struct({ name: DisplayNameSchema, repoUrl: RepoUrlSchema, profile: ProfileNameSchema });
 export type SetupRegistration = typeof SetupRegistrationSchema.Type;
 export const SetupRecordSchema = Schema.Struct({ setupId: IdSchema, ...SetupRegistrationSchema.fields, latestRevision: RevisionCursorSchema, createdAt: IsoTimeSchema });
 export type SetupRecord = typeof SetupRecordSchema.Type;

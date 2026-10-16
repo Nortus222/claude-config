@@ -65,7 +65,9 @@ export const readAccountOperation = <N extends 'agentStatus' | 'accountState'>(
       lastSyncAt: hosted.lastSyncAt, retryAt: hosted.retryAt, error: hosted.error === null ? null : 'hosted-unavailable' }];
   } else if (args.section === 'setups') {
     if (hosted.setups.length > 10000) return yield* Effect.fail(unsafeObservation());
-    items = hosted.setups.map(s => ({ setupId: s.setupId, name: s.name, repoUrl: s.repoUrl, latestRevision: s.latestRevision }));
+    items = hosted.setups.map(s => ({ setupId: s.setupId, name: s.name, repoUrl: s.repoUrl,
+      profile: s.profile, owned: s.owned, latestRevision: s.latestRevision,
+      ...(s.closed === undefined ? {} : { closed: s.closed }) }));
   } else {
     items = [{ effective: hosted.machine, confirmed: hosted.confirmedMachine ?? null, persistence: hosted.machinePersistence ?? 'unknown' }];
   }

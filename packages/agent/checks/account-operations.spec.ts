@@ -72,11 +72,35 @@ const baseState:HostedState={accountId:'account1',login:'person',machineId:'mach
 const fakeClient=(calls:string[],get:()=>HostedState,expiresIn=3600):HostedClient=>{
  let flow:string|null=null;
  return {
+  registerSetup: () => Effect.die('Unexpected setup registration'),
+  publishRevision: () => Effect.die('Unexpected publication'),
+  listRevisions: () => Effect.succeed([]),
+  publicSetup: () => Effect.die('Unexpected public setup read'),
+  subscribe: () => Effect.void,
+  unsubscribe: () => Effect.void,
   signInFlow:Effect.sync(()=>flow),
   state:Effect.sync(get),recover:()=>Effect.sync(get),sync:()=>Effect.sync(()=>{calls.push('sync');return get()}),revisions:()=>Effect.succeed([]),
   startSignIn:()=>Effect.sync(()=>{flow=randomUUID();calls.push('signIn');return {userCode:'ABCD-EFGH',verificationUri:'https://github.com/login/device',interval:5,expiresIn}}),
   pollSignIn:()=>Effect.sync(()=>{calls.push('poll');return {status:'pending',pollAfter:5}}),signOut:()=>Effect.sync(()=>{flow=null;calls.push('signOut')}),enqueueMachine:()=>Effect.void,enqueueDecision:()=>Effect.void,reportStatus:()=>Effect.void,
 }};
+test('account-state reads preserve subscribed setup profile, ownership and closure', async () => {
+  const m = agentMachine(), f = setupFixture(m.root);
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      for (const closure of [{}, { closed: true as const }]) {
+        const state: HostedState = { ...baseState, setups: [{ setupId: 'shared', name: 'Shared setup',
+          repoUrl: 'https://github.com/owner/shared', profile: 'personal', owned: false, latestRevision: 2, ...closure }] };
+        const runtime = yield* makeHostedRuntime(fakeClient([], () => state), { domains: () => m.domains, os: 'macos' });
+        const handle = yield* startAgent(() => m.domains, { deferStart: true, hosted: runtime });
+        const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+        const result = yield* session.accountState(decodeOperationInput('accountState', { section: 'setups' }));
+        assert.equal(result.section, 'setups');
+        assert.deepEqual(result.items, [{ setupId: 'shared', name: 'Shared setup', repoUrl: 'https://github.com/owner/shared',
+          profile: 'personal', owned: false, latestRevision: 2, ...closure }]);
+      }
+    })), f.source);
+  } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
 test('sign-in is initiation only, retries never restart it, expiry and scrub-save failure hide all public codes',async()=>{
   for(const failScrub of [false,true]){
     const m=agentMachine(),f=setupFixture(m.root),calls:string[]=[];
@@ -170,7 +194,7 @@ test('hosted metadata queues under the shared lock, sync confirms only owner evi
 
 test('account reads bind section and observation cursors, reject unsafe owner data and generation changes',async()=>{
  const m=agentMachine(),f=setupFixture(m.root);
- let state={...baseState,setups:[{setupId:'setup1',name:'First',repoUrl:'https://github.com/owner/one',latestRevision:1},{setupId:'setup2',name:'Second',repoUrl:'https://github.com/owner/two',latestRevision:2}]};
+ let state={...baseState,setups:[{setupId:'setup1',name:'First',repoUrl:'https://github.com/owner/one',profile:'default',owned:true,latestRevision:1},{setupId:'setup2',name:'Second',repoUrl:'https://github.com/owner/two',profile:'default',owned:true,latestRevision:2}]};
  try{await m.run(Effect.scoped(Effect.gen(function*(){
   const h=yield* startAgent(()=>m.domains,{deferStart:true});
   let generation=0,reads=0,move=false;
