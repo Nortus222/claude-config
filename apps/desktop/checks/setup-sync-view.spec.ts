@@ -21,6 +21,17 @@ test('pin-group refusal is rendered beside its source and unchanged siblings rem
   assert.match(html, /<fieldset[^>]*class="setup-sync-pin"[\s\S]*owner\/repo[\s\S]*role="alert"/); assert.match(html, /Unchanged/); assert.match(html, /1 not on this page/);
 });
 
+test('a failed Preview is reported beside the Preview button, not at the top of the page', async t => {
+  const f = await fixture(); const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
+  await c.reload(); c.choose({ itemId: 'setting:a', action: 'accept' });
+  f.handlers.previewChange = () => { throw 'INSPECT_FAILED: Reading the setup timed out after 20 seconds; try again'; }; await c.preview();
+  assert.equal(c.state.error, null); assert.match(c.state.previewError ?? '', /timed out/);
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(html, />Preview<\/button>[\s\S]*role="alert"[^>]*>INSPECT_FAILED: Reading the setup timed out/);
+  assert.doesNotMatch(html.slice(0, html.indexOf('setup-sync-summary')), /role="alert"/);
+  c.choose({ itemId: 'setting:a', action: 'hold' }); assert.equal(c.state.previewError, null);
+});
+
 test('the preview lists each staged action before Apply', async t => {
   const f = await fixture(); const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
   await c.reload(); c.choose({ itemId: 'setting:a', action: 'takeTheirs' }); await c.preview();

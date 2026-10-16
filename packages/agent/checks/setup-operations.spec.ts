@@ -480,6 +480,27 @@ test('unchosen source pin groups are held together while an independent setting 
   }), { 'skills-manifest.txt': '[owner/repo]\none\ntwo\n', 'skill-pins.json': json({ version: 1, pins: { 'owner/repo': '1'.repeat(40) } }) });
 });
 
+test('setup failures report a timeout as a timeout', async () => {
+  const { setupFailure } = await import('../src/operations/setup.ts');
+  const { Cause } = await import('effect');
+  const message = async (cause: import('effect').Cause.Cause<unknown>) => (await Effect.runPromise(Effect.flip(setupFailure(cause)))).message;
+  assert.match(await message(Cause.fail(new Cause.TimeoutError())), /timed out after 20 seconds/);
+  assert.match(await message(Cause.fail(new Error('git failed'))), /unavailable/);
+});
+
+test('a setup preview observes the source once however many incoming rows it holds or takes', async () => {
+  const keys = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`key${i}`, i]));
+  await withSetup((_m, setup, s) => Effect.gen(function* () {
+    setup.calls.length = 0;
+    const preview = yield* s.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    assert.equal(preview.change.kind, 'setupApply');
+    const count = (call: string) => setup.calls.filter(c => c === call).length;
+    assert.ok(count('fetch') <= 2, `fetched ${count('fetch')} times`);
+    assert.ok(count('effective') <= 2, `composed ${count('effective')} times`);
+    assert.ok(count('load') <= 2, `loaded ${count('load')} times`);
+  }), { 'claude/settings.keys.json': json({ theme: 'dark', effortLevel: 'high', ...keys }) });
+});
+
 test('large setup reviews paginate within the IPC record limit without dropping rows', async () => {
   const settings = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`custom${i}`, 'x'.repeat(70_000)]));
   await withSetup((_m, _setup, s) => Effect.gen(function* () {

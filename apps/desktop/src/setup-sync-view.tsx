@@ -99,6 +99,7 @@ export function SetupSyncView({ state, controller }: { state: SetupSyncState; co
         <button disabled={!can.browse || !review.nextCursor} onClick={() => void controller.page('next')}>Next page</button></nav>
       {review.pinGroups.length ? <Pins review={review} state={state} /> : null}
       <p className="notice">Items you don't choose will be held.</p><div className="setup-sync-actions"><button disabled={!can.preview} onClick={() => void controller.preview()}>Preview</button><span>{state.choices.length} explicit choices. Preview writes nothing.</span></div>
+      {state.previewError && !Object.keys(state.groupErrors).length ? <p className="alert" role="alert">{state.previewError}</p> : null}
     </section> : null}
     <PreviewPanel state={state} controller={controller} />
   </div>;
