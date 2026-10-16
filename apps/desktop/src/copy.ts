@@ -103,8 +103,11 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
   UNAUTHORIZED: 'Access was refused. Check your permissions, then retry.',
   NO_REPORT: 'Waiting for the agent’s first inspection.',
   MALFORMED: OFFLINE,
-  // An operation refused a result over its size bound; the connection is fine.
-  OVERSIZED: 'Too much to show at once. Select fewer items.',
+};
+// Text for a code whose own message is empty; otherwise the agent's sentence is shown.
+const FALLBACK_TEXT: Readonly<Record<string, string>> = {
+  // The agent refused a result over its size bound; the connection is fine.
+  OVERSIZED: 'Too much to show at once.',
 };
 // The host prefixes the agent's refusal with its error code.
 const CODE_PREFIX = /^([A-Z][A-Z0-9_]*): /;
@@ -116,5 +119,6 @@ export function errorText(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
     ? error.code : CODE_PREFIX.exec(raw)?.[1];
   const known = code === undefined ? undefined : ERROR_TEXT[code];
-  return known ?? (raw.replace(CODE_PREFIX, '').trim() || 'Something went wrong.');
+  const fallback = (code === undefined ? undefined : FALLBACK_TEXT[code]) ?? 'Something went wrong.';
+  return known ?? (raw.replace(CODE_PREFIX, '').trim() || fallback);
 }

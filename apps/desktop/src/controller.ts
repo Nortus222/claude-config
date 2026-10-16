@@ -341,7 +341,9 @@ export class MachineController {
   private refused(error: unknown, update: Partial<ViewState> = {}) {
     const detail = message(error);
     const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : detail;
-    const offline = /UNAUTHORIZED|MALFORMED|OVERSIZED|CLOSED|disconnected|closed the connection|incompatible|protocol/i.test(code);
+    // An agent OVERSIZED reply refuses one result on a healthy connection; a record the host could not read
+    // disconnects through its own event.
+    const offline = /UNAUTHORIZED|MALFORMED|CLOSED|disconnected|closed the connection|incompatible|protocol/i.test(code);
     this.update({ ...update, initialReadPending: false, waitingForReport: false,
       ...(this.state.initialReadPending || this.state.waitingForReport ? { initialReadError: detail } : {}),
       detail, ...(offline ? { connection: 'disconnected' } : {}) });

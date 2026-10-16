@@ -375,6 +375,15 @@ test('live applying status prevents restart until idle', async () => {
   assert.equal(f.calls.some(([name]) => name === 'restart_agent'), false);
 });
 
+test('an agent OVERSIZED refusal on a healthy connection is shown as an error, not a lost connection', async () => {
+  const f = fake({ inspect_machine: () => { throw new Error('OVERSIZED: Result exceeds 1048576 bytes'); } });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.equal(c.state.connection, 'connected');
+  assert.equal(c.state.inspection, null);
+  assert.match(c.state.detail, /Result exceeds 1048576 bytes/);
+});
+
 test('UNAUTHORIZED makes the agent offline and explicit restart works', async () => {
   let rejected = true;
   const f = fake({

@@ -64,9 +64,14 @@ test('errorText picks text by code for codes the app special-cases', () => {
   assert.equal(errorText(coded('UNAUTHORIZED')), 'Access was refused. Check your permissions, then retry.');
   assert.equal(errorText(coded('NO_REPORT')), 'Waiting for the agent’s first inspection.');
   assert.equal(errorText(coded('MALFORMED')), 'Lost the connection to the agent. Reconnect the agent.');
-  assert.equal(errorText(coded('OVERSIZED')), 'Too much to show at once. Select fewer items.');
-  assert.equal(errorText('OVERSIZED: Setup preview exceeds supported limits'), 'Too much to show at once. Select fewer items.');
   assert.equal(errorText('UNAUTHORIZED: refused'), 'Access was refused. Check your permissions, then retry.');
+});
+
+test('errorText shows the agent\'s own OVERSIZED sentence, with a fallback only when it has none', () => {
+  assert.equal(errorText('OVERSIZED: Setup preview exceeds supported limits'), 'Setup preview exceeds supported limits');
+  assert.equal(errorText(Object.assign(new Error('Result exceeds 1048576 bytes'), { code: 'OVERSIZED' })), 'Result exceeds 1048576 bytes');
+  assert.equal(errorText('OVERSIZED: '), 'Too much to show at once.');
+  assert.equal(errorText(Object.assign(new Error(''), { code: 'OVERSIZED' })), 'Too much to show at once.');
 });
 
 test('errorText keeps other messages without their code prefix', () => {
