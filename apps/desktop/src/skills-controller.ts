@@ -211,7 +211,7 @@ export class SkillsController {
           const firstConfirmation = this.settledRun !== runId;
           this.settledRun = runId;
           const saving = this.state.saving;
-          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Review & apply makes installation changes.` : 'Skill update succeeded. Reload Skills to inspect installation state.';
+          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Apply on Changes makes installation changes.` : 'Skill update succeeded. Reload Skills to inspect installation state.';
           this.pendingInventory = true;
           this.update({ saving: null, check: null, selected: [], detail });
           try {

@@ -6,11 +6,11 @@ import { MachineController, type ViewState } from '../src/controller.ts';
 import { SkillsController, type SkillsViewState } from '../src/skills-controller.ts';
 import { SkillsView, filterSkills, rowState } from '../src/skills-view.tsx';
 import { ShellView } from '../src/views.tsx';
-import { inventory, updates, row, receipt, preview, status } from './support/skills-data.ts';
-const render = (fields: Partial<SkillsViewState> = {}, machineFields: Partial<ViewState> = {}) => {
+import { inventory, updates, row, receipt, preview, status, inspection } from './support/skills-data.ts';
+const render = (fields: Partial<SkillsViewState> = {}, machineFields: Partial<ViewState> = {}, onOpenChanges?: () => void) => {
   const machine = new MachineController(null), controller = new SkillsController(null, machine);
   const state = { ...controller.state, native: true, view: inventory(), ...fields } as SkillsViewState;
-  return renderToStaticMarkup(createElement(SkillsView, { state, machine: { ...machine.state, connection: 'connected', initialReadPending: false, status: status(), ...machineFields }, controller }));
+  return renderToStaticMarkup(createElement(SkillsView, { state, machine: { ...machine.state, connection: 'connected', initialReadPending: false, status: status(), ...machineFields }, controller, ...(onOpenChanges ? { onOpenChanges } : {}) }));
 };
 test('Skills navigation opens a real page with an honest browser empty state', () => {
   const machine = new MachineController(null), controller = new SkillsController(null, machine);
@@ -61,5 +61,27 @@ test('unavailable and partial data stay visible, and empty profiles invent no ro
 });
 test('a stale choice preview displays the proposed change and offers an explicit retry', () => {
   const html = render({ preview: preview(), detail: 'The machine changed. Review the new plan and apply again.' });
-  assert.match(html, /Save choice/); assert.match(html, /Review &amp; apply makes installation changes/); assert.match(html, />Retry saving choice<\/button>/);
+  assert.match(html, /Save choice/); assert.match(html, /Apply on Changes makes installation changes/); assert.match(html, />Retry saving choice<\/button>/);
+});
+const observed = (disposition: 'apply' | 'in-sync', domain = 'skills') => ({ ...inspection(), items: [{ domain, key: 'skill:tdd', label: 'tdd', group: 'owner/skills', state: 'missing', disposition }] }) as unknown as ViewState['inspection'];
+test('no rendered wording sends the user to Review & apply', () => {
+  const html = render({ check: updates(), run: receipt(), preview: preview() }, { inspection: observed('apply') }, () => {});
+  assert.doesNotMatch(html, /Review &amp; apply|Review & apply/); assert.match(html, /Apply on Changes/);
+  assert.match(html, /Skill updates for this Mac/); assert.doesNotMatch(html, /Upstream skills/); assert.match(html, /Waiting to apply/);
+  assert.doesNotMatch(render({ view: inventory([row('tdd', { choice: false })]) }, { inspection: observed('apply') }), /Review &amp; apply|Review & apply/);
+});
+test('Open Changes appears only for a skill item waiting to apply and a given handler', () => {
+  const open = />Open Changes<\/button>/;
+  assert.match(render({}, { inspection: observed('apply') }, () => {}), open);
+  assert.doesNotMatch(render({}, { inspection: observed('apply') }), open);
+  assert.doesNotMatch(render({}, { inspection: observed('in-sync') }, () => {}), open);
+  assert.doesNotMatch(render({}, { inspection: observed('apply', 'files') }, () => {}), open);
+  assert.doesNotMatch(render({}, { inspection: null }, () => {}), open);
+});
+test('run and update cards show no run ID or digest', () => {
+  const runId = '0b9f3c1e-6a47-4d52-8e1f-2c7d5a9b4e60', digest = 'd'.repeat(40);
+  const base = updates().items[0]!;
+  const html = render({ run: { ...receipt(), runId }, check: updates({ items: [{ ...base, offered: { kind: 'tree' as const, digest } }] }) });
+  assert.doesNotMatch(html, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/); assert.doesNotMatch(html, new RegExp(digest));
+  assert.doesNotMatch(html, /Run <code>/); assert.match(html, /Save skill choice/);
 });
