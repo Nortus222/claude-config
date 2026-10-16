@@ -352,6 +352,7 @@ export const serveIpc = (input: {
             case 'pinImpact': result = yield* session.pinImpact(request.input); break;
             case 'draftChangelog': result = yield* session.draftChangelog(request.input); break;
             case 'inspectSetups': result = yield* session.inspectSetups(request.input); break;
+            case 'setupReview': result = yield* session.setupReview(request.input); break;
             case 'incomingChanges': result = yield* session.incomingChanges(request.input); break;
             case 'prepareTrustRequest': result = yield* session.prepareTrustRequest(request.input); break;
             case 'inspectUpdates': result = yield* session.inspectUpdates(request.input); break;

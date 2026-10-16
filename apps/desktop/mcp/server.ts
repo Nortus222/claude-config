@@ -7,6 +7,7 @@ export const toolNames = {
   listBackups: 'nortuscc_list_backups',
   agentStatus: 'nortuscc_agent_status', accountState: 'nortuscc_account_state',
   watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',
+  setupReview: 'nortuscc_setup_review',
   inspectSetups: 'nortuscc_inspect_setups', incomingChanges: 'nortuscc_incoming_changes', prepareTrustRequest: 'nortuscc_prepare_trust_request',
   inspectUpdates: 'nortuscc_inspect_updates',
   inspectIntent: 'nortuscc_inspect_intent',
@@ -24,6 +25,7 @@ const descriptions: Record<OperationName, string> = {
   pinImpact: 'Read source-wide pin impact for every declared skill and the resolved target revision. This read changes no pin.',
   draftChangelog: 'Draft a bounded changelog for up to eight accepted source revision pairs with report-validated ignored and added selections. No publication or intent writes.',
 
+  setupReview: 'Review incoming setup values, holds, conflicts and source pin groups without scheduling or changing machine state.',
   inspectSetups: 'Read known setup identities and local trust without granting consent.',
   incomingChanges: 'Read verified exact setup revisions and incoming item identities without repository contents.',
   prepareTrustRequest: 'Prepare the existing app-local repository trust action. This read grants no trust and writes no consent.',

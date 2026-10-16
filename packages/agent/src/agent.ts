@@ -43,6 +43,7 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly operationDomains?: AgentDomains;
   readonly signInFlow?: HostedRuntime['signInFlow'];
   readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
   readonly operationSetupIds?: Effect.Effect<readonly string[],unknown>;
@@ -171,7 +172,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       ...(hosted ? { hosted: { signIn: hosted.signIn, signOut: hosted.signOut, sync: () => hosted.sync, machine: hosted.machine } } : {}),
     };
     const handle: AgentHandle = {
-      mutationBodies, withJobMutation, selectOperationSetup,
+      operationDomains: domains, mutationBodies, withJobMutation, selectOperationSetup,
       operationSetupIds: hosted ? Effect.map(hosted.state,state=>['local',...state.setups.map(s=>s.setupId)]) : Effect.succeed(['local']),
       status: Ref.get(latest),
       inspection: Ref.get(inspection),

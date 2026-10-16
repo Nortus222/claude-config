@@ -3,7 +3,7 @@ import type { OperationDefinition } from './model.ts';
 import {
   ListBackupsInputSchema, ListBackupsResultSchema, AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
   WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
-  InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
+  SetupReviewInputSchema, SetupReviewSchema, InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
   InspectUpdatesInputSchema, UpdatesInspectionResultSchema, InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
@@ -27,6 +27,7 @@ export const operationDefinitions = {
   inspectSourceDiff: define('inspectSourceDiff',InspectSourceDiffInputSchema,SourceDiffResultSchema),
   pinImpact: define('pinImpact',PinImpactInputSchema,PinImpactResultSchema),
   draftChangelog: define('draftChangelog',DraftChangelogInputSchema,ChangelogResultSchema),
+  setupReview: define('setupReview', SetupReviewInputSchema, SetupReviewSchema),
   inspectSetups: define('inspectSetups',InspectSetupsInputSchema,SetupInspectionResultSchema),
   incomingChanges: define('incomingChanges',IncomingChangesInputSchema,IncomingChangesResultSchema),
   prepareTrustRequest: define('prepareTrustRequest',PrepareTrustRequestInputSchema,TrustRequestResultSchema),

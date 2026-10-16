@@ -5,7 +5,7 @@ import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/opera
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
 const reads = ['getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
-const changes = ['reconcile', 'machineIntent', 'capture', 'uninstallConfig', 'update', 'syncDecision', 'sourceDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
+const changes = ['reconcile', 'machineIntent', 'capture', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'sourceDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {
   const rows = Object.values(engineCapabilityCoverage);
