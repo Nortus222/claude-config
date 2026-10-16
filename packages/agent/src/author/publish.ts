@@ -27,9 +27,11 @@ export type DraftPreview = {
 };
 const DIFF_FILE_TEXT_BYTES = 16_384;
 const DIFF_PREVIEW_BYTES = 262_144;
+// Item IDs can be long and multi-byte, so the list has its own budget; with the diff's it stays well under one IPC record.
+const ITEMS_PREVIEW_BYTES = 262_144;
 
 // Only display bytes and the item list are clipped. The digest and the files sent to Git cover the full diff.
-const boundedPreview = (preview: DraftPreview): DraftPreview => {
+export const boundedPreview = (preview: DraftPreview): DraftPreview => {
   const clip = (text: string | null) => text === null ? null : new TextDecoder('utf-8', { ignoreBOM: true })
     .decode(Buffer.from(text).subarray(0, DIFF_FILE_TEXT_BYTES), { stream: true });
   const diff: DraftPreview['diff'] = [];
@@ -42,7 +44,13 @@ const boundedPreview = (preview: DraftPreview): DraftPreview => {
     if (bytes + size > DIFF_PREVIEW_BYTES) { truncated = true; break; }
     diff.push(entry); bytes += size; truncated ||= clipped;
   }
-  const items = preview.items.slice(0, MAX_DRAFT_PREVIEW_ITEMS);
+  const items: DraftPreview['items'] = [];
+  let itemBytes = 2;
+  for (const item of preview.items.slice(0, MAX_DRAFT_PREVIEW_ITEMS)) {
+    const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+    if (itemBytes + size > ITEMS_PREVIEW_BYTES) break;
+    items.push(item); itemBytes += size;
+  }
   return { ...preview, diff, ...(truncated ? { truncated: true } : {}), items,
     ...(items.length < preview.items.length ? { itemsTruncated: true as const } : {}) };
 };

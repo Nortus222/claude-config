@@ -279,7 +279,7 @@ export const SourceDecisionPreviewSchema = Schema.Struct({ ...previewFields, cha
 const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsChangeSchema,retention:BackupPrunePlanSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
-// Resolved items a draft changes, per profile; longer lists are cut and marked itemsTruncated.
+// Resolved items a draft changes, per profile; lists over this count or the preview's byte budget are cut and marked itemsTruncated.
 export const MAX_DRAFT_PREVIEW_ITEMS = 1000;
 export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: AuthorHeadSchema, digest: DigestSchema,
   diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String), truncated: Schema.optionalKey(Schema.Literal(true)) })),

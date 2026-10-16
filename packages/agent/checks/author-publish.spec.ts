@@ -13,7 +13,7 @@ import { hostedSetupSourceLayer, SetupSource, worktreeDocuments, itemValues } fr
 import { parseSyncQuery, type RevisionRecord, type SetupRecord } from '@nortuscc/hosted-protocol';
 import { authorWorkspaceLayer, GIT_TIMEOUT_MS } from '../src/author/workspace.ts';
 import { DraftStore, DraftStoreError, draftStore, type Draft } from '../src/author/drafts.ts';
-import { makeAuthorPublisher } from '../src/author/publish.ts';
+import { boundedPreview, makeAuthorPublisher } from '../src/author/publish.ts';
 import { makeAgentRuns, operationDigest, type RunLifecycle } from '../src/runs.ts';
 import { RunStore, RunStoreError, runStore } from '../src/run-store.ts';
 import type { SessionError } from '../src/ipc/session.ts';
@@ -158,6 +158,17 @@ test('items stay bounded and say when truncated', async t => {
   assert.deepEqual(preview.affectedProfiles, ['team']);
   assert.ok(preview.items.every(item => item.profile === 'team' && item.change === 'added'));
   assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 1_048_576);
+});
+
+test('items with long multi-byte IDs stay within a byte budget beside a full diff', () => {
+  const id = (index: number) => `skill:owner/repo/${'界'.repeat(490)}${String(index).padStart(4, '0')}`;
+  const items = Array.from({ length: 1000 }, (_, index) => ({ profile: 'team', itemId: id(index), kind: 'skill' as const, change: 'added' as const }));
+  const diff = Array.from({ length: 40 }, (_, index) => ({ path: `profiles/p${index}.json`, before: 'é'.repeat(10_000), after: 'ü'.repeat(10_000) }));
+  const preview = boundedPreview({ draftId: randomUUID(), base: 'a'.repeat(40), digest: 'b'.repeat(64), diff, invalid: [], affectedProfiles: ['team'], items });
+  assert.equal(preview.itemsTruncated, true); assert.equal(preview.truncated, true);
+  assert.ok(preview.items.length > 0 && preview.items.length < 1000);
+  assert.deepEqual(preview.items, items.slice(0, preview.items.length));
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 600_000, String(Buffer.byteLength(JSON.stringify(preview))));
 });
 
 test('publish refuses when the replayed diff no longer matches the preview', async t => {
