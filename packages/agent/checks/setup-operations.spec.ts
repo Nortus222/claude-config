@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { DecisionsStore, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
+import { configDomain, integrationsDomain, DecisionsStore, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
 import { decodeOperationInput } from '../src/operations/index.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -259,6 +259,81 @@ test('hosted setup apply records freshly observed settings and retains unchosen 
       assert.ok(saved.some(e => JSON.stringify(JSON.parse(readFileSync(join(e.parentPath, e.name), 'utf8'))) === JSON.stringify(baseline)));
     })));
   } finally { rmSync(m.root, { recursive: true, force: true }); rmSync(repo.root, { recursive: true, force: true }); }
+});
+
+const withHostedSetup = async (
+  changes: Readonly<Record<string, string | null>>,
+  body: (m: ReturnType<typeof agentMachine>, session: AgentSession, source: SetupSource['Service'], head: string) => Effect.Effect<void, unknown, import('../src/layer.ts').AgentServices>,
+) => {
+  const repo = tempSetup(), m = agentMachine();
+  const url = 'https://github.com/example/setup.git';
+  Object.assign(m.paths, { repo: repo.checkout });
+  repo.inCheckout('remote', 'set-url', 'origin', url);
+  const head = repo.push(changes);
+  repo.inCheckout('fetch', repo.origin, 'main');
+  repo.inCheckout('tag', 'v1', repo.first); repo.inCheckout('tag', 'v2', head);
+  repo.inCheckout('push', repo.origin, 'refs/tags/v1', 'refs/tags/v2');
+  m.write(join(m.paths.stateRoot, 'agent/setups.json'), json({ version: 1, setups: [{ setupId: 'setup-1', repoUrl: normalizeRepoUrl(url), accountId: 'account-1', checkout: repo.checkout, trustedAt: '2026-10-15T00:00:00Z' }] }));
+  m.write(join(m.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: repo.first, at: '2026-10-15T00:00:00Z' } }));
+  const processes = Layer.effect(Processes, Effect.gen(function* () {
+    const real = yield* Processes;
+    return { run: (command: Parameters<typeof real.run>[0]) => real.run({ ...command, args: command.args.map(arg => arg === url ? repo.origin : arg) }) };
+  })).pipe(Layer.provide(nodeProcesses()));
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const before = yield* commitDocuments(repo.checkout, repo.first), after = yield* commitDocuments(repo.checkout, head);
+      const record = (number: number, commitSha: string, old: typeof before, next: typeof before) => ({ setupId: 'setup-1', number, commitSha, tag: `v${number}`, changelog: '', requiredEnv: [],
+        items: diffItems(itemValues(old), itemValues(next)).map(c => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' as const : c.after === undefined ? 'removed' as const : 'changed' as const })) });
+      const source = yield* SetupSource.pipe(Effect.provide(hostedSetupSourceLayer(m.paths, { setupId: 'setup-1', accountId: 'account-1', currentAccountId: Effect.succeed('account-1'), repoUrl: url,
+        records: Effect.succeed([record(1, repo.first, {}, before), record(2, head, before, after)]), processes })));
+      const domains = (paths: typeof m.paths) => [configDomain, integrationsDomain({ paths, env: {} })];
+      const handle = yield* startAgent(domains, { deferStart: true });
+      const decisions = yield* DecisionsStore;
+      const session = yield* makeSession({ ...handle,
+        selectOperationSetup: () => Effect.succeed({ setupId: 'setup-1', trusted: true, accountId: 'account-1', repository: normalizeRepoUrl(url), source }),
+        mutationBodies: { ...handle.mutationBodies, decideAll: rows => Effect.forEach(rows, row => decisions.record(row), { discard: true }) },
+      }, { domains, signal: new AbortController().signal });
+      yield* body(m, session, source, head);
+    })));
+  } finally { rmSync(m.root, { recursive: true, force: true }); rmSync(repo.root, { recursive: true, force: true }); }
+};
+
+for (const [removed, documents] of [
+  ['setting:claude:settings.json#effortLevel', { 'claude/settings.keys.json': json({ theme: 'auto' }) }],
+  ['file:claude:CLAUDE.md', { 'claude/CLAUDE.md': null }],
+] as const) test(removed.startsWith('setting:')
+  ? 'after applying a hosted removal it no longer appears as incoming'
+  : 'after applying a hosted copied-file removal it no longer appears as incoming', async () => {
+  await withHostedSetup(documents, (_m, session, source, head) => Effect.gen(function* () {
+    const input = decodeOperationInput('setupReview', { setupId: 'setup-1', refetch: false, limit: 100 });
+    assert.equal((yield* session.setupReview(input)).rows.find(row => row.itemId === removed)?.change, 'removed');
+    const preview = yield* session.previewChange({ ...change([{ itemId: removed, action: 'accept' }]), setupId: 'setup-1', revision: { kind: 'hosted', number: 2, commitSha: head } });
+    assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
+    assert.equal((yield* session.setupReview(input)).rows.some(row => row.itemId === removed), false);
+    assert.equal((yield* source.baseline!).origins[removed], undefined);
+  }));
+});
+
+const hookAddition = {
+  'integrations.json': json({ version: 1, integrations: [{ id: 'new-hook', label: 'new hook', target: 'claude', type: 'hook', default: true, event: 'SessionStart', file: 'claude/hooks/new.mjs' }] }),
+  'claude/hooks/new.mjs': 'console.log("new hook");\n',
+};
+for (const mismatch of [false, true]) test(mismatch
+  ? 'an accepted hosted hook with mismatching installed bytes stays incoming'
+  : 'an applied hosted hook leaves incoming only after its installed bytes are confirmed', async () => {
+  await withHostedSetup(hookAddition, (m, session, source, head) => Effect.gen(function* () {
+    const id = 'integration:new-hook';
+    if (mismatch) {
+      m.write(join(m.paths.claude, 'hooks/new.mjs'), 'local hook body');
+      m.write(join(m.paths.claude, 'settings.json'), json({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `node ${join(m.paths.claude, 'hooks/new.mjs')}` }] }] } }));
+    }
+    const preview = yield* session.previewChange({ ...change([{ itemId: id, action: 'accept' }]), setupId: 'setup-1', revision: { kind: 'hosted', number: 2, commitSha: head } });
+    assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
+    assert.equal(m.read(join(m.paths.claude, 'hooks/new.mjs')), mismatch ? 'local hook body' : hookAddition['claude/hooks/new.mjs']);
+    assert.equal((yield* source.baseline!).origins[id], mismatch ? undefined : head);
+    const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'setup-1', refetch: false, limit: 100 }));
+    assert.equal(review.rows.some(row => row.itemId === id), mismatch);
+  }));
 });
 
 test('a source revision changed after preview returns a replacement bound to the fresh revision', async () => {
