@@ -97,8 +97,8 @@ test('independent validation refuses different hook bytes after composition', as
   const current = hook(['one'], 'old\n'), offered = hook(['one'], 'new\n');
   const expected = composeSetupChoices({ current, offered, accepted: [], holds: { 'integration:one': 'origin' } });
   const replayed = patchItem(offered, 'integration:one', current);
-  assert.equal(replayed['hooks/session.mjs'], 'old\n');
-  assert.throws(() => validateSetupComposition(expected, { ...replayed, 'hooks/session.mjs': 'new\n' }), /hook bytes/);
+  assert.equal(replayed['hooks/session.mjs'], 'new\n');
+  assert.throws(() => validateSetupComposition(expected, replayed), /hook bytes/);
 });
 
 test('independent validation accepts equal hook bytes at the offered path', async () => {

@@ -11,7 +11,10 @@ Decisions: [ADR 0017](../../docs/adr/0017-held-items-compose-over-the-checkout.m
 - **Holds.** `<stateRoot>/sync.json` maps a skipped item to the commit whose value it keeps.
 - **Composition.** `desiredFor` reads the documents at head (the working tree for the CLI, git objects
   for the agent), resolves every held item under the required `profile` at its held commit, and applies machine overrides.
-  `droppedOnSwitch` lists missing hold IDs and override paths without changing either store.
+  Holds from commits without the followed profile are ignored. `composeDocumentsWithStaleHolds` and
+  `incoming` return their IDs as `staleHolds`, including when head equals the applied commit.
+  Pass those IDs to `droppedOnSwitch({ ..., staleHolds })` to list them alongside missing holds and override paths.
+  Existing holds remain visible and releasable in the agent incoming and setup review data.
 - **Incoming.** `incoming` lists what moved upstream since the applied commit, from this machine's held
   values, and the overrides those items conflict with.
 - **The agent's source.** `setupSourceLayer(paths)` implements `SetupSource` over the own checkout:

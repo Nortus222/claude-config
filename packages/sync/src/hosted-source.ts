@@ -19,7 +19,7 @@ import {
   RevisionMismatch, RevisionUnavailable, SetupSource, type AppliedEvidence, type HostedBaseline, type Revision,
 } from './source.ts';
 import { SyncStore, syncStore } from './store.ts';
-import { desiredOfDocuments, type Documents } from './documents.ts';
+import { desiredOfDocuments, hasProfile, type Documents } from './documents.ts';
 
 type Services = Fs | Processes | SetupsStore | OverridesStore | SyncStore;
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));
@@ -124,7 +124,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       if (sha === undefined) return yield* unavailable(record, 'the tag is unavailable and has no previously verified cache');
       if (sha !== record.commitSha) return yield* mismatch(record, 'trusted repository tag does not match its recorded commit');
       const current = yield* commitDocuments(repo, sha);
-      if (profile !== undefined && desiredOfDocuments(current, undefined, profile).issues.length) return yield* mismatch(record, 'published profile is invalid');
+      if (profile !== undefined && hasProfile(current, profile) && desiredOfDocuments(current, undefined, profile).issues.length) return yield* mismatch(record, 'published profile is invalid');
       const actual = diffItems(valuesOf(previous), valuesOf(current)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' }));
       const advertised = [...record.items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
       if (canonical(actual) !== canonical(advertised)) return yield* mismatch(record, 'advertised items do not match the published Git diff');
@@ -169,6 +169,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
         const held = holds[id]!;
         let heldDocs = cache.get(held);
         if (heldDocs === undefined) { heldDocs = yield* commitDocuments(repo, held); cache.set(held, heldDocs); }
+        if (!hasProfile(heldDocs, profile)) continue;
         seed = patch(seed, id, heldDocs);
         if (valuesOf(heldDocs).has(id)) origins[id] = held;
         else delete origins[id];

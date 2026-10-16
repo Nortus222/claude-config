@@ -17,6 +17,11 @@ export const PROFILE_DOCUMENTS: ReadonlyArray<string> = [
 export const documentOf = (documents: Documents, path: string): string | undefined =>
   Object.hasOwn(documents, path) ? documents[path] : undefined;
 
+// The implicit default exists only when the repository has no profiles directory.
+export const hasProfile = (documents: Documents, profile?: string): boolean =>
+  profile === undefined || Object.hasOwn(documents, `profiles/${profile}.json`)
+  || profile === 'default' && !Object.keys(documents).some(path => path === 'profiles' || path.startsWith('profiles/'));
+
 // A repo-relative path that stays inside the repository.
 export const inside = (path: string): boolean =>
   path !== '' && !isAbsolute(path) && !/^[a-z]:/i.test(path) && !path.split(/[\\/]/).includes('..');

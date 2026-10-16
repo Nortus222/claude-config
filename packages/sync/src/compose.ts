@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 import { loadNamedProfile, nodeFiles, requireValid, type Input, type MachineOverrides, type ReadFailed, type ProfileInvalid } from '@nortuscc/profile-engine';
 import type { Fs, FsFailed, LaunchFailed, Processes } from '@nortuscc/machine';
-import { desiredOfDocuments, worktreeDocuments, writeDocuments, type Documents } from './documents.ts';
+import { desiredOfDocuments, hasProfile, worktreeDocuments, writeDocuments, type Documents } from './documents.ts';
 import { commitDocuments } from './git.ts';
 import { patchItem } from './patch.ts';
 import type { RevisionUnavailable, Snapshot } from './source.ts';
@@ -14,8 +14,8 @@ export type Head = { readonly kind: 'worktree' } | { readonly kind: 'commit'; re
 type ComposeError = FsFailed | LaunchFailed | RevisionUnavailable | ProfileInvalid;
 
 // Head's documents with every held item patched to its value at its held commit, in item-id order.
-export const composeDocuments = (input: { readonly repo: string; readonly head: Head; readonly held: Holds; readonly profile?: string }):
-  Effect.Effect<Documents, ComposeError, Fs | Processes> =>
+export const composeDocumentsWithStaleHolds = (input: { readonly repo: string; readonly head: Head; readonly held: Holds; readonly profile?: string }):
+  Effect.Effect<{ documents: Documents; staleHolds: string[] }, ComposeError, Fs | Processes> =>
   Effect.gen(function* () {
     let documents = input.head.kind === 'worktree'
       ? yield* worktreeDocuments(input.repo)
@@ -24,18 +24,27 @@ export const composeDocuments = (input: { readonly repo: string; readonly head: 
       ? requireValid(desiredOfDocuments(documents, undefined, input.profile)).pipe(Effect.asVoid) : Effect.void;
     yield* validate(documents);
     const atCommit = new Map<string, Documents>();
+    const staleHolds: string[] = [];
     for (const itemId of Object.keys(input.held).sort()) {
       const commit = input.held[itemId]!;
       let held = atCommit.get(commit);
       if (held === undefined) {
         held = yield* commitDocuments(input.repo, commit);
-        yield* validate(held);
         atCommit.set(commit, held);
       }
+      if (!hasProfile(held, input.profile)) {
+        staleHolds.push(itemId);
+        continue;
+      }
+      yield* validate(held);
       documents = patchItem(documents, itemId, held, input.profile);
     }
-    return documents;
+    return { documents, staleHolds };
   });
+
+// A hold predating the followed profile has no value to replay and remains releasable.
+export const composeDocuments = (input: Parameters<typeof composeDocumentsWithStaleHolds>[0]): Effect.Effect<Documents, ComposeError, Fs | Processes> =>
+  composeDocumentsWithStaleHolds(input).pipe(Effect.map(result => result.documents));
 
 // This machine's desired configuration: head with held items at their held values, resolved with
 // machine overrides. With no holds, a worktree resolves in place; otherwise the composed

@@ -28,7 +28,7 @@ export const resolvedItemValues = (desired: DesiredConfig, documents: Readonly<R
 };
 
 // Existing choice formats are retained. Override entries use the paths accepted by overrideOf.
-export const droppedOnSwitch = (input: { holds: Holds; overrides: MachineOverrides; to: DesiredConfig }): { holds: string[]; overrides: string[] } => {
+export const droppedOnSwitch = (input: { holds: Holds; overrides: MachineOverrides; to: DesiredConfig; staleHolds?: readonly string[] }): { holds: string[]; overrides: string[] } => {
   const ids = new Set<string>();
   for (const file of input.to.files) {
     if (file.mode === 'copy') ids.add(`file:${file.id}`);
@@ -43,5 +43,5 @@ export const droppedOnSwitch = (input: { holds: Holds; overrides: MachineOverrid
     if (!input.to.skills.some(skill => skill.name === name)) overrides.push(`skills.${name}`);
   for (const id of Object.keys(input.overrides.integrations ?? {}))
     if (!ids.has(`integration:${id}`)) overrides.push(`integrations.${id}`);
-  return { holds: Object.keys(input.holds).filter(id => !ids.has(id)).sort(), overrides: overrides.sort() };
+  return { holds: Object.keys(input.holds).filter(id => !ids.has(id) || input.staleHolds?.includes(id)).sort(), overrides: overrides.sort() };
 };

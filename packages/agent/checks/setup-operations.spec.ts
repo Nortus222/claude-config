@@ -373,7 +373,7 @@ test('hook body-only changes appear in review with both executable bodies', asyn
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
 
-test('an omitted hook keeps its held body while an independent item settles', async () => {
+test('an omitted hook refuses settlement when replay cannot preserve its held body', async () => {
   const m = agentMachine();
   const { HEAD_FILES } = await import('./support/setup-fixture.ts');
   const setup = setupFixture(join(m.root, 'snapshots'), { composeStateRoot: m.paths.stateRoot,
@@ -385,12 +385,11 @@ test('an omitted hook keeps its held body while an independent item settles', as
       const handle = yield* startAgent(() => m.domains, { deferStart: true });
       const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
       const before = durableFiles(m.paths.stateRoot);
-      const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+      const error = yield* Effect.flip(session.previewChange(change([{ itemId: EFFORT, action: 'accept' }])));
+      assert.equal(error.code, 'INVALID_REQUEST');
+      assert.match(error.message, /hook bytes/);
       assert.deepEqual(durableFiles(m.paths.stateRoot), before);
-      assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
-      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held[HOOK], APPLIED);
-      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, HEAD);
-      assert.equal(readFileSync(join(m.root, 'snapshots/composed/claude/hooks/session.mjs'), 'utf8'), 'old hook\n');
+      assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
     })), setup.source);
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
@@ -466,4 +465,44 @@ test('setup review shows a profile file exclusion instead of unchanged file text
       assert.deepEqual(JSON.parse(row.after!), { managed: false });
     })), Layer.succeed(SetupSource, { ...setup.service, profile: 'child' }));
   } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
+
+test('a hold from before the followed profile stays listed and can be released', async () => {
+  const { desiredFor, SetupSource, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo();
+  const itemId = 'file:claude:CLAUDE.md';
+  const head = repo.commit({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  const held = { [itemId]: repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held }));
+  const snapshot = (holds: Record<string, string>) => Effect.promise(() => runSync(desiredFor({ repo: repo.dir, profile: 'child', head: { kind: 'commit', commit: head }, held: holds, into: join(m.root, 'profile-snapshot') })));
+  const source = Layer.succeed(SetupSource, {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: () => snapshot({}),
+    current: snapshot(held),
+    effective: (_decisions, choices) => Effect.gen(function* () {
+      const current = yield* snapshot(choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held);
+      return { applied: { ...current, revision: head }, effective: current, conflicts: [] };
+    }),
+  });
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => [], { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => [], signal: new AbortController().signal });
+      const incoming = yield* s.incomingChanges(decodeOperationInput('incomingChanges', { setupId: 'local' }));
+      assert.ok(incoming.items.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: false }));
+      assert.ok(review.rows.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const preview = yield* s.previewChange({ kind: 'syncDecision', setupId: 'local', itemId, revision: { kind: 'local', commit: head }, action: 'release' });
+      const run = yield* finish(s, preview.planId);
+      assert.equal(run.state, 'succeeded');
+      assert.deepEqual(yield* (yield* SyncStore).read, {});
+    })), source);
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
 });

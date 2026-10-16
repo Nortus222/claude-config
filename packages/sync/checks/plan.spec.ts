@@ -83,7 +83,7 @@ test('incoming reads the applied and head commits and the holds from git', async
 
 test('incoming at the applied commit itself has nothing', async () => {
   const repo = tempRepo();
-  assert.deepEqual(await runSync(incoming({ repo: repo.dir, applied: repo.first, head: repo.first, holds: {}, overrides: {} })), { changes: [], conflicts: [] });
+  assert.deepEqual(await runSync(incoming({ repo: repo.dir, applied: repo.first, head: repo.first, holds: {}, overrides: {} })), { changes: [], conflicts: [], staleHolds: [] });
 });
 
 test('incoming compares the followed profile with a held inherited value', async () => {

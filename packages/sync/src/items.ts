@@ -1,6 +1,6 @@
 import { parseItemId, type ItemKind } from '@nortuscc/hosted-protocol';
 import { resolvedItemValues } from './resolved-items.ts';
-import { desiredOfDocuments, type Documents } from './documents.ts';
+import { desiredOfDocuments, hasProfile, type Documents } from './documents.ts';
 
 export { parseItemId, type ItemKind, type ItemRef } from '@nortuscc/hosted-protocol';
 
@@ -15,7 +15,7 @@ export type ItemChange = {
 
 // Resolve without machine overrides so local choices cannot hide incoming profile changes.
 export const itemValues = (documents: Documents, profile?: string): ItemValues =>
-  resolvedItemValues(desiredOfDocuments(documents, undefined, profile), documents);
+  hasProfile(documents, profile) ? resolvedItemValues(desiredOfDocuments(documents, undefined, profile), documents) : new Map();
 
 // Every item whose value differs between two setups, sorted by id, with both values.
 export const diffItems = (from: ItemValues, to: ItemValues): ReadonlyArray<ItemChange> =>

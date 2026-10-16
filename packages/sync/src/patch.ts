@@ -115,8 +115,8 @@ const patchSkill = (head: Documents, ref: Extract<ItemRef, { kind: 'skill' }>, h
 };
 
 // The declaration as the engine resolved it at the held commit (a refused held document declares
-// nothing): replaced in place, appended, or removed. A held hook keeps
-// the file bytes it shipped, and only from inside the repository (ruling 30).
+// nothing): replaced in place, appended, or removed. A held hook restores a missing file
+// inside the repository, preserving existing bytes that another hook may share.
 const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integration' }>, held: Documents): Documents => {
   const entry: unknown = desiredOfDocuments(held).integrations.find((i) => i.id === ref.id)?.declaration;
   const text = documentOf(head, INTEGRATIONS_SOURCE);
@@ -131,7 +131,7 @@ const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integr
   let out = withDocument(head, INTEGRATIONS_SOURCE, json({ ...document, integrations: next }));
   const file = isRecord(entry) && entry.type === 'hook' && typeof entry.file === 'string' && inside(entry.file) ? entry.file : undefined;
   const body = file === undefined ? undefined : documentOf(held, file);
-  if (file !== undefined && body !== undefined) out = withDocument(out, file, body);
+  if (file !== undefined && body !== undefined && documentOf(out, file) === undefined) out = withDocument(out, file, body);
   return out;
 };
 
@@ -180,12 +180,14 @@ const patchProfileItem = (head: Documents, ref: ItemRef, held: Documents, profil
     const file = current.files.find(file => file.id === ref.fileId);
     if (!file) return head;
     const prior = previous.files.find(file => file.id === ref.fileId);
-    const settings = file.managed ? parseObject(out[file.src]) ?? {} : {};
+    const text = documentOf(out, file.src);
+    const settings = file.managed && text !== undefined ? parseObject(text) : {};
+    if (settings === undefined) return head;
     const key = prior?.keys?.[ref.key];
     if (key) settings[ref.key] = key.value; else delete settings[ref.key];
     // A head exclusion can be held back one owned key at a time.
     if (key && !file.managed) leaf.files = { ...(isRecord(leaf.files) ? leaf.files : {}), [ref.fileId]: file.src };
-    out = withDocument(out, file.src, json(settings));
+    out = withDocument(out, file.src, Object.keys(settings).length > 0 ? json(settings) : undefined);
   } else if (ref.kind === 'skill') {
     const skill = previous.skills.find(skill => skill.source === ref.source && skill.name === ref.name);
     const markers = [skill?.exact ? 'exact' : '', skill?.optional ? 'optional' : ''].filter(Boolean).join(' ');
@@ -204,9 +206,6 @@ const patchProfileItem = (head: Documents, ref: ItemRef, held: Documents, profil
       const action = integration.enabled ? 'add' : 'remove';
       const selections = isRecord(leaf.integrations) ? leaf.integrations : {};
       leaf.integrations = { ...selections, [action]: [...(Array.isArray(selections[action]) ? selections[action] : []), ref.id] };
-      const declaration = integration.declaration;
-      if (declaration.type === 'hook' && typeof declaration.file === 'string' && inside(declaration.file))
-        out = withDocument(out, declaration.file, held[declaration.file]);
     }
   }
   return withDocument(out, path, json(leaf));

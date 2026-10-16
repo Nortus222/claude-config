@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ProfileInvalid, resolveNamedProfile } from '@nortuscc/profile-engine';
+import { resolveNamedProfile } from '@nortuscc/profile-engine';
 import * as sync from '../src/index.ts';
 import { BASE, json, runSync, tempRepo } from './support/repo.ts';
 
@@ -73,11 +73,11 @@ test('snapshot keys separate repository and profile identity at the same commit'
   assert.equal(sync.SNAPSHOT_FORMAT, 2);
 });
 
-test('a default-profile hook hold keeps its referenced bytes over a changed head file', async () => {
+test('a default-profile hook hold leaves existing head file bytes intact', async () => {
   const repo = tempRepo();
   const head = repo.commit({ 'claude/hooks/hk.mjs': '// changed\n' });
   const snapshot = await runSync(sync.desiredFor({ repo: repo.dir, profile: 'default', head: { kind: 'commit', commit: head }, held: { 'integration:hk': repo.first }, into: join(repo.root, 'held-hook') }));
-  assert.equal(readFileSync(join(snapshot.repo, 'claude/hooks/hk.mjs'), 'utf8'), BASE['claude/hooks/hk.mjs']);
+  assert.equal(readFileSync(join(snapshot.repo, 'claude/hooks/hk.mjs'), 'utf8'), '// changed\n');
 });
 
 test('a hold on an item absent at the held profile revision removes a later profile addition', async () => {
@@ -94,10 +94,17 @@ test('a settings hold reads the replacement document selected by the held profil
   assert.equal(snapshot.desired.files.find(file => file.id === 'claude:settings.json')!.keys!.theme!.value, 'dark');
 });
 
-test('a hold cannot invent a followed profile missing at its held commit', async () => {
+test('a hold at a commit without the followed profile is ignored and listed as stale', async () => {
   const repo = tempRepo();
-  const head = repo.commit({ 'profiles/child.json': '{}' });
-  await assert.rejects(runSync(sync.desiredFor({ repo: repo.dir, profile: 'child', head: { kind: 'commit', commit: head }, held: { [FILE]: repo.first }, into: join(repo.root, 'missing-held-profile') })), (error: unknown) => error instanceof ProfileInvalid && error.issues.some(issue => issue.message.includes('missing profile')));
+  const head = repo.commit({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  const holds = { [FILE]: repo.first };
+  const snapshot = await runSync(sync.desiredFor({ repo: repo.dir, profile: 'child', head: { kind: 'commit', commit: head }, held: holds, into: join(repo.root, 'missing-held-profile') }));
+  assert.equal(readFileSync(join(snapshot.repo, 'claude/CLAUDE.md'), 'utf8'), '# current\n');
+  for (const next of [head, repo.commit({ 'claude/CLAUDE.md': '# later\n' })]) {
+    const result = await runSync(sync.incoming({ repo: repo.dir, profile: 'child', applied: head, head: next, holds, overrides: {} }));
+    assert.deepEqual(result.staleHolds, [FILE]);
+    assert.deepEqual(sync.droppedOnSwitch({ to: snapshot.desired, holds, overrides: {}, staleHolds: result.staleHolds }), { holds: [FILE], overrides: [] });
+  }
 });
 
 test('profile exclusions retain existing holds and item overrides during a switch', () => {

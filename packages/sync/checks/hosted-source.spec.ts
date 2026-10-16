@@ -59,7 +59,8 @@ const fixture = (base: Readonly<Record<string, string>> = initial, profile?: str
     const tag = `v${number}`;
     repo.git('tag', ...(annotated ? ['-a', '-m', tag] : []), tag, commitSha);
     repo.git('push', '-q', 'origin', 'main', `refs/tags/${tag}`);
-    const record: SyncRevision = { setupId: 'setup-1', number, commitSha, tag, changelog: '', requiredEnv: [], items: sync.diffItems(sync.itemValues(before, profile), sync.itemValues(docs, profile)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' })) };
+    const values = (documents: Readonly<Record<string, string>>) => profile && profile !== 'default' && !Object.hasOwn(documents, `profiles/${profile}.json`) ? new Map() : sync.itemValues(documents, profile);
+    const record: SyncRevision = { setupId: 'setup-1', number, commitSha, tag, changelog: '', requiredEnv: [], items: sync.diffItems(values(before), values(docs)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' })) };
     records.push(record);
     return record;
   };
@@ -381,4 +382,25 @@ test('hosted verification uses inherited resolved items and ignores an unrelated
   assert.deepEqual(unrelated.items, []);
   assert.equal((await s.source(source => source.load(unrelated)))._tag, 'Success');
   assert.equal((await s.source(source => source.effective(first.items.map(item => accept(item.id)))))._tag, 'Success');
+});
+
+test('a profile added in a later revision verifies and loads', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  const first = s.publish();
+  assert.deepEqual(first.items, []);
+  const second = s.publish({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# child\n' });
+  const result = await s.source(source => source.load(second));
+  assert.equal(result._tag, 'Success');
+  if (result._tag === 'Success') assert.equal(s.textAt(result.success.repo, 'claude/CLAUDE.md'), '# child\n');
+});
+
+test('a linked hosted baseline ignores holds from before its followed profile existed', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.publish();
+  const head = s.publish({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  s.write(join(s.paths.stateRoot, 'state.json'), json({ version: 1, files: {}, applied: { commit: head.commitSha, at: '2026-10-07T00:00:00Z' } }));
+  s.write(join(s.paths.stateRoot, 'sync.json'), json({ version: 1, held: { [FILE]: s.first } }));
+  const result = await s.source(source => source.effective([]));
+  assert.equal(result._tag, 'Success');
+  if (result._tag === 'Success') assert.equal(s.textAt(result.success.applied.repo, 'claude/CLAUDE.md'), '# current\n');
 });
