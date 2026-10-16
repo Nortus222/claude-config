@@ -7,7 +7,7 @@ import { rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { FsFailed, nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
-import { FollowedStore, SyncStore, SetupSource, SetupsStore, followedSetupSourceLayer } from '@nortuscc/sync';
+import { FollowedStore, SyncStore, SetupSource, SetupsStore, RevisionUnavailable, followedSetupSourceLayer } from '@nortuscc/sync';
 import { startAgent, makeSession, makeHostedRuntime } from '../src/index.ts';
 import { prepareProfileOperation, readProfileOperation } from '../src/operations/profiles.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -412,4 +412,34 @@ test('a trusted profile setup resolves its profile, not the root', async t => {
     const snapshot = yield* selected.source!.load(revision);
     assert.equal(snapshot.desired.files.find(file => file.id === 'claude:settings.json')?.managed, false);
   }).pipe(Effect.provide(f.processes)));
+});
+
+for (const hostedEnabled of [false, true]) test(`a corrupt selection can be re-followed without restarting, hosted ${hostedEnabled}`, async t => {
+  const f = await fixture(t);
+  const corrupt = '{broken followed selection';
+  const path = join(f.m.paths.stateRoot, 'agent/followed.json');
+  f.m.write(path, corrupt);
+  const unavailable = Effect.fail(new RevisionUnavailable({ revision: 'HEAD', reason: 'invalid followed profile' }));
+  const startupSource = Layer.succeed(SetupSource, { trusted: unavailable, fetch: unavailable, current: unavailable, load: () => unavailable, effective: () => unavailable });
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    const client = { state: Effect.succeed({ accountId: null }), recover: () => Effect.fail(new HostedFailure({ code: 'network' })) } as unknown as HostedClient;
+    const hosted = hostedEnabled ? yield* makeHostedRuntime(client, { domains: () => f.m.domains, os: 'macos' }) : undefined;
+    const handle = yield* startAgent(() => f.m.domains, { deferStart: true, hosted });
+    yield* Effect.exit(handle.freshInspection!);
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange(change);
+    assert.ok('actionEffects' in preview);
+    assert.ok(preview.actionEffects?.includes('Current selection is unreadable and will be replaced'));
+    assert.equal(f.m.read(path), corrupt, 'preview must leave the corrupt selection intact');
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'repair-selection', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    assert.deepEqual(yield* (yield* FollowedStore).read, { repoUrl: url, profile: 'small', setupId: null });
+    const saved = readdirSync(f.m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile()).map(e => readFileSync(join(e.parentPath, e.name), 'utf8'));
+    assert.ok(saved.includes(corrupt));
+    const inspection = yield* handle.freshInspection!;
+    assert.equal(inspection.status.error, undefined);
+    assert.equal(inspection.inspection?.revision, f.commit);
+    assert.equal((yield* handle.selectOperationSetup!('local')).source?.profile, 'small');
+  })).pipe(Effect.provide(f.processes)), startupSource);
 });

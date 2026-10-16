@@ -69,8 +69,12 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
   const target: FollowedProfile = { repoUrl: change.repoUrl, profile: change.profile, setupId: change.setupId };
   const hostedBaseline = target.setupId === null ? undefined : hostedBaselineRelative('followed', target.repoUrl, target.setupId);
   const observe = Effect.gen(function* () {
-    const previous = yield* store.read;
-    const resetBaseline = previous !== undefined && normalizeRepoUrl(previous.repoUrl) !== normalizeRepoUrl(target.repoUrl);
+    const selection = yield* store.read.pipe(Effect.match({
+      onSuccess: previous => ({ previous, unreadable: false }),
+      onFailure: () => ({ previous: undefined, unreadable: true }),
+    }));
+    const { previous, unreadable } = selection;
+    const resetBaseline = unreadable || previous !== undefined && normalizeRepoUrl(previous.repoUrl) !== normalizeRepoUrl(target.repoUrl);
     const link = change.setupId === null ? undefined : yield* checkLink(handle, change.setupId);
     if (link && (normalizeRepoUrl(link.repoUrl) !== normalizeRepoUrl(target.repoUrl) || link.profile !== target.profile)) return yield* Effect.fail(stale());
     const readable = link?.access ?? (yield* access(target.repoUrl));
@@ -96,7 +100,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
     const nextHolds = Object.fromEntries(Object.entries(holds).filter(([id]) => !dropped.holds.includes(id)));
     const nextOverrides = retainedOverrides(overrides.value, dropped.overrides);
     const files = yield* Effect.forEach(['agent/followed.json', 'sync.json', 'overrides.json', 'state.json', ...(hostedBaseline ? [hostedBaseline] : [])], name => fs.readBytes(join(paths.stateRoot, name)).pipe(Effect.map(authorDigest)));
-    return { previous, resetBaseline, holds, overrides, dropped, nextHolds, nextOverrides, binding: digest({ previous, target, link, head, files, dropped, to }) };
+    return { previous, unreadable, resetBaseline, holds, overrides, dropped, nextHolds, nextOverrides, binding: digest({ previous, unreadable, target, link, head, files, dropped, to }) };
   }).pipe(Effect.timeout(PROFILE_TIMEOUT));
   const first = yield* observe;
   const keys = [...(first.resetBaseline ? ['profile:baseline'] : []), 'profile:follow', ...(first.dropped.holds.length ? ['profile:holds'] : []), ...(first.dropped.overrides.length ? ['profile:overrides'] : []), ...(target.setupId ? ['profile:subscribe'] : []),
@@ -106,6 +110,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
     touches: key === 'profile:holds' ? first.dropped.holds : key === 'profile:overrides' ? first.dropped.overrides : [], interruptible: false })), skipped: [] };
   const acceptance = { kind: 'followProfile' as const, generation: String(generation), baselineDigest: first.binding, planDigest: digest(plan), plannedKeys: keys };
   const actionEffects = [
+    ...(first.unreadable ? ['Current selection is unreadable and will be replaced'] : []),
     `Back up the followed profile and remove the listed holds and overrides${first.resetBaseline ? '. Clear the applied baseline. Every item from the new repository starts as incoming added; drop all holds from the previous repository' : ''}`,
     'Prove Git read access before subscribing to a shared setup',
     'Refetch for inspection only. Review incoming items before applying machine changes',

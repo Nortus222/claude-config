@@ -159,10 +159,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
         try: () => {
           const cached: unknown = JSON.parse(prior);
           if (!Array.isArray(cached)) throw new Error();
-          return cached.map(r => decodeHosted(SyncRevisionSchema, r)).length;
+          const decoded = cached.map(r => decodeHosted(SyncRevisionSchema, r));
+          if (decoded.some((r, i) => r.setupId !== options.setupId || r.number !== i + 1)) throw new Error();
+          return decoded.length;
         },
         catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }),
-      });
+      }).pipe(Effect.catch(() => Effect.succeed(-1)));
       if (range.length > priorCount) {
         yield* Backups.use(b => b.preserve(verifiedRecords, verifiedRelative, undefined, { private: true })).pipe(
           Effect.provide(backupsForRun(now()).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), Layer.succeed(Fs, fs))))),
