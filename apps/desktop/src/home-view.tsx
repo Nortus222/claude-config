@@ -6,6 +6,7 @@ import { AUTHOR_RUN_KINDS } from './controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
 import { changeTitle, plural, repoName } from './copy.ts';
+import { BusyProgress } from './busy-view.tsx';
 
 export type HomeScreen = 'changes' | 'publish' | 'settings';
 export type HomeProps = {
@@ -20,31 +21,14 @@ function Line({ tone, children, action }: { tone?: 'attention'; children: ReactN
   return <li className={tone ? `home-line row home-line-${tone}` : 'home-line row'}><p className="row-main">{children}</p><div className="row-trail home-actions">{action}</div></li>;
 }
 
-// Progress of the apply this Mac is running: the Changes run when one is active (it records its planned
-// steps), else this window's own run. HOOK(controller): an apply the agent started itself (first run,
-// auto-apply) reports no steps or total to the renderer; show its progress here once the machine state has it.
-function applyProgress({ machine, changes }: HomeProps): { done: number; total: number } {
-  const run = changes.run;
-  if (run && (run.state === 'accepted' || run.state === 'running')) {
-    const planned = (run.intent as { parity?: { plannedKeys?: readonly string[] } }).parity?.plannedKeys?.length ?? 0;
-    return { done: run.steps.length, total: Math.max(planned, run.steps.length) };
-  }
-  if (machine.run?.outcome !== 'running') return { done: 0, total: 0 };
-  return { done: machine.run.steps.filter(step => step.status !== 'pending' && step.status !== 'running').length, total: machine.run.steps.length };
-}
-
-function agentLine(props: HomeProps, open: (screen: HomeScreen) => ReactNode): ReactNode {
-  const status = props.machine.status, machine = props.machine;
+function agentLine({ machine }: HomeProps, open: (screen: HomeScreen, label?: string) => ReactNode): ReactNode {
+  const status = machine.status;
   if (machine.connection === 'browser') return <Line action={open('settings')}>Browser preview. Open the desktop app to see this Mac.</Line>;
   if (machine.connection === 'connecting') return <Line action={open('settings')}>Connecting to the agent…</Line>;
   if (machine.connection === 'disconnected') return <Line tone="attention" action={open('settings')}>The agent isn’t connected.</Line>;
   if (status?.error) return <Line tone="attention" action={open('settings')}>The agent couldn’t check this Mac. Details are in Settings.</Line>;
-  if (status?.applying) {
-    const { done, total } = applyProgress(props);
-    return <Line action={open('changes')}><span className="busy-line"><span className="spinner" aria-hidden="true" />
-      <span>The agent is applying changes{total ? ` · ${done} of ${plural(total, 'step')} done` : ''}.</span></span>
-      {total ? <progress className="home-progress" aria-label="Apply progress" value={done} max={total} /> : null}</Line>;
-  }
+  if (machine.busy) return <li className="home-line row home-busy"><div className="row-main"><BusyProgress busy={machine.busy} /></div>
+    <div className="row-trail home-actions">{open('changes', 'Open Changes')}</div></li>;
   if (status?.paused) return <Line tone="attention" action={open('settings')}>Automatic apply is paused.</Line>;
   return <Line action={open('settings')}>The agent is running{status ? ` and ${POLICY[status.policy]}` : ''}.</Line>;
 }

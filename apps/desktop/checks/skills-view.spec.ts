@@ -103,3 +103,14 @@ test('the Skills run heading says what happened in words, never a raw state', ()
   assert.equal(heading(receipt('succeeded')), 'Skill choice saved');
   for (const run of [receipt('accepted', update), receipt('cancelled'), receipt('interrupted', update)]) assert.doesNotMatch(heading(run) ?? '', /·|running|accepted|succeeded/);
 });
+
+test('a busy Mac shows its progress on Skills, and an outdated page says it is reading again', () => {
+  const busy = { kind: 'setupApply', description: 'Applying incoming changes from your profile', done: 3, total: 9, step: 'Install skill tdd', runId: 'run' };
+  const html = render({}, { busy });
+  assert.match(html, /aria-label="This Mac is busy"[\s\S]*Applying incoming changes from your profile[\s\S]*3 of 9[\s\S]*Install skill tdd/);
+  assert.doesNotMatch(html, /Reading skills…/);
+  const reading = render({ outdated: true });
+  assert.match(reading, /role="status"[^>]*>(<span[^>]*><\/span>)?Reading skills…<\/p>/);
+  assert.doesNotMatch(reading, /This Mac is busy|>Skills is reading this Mac again|This Mac changed since Skills was read/);
+  assert.match(reading, /<button disabled="" title="Skills is reading this Mac again\.">Check upstream<\/button>/, 'the disabled action names its reason');
+});

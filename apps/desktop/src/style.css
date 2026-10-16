@@ -521,6 +521,20 @@ legend {
   align-items: center;
   gap: var(--space-2);
 }
+.busy-progress {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.busy-count {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+}
+.busy-card {
+  border-color: var(--accent-soft);
+}
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

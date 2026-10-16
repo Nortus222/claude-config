@@ -229,3 +229,13 @@ test('with nothing followed, Changes lists the setup repository profiles and Fol
   const followedPage = await page(t, followProfiles);
   assert.doesNotMatch(followedPage.html(), />Follow default</);
 });
+
+test('while this Mac is busy, Changes shows its progress in place of the review and On this Mac', async t => {
+  const { c } = await page(t, f => { f.report.items = localItems(); });
+  const busy = { kind: 'reconcile', description: 'Applying changes on this Mac', done: 12, total: 30, step: 'Install skill tdd from mattpocock/skills', runId: null };
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: { ...c.state, busy }, controller: c }));
+  assert.match(html, /aria-label="This Mac is busy"[\s\S]*Applying changes on this Mac[\s\S]*12 of 30[\s\S]*Install skill tdd from mattpocock\/skills/);
+  assert.doesNotMatch(html, /changes-incoming-h|changes-local-h|hasn(&#x27;|')t been inspected/);
+  const free = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(free, /changes-incoming-h/); assert.match(free, /changes-local-h/); assert.doesNotMatch(free, /This Mac is busy/);
+});

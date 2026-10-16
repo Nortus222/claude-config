@@ -319,6 +319,6 @@ export function SettingsView({ machine, state, controller, machineController, on
 function reconnectReason(machine: ViewState): string | null {
   if (machine.connection === 'browser') return 'Open the desktop app to reconnect the agent.';
   if (machine.pending) return 'Waiting for the agent to answer.';
-  if (machine.connection === 'connected' && (machine.status?.applying === true || machine.run?.outcome === 'running')) return 'Available when the current apply finishes.';
+  if (machine.busy) return `${machine.busy.description}. Reconnect is available when it finishes.`;
   return null;
 }

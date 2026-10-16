@@ -7,7 +7,7 @@ import { UpdateController, type UpdateViewState } from '../src/update-controller
 import { UpdateView } from '../src/update-view.tsx';
 import { SetupController } from '../src/setup-controller.ts';
 import { AccountController } from '../src/account-controller.ts';
-import { MachineController } from '../src/controller.ts';
+import { MachineController, machineBusy } from '../src/controller.ts';
 import type { Bridge, HostEvent } from '../src/bridge.ts';
 
 function heldReply<T>() {
@@ -72,9 +72,11 @@ test('Settings reconnects the agent and keeps its version under Details', () => 
 test('a disabled Reconnect agent says why, next to it and as its title', () => {
   const c = machine(); const account = new AccountController(null, c);
   const applying = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: null, trusted: true, applying: true, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 0, held: 0, ready: 0, drift: 0 } };
-  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status: applying }, state: account.state, controller: account, machineController: c }));
-  assert.match(markup, /Available when the current apply finishes\.[\s\S]*<button disabled="" title="Available when the current apply finishes\.">Reconnect agent<\/button>/);
-  const idle = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status: { ...applying, applying: false } }, state: account.state, controller: account, machineController: c }));
+  const connected = { ...c.state, connection: 'connected' as const, status: applying };
+  const markup = renderToStaticMarkup(createElement(SettingsView, { machine: { ...connected, busy: machineBusy(connected) }, state: account.state, controller: account, machineController: c }));
+  const reason = 'The agent is applying changes on this Mac. Reconnect is available when it finishes.';
+  assert.match(markup, new RegExp(`${reason}[\\s\\S]*<button disabled="" title="${reason}">Reconnect agent</button>`));
+  const idle = renderToStaticMarkup(createElement(SettingsView, { machine: { ...c.state, connection: 'connected', status: { ...applying, applying: false }, busy: null }, state: account.state, controller: account, machineController: c }));
   assert.match(idle, /<button>Reconnect agent<\/button>/);
 });
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };

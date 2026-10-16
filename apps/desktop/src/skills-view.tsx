@@ -4,6 +4,7 @@ import type { ViewState } from './controller.ts';
 import { effectiveChoice, eligibleUpdates, mutationBlocked, type SkillChoice, type SkillRow, type SkillCheck, type SkillsController, type SkillsViewState } from './skills-controller.ts';
 import type { OperationOutput } from '@nortuscc/agent/operations';
 import { changeTitle } from './copy.ts';
+import { BusyCard } from './busy-view.tsx';
 export type SkillsFilter = 'all' | 'choices' | 'attention' | 'updates';
 type Inventory = { readonly items: readonly OperationOutput<'inspectIntent'>['items'][number][] };
 type Observation = Pick<InspectResult['items'][number], 'state' | 'disposition' | 'note'>;
@@ -85,10 +86,9 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
   const reloadDisabled = !!busy && !(active && state.error && !state.operation && machine.connection === 'connected');
   // One error at a time: an error or a stale read replaces the status line instead of repeating it.
   const alert = state.error ?? state.stale;
-  // While an apply holds this Mac, say so instead of the generic "reconnect or reload" line.
-  const applying = machine.status?.applying === true || machine.run?.outcome === 'running';
-  const busyNotice = state.native && !view && !alert && reloadDisabled && machine.connection === 'connected' && applying
-    ? 'This Mac is busy applying changes. Skills load when it finishes.' : null;
+  // A busy Mac shows what it is doing; once free, an outdated page reads again by itself.
+  const busyMac = state.native && !active ? machine.busy : null;
+  const reading = !busyMac && state.outdated && !alert;
   return <div className="skills-view">
     <header className="page-header"><div><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Apply on Changes makes installation changes.</p></div>
       <div className="header-actions">{onOpenChanges && waiting ? <button onClick={onOpenChanges}>Open Changes</button> : null}
@@ -97,9 +97,9 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
     {!state.native ? <section className="card"><h2>Open the desktop app to see this Mac's skills</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
       {state.error ? <p className="alert" role="alert">{state.error}</p> : null}
       {state.stale ? <p className="alert" role="alert">{state.stale}</p> : null}
-      {blocked && view && !state.operation && !state.stale ? <p className="notice" role="status">{blocked}</p> : null}
-      {busyNotice ? <p className="notice busy-line"><span className="spinner" aria-hidden="true" /><span>{busyNotice}</span></p> : null}
-      <p className="muted skills-detail" role="status" aria-live="polite">{alert || busyNotice ? '' : state.detail}</p>
+      {blocked && view && !state.operation && !state.stale && !busyMac && !reading ? <p className="notice" role="status">{blocked}</p> : null}
+      {busyMac ? <BusyCard busy={busyMac} note="Skill choices wait until it finishes, then Skills reads this Mac again." /> : null}
+      <p className={reading ? 'muted skills-detail busy-line' : 'muted skills-detail'} role="status" aria-live="polite">{alert || busyMac ? '' : reading ? <><span className="spinner" aria-hidden="true" />Reading skills…</> : state.detail}</p>
       {choicePreview && choicePatch ? <section className="card" aria-label="Choice preview"><h2>Review the changed choice</h2>
         {choicePreview.machineIntent.intentChanges.map((change, index) => <p key={index}>{change.message}</p>)}
         {choicePreview.machineIntent.installationEffects.map((effect, index) => <p className="muted" key={index}>{effect}</p>)}
@@ -107,7 +107,8 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
       </section> : null}
       {state.run ? <section className="card" aria-label="Skills run"><div className="card-head"><div><h2 className="busy-line">{active ? <span className="spinner" aria-hidden="true" /> : null}{runHeading(state.run)}</h2>
         {state.run.steps.length || state.run.parity?.backupIds.length ? <p>{state.run.steps.length ? stepCounts(state.run.steps) : ''}{state.run.steps.length && state.run.parity?.backupIds.length ? '. ' : ''}
-          {state.run.parity?.backupIds.length ? `${count(state.run.parity.backupIds.length, 'backup')} kept before changing files.` : ''}</p> : null}</div>
+          {state.run.parity?.backupIds.length ? `${count(state.run.parity.backupIds.length, 'backup')} kept before changing files.` : ''}</p> : null}
+        {active && state.run.current ? <p>{state.run.current.summary}</p> : null}</div>
         {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}</div>
       </section> : null}
       {view ? <>

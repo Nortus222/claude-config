@@ -25,9 +25,10 @@ ul.home-lines {
   background: var(--warning);
   vertical-align: 1px;
 }
-.home-progress {
-  margin-top: var(--space-2);
-  max-width: 320px;
+.home-busy {
+  align-items: flex-start;
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
 }
 .home-error {
   flex-basis: 100%;

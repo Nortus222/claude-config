@@ -225,7 +225,7 @@ function OutcomeCard({ state, controller, run }: AuthorProps & { run: RunView })
   const unknown = recovery?.action === 're-check' || recovery?.published === 'unknown';
   const needsPreview = !pushed && (run.result?.status === 'needs-preview' || recovery?.action === 're-preview');
   const pending = pushed && (recovery?.action === 'announce' || !!evidence?.pending.length || evidence?.tagged === false);
-  const status = unknown ? 'Push outcome unknown. Re-check reads the run again without pushing.' : pending ? 'Published, not yet announced' : pushed ? 'Published'
+  const status = unknown ? 'Push outcome unknown. Re-check reads the run again without pushing.' : pending ? 'Published, not yet announced' : pushed ? 'Published to main.'
     : needsPreview ? 'Needs preview. Main changed; review a new preview before publishing.' : active(run) ? ENDED[run.state] : `${ENDED[run.state]} Push is not confirmed.`;
   const [pill, tone] = unknown ? ['Unknown', 'pill-warning'] : pending ? ['Not announced', 'pill-warning'] : pushed ? ['Published', 'pill-success']
     : needsPreview ? ['Needs preview', 'pill-warning'] : active(run) ? ['Publishing', 'pill-accent'] : ['Not confirmed', 'pill-danger'];

@@ -6,7 +6,7 @@ import { HomeView } from '../src/home-view.tsx';
 import { HomeController } from '../src/home-controller.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
 import type { UpdateViewState } from '../src/update-controller.ts';
-import type { ViewState } from '../src/controller.ts';
+import type { MachineBusy, ViewState } from '../src/controller.ts';
 import { fixture, review, run, status } from './support/setup-sync.ts';
 import { authorRun, draft, draftId } from './support/author.ts';
 
@@ -19,7 +19,7 @@ const published = authorRun({ kind: 'publishDraft', draftId, digest: 'b'.repeat(
 const noUpdate: UpdateViewState = { native: true, update: null, pending: false, retry: null, detail: '', deferred: false };
 const item = (key: string, disposition: 'apply' | 'capture') => ({ key, domain: 'config' as const, label: key, group: 'Claude', state: 'drift', disposition });
 
-async function home(t: test.TestContext, options: { followed?: boolean; update?: UpdateViewState; navigate?: (screen: string) => void } = {}) {
+async function home(t: test.TestContext, options: { followed?: boolean; update?: UpdateViewState; navigate?: (screen: string) => void; busy?: MachineBusy } = {}) {
   const f = await fixture();
   f.handlers.inspectProfiles = () => ({ followed: options.followed === false ? null : followed, available: [{ name: 'personal', extends: null }] });
   f.handlers.setupReview = () => review({ rows });
@@ -31,6 +31,7 @@ async function home(t: test.TestContext, options: { followed?: boolean; update?:
   await changes.reload(); await controller.refresh();
   const machine: ViewState = { ...f.machine.state, status: status({ counts: { pending: 0, held: 0, ready: 0, drift: 0 } }),
     inspection: { ...f.machine.state.inspection!, items: [item('setting:claude:settings.json#model', 'apply'), item('file:claude:CLAUDE.md', 'apply'), item('setting:claude:settings.json#theme', 'apply'), item('file:codex:AGENTS.md', 'capture'), item('file:claude:CLAUDE.md#x', 'capture')] } };
+  if (options.busy) Object.assign(machine, { busy: options.busy });
   const render = () => renderToStaticMarkup(createElement(HomeView, { machine, changes: changes.state, home: controller.state, update: options.update ?? noUpdate,
     navigate: options.navigate ?? (() => {}), controller }));
   return { f, controller, render, calls: f.calls };
@@ -117,4 +118,16 @@ test('Review opens the screen that adopts the interrupted run; other kinds offer
   assert.match(line('Apply changes to this Mac'), />Review<\/button>[\s\S]*>Abandon<\/button>/);
   assert.match(line('Delete draft'), />Review<\/button>[\s\S]*>Abandon<\/button>/);
   assert.doesNotMatch(line('Remove old backups'), />Review<\/button>/); assert.match(line('Remove old backups'), />Abandon<\/button>/);
+});
+
+test('a busy Mac shows what it is doing, how far it is and the step in flight, with a way to Changes', async t => {
+  const busy: MachineBusy = { kind: 'setupApply', description: 'Applying incoming changes from your profile', done: 12, total: 30, step: 'Install skill tdd from mattpocock/skills', runId: 'run' };
+  const visited: string[] = [];
+  const h = await home(t, { busy, navigate: screen => visited.push(screen) });
+  const line = (h.render().match(/<li class="home-line[^"]*">[\s\S]*?<\/li>/g) ?? [])[0] ?? '';
+  assert.match(line, /Applying incoming changes from your profile[\s\S]*12 of 30/);
+  assert.match(line, /<progress[^>]*value="12" max="30"/);
+  assert.match(line, /Install skill tdd from mattpocock\/skills[\s\S]*>Open Changes<\/button>/);
+  const known = await home(t, { busy: { ...busy, done: null, total: null, step: null } });
+  assert.doesNotMatch(known.render(), /<progress| of 30/);
 });

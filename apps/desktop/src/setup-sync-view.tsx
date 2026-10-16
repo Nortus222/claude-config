@@ -5,6 +5,7 @@ import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncControll
 import { RunRecovery } from './run-recovery.tsx';
 import { changeTitle, errorText, itemLabel, repoName, type ItemLabel } from './copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
+import { BusyCard } from './busy-view.tsx';
 
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
@@ -70,13 +71,14 @@ const STAGED: Readonly<Record<SetupChoice['action'], string>> = {
   release: "Release the hold and take your profile's value", takeTheirs: "Use your profile's value and replace this Mac's (backed up first)",
 };
 
-// Why reading and choosing are unavailable, or null when they are available. HOOK(controller): the eligibility
-// flags carry no reason; replace this guess with the controller's own busy reason and apply progress once it has them.
+// Why reading and choosing are unavailable, or null when they are available. A busy Mac explains itself
+// in its own card.
 function unavailableReason(state: SetupSyncState): string | null {
   if (state.eligibility.read || state.pending || state.pagePending) return null;
   if (state.connection !== 'connected') return 'Connect the agent to read changes.';
+  if (state.busy) return `${state.busy.description}. Available when it finishes.`;
   if (activeRun(state.run)) return 'Available when the current run finishes.';
-  return 'This Mac is busy applying changes. Reading and choosing resume when it finishes.';
+  return 'Available when this Mac finishes its current work.';
 }
 
 // The panel's heading and its Apply button, in words for the kind of change previewed.
@@ -137,6 +139,7 @@ export function RunCard({ run, state, controller }: { run: RunView; state: Setup
         {state.eligibility.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : null}</div></div>
     {running && total ? <progress aria-label={`${changeTitle(run.intent.change.kind)} progress`} value={run.steps.length} max={total} /> : null}
     <p role="status" className={result && result.status !== 'done' && result.status !== 'cancelled' ? 'alert' : 'muted'}>{outcome}</p>
+    {running && run.current ? <p className="row-sub">{run.current.summary}</p> : null}
     {run.installation ? <p className="muted">{run.installation.message}</p> : null}
   </section>;
 }
@@ -309,22 +312,26 @@ export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Pr
   if (!state.native) return <div className="setup-sync-view changes-view"><header className="page-header"><div><h1>Changes</h1></div></header>
     <p className="notice">Open the desktop app to review changes. Browser preview has no agent connection.</p></div>;
   const { review, run, eligibility: can } = state;
-  const reason = unavailableReason(state);
+  const reason = unavailableReason(state), busy = state.busy;
+  // A busy Mac's card stands in for the run card of the same run, and for the review and "On this Mac".
+  const busyRun = busy && run && activeRun(run) && (busy.runId === null || busy.runId === run.runId);
   return <div className="setup-sync-view changes-view">
     <header className="page-header"><div><h1>Changes</h1><p className="intro">What your profile brings and what this Mac still needs.</p></div>
       <div className="header-actions">{state.connection !== 'connected' ? <span className={`pill connection ${state.connection}`}>{CONNECTION[state.connection]}</span> : null}
         <button disabled={!can.read} title={reason ?? undefined} onClick={() => void controller.reload()}>Reload</button>
         <button disabled={!can.refetch} title={reason ?? undefined} onClick={() => void controller.refetch()}>Check for new changes</button></div></header>
     {state.error && !Object.keys(state.groupErrors).length ? <p className="alert" role="alert">{state.error}</p> : null}
-    {reason && !activeRun(run) ? <p className="notice busy-line">{state.connection === 'connected' ? <span className="spinner" aria-hidden="true" /> : null}<span>{reason}</span></p> : null}
+    {reason && !busy && !activeRun(run) ? <p className="notice">{reason}</p> : null}
     <p className="setup-sync-detail" role="status">{state.pending ? 'Reading…' : state.message}</p>
     <PreviewPanel state={state} controller={controller} />
-    {run ? <RunCard run={run} state={state} controller={controller} /> : null}
+    {busy ? <BusyCard busy={busy} note="Incoming changes and this Mac’s items are read again when it finishes."
+      action={busyRun && can.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : undefined} /> : null}
+    {run && !busyRun ? <RunCard run={run} state={state} controller={controller} /> : null}
     {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()} onAbandon={() => void controller.abandon()}
       onKeep={() => controller.keepRun()} confirming={state.confirmingAbandon} disabled={!can.read} /> : null}
     <Following state={state} controller={controller} repoUrl={repoUrl} />
-    {review ? <Incoming review={review} state={state} controller={controller} /> : null}
-    <OnThisMac state={state} controller={controller} onOpenProfiles={onOpenProfiles} />
+    {review && !busy ? <Incoming review={review} state={state} controller={controller} /> : null}
+    {busy ? null : <OnThisMac state={state} controller={controller} onOpenProfiles={onOpenProfiles} />}
     <Details state={state} />
   </div>;
 }
