@@ -127,6 +127,33 @@ test('a pin-group refusal highlights only the exact source', async t => {
   assert.deepEqual(f.controller.state.groupErrors, { 'owner/repo-2': refusal });
   assert.equal(f.controller.state.preview, null);
 });
+const pinReview = () => review({ rows: [
+  { itemId: 'skill:owner/repo/one', kind: 'skill', change: 'changed', held: false, conflict: false, before: 'a', after: 'b' },
+  { itemId: 'skill:owner/repo/two', kind: 'skill', change: 'unchanged', held: false, conflict: false, before: 'a', after: 'a' },
+  { itemId: 'setting:a', kind: 'setting', change: 'changed', held: false, conflict: false, before: 'old', after: 'new' },
+  { itemId: 'setting:kept', kind: 'setting', change: 'unchanged', held: true, conflict: false, before: 'x', after: 'x' },
+], pinGroups: [{ source: 'owner/repo', itemIds: ['skill:owner/repo/one', 'skill:owner/repo/two'] }, { source: 'other/repo', itemIds: ['skill:other/repo/x'] }] });
+test('take all stages every incoming row with its pin-group siblings, and hold all holds them', async t => {
+  const f = await setup(t); f.handlers.setupReview = pinReview; await f.controller.reload();
+  f.controller.chooseAll('accept');
+  assert.deepEqual(f.controller.state.choices.map(c => `${c.itemId}=${c.action}`).sort(), ['setting:a=accept', 'skill:owner/repo/one=accept', 'skill:owner/repo/two=accept']);
+  f.controller.chooseAll('hold');
+  assert.deepEqual(new Set(f.controller.state.choices.map(c => c.action)), new Set(['hold']));
+  assert.equal(f.controller.state.choices.length, 3);
+});
+test('one control stages a whole pin group on this page', async t => {
+  const f = await setup(t); f.handlers.setupReview = pinReview; await f.controller.reload();
+  f.controller.choose({ itemId: 'setting:a', action: 'hold' });
+  f.controller.chooseAll('accept', 'owner/repo');
+  assert.deepEqual(f.controller.state.choices.map(c => `${c.itemId}=${c.action}`).sort(), ['setting:a=hold', 'skill:owner/repo/one=accept', 'skill:owner/repo/two=accept']);
+});
+test('a pin refusal relayed by the host with its error code still lands on its group', async t => {
+  const f = await setup(t); f.handlers.setupReview = pinReview; await f.controller.reload();
+  f.controller.choose({ itemId: 'skill:owner/repo/one', action: 'accept' });
+  f.handlers.previewChange = () => { throw 'INVALID_REQUEST: Choices for owner/repo must match: its items share one pin.'; };
+  await f.controller.preview();
+  assert.deepEqual(Object.keys(f.controller.state.groupErrors), ['owner/repo']);
+});
 test('paging retains issued selections and a replacement review clears them', async t => {
   const f = await setup(t); f.handlers.setupReview = input => input.cursor ? review({ rows: [{ itemId: 'setting:c', kind: 'setting', change: 'unchanged', conflict: false, held: true }], nextCursor: null }) : review({ nextCursor: 'next' });
   await f.controller.reload(); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.page('next');

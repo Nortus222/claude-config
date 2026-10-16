@@ -32,6 +32,16 @@ test('a failed Preview is reported beside the Preview button, not at the top of 
   c.choose({ itemId: 'setting:a', action: 'hold' }); assert.equal(c.state.previewError, null);
 });
 
+test('Setup offers take all, hold all and one control per pin group, and hides groups absent from the page', async t => {
+  const f = await fixture(); f.handlers.setupReview = () => review({ rows: [{ itemId: 'skill:owner/repo/one', kind: 'skill', change: 'changed', held: false, conflict: false, before: 'a', after: 'b' }],
+    pinGroups: [{ source: 'owner/repo', itemIds: ['skill:owner/repo/one'] }, { source: 'cursor/plugins', itemIds: ['skill:cursor/plugins/x'] }] });
+  const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); }); await c.reload();
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(html, />Take all incoming</); assert.match(html, />Hold all incoming</);
+  assert.match(html, /<fieldset[^>]*class="setup-sync-pin"[\s\S]*owner\/repo[\s\S]*>Take this group<[\s\S]*>Hold this group</);
+  assert.doesNotMatch(html, /cursor\/plugins/);
+});
+
 test('the preview lists each staged action before Apply', async t => {
   const f = await fixture(); const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
   await c.reload(); c.choose({ itemId: 'setting:a', action: 'takeTheirs' }); await c.preview();

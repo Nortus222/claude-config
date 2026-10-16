@@ -170,6 +170,20 @@ export class SetupSyncController {
     if (!this.state.choices.some(c => c.itemId === choice.itemId) && this.state.choices.length >= MAX_CHOICES) return;
     this.update({ choices: [...this.state.choices.filter(c => c.itemId !== choice.itemId), choice], preview: null, groupErrors: {}, previewError: null, error: null });
   }
+  // Stages one action for many rows on this page: one pin group, or every incoming row with its
+  // pin-group siblings so the group's choices match.
+  chooseAll(action: 'accept' | 'hold', source?: string) {
+    const review = this.state.review;
+    if (!this.state.eligibility.choose || !review) return;
+    const onPage = new Set(review.rows.map(row => row.itemId));
+    const ids = new Set(source !== undefined ? review.pinGroups.find(group => group.source === source)?.itemIds ?? []
+      : review.rows.filter(row => row.change !== 'unchanged').map(row => row.itemId));
+    if (source === undefined) for (const group of review.pinGroups) if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
+    const staged = new Map(this.state.choices.map(choice => [choice.itemId, choice]));
+    for (const itemId of ids) if (onPage.has(itemId) && this.issued.has(itemId)) staged.set(itemId, { itemId, action });
+    if (staged.size > MAX_CHOICES) return;
+    this.update({ choices: [...staged.values()], preview: null, groupErrors: {}, previewError: null, error: null });
+  }
   async page(direction: 'next' | 'previous') {
     const review = this.state.review;
     if (!this.state.eligibility.browse || !review || direction === 'next' && !review.nextCursor || direction === 'previous' && this.state.pageIndex === 0) return;
@@ -224,7 +238,9 @@ export class SetupSyncController {
     } catch (error) {
       if (this.current(mark)) {
         const text = message(error);
-        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => `Choices for ${group.source} must match: its items share one pin.` === text).map(group => [group.source, text]));
+        // The host prefixes the agent's refusal with its error code.
+        const refusal = text.replace(/^[A-Z_]+: /, '');
+        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => `Choices for ${group.source} must match: its items share one pin.` === refusal).map(group => [group.source, refusal]));
         this.update(change.kind === 'setupApply' && this.state.review ? { previewError: text, groupErrors } : { error: text, groupErrors });
       }
     } finally { if (this.current(mark)) this.update({ pending: false }); }
