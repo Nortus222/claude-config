@@ -1,7 +1,8 @@
+import { FILES } from '@nortuscc/profile-engine/author-values';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Effect, Layer, Schema, Semaphore } from 'effect';
-import { Backups, Fs, MachinePaths, Processes, backupsForRun, canonical } from '@nortuscc/machine';
+import { Backups, Fs, MachinePaths, Processes, homeDir, backupsForRun, canonical } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, parseProfileDocument, resolveNamedProfile } from '@nortuscc/profile-engine';
 import { AccessDenied, readDocuments } from '@nortuscc/sync';
 import { Git, IGNORES_FILE, discoverSkills, machineGit, readSkillContents } from '@nortuscc/source-watch';
@@ -19,7 +20,7 @@ import { decodeOperationOutput, type OperationChange, type OperationInput, type 
 import { DiscoveryResultSchema } from './schemas.ts';
 import type { PreparedParityChange } from './parity.ts';
 
-export type AuthorRead = 'authorProfiles' | 'authorFile' | 'upstreams' | 'discoverUpstream' | 'upstreamSkill' | 'drafts' | 'draftPreview' | 'ghState';
+export type AuthorRead = 'machineFile' | 'authorProfiles' | 'authorFile' | 'upstreams' | 'discoverUpstream' | 'upstreamSkill' | 'drafts' | 'draftPreview' | 'ghState';
 type LocalChange = Extract<OperationChange, { kind: 'editDraft' | 'removeDraftIntent' | 'deleteDraft' | 'ghLogin' }>;
 export type AuthorChange = LocalChange | Extract<OperationChange, { kind: 'publishDraft' | 'announcePublication' }>;
 export const isAuthorChange = (change: OperationChange): change is AuthorChange =>
@@ -85,7 +86,13 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
       if (input.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'Author operations support machine scope only'));
       let result: unknown;
       if (name === 'ghState') result = { state: yield* ghStatus().pipe(Effect.provideService(Processes, processes)) };
-      else if (name === 'drafts') result = { drafts: yield* store.list() };
+      else if (name === 'machineFile') {
+        const fileId = (input as OperationInput<'machineFile'>).fileId;
+        const file = FILES.find(file => file.id === fileId)!;
+        const text = yield* fs.readText(join(homeDir(paths, file.home), file.dest));
+        const bytes = Buffer.from(text ?? '');
+        result = { fileId, exists: text !== undefined, text: new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes.subarray(0, CAPTURE_MAX_BYTES), { stream: true }), truncated: bytes.length > CAPTURE_MAX_BYTES };
+      } else if (name === 'drafts') result = { drafts: yield* store.list() };
       else if (name === 'draftPreview') result = yield* publisher.previewDraft((input as OperationInput<'draftPreview'>).draftId);
       else if (name === 'discoverUpstream') {
         const source = (input as OperationInput<'discoverUpstream'>).source;

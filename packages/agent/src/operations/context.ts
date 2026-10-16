@@ -3,6 +3,7 @@ import { ContextResultSchema } from './schemas.ts';
 
 export const capabilityInventory = {
   authorProfiles: {available:true},
+  machineFile: {available:true},
   authorFile: {available:true},
   upstreams: {available:true},
   discoverUpstream: {available:true},

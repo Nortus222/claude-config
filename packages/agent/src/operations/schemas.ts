@@ -1,3 +1,4 @@
+import { FILES } from '@nortuscc/profile-engine/author-values';
 import { IntentSchema } from '../author/intents.ts';
 import { DraftSchema } from '../author/draft-schema.ts';
 import { utf8ByteLength, MachinePatchSchema, DisplayNameSchema, DeviceStartResponseSchema, SyncMachineSchema, SyncSetupSchema, RepoUrlSchema, ProfileNameSchema } from '@nortuscc/hosted-protocol';
@@ -122,7 +123,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['authorProfiles','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -467,6 +468,8 @@ export type SetupReview = typeof SetupReviewSchema.Type;
 export type SetupReviewRow = typeof SetupReviewRowSchema.Type;
 
 export const AuthorProfilesInputSchema = Schema.Struct({ scope });
+export const MachineFileInputSchema = Schema.Struct({ scope, fileId: Schema.String.check(Schema.makeFilter(value => FILES.some(file => file.id === value && file.capture))) });
+export const MachineFileResultSchema = Schema.Struct({ fileId: Schema.String, exists: Schema.Boolean, text: Schema.String, truncated: Schema.Boolean });
 export const AuthorFileInputSchema = Schema.Struct({ scope, profile: ProfileNameSchema, fileId: KeySchema });
 export const UpstreamsInputSchema = Schema.Struct({ scope });
 export const DiscoverUpstreamInputSchema = Schema.Struct({ scope, source: AuthorSourceSchema });

@@ -10,7 +10,7 @@ const profiles = 'Personal sharing and owned-profile distribution';
 
 // Supported owner behavior and explicit prerequisites, with shared reads and mutation kinds.
 export const engineCapabilityCoverage = {
-  authorReads: available('operations/author.ts', ['authorProfiles','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState'], 'All-profile author inspection, local drafts, upstream discovery and gh state.'),
+  authorReads: available('operations/author.ts', ['authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState'], 'All-profile author inspection, local drafts, upstream discovery and gh state.'),
   authorLogin: available('author/gh.ts', ['previewChange','applyChange','getRun'], 'GitHub device challenge remains visible only while gh is pending.', ['ghLogin']),
   appContext: available('operations/context.ts', ['getContext'], 'App ownership, runtime, configured targets, setup/account availability and supported scopes.'),
   machineInspection: available('machine/run.ts', ['inspect'], 'Config, integrations, skills, drift, conflicts and reconciliation keys.'),
@@ -65,6 +65,7 @@ export const engineCapabilityCoverage = {
 
 const capabilityCoverage: Record<string, { readonly state: 'available' | 'remaining'; readonly reason?: string }> = {
   authorProfiles: {state:'available'},
+  machineFile: {state:'available'},
   authorFile: {state:'available'},
   upstreams: {state:'available'},
   discoverUpstream: {state:'available'},

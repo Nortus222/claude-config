@@ -1,7 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
-  AuthorProfilesInputSchema, AuthorFileInputSchema, UpstreamsInputSchema, DiscoverUpstreamInputSchema, UpstreamSkillInputSchema, DraftsInputSchema, DraftPreviewInputSchema, GhStateInputSchema,
+  MachineFileInputSchema, MachineFileResultSchema, AuthorProfilesInputSchema, AuthorFileInputSchema, UpstreamsInputSchema, DiscoverUpstreamInputSchema, UpstreamSkillInputSchema, DraftsInputSchema, DraftPreviewInputSchema, GhStateInputSchema,
   AuthorProfilesResultSchema, AuthorFileResultSchema, UpstreamsResultSchema, DiscoveryResultSchema, UpstreamSkillResultSchema, DraftsResultSchema, DraftPreviewSchema, GhStateResultSchema,
   ListBackupsInputSchema, ListBackupsResultSchema, AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
   WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
@@ -23,6 +23,7 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 
 export const operationDefinitions = {
   authorProfiles: define('authorProfiles', AuthorProfilesInputSchema, AuthorProfilesResultSchema),
+  machineFile: define('machineFile', MachineFileInputSchema, MachineFileResultSchema),
   authorFile: define('authorFile', AuthorFileInputSchema, AuthorFileResultSchema),
   upstreams: define('upstreams', UpstreamsInputSchema, UpstreamsResultSchema),
   discoverUpstream: define('discoverUpstream', DiscoverUpstreamInputSchema, DiscoveryResultSchema),
