@@ -9,7 +9,7 @@ export type Home = Target | 'codex-openrouter';
 export const CATEGORIES = ['agents', 'plugins', 'marketplaces', 'hooks', 'skills'] as const;
 export type Category = (typeof CATEGORIES)[number];
 
-export type LayerName = 'base' | 'pin' | 'machine';
+export type LayerName = 'base' | 'profile' | 'pin' | 'machine';
 // Which layer decided a value, and the document (or 'built-in' table) it came from.
 export type Origin = { readonly layer: LayerName; readonly source: string };
 // `path` is display text (dotted, ids may contain '.' or ':'), not a parseable pointer.
