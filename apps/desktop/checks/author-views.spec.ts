@@ -23,7 +23,17 @@ test('uncertain pushes offer Re-check without claiming publication',async t=>{
 });
 test('Sign in shows gh\'s one-time code and an Open GitHub link',async t=>{
   const f=await authorFixture(t);f.handlers.getRun=()=>authorRun({kind:'ghLogin'},{ghCode:{code:'ABCD-1234',url:'https://github.com/login/device'}});await f.controller.signIn();
-  const html=render(PublishView,f);assert.match(html,/ABCD-1234/);assert.match(html,/<a[^>]*href="https:\/\/github.com\/login\/device"[^>]*>Open GitHub<\/a>/);
+  const html=render(PublishView,f);assert.match(html,/ABCD-1234/);assert.match(html,/<button[^>]*>Open GitHub<\/button>/);assert.doesNotMatch(html,/<a /);
+});
+test('GitHub links open natively by fixed name, never as webview anchors',async t=>{
+  const f=await authorFixture(t);const opened:unknown[]=[];const invoke=f.bridge.invoke;
+  f.bridge.invoke=async(command,args)=>{if(command==='open_github_link'){opened.push(args);return {generation:1,data:{opened:true}};}return invoke(command,args);};
+  f.controller.state={...f.controller.state,gh:{state:'missing'}};
+  assert.match(render(ProfilesView,f),/<button[^>]*>Install GitHub CLI<\/button>/);
+  await f.controller.openGitHub('installCli');await f.controller.openGitHub('deviceLogin');
+  assert.deepEqual(opened,[{link:'installCli'},{link:'deviceLogin'}]);
+  f.bridge.invoke=async()=>{throw 'Unable to open GitHub';};await f.controller.openGitHub('installCli');
+  assert.equal(f.controller.state.error,'Unable to open GitHub');
 });
 test('an unavailable source shows that its list could not be read and offers no checkboxes',async t=>{
   const f=await authorFixture(t);f.handlers.upstreams=()=>({sources:[{source:'owner/repo',inProfiles:['team'],pin:null,discovery:{kind:'unavailable',source:'owner/repo',reason:'unparseable'}}]});await f.controller.reload();

@@ -216,6 +216,11 @@ export class AuthorController {
       await this.request(mark => this.apply(mark, preview), true);
   }
   async signIn() { await this.change({ kind: 'ghLogin' }); }
+  // The webview cannot open external links; the host opens a fixed GitHub page by name.
+  async openGitHub(link: 'deviceLogin' | 'installCli') {
+    if (!this.bridge || this.disposed) return;
+    try { await this.bridge.invoke('open_github_link', { link }); } catch (error) { this.fail(error); }
+  }
   async announce() {
     const run = this.state.publicationRun;
     if (run && (run.publicationRecovery?.action === 'announce' || run.publication?.pushed && (run.publication.pending.length > 0 || !run.publication.tagged)))

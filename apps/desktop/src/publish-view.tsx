@@ -42,10 +42,10 @@ function GitHubCard({ state, controller }: AuthorProps) {
   return <section className="card" aria-label="GitHub publishing access"><h2>GitHub</h2>
     <p>{state.gh?.state === 'missing' ? 'GitHub CLI is not installed' : state.gh?.state === 'signed-out' ? 'Not signed in to GitHub, or GitHub is unreachable'
       : state.gh?.state === 'ready' ? 'GitHub is ready' : 'GitHub state is unavailable'}</p>
-    {state.gh?.state === 'missing' ? <a href="https://cli.github.com/" target="_blank" rel="noreferrer">Install GitHub CLI</a> : null}
+    {state.gh?.state === 'missing' ? <button onClick={() => void controller.openGitHub('installCli')}>Install GitHub CLI</button> : null}
     {signingIn ? <>
       <p role="status">GitHub sign-in is pending. Complete authorization in your browser.</p>
-      {code ? <><p className="device-code" aria-label="GitHub one-time code">{code.code}</p><a href={code.url} target="_blank" rel="noreferrer">Open GitHub</a></>
+      {code ? <><p className="device-code" aria-label="GitHub one-time code">{code.code}</p><button onClick={() => void controller.openGitHub('deviceLogin')}>Open GitHub</button></>
         : <p>Waiting for GitHub's one-time code. Retry to read the current run.</p>}
     </> : state.gh?.state !== 'ready' && state.gh?.state !== 'missing' ? <button disabled={!state.canWrite} onClick={() => void controller.signIn()}>Sign in with GitHub</button> : null}
     <button disabled={!state.canRead} onClick={() => void controller.reload()}>Retry</button>

@@ -809,15 +809,27 @@ pub fn install_git(resources: &Path) -> Result<Value, String> {
     if value != json!({"requested":true}) { return Err("Invalid installer result".into()); }
     Ok(value)
 }
-pub fn device_login_command() -> Command {
+/// The GitHub pages the renderer may open. It names a page; it never supplies a URL.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHubLink { DeviceLogin, InstallCli }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubLinkArgs { pub link: GitHubLink }
+pub fn github_link_command(link: GitHubLink) -> Command {
+    let url = match link { GitHubLink::DeviceLogin => "https://github.com/login/device", GitHubLink::InstallCli => "https://cli.github.com/" };
     let mut command = Command::new("/usr/bin/open");
-    command.arg("https://github.com/login/device").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     command
 }
+pub fn device_login_command() -> Command { github_link_command(GitHubLink::DeviceLogin) }
 pub fn open_device_login() -> Result<Value, String> {
     run_browser(device_login_command(), Duration::from_secs(5))
+}
+pub fn open_github_link(link: GitHubLink) -> Result<Value, String> {
+    run_browser(github_link_command(link), Duration::from_secs(5))
 }
 fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String> {
     wait_browser(command.spawn().map_err(|_| "Unable to open GitHub")?, timeout)
@@ -1890,6 +1902,18 @@ mod onboarding_bridge_tests {
         let command = device_login_command();
         assert_eq!(command.get_program(), "/usr/bin/open");
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["https://github.com/login/device"]);
+    }
+    #[test]
+    fn github_links_open_only_fixed_https_github_urls() {
+        for (link, url) in [(json!({"link":"deviceLogin"}), "https://github.com/login/device"), (json!({"link":"installCli"}), "https://cli.github.com/")] {
+            let args: GitHubLinkArgs = decode_args(link).unwrap();
+            let command = github_link_command(args.link);
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), vec![url]);
+        }
+        for bad in [json!({"link":"https://evil.invalid"}), json!({"link":"deviceLogin","url":"https://evil.invalid"}), json!({"url":"https://github.com/login/device"}), json!({})] {
+            assert!(decode_args::<GitHubLinkArgs>(bad).is_err());
+        }
     }
 }
 

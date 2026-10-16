@@ -93,7 +93,7 @@ function SemanticRunResult({ run, challengeCurrent }: { run: OperationRunView; c
     {accepted?.kind === 'pruneBackups' && accepted.retention.limited ? <p>This retention batch is limited. Review another preview for remaining eligible folders.</p> : null}
     {signIn ? <>
       <p>Device authorization: {signIn.state}. Display expires at {signIn.expiresAt}.</p>
-      {challenge?.userCode && challenge.verificationUri ? <p>Complete authorization in your browser at <a href={challenge.verificationUri} target="_blank" rel="noreferrer">{challenge.verificationUri}</a> with code <code>{challenge.userCode}</code>.</p>
+      {challenge?.userCode && challenge.verificationUri ? <p>Complete authorization in your browser at <code>{challenge.verificationUri}</code> with code <code>{challenge.userCode}</code>.</p>
         : <p>Challenge unavailable. Inspect current account state before starting authorization again.</p>}
     </> : null}
   </div>;
