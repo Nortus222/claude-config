@@ -89,7 +89,7 @@ function App() {
     {choosingProfile ? <ProfileChoiceView state={setupSyncState} controller={setupSync} repoUrl={setupState.setup?.defaultRepoUrl ?? DEFAULT_REPO_URL} onDone={settleProfile} /> :
     <ShellView screen={screen} navigate={setScreen} machine={state} badges={navBadges(setupSyncState, homeState, updateState)} onReconnect={() => void machine.restart()} onRecheck={() => void machine.inspect()}>
       {screen === 'home' ? <HomeView machine={state} changes={setupSyncState} home={homeState} update={updateState} navigate={setScreen} controller={home} /> : null}
-      {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} /> : null}
+      {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} repoUrl={setupState.setup?.defaultRepoUrl ?? DEFAULT_REPO_URL} /> : null}
       {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} onOpenChanges={() => setScreen('changes')} /> : null}
       {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}
       {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}

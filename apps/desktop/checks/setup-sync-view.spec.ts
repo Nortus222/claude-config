@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SetupSyncView } from '../src/setup-sync-view.tsx';
+import { SetupSyncView, SetupProfiles } from '../src/setup-sync-view.tsx';
+import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
 import { fixture, review, run, localItems, localRun, flush } from './support/setup-sync.ts';
 
@@ -11,11 +12,12 @@ async function page(t: test.TestContext, prepare: (f: Awaited<ReturnType<typeof 
   const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
   if (f.report.items.length) await f.machine.inspect();
   await c.reload();
-  return { ...f, c, html: (props: { onOpenProfiles?: () => void } = {}) => renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c, ...props })) };
+  return { ...f, c, html: (props: { onOpenProfiles?: () => void; repoUrl?: string } = {}) => renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c, ...props })) };
 }
 const buttons = (html: string) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map(match => match[1]!);
 // Buttons that start a change: the page has exactly one, inside the top preview panel.
-const applyButtons = (html: string) => buttons(html).filter(text => /^(Apply|Switch to|Follow |Hold \d)/.test(text));
+// The list of profiles to follow only previews, so its Follow buttons are left out.
+const applyButtons = (html: string) => buttons(html.replace(/<ul class="profile-choice-list"[\s\S]*?<\/ul>/, '')).filter(text => /^(Apply|Switch to|Follow |Hold \d)/.test(text));
 const panel = (html: string) => /<section class="card changes-preview"[\s\S]*?<\/section>/.exec(html)?.[0] ?? '';
 const details = (html: string) => html.slice(html.indexOf('<details class="changes-details"'));
 // What a reader sees or hears outside Details: text and accessible names.
@@ -201,4 +203,22 @@ test('Abandon on Changes asks once and names the run', async t => {
   c.askAbandon(); const text = html();
   assert.match(text, /Abandon “Apply incoming changes”\? Its remaining steps won’t run\. Finished steps and backups are kept\./);
   assert.match(text, /<button class="danger">Abandon<\/button><button>Keep<\/button>/);
+});
+
+test('with nothing followed, Changes lists the setup repository profiles and Follow previews one', async t => {
+  const { c, html, calls, handlers } = await page(t, f => {
+    f.handlers.inspectProfiles = () => ({ followed: null, available: [{ name: 'default', extends: null }, { name: 'team', extends: 'default' }] });
+  });
+  handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: [], overrides: [] }, actionEffects: ['Inspect only'] });
+  const text = html({ repoUrl: DEFAULT_REPO_URL });
+  assert.match(text, /Profiles in https:\/\/github.com\/Nortus222\/claude-config.git/);
+  assert.deepEqual(buttons(text).filter(label => label.startsWith('Follow ')), ['Follow default', 'Follow team']);
+  const element = SetupProfiles({ state: c.state, controller: c, repoUrl: DEFAULT_REPO_URL })!;
+  const follow = (element.props.children[1].props.children as any[]).find(item => item.key === 'team').props.children[1];
+  assert.equal(follow.props.disabled, false);
+  follow.props.onClick(); await flush();
+  assert.deepEqual(calls.filter(call => call.name === 'previewChange').at(-1)?.input.change, { kind: 'followProfile', repoUrl: DEFAULT_REPO_URL, profile: 'team', setupId: null });
+  assert.match(panel(html()), /Follow team/);
+  const followedPage = await page(t, followProfiles);
+  assert.doesNotMatch(followedPage.html(), />Follow default</);
 });

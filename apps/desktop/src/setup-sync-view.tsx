@@ -4,13 +4,15 @@ import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/op
 import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { RunRecovery } from './run-recovery.tsx';
 import { changeTitle, errorText, itemLabel, type ItemLabel } from './copy.ts';
+import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
 type Observed = InspectResult['items'][number];
 type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'chooseAll' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'askAbandon' | 'keepRun' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'
-  | 'toggleLocal' | 'previewLocal' | 'cancelPreview'>;
-type Props = { state: SetupSyncState; controller: Actions; onOpenProfiles?: () => void };
+  | 'toggleLocal' | 'previewLocal' | 'cancelPreview' | 'followRepository'>;
+// `repoUrl` is the setup repository, whose profiles an unfollowed Mac can follow.
+type Props = { state: SetupSyncState; controller: Actions; onOpenProfiles?: () => void; repoUrl?: string };
 
 const CHANGE = { added: 'Added', changed: 'Changed', removed: 'Removed', unchanged: 'Unchanged' };
 const CONNECTION = { connected: 'Connected', connecting: 'Connecting', disconnected: 'Disconnected', browser: 'Browser preview' };
@@ -118,13 +120,25 @@ export function RunCard({ run, state, controller }: { run: RunView; state: Setup
   </section>;
 }
 
-function Following({ state, controller }: Props) {
+// With nothing followed, the setup repository's own profiles, each with Follow.
+export function SetupProfiles({ state, controller, repoUrl }: { state: SetupSyncState; controller: Pick<SetupSyncController, 'followRepository'>; repoUrl: string }) {
+  const available = state.profiles && !state.profiles.followed ? state.profiles.available : [];
+  if (!available.length) return null;
+  return <div className="changes-local-group"><h3>Profiles in {repoUrl}</h3>
+    <ul className="profile-choice-list" aria-label="Profiles to follow">{available.map(profile => <li key={profile.name}>
+      <span><strong>{profile.name}</strong>{profile.extends ? <small>Builds on {profile.extends}</small> : null}</span>
+      <button disabled={!state.eligibility.read} onClick={() => void controller.followRepository(repoUrl, profile.name)}>Follow {profile.name}</button>
+    </li>)}</ul></div>;
+}
+
+function Following({ state, controller, repoUrl = DEFAULT_REPO_URL }: Props) {
   const { source } = state;
   const [link, setLink] = React.useState('');
   const followed = state.profiles?.followed;
   return <section className="card setup-sync-summary" aria-labelledby="changes-following-h">
     <p className="eyebrow">FOLLOWING</p><h2 id="changes-following-h">{followed ? `Following ${followed.profile} from ${followed.repoUrl}` : source?.repository ? `Using ${source.repository}` : "This Mac doesn't follow a profile yet"}</h2>
     {state.profileNotice ? <p className="notice">{state.profileNotice}</p> : null}
+    <SetupProfiles state={state} controller={controller} repoUrl={repoUrl} />
     {followed ? <label>Profile <select aria-label="Profile" value={state.switchTarget ?? followed.profile} disabled={!state.eligibility.read} onChange={event => void controller.switchProfile(event.target.value)}>{state.profiles?.available.map(profile => <option key={profile.name} value={profile.name}>{profile.name}</option>)}</select></label> : null}
     <form onSubmit={event => { event.preventDefault(); void controller.followSharedLink(link); }}><label>Follow a shared link <input value={link} onChange={event => setLink(event.target.value)} disabled={!state.eligibility.read} placeholder="nortuscc://follow/…" /></label><button disabled={!state.eligibility.read || !link.trim()}>Preview follow</button></form>
     {state.sources.length > 1 ? <label>Source <select value={source?.setupId ?? ''} disabled={!state.eligibility.read}
@@ -249,7 +263,7 @@ function Details({ state }: { state: SetupSyncState }) {
 
 // Changes: one preview panel holding the page's only Apply, the current run, the followed profile, incoming
 // changes and this Mac's own items, then Details.
-export function SetupSyncView({ state, controller, onOpenProfiles }: Props) {
+export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Props) {
   if (!state.native) return <div className="setup-sync-view changes-view"><h1>Changes</h1><p className="notice">Open the desktop app to review changes. Browser preview has no agent connection.</p></div>;
   const { review, run, eligibility: can } = state;
   return <div className="setup-sync-view changes-view">
@@ -262,7 +276,7 @@ export function SetupSyncView({ state, controller, onOpenProfiles }: Props) {
     {run ? <RunCard run={run} state={state} controller={controller} /> : null}
     {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()} onAbandon={() => void controller.abandon()}
       onKeep={() => controller.keepRun()} confirming={state.confirmingAbandon} disabled={!can.read} /> : null}
-    <Following state={state} controller={controller} />
+    <Following state={state} controller={controller} repoUrl={repoUrl} />
     {review ? <Incoming review={review} state={state} controller={controller} /> : null}
     <OnThisMac state={state} controller={controller} onOpenProfiles={onOpenProfiles} />
     <Details state={state} />
