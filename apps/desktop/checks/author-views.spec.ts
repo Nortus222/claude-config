@@ -263,3 +263,39 @@ test('an interrupted author run on Publish counts its effects and keeps the run 
   assert.doesNotMatch(visible, /author-run|draft:written-key|draft:remaining-key|backup-author/);
   for (const text of ['author-run', 'draft:written-key', 'draft:remaining-key']) assert.ok(html.includes(text), text);
 });
+
+test('a diff hidden by the shortened preview says so instead of claiming only a newline changed', async t => {
+  const f = await previewed(t, { diff: [{ path: 'claude/CLAUDE.md', before: 'same start', after: 'same start', truncated: true }, { path: 'codex/AGENTS.md', before: 'a', after: 'a\n' }] });
+  const text = words(render(PublishView, f));
+  assert.match(text, /claude\/CLAUDE\.mdThe change is beyond the shortened preview\./);
+  assert.equal(text.match(/Only the final newline changes\./g)?.length, 1);
+});
+
+test('a failed Cancel of a publication shows its error on the outcome card', async t => {
+  const f = await authorFixture(t);
+  const publishing = authorRun({ kind: 'publishDraft', draftId, digest: 'b'.repeat(64) }, { state: 'running', result: null });
+  f.controller.state = { ...f.controller.state, run: publishing, publicationRun: publishing };
+  f.handlers.cancelRun = () => { throw new Error('BUSY: The push is already in progress.'); };
+  await f.controller.cancel();
+  const html = render(PublishView, f);
+  const card = /<section class="card" aria-label="Publication outcome">[\s\S]*?<\/section>/.exec(html)?.[0] ?? '';
+  assert.match(card, />Cancel<\/button>[\s\S]*role="alert">The push is already in progress\.</);
+  assert.equal(html.match(/The push is already in progress/g)?.length, 1);
+});
+
+test('Abandon on Publish asks once and names the run before abandoning', async t => {
+  const f = await authorFixture(t);
+  const interrupted = authorRun({ kind: 'deleteDraft', draftId }, { state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
+  f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; await f.controller.reload();
+  assert.equal(f.controller.state.run?.state, 'interrupted');
+  await f.controller.abandon(); assert.equal(f.calls.some(c => c.name === 'abandonRun'), false);
+  f.controller.askAbandon();
+  const text = words(render(PublishView, f));
+  assert.match(text, /Abandon “Delete draft”\? Its remaining steps won’t run\. Finished steps and backups are kept\./);
+  f.controller.dismiss(); assert.equal(f.controller.state.confirming, null);
+  f.controller.askAbandon();
+  f.handlers.abandonRun = () => ({ ...interrupted, state: 'abandoned' });
+  await f.controller.abandon();
+  assert.equal(f.calls.filter(c => c.name === 'abandonRun').length, 1); assert.equal(f.controller.state.run?.state, 'abandoned');
+  assert.equal(f.controller.state.confirming, null);
+});

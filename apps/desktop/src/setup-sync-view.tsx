@@ -8,7 +8,7 @@ import { changeTitle, errorText, itemLabel, type ItemLabel } from './copy.ts';
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
 type Observed = InspectResult['items'][number];
-type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'chooseAll' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'
+type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'chooseAll' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'askAbandon' | 'keepRun' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'
   | 'toggleLocal' | 'previewLocal' | 'cancelPreview'>;
 type Props = { state: SetupSyncState; controller: Actions; onOpenProfiles?: () => void };
 
@@ -259,7 +259,8 @@ export function SetupSyncView({ state, controller, onOpenProfiles }: Props) {
     <p className="setup-sync-detail" role="status">{state.pending ? 'Reading…' : state.message}</p>
     <PreviewPanel state={state} controller={controller} />
     {run ? <RunCard run={run} state={state} controller={controller} /> : null}
-    {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAbandon={() => void controller.abandon()} disabled={!can.read} /> : null}
+    {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()} onAbandon={() => void controller.abandon()}
+      onKeep={() => controller.keepRun()} confirming={state.confirmingAbandon} disabled={!can.read} /> : null}
     <Following state={state} controller={controller} />
     {review ? <Incoming review={review} state={state} controller={controller} /> : null}
     <OnThisMac state={state} controller={controller} onOpenProfiles={onOpenProfiles} />

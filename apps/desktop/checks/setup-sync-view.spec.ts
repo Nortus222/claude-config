@@ -181,3 +181,12 @@ test('the Changes heading counts incoming rows like Home and the badge: not unch
   const quiet = await page(t, f => { f.handlers.setupReview = () => review({ rows: [rows.at(-1)] }); });
   assert.match(quiet.html(), /<h2 id="changes-incoming-h">No incoming changes from your profile<\/h2>/);
 });
+
+test('Abandon on Changes asks once and names the run', async t => {
+  const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
+  const { c, html } = await page(t, f => { f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; });
+  assert.match(html(), />Re-preview<\/button><button>Abandon<\/button>/);
+  c.askAbandon(); const text = html();
+  assert.match(text, /Abandon “Apply incoming changes”\? Its remaining steps won’t run\. Finished steps and backups are kept\./);
+  assert.match(text, /<button class="danger">Abandon<\/button><button>Keep<\/button>/);
+});

@@ -102,7 +102,7 @@ test('Abandon marks an interrupted run abandoned and prevents further Re-preview
   f.controller.enter(); await flush(); assert.equal(f.controller.state.run?.state, 'interrupted');
   await f.controller.repreview(); assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, change);
   assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
-  await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned'); assert.equal(f.controller.state.preview, null);
+  f.controller.askAbandon(); await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned'); assert.equal(f.controller.state.preview, null);
   const previews = f.calls.filter(c => c.name === 'previewChange').length;
   await f.controller.repreview(); assert.equal(f.calls.filter(c => c.name === 'previewChange').length, previews);
   assert.equal(f.controller.state.preview, null);
@@ -241,7 +241,7 @@ test('an interrupted reconcile is offered for Re-preview of what remains, and fo
   await f.controller.repreview();
   assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'reconcile', only: ['config:claude:settings.json#model'] });
   f.handlers.abandonRun = () => localRun({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } });
-  await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned');
+  f.controller.askAbandon(); await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned');
 });
 test('discovery adopts an active run of any machine kind but never a finished one', async t => {
   const f = await setup(t);
@@ -342,7 +342,7 @@ test('a read started during Abandon cannot replace its terminal receipt', async 
   f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; f.controller.enter(); await flush();
   const late = deferred<unknown>(); f.handlers.getRun = () => late.promise;
   f.handlers.abandonRun = () => { f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); return run({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } }); };
-  await f.controller.abandon(); late.resolve(interrupted); await flush();
+  f.controller.askAbandon(); await f.controller.abandon(); late.resolve(interrupted); await flush();
   assert.equal(f.controller.state.run?.state, 'abandoned');
 });
 
@@ -516,4 +516,17 @@ test('incoming counts leave out unchanged rows and count rows on hold apart', ()
   const row = (change: 'changed' | 'unchanged' | 'added', held: boolean) => ({ itemId: `setting:${change}${held}`, kind: 'setting' as const, change, held, conflict: false });
   assert.deepEqual(incomingCounts(review({ rows: [row('changed', false), row('added', false), row('changed', true), row('unchanged', false), row('unchanged', true)] })), { incoming: 2, held: 2 });
   assert.deepEqual(incomingCounts(null), { incoming: 0, held: 0 });
+});
+
+test('Abandon asks once, and the question ends when the run stops being interrupted', async t => {
+  const f = await setup(t); const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
+  f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; f.controller.enter(); await flush();
+  await f.controller.abandon(); assert.equal(f.calls.some(c => c.name === 'abandonRun'), false);
+  f.controller.askAbandon(); assert.equal(f.controller.state.confirmingAbandon, true);
+  f.controller.keepRun(); assert.equal(f.controller.state.confirmingAbandon, false);
+  f.controller.askAbandon();
+  f.handlers.getRun = () => run({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned elsewhere' } });
+  f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
+  assert.equal(f.controller.state.run?.state, 'abandoned'); assert.equal(f.controller.state.confirmingAbandon, false);
+  await f.controller.abandon(); assert.equal(f.calls.some(c => c.name === 'abandonRun'), false);
 });

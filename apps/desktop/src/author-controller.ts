@@ -10,7 +10,7 @@ type CaptureChoice = Extract<AuthorIntent, { kind: 'captureFile' }>['choice'];
 // Publish-screen controls whose failures render beside them; other failures render at the top of the page.
 export type AuthorAction = 'signIn' | 'openGitHub' | 'deleteDraft' | 'removeIntent' | 'preview' | 'publish' | 'announce' | 'recheck' | 'applyReviewed' | 'cancel' | 'recovery';
 // A destructive action waiting for its one confirmation.
-export type AuthorConfirmation = { action: 'publish' } | { action: 'deleteDraft'; draftId: string };
+export type AuthorConfirmation = { action: 'publish' } | { action: 'deleteDraft'; draftId: string } | { action: 'abandon'; runId: string };
 export type AuthorState = {
   profiles: OperationOutput<'authorProfiles'> | null; upstreams: OperationOutput<'upstreams'> | null;
   selectedProfile: string; file: OperationOutput<'authorFile'> | null; fileId: string | null;
@@ -76,8 +76,9 @@ export class AuthorController {
       && this.machine.state.run?.outcome !== 'running' && !active(state.run) && !active(state.publicationRun);
     const canPublish = canWrite && state.gh?.state === 'ready'
       && !!state.draft?.intents.length && !!state.draftPreview && state.draftPreview.invalid.length === 0 && state.preview?.change.kind === 'publishDraft';
-    // A publish confirmation lasts only while its reviewed preview does.
-    const confirming = state.confirming?.action === 'publish' && !canPublish ? null : state.confirming;
+    // A publish confirmation lasts only while its reviewed preview does, an abandon one while its run stays interrupted.
+    const confirming = state.confirming?.action === 'publish' && !canPublish
+      || state.confirming?.action === 'abandon' && (state.run?.runId !== state.confirming.runId || state.run.state !== 'interrupted') ? null : state.confirming;
     this.state = { ...state, canRead, canWrite, canPublish, confirming };
     for (const listener of this.listeners) listener();
   }
@@ -328,8 +329,10 @@ export class AuthorController {
       else if (event.event === 'operation-run' && !this.state.run && this.visible && !this.state.pending) void this.discoverRuns();
     }
   }
+  // Opens the one confirmation abandoning the interrupted run needs; confirming calls abandon().
+  askAbandon() { const run = this.state.run; if (run?.state === 'interrupted' && this.state.canWrite) this.update({ confirming: { action: 'abandon', runId: run.runId } }); }
   async abandon() {
-    const run = this.state.run; if (!run || run.state !== 'interrupted') return;
+    const run = this.state.run; if (!run || run.state !== 'interrupted' || this.state.confirming?.action !== 'abandon' || this.state.confirming.runId !== run.runId) return;
     await this.request(async mark => {
       this.reads.set(run.runId, (this.reads.get(run.runId) ?? 0) + 1);
       const receipt = await this.call(mark, 'abandonRun', { scope: SCOPE, runId: run.runId });

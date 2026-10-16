@@ -161,7 +161,7 @@ function FileDiff({ file }: { file: DraftPreview['diff'][number] }) {
     {hunks.length ? <pre className="line-diff" tabIndex={0} aria-label={`Changes in ${file.path}`}>{hunks.map((hunk, index) => <React.Fragment key={index}>
       <span className="hunk">{`Line ${hunk.afterCount ? hunk.afterStart : hunk.beforeStart}`}</span>
       {hunk.lines.map((line, row) => <span key={row} className={line.kind}>{`${line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' '}${line.text}`}</span>)}
-    </React.Fragment>)}</pre> : <p className="muted">Only the final newline changes.</p>}
+    </React.Fragment>)}</pre> : <p className="muted">{file.truncated ? 'The change is beyond the shortened preview.' : 'Only the final newline changes.'}</p>}
     {file.truncated ? <p className="muted">Shortened preview. Publishing includes the whole file.</p> : null}
   </div>;
 }
@@ -209,6 +209,7 @@ function OutcomeCard({ state, controller, run }: AuthorProps & { run: RunView })
   return <section className="card" aria-label="Publication outcome"><h2>Last publication</h2>
     <p role="status">{status}</p>
     {active(run) && state.run?.runId === run.runId ? <button disabled={!state.canRead} onClick={() => void controller.cancel()}>Cancel</button> : null}
+    {state.run?.runId === run.runId ? <ActionError state={state} action="cancel" /> : null}
     {pushed && evidence?.commit ? <p>{`Commit ${short(evidence.commit)}.`}</p> : null}
     {evidence?.announced.length ? <p>{`Announced to ${list(evidence.announced)}.`}</p> : null}
     {pushed && evidence?.pending.length ? <p>{`Not yet announced to ${list(evidence.pending)}.`}</p> : null}
@@ -240,7 +241,8 @@ export function PublishView({ state, controller }: AuthorProps) {
       <button disabled={!state.canWrite} onClick={() => void controller.applyReviewed()}>Apply reviewed action</button>
     </section> : null}
     <ActionError state={state} action="applyReviewed" />
-    {state.run ? <RunRecovery run={state.run} disabled={!state.canWrite} onRepreview={() => void controller.repreview()} onAbandon={() => void controller.abandon()} /> : null}
+    {state.run ? <RunRecovery run={state.run} disabled={!state.canWrite} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()}
+      onAbandon={() => void controller.abandon()} onKeep={() => controller.dismiss()} confirming={state.confirming?.action === 'abandon' && state.confirming.runId === state.run.runId} /> : null}
     <ActionError state={state} action="recovery" />
   </div>;
 }

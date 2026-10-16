@@ -26,6 +26,8 @@ export type SetupSyncState = {
   previewNotice: string | null;
   // The profile a switch preview is for, so the profile select shows it while the preview stands.
   switchTarget: string | null;
+  // Abandon of the interrupted run awaits its one confirmation.
+  confirmingAbandon: boolean;
   eligibility: { read: boolean; refetch: boolean; choose: boolean; preview: boolean; apply: boolean; cancel: boolean; browse: boolean; local: boolean; previewLocal: boolean };
 };
 const SCOPE = { kind: 'machine' } as const;
@@ -82,7 +84,7 @@ export class SetupSyncController {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
       pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {}, previewError: null,
-      inspection: machine.state.inspection, excluded: [], localError: null, previewNotice: null, switchTarget: null,
+      inspection: machine.state.inspection, excluded: [], localError: null, previewNotice: null, switchTarget: null, confirmingAbandon: false,
       eligibility: { read: false, refetch: false, choose: false, preview: false, apply: false, cancel: false, browse: false, local: false, previewLocal: false } };
     let session = machine.state.session, connection = machine.state.connection;
     this.unlisten = machine.subscribe(() => {
@@ -116,6 +118,8 @@ export class SetupSyncController {
   private update(patch: Partial<SetupSyncState>) {
     if (this.disposed) return;
     this.state = { ...this.state, ...patch };
+    // The confirmation lasts only while its run stays interrupted.
+    if (this.state.confirmingAbandon && this.state.run?.state !== 'interrupted') this.state = { ...this.state, confirmingAbandon: false };
     const connected = !!this.bridge && this.machine.state.connection === 'connected';
     const free = connected && !this.maintenance() && !this.machine.state.pending && !this.machine.state.initialReadPending
       && !this.machine.state.status?.applying && this.machine.state.run?.outcome !== 'running' && !active(this.state.run);
@@ -407,12 +411,15 @@ export class SetupSyncController {
     if (!only.length) { this.update({ localError: 'Nothing from that run is still waiting to apply on this Mac.' }); return; }
     await this.prepare({ ...change, only });
   }
-  async abandon() { await this.runAction('abandonRun'); }
+  // Opens the one confirmation Abandon needs; confirming calls abandon().
+  askAbandon() { if (this.state.run?.state === 'interrupted' && this.state.eligibility.read) this.update({ confirmingAbandon: true }); }
+  keepRun() { this.update({ confirmingAbandon: false }); }
+  async abandon() { if (this.state.confirmingAbandon) await this.runAction('abandonRun'); }
   async cancel() { await this.runAction('cancelRun'); }
   private async runAction(name: 'abandonRun' | 'cancelRun') {
     const run = this.state.run;
     if (!run || this.state.pending || (name === 'abandonRun' ? run.state !== 'interrupted' || !this.state.eligibility.read : !this.state.eligibility.cancel)) return;
-    const mark = this.mark(); this.runRead++; this.update({ pending: true, preview: null, previewNotice: null, switchTarget: null, error: null });
+    const mark = this.mark(); this.runRead++; this.update({ pending: true, preview: null, previewNotice: null, switchTarget: null, error: null, confirmingAbandon: false });
     try {
       const result = await this.call(mark, name, { scope: SCOPE, runId: run.runId });
       if (result?.runId === run.runId) { this.runRead++; this.update({ run: result }); }
