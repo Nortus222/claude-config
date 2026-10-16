@@ -74,6 +74,20 @@ test('preview, run and follow-up outputs decode strictly', () => {
   for (const bad of [{ ...run, runId: 'x'.repeat(101) }, { ...run, intent: { ...run.intent, command: 'install' } }, { ...run, result: { status: 'done', ok: -1, failed: 0 } }, { ...run, steps: [{ key: 'x', outcome: 'ok', note: '', token: 'secret' }] }]) assert.throws(() => decodeRunView(bad));
 });
 
+test('intent and machine inspection wire results preserve profile origins and issues', () => {
+  const from = { layer: 'profile', source: 'profiles/personal.json' };
+  const intent = { generation: 'g', nextCursor: null, items: [
+    { kind: 'skill', source: 'owner/skills', name: 'review', enabled: true, from, declaredFrom: from, targets: ['codex'], policy: 'upstream' },
+    { kind: 'issue', ...from, message: 'Configuration input is invalid; inspect the owning document in the app' },
+  ] };
+  assert.deepEqual(decodeOperationOutput('inspectIntent', intent), intent);
+  const inspection = {
+    profile: { repo: '/r', revision: null, overrides: '/o', issues: [{ ...from, path: 'extends', message: 'Missing parent' }] },
+    items: [{ key: 'skill:owner/skills/review', domain: 'skills', label: 'review', group: 'owner/skills', state: 'missing', disposition: 'apply', from }], probeErrors: [],
+  };
+  assert.deepEqual(decodeInspectResult(inspection), inspection);
+});
+
 test('legacy IPC machine result schemas remain compatible with shared operation plans', () => {
   assert.equal(operationDefinitions.inspect.output, InspectResultSchema);
   assert.deepEqual(Schema.decodeUnknownSync(ReconcilePreviewSchema.fields.plan)(preview.plan), preview.plan);
