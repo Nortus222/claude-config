@@ -1,0 +1,20 @@
+
+│
+◇  Source: https://github.com/example/skills.git
+│
+◇  Repository cloned
+│
+◇  Found 1 skill
+
+│
+◇  Available Skills
+Example Skills
+│
+│    first
+│
+│      A long description that wraps
+│      onto another line with café.
+
+│
+└  Use --skill <name> to install specific skills
+

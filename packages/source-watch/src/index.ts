@@ -23,3 +23,5 @@ export { joinedDeadline, SourceCleanupFailed, SourceDeadline } from './services.
 export { watchUpstreamWithServices } from './upstream.ts';
 export { pinImpactWithServices } from './impact.ts';
 export type { SourceDecisionAction } from './documents.ts';
+export { DISCOVERY_LIMITS, SKILL_TEXT_MAX_BYTES, discoverSkills, parseSkillsList, readSkillContents } from './skills-list.ts';
+export type { DiscoveryResult, SkillSummary } from './skills-list.ts';
