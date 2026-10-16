@@ -454,7 +454,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               yield* lifecycle!.finished(terminal).pipe(Effect.catch(() => Effect.void));
               yield* clear;
               emit(self.runId, terminal);
+              // A follow-up job reports the status; without one, the latest is announced again so `applying` ends with the run.
               if (prepared.afterRelease && !shutdown.aborted) yield* Effect.forkIn(handle.request(prepared.afterRelease, { runId: self.runId }), runs);
+              else if (handle.announce) yield* handle.announce({ runId: self.runId });
             }).pipe(Effect.provideContext(context));
             yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(prepared.preview.change, prepared.acceptance.plannedKeys, undefined, prepared.acceptance),
               Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; if (login) parityPlans.delete(planId); else parityPlans.clear(); }))));

@@ -336,6 +336,8 @@ const runFields = {
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
   intentSaved: Schema.Boolean, intentState: Schema.optionalKey(Schema.Literals(['pending', 'saved', 'needsInspection'])),
   installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
+  // The planned step in flight while the run is running.
+  current: Schema.optionalKey(Schema.Struct({ key: KeySchema, summary: Text })),
 };
 export const RunViewSchema = Schema.Union([
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AuthorLocalChangeSchema.members[0], parity: AuthorLocalAcceptanceSchema.members[0], skillAddition: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(AuthorLocalEvidenceSchema.members[0]) }),
