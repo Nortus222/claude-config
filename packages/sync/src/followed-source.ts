@@ -24,6 +24,34 @@ export { followedClone } from './followed-repository.ts';
 
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));
 
+// Holds use a private empty profile commit without recording an upstream apply.
+const emptyProfileRef = (profile: string) => `refs/nortuscc/empty/${profile}`;
+const EMPTY_BASELINE_REF = 'refs/nortuscc/baseline/empty';
+const emptyProfileOrigin = (paths: MachinePathsValue, followed: FollowedProfile) => Effect.gen(function* () {
+  const repo = followedClone(paths, followed.repoUrl);
+  const emptyRef = emptyProfileRef(followed.profile);
+  const existing = yield* revParse(repo, emptyRef);
+  if (existing) return existing;
+  const write = (args: readonly string[], input: string) => Processes.use(p => p.run({
+    cmd: 'git', cwd: repo, args, input, output: 'capture', stderr: 'capture',
+  })).pipe(Effect.flatMap(result => result.code === 0 ? Effect.succeed(result.stdout.trim()) : unavailable('HEAD', 'empty profile origin could not be created')));
+  const blob = yield* write(['hash-object', '-t', 'blob', '-w', '--stdin'], '{}\n');
+  const profiles = yield* write(['mktree'], `100644 blob ${blob}\t${followed.profile}.json\n`);
+  const tree = yield* write(['mktree'], `040000 tree ${profiles}\tprofiles\n`);
+  const commit = yield* write(['hash-object', '-t', 'commit', '-w', '--stdin'],
+    `tree ${tree}\nauthor nortuscc <nortuscc@localhost> 0 +0000\ncommitter nortuscc <nortuscc@localhost> 0 +0000\n\nEmpty profile origin\n`);
+  if ((yield* followedGit(paths, repo, ['update-ref', emptyRef, commit])).code !== 0) return yield* unavailable('HEAD', 'empty profile origin could not be retained');
+  return commit;
+});
+
+// Mark only the destination clone, before clearing state or saving its followed selection.
+export const markFollowedBaselineEmpty = (paths: MachinePathsValue, followed: FollowedProfile) => Effect.gen(function* () {
+  const commit = yield* emptyProfileOrigin(paths, followed);
+  if ((yield* followedGit(paths, followedClone(paths, followed.repoUrl), ['update-ref', EMPTY_BASELINE_REF, commit])).code !== 0) {
+    return yield* unavailable('HEAD', 'empty applied baseline could not be retained');
+  }
+});
+
 export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: FollowedProfile, options: {
   readonly processes?: Layer.Layer<Processes>;
   readonly records?: Effect.Effect<ReadonlyArray<SyncRevision>, unknown>;
@@ -37,28 +65,13 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
   type Services = Fs | Processes | OverridesStore | SyncStore;
   const repo = followedClone(paths, followed.repoUrl);
   const repository = privateFollowedRepository(paths, followed);
-  // Holds keep their commit-only format. A private empty profile origin can hold an item absent
-  // before the first apply, without claiming that any upstream commit was applied to this machine.
-  const emptyRef = `refs/nortuscc/empty/${followed.profile}`;
-  const emptyOrigin = Effect.gen(function* () {
-    const existing = yield* revParse(repo, emptyRef);
-    if (existing) return existing;
-    const write = (args: readonly string[], input: string) => Processes.use(p => p.run({
-      cmd: 'git', cwd: repo, args, input, output: 'capture', stderr: 'capture',
-    })).pipe(Effect.flatMap(result => result.code === 0 ? Effect.succeed(result.stdout.trim()) : unavailable('HEAD', 'empty profile origin could not be created')));
-    const blob = yield* write(['hash-object', '-t', 'blob', '-w', '--stdin'], '{}\n');
-    const profiles = yield* write(['mktree'], `100644 blob ${blob}\t${followed.profile}.json\n`);
-    const tree = yield* write(['mktree'], `040000 tree ${profiles}\tprofiles\n`);
-    const commit = yield* write(['hash-object', '-t', 'commit', '-w', '--stdin'],
-      `tree ${tree}\nauthor nortuscc <nortuscc@localhost> 0 +0000\ncommitter nortuscc <nortuscc@localhost> 0 +0000\n\nEmpty profile origin\n`);
-    if ((yield* followedGit(paths, repo, ['update-ref', emptyRef, commit])).code !== 0) return yield* unavailable('HEAD', 'empty profile origin could not be retained');
-    return commit;
-  });
+  const emptyRef = emptyProfileRef(followed.profile);
   const recorded = Effect.gen(function* () {
     const text = yield* (yield* Fs).readText(join(paths.stateRoot, 'state.json'));
     const state = text === undefined ? undefined : parseState(text);
     if (text !== undefined && state === undefined) return yield* unavailable('HEAD', 'applied state is invalid');
-    if (state !== undefined) return state.applied?.commit ?? (yield* emptyOrigin);
+    if (state?.applied) return state.applied.commit;
+    if (yield* revParse(repo, EMPTY_BASELINE_REF)) return yield* emptyProfileOrigin(paths, followed);
     return yield* revParse(repo, 'refs/nortuscc/migration/applied');
   });
   // A historical absence owns no items. Keep unmatched overrides on disk until their items are taken.

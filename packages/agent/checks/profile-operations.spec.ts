@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
+import { FsFailed, nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
 import { FollowedStore, SyncStore, SetupSource, followedSetupSourceLayer } from '@nortuscc/sync';
 import { startAgent, makeSession, makeHostedRuntime } from '../src/index.ts';
 import { prepareProfileOperation, readProfileOperation } from '../src/operations/profiles.ts';
@@ -360,5 +360,38 @@ test('following a different repository resets a previously used shared-link base
     assert.deepEqual(yield* SetupSource.use(source => source.baseline!).pipe(Effect.provide(source)), { revisionApplied: 0, origins: {} });
     const saved = readdirSync(f.m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile()).map(e => readFileSync(join(e.parentPath, e.name), 'utf8'));
     assert.ok(saved.includes(JSON.stringify(baseline)));
+  })).pipe(Effect.provide(f.processes)));
+});
+
+
+test('a failure after clearing the baseline but before saving the follow can be retried', async t => {
+  const f = await fixture(t);
+  const previous = { repoUrl: 'https://github.com/old/setup.git', profile: 'default', setupId: null };
+  f.m.write(join(f.m.paths.stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: null, files: {}, applied: { commit: 'e'.repeat(40), at: '2026-10-16T12:00:00Z' } }));
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    const store = yield* FollowedStore;
+    yield* store.write(previous);
+    let failFollow = true;
+    yield* Effect.gen(function* () {
+      const handle = yield* startAgent(() => f.m.domains, { deferStart: true });
+      const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+      const preview = yield* session.previewChange({ ...change, profile: 'default' });
+      const failed = yield* session.runs.submit({ planId: preview.planId, requestId: 'follow-write-failed', inputDigest: operationDigest(preview.planId), actor: 'app' });
+      while (!(yield* session.runs.get(failed.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+      assert.equal((yield* session.runs.get(failed.runId)).state, 'failed');
+      assert.equal((yield* (yield* StateStore).read).applied, undefined);
+      assert.deepEqual(yield* store.read, previous);
+      failFollow = false;
+      const retry = yield* session.previewChange({ ...change, profile: 'default' });
+      const run = yield* session.runs.submit({ planId: retry.planId, requestId: 'follow-write-retry', inputDigest: operationDigest(retry.planId), actor: 'app' });
+      while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+      assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+      assert.deepEqual(yield* store.read, { repoUrl: url, profile: 'default', setupId: null });
+      const review = yield* session.setupReview({ scope, setupId: 'local', refetch: true, limit: 100 });
+      assert.ok(review.rows.length > 0);
+      assert.ok(review.rows.every(row => row.change === 'added' && row.before === undefined));
+    }).pipe(Effect.provideService(FollowedStore, { ...store, write: next => Effect.suspend(() => failFollow
+      ? Effect.fail(new FsFailed({ op: 'write', path: join(f.m.paths.stateRoot, 'agent/followed.json'), reason: 'disk full' }))
+      : store.write(next)) }));
   })).pipe(Effect.provide(f.processes)));
 });

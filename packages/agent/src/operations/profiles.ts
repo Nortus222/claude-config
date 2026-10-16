@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import { Cause, Effect } from 'effect';
 import { authorDigest, Backups, backupsForRun, canonical, Fs, MachinePaths, OverridesStore, StateStore } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, requireValid } from '@nortuscc/profile-engine';
-import { composeDocumentsWithStaleHolds, desiredOfDocuments, droppedOnSwitch, retainedOverrides, FollowedStore, followedClone, normalizeRepoUrl, hostedBaselineRelative, proveReadAccess, SyncStore, worktreeDocuments, commitDocuments, type FollowedProfile } from '@nortuscc/sync';
+import { composeDocumentsWithStaleHolds, desiredOfDocuments, droppedOnSwitch, retainedOverrides, markFollowedBaselineEmpty, FollowedStore, followedClone, normalizeRepoUrl, hostedBaselineRelative, proveReadAccess, SyncStore, worktreeDocuments, commitDocuments, type FollowedProfile } from '@nortuscc/sync';
 import { privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from '@nortuscc/sync';
 import { revParse } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
@@ -99,7 +99,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
     return { previous, resetBaseline, holds, overrides, dropped, nextHolds, nextOverrides, binding: digest({ previous, target, link, head, files, dropped, to }) };
   }).pipe(Effect.timeout(PROFILE_TIMEOUT));
   const first = yield* observe;
-  const keys = ['profile:follow', ...(first.resetBaseline ? ['profile:baseline'] : []), ...(first.dropped.holds.length ? ['profile:holds'] : []), ...(first.dropped.overrides.length ? ['profile:overrides'] : []), ...(target.setupId ? ['profile:subscribe'] : []),
+  const keys = [...(first.resetBaseline ? ['profile:baseline'] : []), 'profile:follow', ...(first.dropped.holds.length ? ['profile:holds'] : []), ...(first.dropped.overrides.length ? ['profile:overrides'] : []), ...(target.setupId ? ['profile:subscribe'] : []),
     ...(first.previous?.setupId && first.previous.setupId !== target.setupId ? ['profile:unsubscribe'] : []), 'profile:inspect'];
   const plan: OperationPlan = { kind: 'operation', steps: keys.map(key => ({ key, domain: 'sync', action: 'save-decision',
     summary: key === 'profile:inspect' ? 'Refetch the followed profile for inspection only' : key === 'profile:follow' ? `Back up and follow ${target.profile} from ${target.repoUrl}` : key === 'profile:baseline' ? 'Back up and clear the applied baseline for the new repository' : key === 'profile:holds' ? 'Back up and remove the listed holds' : key === 'profile:overrides' ? 'Back up and remove the listed overrides' : key === 'profile:subscribe' ? 'Subscribe after proving Git read access' : 'Unsubscribe from the previous shared setup',
@@ -129,6 +129,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
           if (key === 'profile:follow') { yield* backups.preserve(join(paths.stateRoot, 'agent/followed.json'), 'agent/followed.json', undefined, { private: true }); yield* store.write(target); saved = true; }
           if (key === 'profile:baseline') {
             yield* backups.preserve(join(paths.stateRoot, 'state.json'), 'state.json', undefined, { private: true });
+            yield* markFollowedBaselineEmpty(paths, target);
             yield* (yield* StateStore).update(state => { const { applied: _applied, ...next } = state; return next; });
             if (hostedBaseline) {
               const path = join(paths.stateRoot, hostedBaseline);
