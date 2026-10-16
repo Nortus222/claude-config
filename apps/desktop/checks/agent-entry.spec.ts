@@ -12,6 +12,7 @@ import { AgentError, connectAgent, type AgentConnection } from '../../../src/age
 import { runDesktopEntry } from '../agent/main.ts';
 import { STARTUP_PREFIX } from '../agent/startup-diagnostics.ts';
 import { probeLoginEnvironment } from '../agent/login-environment.ts';
+import { assertExited, assertReaped } from './support/processes.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
   const home = mkdtempSync(join(tmpdir(), 'nae-'));
@@ -492,7 +493,8 @@ test('startup cancellation joins a real held login capture before returning with
     pids.push(Number(readFileSync(shellPid, 'utf8')), Number(readFileSync(runtimePid, 'utf8')));
     controller.abort();
     assert.equal(await running, 1);
-    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} must be joined before helper return`);
+    assertReaped(pids[0]!, 'the login shell must be reaped before helper return');
+    assertExited(pids[1]!, 'the capture runtime must exit before helper return');
     assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
     const records = startupRecords(f.stderr);
     assert.ok(records.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
