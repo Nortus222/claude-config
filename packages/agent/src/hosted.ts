@@ -194,6 +194,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
   return {
     profileHosted: { publicSetup: client.publicSetup, subscribe: client.subscribe, unsubscribe: client.unsubscribe },
     followedSource,
+    authorClient: client,
     selectOperationSetup: (setupId: string) => Effect.gen(function* () {
       const current = yield* client.state;
       const followed = yield* followedStore.read;

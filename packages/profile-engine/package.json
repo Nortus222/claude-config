@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Resolves a machine's desired agent configuration from a base profile, revision pins and machine overrides, with provenance",
-  "exports": { ".": "./src/index.ts", "./intent-value": "./src/intent-value.ts" },
+  "exports": { ".": "./src/index.ts", "./author-values": "./src/author-values.ts", "./intent-value": "./src/intent-value.ts" },
   "scripts": {
     "test": "node --test --test-concurrency=2 \"checks/*.spec.ts\"",
     "typecheck": "tsc --noEmit"
