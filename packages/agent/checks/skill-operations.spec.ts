@@ -136,8 +136,25 @@ test('unavailable target context and forged IDs refuse, satisfied declaration st
 
 
 test('aggregate deadline joins reader cancellation and preserves its cleanup defect', async () => {
-  const f = fixture({ clock: { now: Effect.succeed(new Date()), random: Effect.succeed(0), sleep: () => Effect.sleep('20 millis') }, reads: () => Effect.never.pipe(Effect.onInterrupt(() => Effect.die(new SkillCandidateCleanupFailed({ temporaryDirectory: '/owned/quarantine' })))) });
-  const exit = await f.run(ops => Effect.exit(resolve(ops, 'owner/one')));
+  const readerStarted = Deferred.makeUnsafe<void>();
+  const cleanupStarted = Deferred.makeUnsafe<void>();
+  const releaseCleanup = Deferred.makeUnsafe<void>();
+  let lookupSettled = false;
+  const f = fixture({
+    clock: { now: Effect.succeed(new Date()), random: Effect.succeed(0), sleep: () => Deferred.await(readerStarted) },
+    reads: () => Deferred.succeed(readerStarted, undefined).pipe(Effect.andThen(Effect.never), Effect.onInterrupt(() => Effect.gen(function* () {
+      yield* Deferred.succeed(cleanupStarted, undefined);
+      yield* Deferred.await(releaseCleanup);
+      return yield* Effect.die(new SkillCandidateCleanupFailed({ temporaryDirectory: '/owned/quarantine' }));
+    }))),
+  });
+  const exit = await f.run(ops => Effect.gen(function* () {
+    const lookup = yield* Effect.forkChild(Effect.exit(resolve(ops, 'owner/one')).pipe(Effect.tap(() => Effect.sync(() => { lookupSettled = true; }))));
+    yield* Deferred.await(cleanupStarted);
+    assert.equal(lookupSettled, false, 'deadline waits for reader cleanup');
+    yield* Deferred.succeed(releaseCleanup, undefined);
+    return yield* Fiber.join(lookup);
+  }));
   assert.equal(exit._tag, 'Failure');
   if (Exit.isFailure(exit)) assert.ok(exit.cause.reasons.some(reason => Cause.isDieReason(reason) && reason.defect instanceof SkillCandidateCleanupFailed));
 });
