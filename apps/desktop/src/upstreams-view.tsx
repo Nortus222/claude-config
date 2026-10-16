@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AuthorFeedback, AuthorIssues, PublishView, type AuthorProps } from './publish-view.tsx';
+import { AuthorFeedback, AuthorIssues, DraftLine, RunStatus, type AuthorPageProps } from './publish-view.tsx';
 import type { AuthorState } from './author-controller.ts';
 
 function included(state: AuthorState, profile: string, source: string, name: string) {
@@ -7,11 +7,12 @@ function included(state: AuthorState, profile: string, source: string, name: str
   if (intent) return intent.kind === 'includeSkill';
   return state.profiles?.profiles.find(p => p.name === profile)?.skills.some(s => s.source === source && s.name === name && s.included) ?? false;
 }
-export function UpstreamsView({ state, controller }: AuthorProps) {
+export function UpstreamsView({ state, controller, onOpenPublish }: AuthorPageProps) {
   const [url, setUrl] = useState('');
-  return <div className="author-view"><header><div><p className="eyebrow">AUTHOR</p><h1>Upstreams</h1><p className="intro">Browse source skills and choose which profiles include them.</p></div>
+  return <div className="author-view"><header><div><p className="eyebrow">MY PROFILES</p><h1>Upstreams</h1><p className="intro">Browse source skills and choose which profiles include them.</p></div>
     <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload upstreams</button></header>
-    <AuthorFeedback state={state} /><AuthorIssues issues={state.upstreams?.issues} />
+    <AuthorFeedback state={state} /><RunStatus state={state} controller={controller} page="author" /><DraftLine state={state} onOpenPublish={onOpenPublish} />
+    <AuthorIssues issues={state.upstreams?.issues} />
     <section className="card"><h2>Add source</h2><form onSubmit={e => {e.preventDefault();if (url.trim()) void controller.discover(url.trim());}}>
       <label className="field">Source URL or owner/repo<input type="text" value={url} disabled={!state.canWrite} onChange={e => setUrl(e.target.value)} /></label>
       <button disabled={!state.canWrite || !url.trim()}>Add source</button></form><p>Browsing a source does not publish it. Including one of its skills adds it to the draft.</p></section>
@@ -41,6 +42,5 @@ export function UpstreamsView({ state, controller }: AuthorProps) {
     {state.skill ? <section className="card"><h2>Skill contents</h2>{'unavailable' in state.skill ? <p role="alert">{state.skill.unavailable}</p> : <>
       <p>{state.skill.path}</p><pre className="setup-sync-diff" tabIndex={0} aria-label="Skill text">{state.skill.text}</pre><h3>Files</h3><ul>{state.skill.files.map(file => <li key={file}>{file}</li>)}</ul>
     </>}</section> : null}
-    <PublishView state={state} controller={controller} />
   </div>;
 }
