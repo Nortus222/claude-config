@@ -83,6 +83,26 @@ test('a closed setup appears closed to subscribers', async () => {
   } finally { await f.close(); }
 });
 
+test('a status report that includes a closed setup is accepted without it', async () => {
+  const { f, owner, follower, s } = await shared();
+  try {
+    assert.equal((await f.call('PUT', `/v1/subscriptions/${s.setupId}`, undefined, follower.token)).status, 204);
+    await publish(f, owner.token, s.setupId, 1);
+    const healthy = await setup(f, follower.token);
+    await publish(f, follower.token, healthy.setupId, 1);
+    const report = (setupId: string) => ({ setupId, revisionApplied:1, adopted:[publication(1).items[0].id], skipped:[], pending:[], waitingForPerson:[] });
+    const summary = { reportedAt:new Date(f.clock.now).toISOString(), policy:'notify', agents:['codex'],
+      setups:[report(s.setupId), report(healthy.setupId)], drift:{ setting:0, skill:0, integration:0, file:0 } };
+    const put = (body: unknown) => f.call('PUT', '/v1/machines/self/status', body, follower.token);
+    assert.equal((await put(summary)).status, 204);
+    assert.equal((await f.call('DELETE', '/v1/account', undefined, owner.token)).status, 204);
+    assert.equal((await put(summary)).status, 204);
+    const machines = await (await f.call('GET', '/v1/machines', undefined, follower.token)).json();
+    assert.deepEqual(machines.machines[0].status, { ...summary, setups:[report(healthy.setupId)] });
+    assert.equal((await put({ ...summary, setups:[report('unknown')] })).status, 404);
+  } finally { await f.close(); }
+});
+
 test('subscription limits share the owned setup budget and concurrent retries are idempotent', async () => {
   const { f, owner, follower, s } = await shared();
   try {

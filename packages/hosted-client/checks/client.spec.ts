@@ -724,6 +724,49 @@ test('sync recovers when another machine unsubscribes a cached setup', async (t)
   assert.deepEqual(await run(f.services.decisions.read), []);
 });
 
+test('a queued decision for a closed setup is dropped and later decisions for a healthy setup still flush', async (t) => {
+  for (const afterClosure of [false, true]) await t.test(afterClosure ? 'queued after closure' : 'queued before closure', async (t) => {
+    const f = await fixture(t); await f.signIn();
+    const subscribed = { ...delta().setups[0]!, owned:false };
+    const healthy = { ...delta().setups[0]!, setupId:'setup2' };
+    f.setResponse(delta({ setups:[subscribed, healthy], revisions:[revision(1), revision(1, 'setup2')] }));
+    await run(f.client.sync());
+    f.setResponse(delta({ setups:[{ ...subscribed, closed:true }, healthy], revisions:[] }));
+    if (afterClosure) await run(f.client.sync());
+    await run(f.client.enqueueDecision(local()));
+    await run(f.client.enqueueDecision(local({ setupId:'setup2' })));
+    f.actions.push(req => {
+      assert.equal(req.path, '/decisions');
+      return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+    });
+    assert.equal((await run(f.client.sync())).setups[0]!.closed, true);
+    const account = (await run(f.services.store.read)).accounts[0]!;
+    assert.deepEqual(account.outbox.map(e => e.kind === 'decision' ? e.decision.setupId : e.kind), ['setup2']);
+    assert.deepEqual((await run(f.services.decisions.read)).map(d => d.setupId), ['setup2']);
+    await f.restart();
+    await run(f.client.sync());
+    assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, []);
+    const sent = f.requests.filter(req => req.path === '/decisions').at(-1)!;
+    assert.deepEqual(sent.body, { decisions:[{ setupId:'setup2', itemId:'file:claude/CLAUDE.md', revision:1, decision:'accept' }] });
+  });
+});
+
+test('a machine update 404 is still reported', async (t) => {
+  const f = await fixture(t); await f.signIn(); await run(f.client.sync());
+  f.setResponse(delta({ revisions:[] }));
+  await run(f.client.enqueueMachine({ name:'Renamed' }));
+  const before = f.requests.length;
+  f.actions.push(req => {
+    assert.equal(req.method, 'PATCH');
+    assert.equal(req.path, '/machines/machine1');
+    return Effect.fail(new HostedFailure({ code:'not_found', status:404 }));
+  });
+  await assert.rejects(run(f.client.sync()), /not_found/);
+  assert.equal((await run(f.client.state)).error, 'not_found');
+  assert.equal(f.requests.length, before + 1);
+  assert.deepEqual((await run(f.services.store.read)).accounts[0]!.outbox, [{ kind:'machine', patch:{ name:'Renamed' } }]);
+});
+
 test('metadata methods reject invalid input and mismatched response identities', async (t) => {
   const f = await fixture(t); await f.signIn(); const count = f.requests.length;
   await assert.rejects(run(f.client.publicSetup('../other')), /invalid_request/);

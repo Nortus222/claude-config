@@ -187,8 +187,10 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
         }
         if (sent.length === 0) return yield* Effect.fail(new HostedFailure({ code: 'payload_too_large' }));
         const body = yield* decode(DecisionsRequestSchema, { decisions: sent.map((e) => e.decision) }, true);
-        const result = yield* request(a, { method: 'PUT', path: '/decisions', body }).pipe(Effect.catch((error) => error.code === 'invalid'
-          ? drop(a, sent.length).pipe(Effect.as(undefined)) : Effect.fail(error)));
+        const result = yield* request(a, { method: 'PUT', path: '/decisions', body }).pipe(Effect.catch((error) => error.code === 'not_found'
+          ? Effect.succeed(null) : error.code === 'invalid' ? drop(a, sent.length).pipe(Effect.as(undefined)) : Effect.fail(error)));
+        // Refresh setup metadata before retrying decisions for removed or closed setups.
+        if (result === null) break;
         if (result !== undefined) {
           if (result.status !== 200) return yield* Effect.fail(invalidResponse());
           const reply = yield* Effect.try({ try: () => decodeDecisionsResponse(body, result.body), catch: invalidResponse });
@@ -218,7 +220,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     if (!a || a.auth !== 'signed-in' || (a.retryAt !== null && Date.parse(a.retryAt) > now().getTime())) return project(a);
     const initial = a;
     const work = Effect.gen(function* () {
-      a = yield* flush(initial).pipe(Effect.catch(error => error.code === 'not_found' ? requireAccount : Effect.fail(error)));
+      a = yield* flush(initial);
       let query = { since: a.seq, setups: a.cursors };
       const result = yield* request(a, { method: 'GET', path: `/sync?${formatSyncQuery(query)}`, ...(a.etag === undefined ? {} : { etag: a.etag }) }).pipe(Effect.catch(error => {
         if (error.code !== 'not_found' || query.setups.length === 0) return Effect.fail(error);
@@ -248,6 +250,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       // Validate all ranges before any cache write; cache immutability handles cache-ahead replay.
       for (const setup of body.setups.filter(s => !s.closed)) yield* store.cache(a.accountId, setup.setupId, body.revisions.filter((r) => r.setupId === setup.setupId));
       const removed = new Set(a.setups.filter(old => !body.setups.some(s => s.setupId === old.setupId)).map(s => s.setupId));
+      for (const setup of body.setups) if (setup.closed) removed.add(setup.setupId);
       const authoritative = mergeDecisions(a.authoritative.filter(d => !removed.has(d.setupId)), body.decisions);
       for (const d of body.decisions) {
         const previous = a.authoritative.find((old) => key(old) === key(d));
