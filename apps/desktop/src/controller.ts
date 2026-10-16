@@ -12,7 +12,7 @@ export type RunView = {
   readonly receipt?: OperationRunView;
   readonly challengeCurrent?: boolean;
   readonly steps: ReadonlyArray<StepView>;
-  readonly outcome: 'running' | 'done' | 'cancelled' | 'failed';
+  readonly outcome: 'running' | 'done' | 'cancelled' | 'failed' | 'interrupted' | 'abandoned';
   readonly summary: string;
   readonly backups?: string;
 };
@@ -274,7 +274,7 @@ export class MachineController {
       }
       if (!current && this.state.status?.applying && receipt.result !== null && !completionObserved) return;
       const outcome = receipt.state === 'accepted' || receipt.state === 'running' ? 'running'
-        : receipt.state === 'succeeded' ? 'done' : receipt.state === 'cancelled' ? 'cancelled' : 'failed';
+        : receipt.state === 'succeeded' ? 'done' : receipt.state;
       const summary = receipt.installation?.message ?? (receipt.result && 'message' in receipt.result ? receipt.result.message : `Run ${receipt.state}`);
       const sameRun = current?.runId === receipt.runId ? current : undefined;
       const previous = sameRun?.steps ?? [];
@@ -564,6 +564,7 @@ export class MachineController {
     if (event.event === 'status') {
       const externalApplyEnded = this.state.status?.applying === true && this.state.run?.outcome !== 'running' && event.status.applying === false;
       this.showStatus(event.status);
+      if (event.runId === this.state.run?.runId && this.state.run?.receipt && this.state.run.outcome === 'running') void this.refreshRun(event.runId, true);
       this.refreshReview();
       if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
       return;
