@@ -88,7 +88,7 @@ export type OperationRunEvent = typeof OperationRunEventSchema.Type;
 export const RunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('progress'), runId: Id, progress: ProgressSchema });
 
 export const decodeWireStatus = Schema.decodeUnknownSync(WireStatusSchema, { onExcessProperty: 'error' });
-export const StatusEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('status'), status: WireStatusSchema });
+export const StatusEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('status'), status: WireStatusSchema, runId: Schema.optionalKey(Id) });
 
 export const ResponseSchema = Schema.Union([
   Schema.Struct({ version: Version, id: Id, ok: Schema.Literal(true), result: Schema.Unknown }),

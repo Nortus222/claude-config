@@ -14,19 +14,20 @@ export const jittered = (random: number, period = PERIOD_MS): number => Math.rou
 export const tickKind = (previous: number, now: number, period = PERIOD_MS): 'timer' | 'wake' =>
   now - previous > 2 * period ? 'wake' : 'timer';
 
-type Request<A> = { readonly trigger: Trigger; readonly done?: Deferred.Deferred<A> };
+export type TriggerCause = { readonly runId: string };
+type Request<A> = { readonly trigger: Trigger; readonly cause?: TriggerCause; readonly done?: Deferred.Deferred<A> };
 
 export type Scheduler<A, R> = {
   readonly trigger: (trigger: Trigger) => Effect.Effect<void>;
   // Triggers a job and answers with the result of the job that included the trigger. Once the
   // scheduler has stopped, a request is interrupted instead of waiting forever.
-  readonly request: (trigger: Trigger) => Effect.Effect<A>;
+  readonly request: (trigger: Trigger, cause?: TriggerCause) => Effect.Effect<A>;
   // Runs jobs forever, one at a time: everything queued while a job runs becomes one follow-up job.
   // When it stops, it interrupts the requests it cut off or never took, and takes no more.
   readonly run: Effect.Effect<never, never, R>;
 };
 
-export const makeScheduler = <A, R>(job: (triggers: ReadonlyArray<Trigger>) => Effect.Effect<A, never, R>) =>
+export const makeScheduler = <A, R>(job: (triggers: ReadonlyArray<Trigger>, cause?: TriggerCause) => Effect.Effect<A, never, R>) =>
   Effect.gen(function* () {
     const queue = yield* Queue.unbounded<Request<A>>();
     let batch: ReadonlyArray<Request<A>> = [];
@@ -41,15 +42,17 @@ export const makeScheduler = <A, R>(job: (triggers: ReadonlyArray<Trigger>) => E
     });
     const scheduler: Scheduler<A, R> = {
       trigger: (trigger: Trigger) => Effect.asVoid(Queue.offer(queue, { trigger })),
-      request: (trigger: Trigger) =>
+      request: (trigger: Trigger, cause?: TriggerCause) =>
         Effect.gen(function* () {
           const done = yield* Deferred.make<A>();
-          if (!(yield* Queue.offer(queue, { trigger, done }))) return yield* Effect.interrupt;
+          if (!(yield* Queue.offer(queue, { trigger, cause, done }))) return yield* Effect.interrupt;
           return yield* Deferred.await(done);
         }),
       run: Effect.forever(Effect.gen(function* () {
         batch = yield* Queue.takeAll(queue);
-        const result = yield* job(batch.map((r) => r.trigger));
+        // Uncaused triggers do not replace the latest run in this batch.
+        const cause = batch.reduce<TriggerCause | undefined>((latest, r) => r.cause ?? latest, undefined);
+        const result = yield* job(batch.map((r) => r.trigger), cause);
         for (const r of batch) if (r.done) yield* Deferred.succeed(r.done, result);
         batch = [];
       })).pipe(Effect.onExit(() => stop)),

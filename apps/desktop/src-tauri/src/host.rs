@@ -17,6 +17,7 @@ use std::{
 };
 
 const MAX_RECORD: usize = 1_048_576;
+pub const OPERATION_MAX_BYTES: usize = MAX_RECORD;
 const MAX_EXCLUDED: usize = 10_000;
 const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -26,10 +27,11 @@ const BOOTSTRAP_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 type Pending = HashMap<String, mpsc::Sender<Result<Value, String>>>;
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 
-/// Renderer arguments are public metadata, enums and opaque IDs, never paths or commands.
+/// The agent validates shared operation inputs; legacy requests use fixed public arguments.
 pub enum Request {
     Status,
     Inspect,
+    Operation { name: String, input: Value },
     GetOperationRun { run_id: String },
     ListOperationRuns { limit: u16 },
     Preview { exclude: Vec<String> },
@@ -54,7 +56,7 @@ impl Request {
         match self {
             Self::Status => "status",
             Self::Inspect => "inspect",
-            Self::GetOperationRun { .. } | Self::ListOperationRuns { .. } => "operation",
+            Self::Operation { .. } | Self::GetOperationRun { .. } | Self::ListOperationRuns { .. } => "operation",
             Self::Preview { .. } => "preview",
             Self::Apply { .. } => "apply",
             Self::Cancel => "cancel",
@@ -85,6 +87,10 @@ impl Request {
         let mut record = json!({"version": 3, "id": id, "command": self.command()});
         match self {
             Self::SubscribeOperations => { record["operationsProtocol"] = json!(1); }
+            Self::Operation { name, input } => {
+                record["operation"] = json!(name);
+                record["input"] = input.clone();
+            }
             Self::GetOperationRun { run_id } => {
                 if run_id.is_empty() || run_id.chars().count() > 100 { return Err("Invalid operation run id".into()); }
                 record["operation"] = json!("getRun");
@@ -132,6 +138,7 @@ impl Request {
             _ => {}
         }
         let line = format!("{record}\n");
+        if matches!(self, Self::Operation { .. }) && line.len() > OPERATION_MAX_BYTES { return Err("operation request too large".into()); }
         if line.len() > MAX_RECORD { return Err("Request exceeds the record limit".into()); }
         Ok(line)
     }
@@ -282,6 +289,8 @@ struct StatusEvent {
     version: u8,
     event: String,
     status: WireStatus,
+    #[serde(default, rename = "runId", deserialize_with = "present")]
+    run_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -382,7 +391,7 @@ fn validate(message: &Value) -> Result<(), String> {
             if m.version != 3 || m.event != "operation-run" || !valid_id(&m.run_id) { return Err("Invalid operation run event contract".into()); }
         } else if message["event"] == "status" {
             let m: StatusEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid status event")?;
-            if m.version != 3 || m.event != "status" { return Err("Invalid status event contract".into()); }
+            if m.version != 3 || m.event != "status" || m.run_id.as_deref().is_some_and(|id| !valid_id(id)) { return Err("Invalid status event contract".into()); }
             let _ = m.status;
             validate_status(&message["status"])?;
         } else {
@@ -968,6 +977,33 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operation_forward_rejects_oversized_input() {
+        let request = Request::Operation { name: "previewChange".into(), input: json!({"content":"x".repeat(OPERATION_MAX_BYTES)}) };
+        assert_eq!(request.record("1").unwrap_err(), "operation request too large");
+    }
+    #[test]
+    fn operation_forward_accepts_the_byte_limit_and_leaves_validation_to_the_agent() {
+        let empty = Request::Operation { name: "futureOperation".into(), input: json!({"content":""}) }.record("1").unwrap();
+        let content = "x".repeat(OPERATION_MAX_BYTES - empty.len());
+        let input = json!({"content":content});
+        let record = Request::Operation { name: "futureOperation".into(), input: input.clone() }.record("1").unwrap();
+        assert_eq!(record.len(), OPERATION_MAX_BYTES);
+        assert_eq!(serde_json::from_str::<Value>(&record).unwrap(), json!({"version":3,"id":"1","command":"operation","operation":"futureOperation","input":input}));
+        let oversized = Request::Operation { name: "futureOperation".into(), input: json!({"content":format!("{content}é")}) };
+        assert_eq!(oversized.record("1").unwrap_err(), "operation request too large");
+    }
+    #[test]
+    fn status_with_run_id_decodes() {
+        let status = json!({"version":3,"event":"status","runId":"run-1","status":fixtures::status()});
+        assert!(validate(&status).is_ok());
+        let decoded: StatusEvent = serde_json::from_value(status.clone()).unwrap();
+        assert_eq!(decoded.run_id.as_deref(), Some("run-1"));
+        for id in [json!(null), json!(""), json!("r".repeat(101))] {
+            let mut invalid = status.clone(); invalid["runId"] = id;
+            assert!(validate(&invalid).is_err());
+        }
+    }
     #[test]
     fn semantic_run_invalidation_is_bounded_metadata_only() {
         let subscription: Value = serde_json::from_str(&Request::SubscribeOperations.record("1").unwrap()).unwrap();

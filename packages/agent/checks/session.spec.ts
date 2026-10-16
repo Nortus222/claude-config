@@ -12,6 +12,8 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
 
+const STATUS_TIMEOUT = '5 seconds';
+
 const MODEL = 'setting:claude:settings.json#model';
 const THEME_KEY = 'config:claude:settings.json#theme';
 const EFFORT_KEY = 'config:claude:settings.json#effortLevel';
@@ -95,6 +97,73 @@ const gatedConfig = () => {
 };
 
 const codeOf = (error: unknown) => (error instanceof SessionError ? error.code : `not a SessionError: ${String(error)}`);
+
+test("status published after a run's follow-up inspection carries that run's id", async t => {
+  const { m, within } = await sessionMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  await within((session, agent) => Effect.scoped(Effect.gen(function* () {
+    yield* session.inspect('app');
+    const preview = yield* session.previewChange({ kind: 'reconcile', only: [EFFORT_KEY] });
+    const nextStatus = Deferred.makeUnsafe<{ runId?: string }>();
+    const unsubscribe = agent.onStatus((_status, cause) => {
+      Deferred.doneUnsafe(nextStatus, Effect.succeed({ ...cause }));
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'caused-status', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    const event = yield* Deferred.await(nextStatus).pipe(Effect.timeout(STATUS_TIMEOUT));
+    assert.equal(event.runId, run.runId);
+  })));
+});
+
+test('batched inspections publish the latest caused trigger without retaining it for later jobs', async t => {
+  const started = Deferred.makeUnsafe<void>();
+  const release = Deferred.makeUnsafe<void>();
+  let fetches = 0;
+  const { m, within } = await sessionMachine({ source: service => ({
+    ...service,
+    fetch: Effect.suspend(() => ++fetches === 1
+      ? Effect.andThen(Deferred.succeed(started, undefined), Effect.andThen(Deferred.await(release), service.fetch))
+      : service.fetch),
+  }) });
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  await within((_session, agent) => Effect.scoped(Effect.gen(function* () {
+    const causes: Array<string | undefined> = [];
+    const unsubscribe = agent.onStatus((_status, cause) => causes.push(cause?.runId));
+    yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+    yield* Deferred.await(started);
+    const first = yield* Effect.forkChild(agent.request('inspect', { runId: 'earlier-run' }));
+    yield* Effect.yieldNow;
+    const latest = yield* Effect.forkChild(agent.request('decide', { runId: 'latest-run' }));
+    yield* Effect.yieldNow;
+    const uncaused = yield* Effect.forkChild(agent.request('timer'));
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(first);
+    yield* Fiber.join(latest);
+    yield* Fiber.join(uncaused);
+    assert.deepEqual(causes, [undefined, 'latest-run']);
+    yield* agent.request('inspect');
+    assert.deepEqual(causes, [undefined, 'latest-run', undefined]);
+  })));
+});
+
+test('status published after a policy run carries its run id', async t => {
+  const { m, within } = await sessionMachine();
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  await within((session, agent) => Effect.scoped(Effect.gen(function* () {
+    yield* session.inspect('app');
+    const preview = yield* session.previewChange({ kind: 'setPolicy', policy: 'manual' });
+    const nextStatus = Deferred.makeUnsafe<{ runId?: string; policy: string }>();
+    const unsubscribe = agent.onStatus((status, cause) => {
+      Deferred.doneUnsafe(nextStatus, Effect.succeed({ ...cause, policy: status.policy }));
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'policy-status', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    const event = yield* Deferred.await(nextStatus).pipe(Effect.timeout(STATUS_TIMEOUT));
+    assert.equal(event.runId, run.runId);
+    assert.equal(event.policy, 'manual');
+  })));
+});
 
 test('inspect answers the profile, items and status; preview plans every item not excluded', async () => {
   const { m, within } = await sessionMachine();

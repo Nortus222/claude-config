@@ -418,7 +418,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               yield* lifecycle!.finished(terminal).pipe(Effect.catch(() => Effect.void));
               yield* clear;
               emit(self.runId, terminal);
-              if (prepared.afterRelease && !shutdown.aborted) yield* Effect.forkIn(handle.request(prepared.afterRelease), runs);
+              if (prepared.afterRelease && !shutdown.aborted) yield* Effect.forkIn(handle.request(prepared.afterRelease, { runId: self.runId }), runs);
             }).pipe(Effect.provideContext(context));
             yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(prepared.preview.change, prepared.acceptance.plannedKeys, undefined, prepared.acceptance),
               Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; parityPlans.clear(); }))));
@@ -558,7 +558,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         }
         yield* clear;
         if (terminal) emit(terminal);
-        if (!shutdown.aborted) yield* Effect.forkIn(handle.request('inspect'), runs);
+        if (!shutdown.aborted) yield* Effect.forkIn(handle.request('inspect', { runId }), runs);
       }).pipe(Effect.provideContext(context));
 
     const progressListeners = new Set<(runId: string, progress: RunProgress) => void>();

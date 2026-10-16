@@ -383,7 +383,7 @@ test('history groups equivalent timestamp instants and skips invalid timestamps'
   });
 });
 
-test('a subscriber receives a status event after another client inspects', unixOnly, async () => {
+test('status from a scheduled inspection has no run id', unixOnly, async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     const subscribed = await ask(watcher, { command: 'subscribe' });
@@ -395,6 +395,7 @@ test('a subscriber receives a status event after another client inspects', unixO
     const event = await watcher.waitFor((r) => r.event === 'status', from);
     assert.equal(event.version, 3);
     assert.equal(event.status.trusted, true);
+    assert.equal('runId' in event, false);
     assert.equal(other.records.some((r) => r.event !== undefined), false);
   });
 });
@@ -565,6 +566,7 @@ test('after an apply, a status event and the status reply no longer list the app
     assert.equal(applied.result.status, 'started');
     const done = await watcher.waitFor((r) => r.event === 'progress' && r.progress.type === 'done', watched);
     const event = await watcher.waitFor((r) => r.event === 'status', watcher.records.indexOf(done) + 1);
+    assert.equal(event.runId, applied.result.runId);
     assert.deepEqual(pendingKeys(event.status).filter((k: string) => k === EFFORT_KEY || k === MODEL_KEY), []);
     const after = await ask(c, { command: 'status' });
     assert.deepEqual(pendingKeys(after.result).filter((k: string) => k === EFFORT_KEY || k === MODEL_KEY), []);
