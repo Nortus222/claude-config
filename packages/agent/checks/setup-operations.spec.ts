@@ -467,6 +467,53 @@ test('setup review shows a profile file exclusion instead of unchanged file text
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
 
+test('a stale settings hold does not block accepting an independent item', async () => {
+  const { desiredFor, revisionCommit, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo({ 'claude/settings.keys.json': json({ theme: 'auto' }) });
+  const applied = repo.commit({ 'profiles/child.json': '{}', 'claude/settings.keys.json': json({ theme: 'dark' }), 'claude/CLAUDE.md': '# before\n' });
+  const head = repo.commit({ 'claude/CLAUDE.md': '# accepted\n' });
+  const itemId = 'file:claude:CLAUDE.md';
+  const held = { 'setting:claude:settings.json#theme': repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), json({ version: 1, held }));
+  const snapshot = (commit: string, holds: Record<string, string> = {}) => Effect.promise(() => runSync(desiredFor({
+    repo: repo.dir, profile: commit === repo.first ? 'default' : 'child', head: { kind: 'commit', commit }, held: holds,
+    into: join(m.root, 'snapshots', commit, Object.keys(holds).length ? 'held' : 'plain'),
+  })));
+  const service: SetupSource['Service'] = {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: revision => snapshot(revisionCommit(revision)),
+    current: snapshot(applied, held),
+    effective: (decisions, choices) => Effect.gen(function* () {
+      const holds = choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held;
+      const current = yield* snapshot(applied, holds);
+      const accepted = decisions.some(d => d.itemId === itemId && d.commit === head && d.decision === 'accept');
+      return { applied: { ...current, revision: applied }, effective: yield* snapshot(accepted ? head : applied, holds), conflicts: [] };
+    }),
+  };
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true }));
+      assert.equal(review.rows.find(row => row.itemId === 'setting:claude:settings.json#theme')?.after, '"dark"');
+      const preview = yield* s.previewChange({ kind: 'setupApply', setupId: 'local', revision: { kind: 'local', commit: head }, choices: [{ itemId, action: 'accept' }] });
+      assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
+      assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# accepted\n');
+      assert.deepEqual(yield* (yield* SyncStore).read, held);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, head);
+      const effective = yield* service.effective(yield* (yield* DecisionsStore).read);
+      assert.equal(effective.effective.desired.files.find(file => file.id === 'claude:settings.json')?.keys?.theme?.value, 'dark');
+    })), Layer.succeed(SetupSource, service));
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
+});
+
 test('a hold from before the followed profile stays listed and can be released', async () => {
   const { desiredFor, SetupSource, SyncStore } = await import('@nortuscc/sync');
   const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');

@@ -1,7 +1,7 @@
 import {
   FILES, INTEGRATIONS_SOURCE, parsePins, parseSkillsManifest, PINS_SOURCE, SKILLS_SOURCE, type SkillGroup,
 } from '@nortuscc/profile-engine';
-import { desiredOfDocuments, documentOf, inside, type Documents } from './documents.ts';
+import { desiredOfDocuments, documentOf, hasProfile, inside, type Documents } from './documents.ts';
 import { parseItemId, type ItemRef } from './items.ts';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
@@ -136,7 +136,9 @@ const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integr
 };
 
 // `head` with one held item's value taken from `held`, the documents at the commit it is held at.
+// A commit without the followed profile has no held value to replay.
 export const patchItem = (head: Documents, itemId: string, held: Documents, profile?: string): Documents => {
+  if (!hasProfile(held, profile)) return head;
   const ref = parseItemId(itemId);
   if (ref && profile !== undefined && (Object.keys(head).some(path => path.startsWith('profiles/')) || Object.keys(held).some(path => path.startsWith('profiles/'))))
     return patchProfileItem(head, ref, held, profile);

@@ -394,6 +394,15 @@ test('a profile added in a later revision verifies and loads', async (t) => {
   if (result._tag === 'Success') assert.equal(s.textAt(result.success.repo, 'claude/CLAUDE.md'), '# child\n');
 });
 
+test('a revision whose followed profile is invalid is still rejected', async (t) => {
+  const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.publish();
+  const revision = s.publish({ 'profiles/child.json': json({ extends: 'missing' }) });
+  const result = await s.source(source => source.load(revision));
+  fails(result, 'RevisionMismatch');
+  if (result._tag === 'Failure') assert.equal(result.failure.reason, 'published profile is invalid');
+});
+
 test('a linked hosted baseline ignores holds from before its followed profile existed', async (t) => {
   const s = fixture(initial, 'child'); t.after(() => rmSync(s.root, { recursive: true, force: true }));
   s.publish();
