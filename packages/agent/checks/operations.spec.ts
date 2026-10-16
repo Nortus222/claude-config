@@ -77,7 +77,7 @@ test('preview, run and follow-up outputs decode strictly', () => {
 test('intent and machine inspection wire results preserve profile origins and issues', () => {
   const from = { layer: 'profile', source: 'profiles/personal.json' };
   const intent = { generation: 'g', nextCursor: null, items: [
-    { kind: 'skill', source: 'owner/skills', name: 'review', enabled: true, from, declaredFrom: from, targets: ['codex'], policy: 'upstream' },
+    { kind: 'skill', source: 'owner/skills', name: 'review', choice: null, defaultEnabled: true, enabled: true, from, declaredFrom: from, targets: ['codex'], policy: 'upstream' },
     { kind: 'issue', ...from, message: 'Configuration input is invalid; inspect the owning document in the app' },
   ] };
   assert.deepEqual(decodeOperationOutput('inspectIntent', intent), intent);
