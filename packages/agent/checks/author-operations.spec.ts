@@ -310,7 +310,7 @@ test('author repository reads distinguish missing gh, signed out, denied access 
     const f = await fixture(t, command => {
       if (command.cmd === 'git' && command.args.includes('clone')) return Effect.succeed({ code: 128, stdout: '', stderr: 'repository not found' });
       if (command.cmd !== 'gh') return undefined;
-      if (state === 'missing') return Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'ENOENT' }));
+      if (state === 'missing') return Effect.fail(new LaunchFailed({ cmd: 'gh', reason: 'spawn gh ENOENT', code: 'ENOENT' }));
       return Effect.succeed({ code: command.args[0] === '--version' || state === 'ready' ? 0 : state === 'signed-out' ? 1 : 2, stdout: '' });
     });
     await f.within(s => Effect.gen(function* () {
