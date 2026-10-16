@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Deferred, Effect, Fiber } from 'effect';
+import { liveLockHolder } from '@nortuscc/machine';
 import { Processes, type Command } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
 import { decodeOperationInput, decodeOperationOutput, type OperationName } from '../src/operations/index.ts';
@@ -11,6 +12,7 @@ import { decodeRequest } from '../src/ipc/protocol.ts';
 import { RunStore, RunStoreError } from '../src/run-store.ts';
 import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
+import { setupFixture } from './support/setup-fixture.ts';
 
 const repoUrl = 'https://github.com/example/setup.git';
 const fixture = async (t: import('node:test').TestContext, intercept?: (command: Command) => Effect.Effect<import('@nortuscc/machine').Completed, import('@nortuscc/machine').LaunchFailed> | undefined, authorClient?: import('@nortuscc/hosted-client').HostedClient, failChallenge = false) => {
@@ -26,12 +28,13 @@ const fixture = async (t: import('node:test').TestContext, intercept?: (command:
   git('-C', m.paths.repo, 'branch', '-M', 'main');
   const origin = join(m.root, 'origin.git'); git('clone', '--bare', m.paths.repo, origin);
   await m.trust();
-  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
+  const setup = setupFixture(join(m.root, 'setup'), { headFiles: {} });
+  const within = <A,E>(body: (s: AgentSession, handle: import('../src/agent.ts').AgentHandle) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
     const processes = yield* Processes; const runStore = yield* RunStore;
     return yield* Effect.gen(function* () {
       const domains = () => []; const handle = yield* startAgent(domains, { deferStart: true });
       const session = yield* makeSession({ ...handle, ...(authorClient ? { authorClient } : {}) }, { domains, signal: new AbortController().signal });
-      return yield* body(session);
+      return yield* body(session, handle);
     }).pipe(Effect.provideService(Processes, { run: (c: Command) => {
       commands.push(c);
       const response = intercept?.(c); if (response) return response;
@@ -40,7 +43,7 @@ const fixture = async (t: import('node:test').TestContext, intercept?: (command:
       if (c.args.includes('get-url')) return Effect.succeed({ code: 0, stdout: repoUrl });
       return processes.run({ ...c, args: c.args.map(a => a === repoUrl ? origin : a) });
     } }), Effect.provideService(RunStore, { ...runStore, write: receipt => failChallenge && receipt.view.ghCode ? Effect.fail(new RunStoreError('Challenge storage failed')) : runStore.write(receipt) }));
-  })));
+  })), setup.source);
   return { m, within, git, origin, commands };
 };
 const read = (s: AgentSession, name: string, input = {}) =>
@@ -70,7 +73,7 @@ test('editDraft creates a draft and previewChange shows the replayed diff', asyn
 });
 
 test('source inputs refuse credentials and non-Git modes at IPC decode', () => {
-  for (const source of ['https://user:secret@github.com/o/r.git', 'http://github.com/o/r', 'git@github.com:o/r', '/tmp/repo', 'file:///tmp/repo', 'https://github.com/o/r?x=y', 'https://github.com/o/r#main', 'https://github.com/o/r/tree/main', 'owner/repo\n']) {
+  for (const source of ['https://user:secret@github.com/o/r.git', 'http://github.com/o/r', 'git@github.com:o/r', '/tmp/repo', 'file:///tmp/repo', 'https://github.com/o/r?x=y', 'https://github.com/o/r#main', 'https://github.com/o/r/tree/main', 'owner/repo\n', '--yes/x', '-owner/repo', 'owner/-repo']) {
     for (const input of [{ operation: 'discoverUpstream', input: { source } }, { operation: 'previewChange', input: { change: { kind: 'editDraft', draftId: null, intent: { kind: 'pin', source, commit: 'a'.repeat(40) } } } }])
       assert.throws(() => decodeRequest({ version: 3, id: 'x', command: 'operation', ...input }), source);
   }
@@ -313,4 +316,98 @@ test('author repository reads distinguish missing gh, signed out, denied access 
       assert.equal(error.code, code, state);
     }));
   }
+});
+
+const pendingLogin = async (t: import('node:test').TestContext) => {
+  let release = () => {}; let ready = () => {};
+  const challenged = new Promise<void>(resolve => { ready = resolve; });
+  const f = await fixture(t, command => command.cmd === 'gh' && command.args[1] === 'login' ? Effect.callback(resume => {
+    release = () => resume(Effect.succeed({ code: 0, stdout: '' }));
+    command.onOutput?.('stderr', 'First copy your one-time code: ABCD-1234\n'); ready();
+  }) : undefined);
+  const start = (s: AgentSession) => Effect.gen(function* () {
+    const p = yield* s.previewChange({ kind: 'ghLogin' });
+    const accepted = yield* s.runs.submit({ planId: p.planId, requestId: 'pending-login', inputDigest: operationDigest(p.planId), actor: 'app' });
+    yield* Effect.promise(() => challenged);
+    return accepted;
+  });
+  return { ...f, start, release: () => release() };
+};
+
+test('author reads complete while a GitHub sign-in is pending', async t => {
+  const f = await pendingLogin(t);
+  await f.within((s, handle) => Effect.gen(function* () {
+    const edit = yield* s.previewChange({ kind: 'editDraft', draftId: null, intent: { kind: 'createProfile', profile: 'extra', extends: 'base' } });
+    yield* apply(s, edit.planId, 'read-draft');
+    const draft = yield* s.draftPreview(decodeOperationInput('draftPreview', { draftId: (edit as any).draftId }));
+    const publish = yield* s.previewChange({ kind: 'publishDraft', draftId: draft.draftId, digest: draft.digest });
+    const publication = yield* apply(s, publish.planId, 'read-publication');
+    yield* f.start(s);
+    const reads = Effect.all([
+      read(s, 'ghState'), read(s, 'drafts'), read(s, 'authorProfiles'),
+      read(s, 'authorFile', { profile: 'base', fileId: 'claude:CLAUDE.md' }),
+      read(s, 'upstreams'), read(s, 'draftPreview', { draftId: draft.draftId }), s.runs.get(publication.runId),
+      handle.exclusive(Effect.succeed('scheduled job')),
+    ], { concurrency: 'unbounded' });
+    const completed = yield* reads.pipe(Effect.timeoutOption(2000));
+    assert.equal(completed._tag, 'Some');
+  }).pipe(Effect.ensuring(Effect.sync(f.release))));
+});
+
+test('a machine apply is not blocked by a pending GitHub sign-in', async t => {
+  const f = await pendingLogin(t);
+  await f.within(s => Effect.gen(function* () {
+    yield* s.inspect('app');
+    yield* f.start(s);
+    assert.equal(liveLockHolder(join(f.m.paths.stateRoot, 'apply.lock')), undefined);
+    const preview = yield* s.previewChange({ kind: 'reconcile', only: [] });
+    const completed = yield* apply(s, preview.planId, 'during-login').pipe(Effect.timeoutOption(2000));
+    assert.equal(completed._tag, 'Some');
+    if (completed._tag === 'Some') assert.equal(completed.value.state, 'succeeded');
+  }).pipe(Effect.ensuring(Effect.sync(f.release))));
+});
+
+test('a second sign-in is refused while one is pending', async t => {
+  const f = await pendingLogin(t);
+  await f.within(s => Effect.gen(function* () {
+    const second = yield* s.previewChange({ kind: 'ghLogin' });
+    yield* f.start(s);
+    const refused = yield* Effect.flip(s.runs.submit({ planId: second.planId, requestId: 'second-login', inputDigest: operationDigest(second.planId), actor: 'app' }));
+    assert.equal(refused.code, 'BUSY');
+  }).pipe(Effect.ensuring(Effect.sync(f.release))));
+});
+
+test('author browsing returns valid profiles and issues for invalid profiles', async t => {
+  const f = await fixture(t);
+  f.m.write(join(f.m.paths.repo, 'skills-manifest.txt'), '[owner/repo]\none\n');
+  f.m.write(join(f.m.paths.repo, 'profiles/broken.json'), '{');
+  f.m.write(join(f.m.paths.repo, 'profiles/missing.json'), '{"extends":"absent"}');
+  f.git('-C', f.m.paths.repo, 'add', '.');
+  f.git('-C', f.m.paths.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'invalid profiles');
+  f.git('-C', f.m.paths.repo, 'push', f.origin, 'main');
+  await f.within(s => Effect.gen(function* () {
+    const profiles = yield* s.authorProfiles(decodeOperationInput('authorProfiles', {}));
+    assert.deepEqual(profiles.profiles.map(p => p.name), ['base', 'personal', 'team']);
+    assert.deepEqual(profiles.issues!.map(p => p.profile), ['broken', 'missing']);
+    assert.ok(profiles.issues!.every(p => p.issues.length > 0));
+    const file = yield* s.authorFile(decodeOperationInput('authorFile', { profile: 'base', fileId: 'claude:CLAUDE.md' }));
+    assert.equal(file.text, 'old\n'); assert.deepEqual(file.issues, profiles.issues);
+    const broken = yield* s.authorFile(decodeOperationInput('authorFile', { profile: 'broken', fileId: 'claude:CLAUDE.md' }));
+    assert.equal(broken.path, null); assert.deepEqual(broken.issues, profiles.issues);
+    const upstreams = yield* s.upstreams(decodeOperationInput('upstreams', {}));
+    assert.deepEqual(upstreams.sources[0]!.inProfiles, ['base', 'personal', 'team']);
+    assert.deepEqual(upstreams.issues, profiles.issues);
+  }));
+});
+
+test('author reads complete while the scheduler job permit is held', async t => {
+  const f = await fixture(t);
+  await f.within((s, handle) => Effect.gen(function* () {
+    const held = yield* Deferred.make<void>();
+    const job = yield* Effect.forkChild(handle.exclusive(Deferred.succeed(held, undefined).pipe(Effect.andThen(Effect.never))));
+    yield* Deferred.await(held);
+    const completed = yield* Effect.all([read(s, 'ghState'), read(s, 'drafts'), read(s, 'authorProfiles')], { concurrency: 'unbounded' })
+      .pipe(Effect.timeoutOption(2000), Effect.ensuring(Fiber.interrupt(job)));
+    assert.equal(completed._tag, 'Some');
+  }));
 });

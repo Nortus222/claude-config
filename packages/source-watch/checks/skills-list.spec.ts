@@ -130,7 +130,7 @@ test('discovery runs the installer\'s pinned skills version with an isolated env
   assert.deepEqual(await Effect.runPromise(f.effect), { kind: 'complete', source, commit, skills: expectedOne });
   assert.deepEqual(f.commands.map(c => [c.cmd, c.args]), [
     ['git', ['ls-remote', '--symref', '--', 'https://github.com/example/skills.git', 'HEAD']],
-    ['npx', ['-y', `skills@${SKILLS_CLI_VERSION}`, 'add', source, '--list', '--full-depth']],
+    ['npx', ['-y', `skills@${SKILLS_CLI_VERSION}`, 'add', '--', source, '--list', '--full-depth']],
     ['git', ['ls-remote', '--symref', '--', 'https://github.com/example/skills.git', 'HEAD']],
   ]);
   const install = additionCommand({ source, revision: commit, selectorName: 'first', targets: ['codex'] });

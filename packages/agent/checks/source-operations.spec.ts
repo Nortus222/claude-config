@@ -25,10 +25,12 @@ test('four source reads have strict bounded inputs with no caller paths', () => 
 import { Effect, Layer } from 'effect';
 import { join, resolve, sep } from 'node:path';
 import { rmSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { Processes, DecisionsStore } from '@nortuscc/machine';
+import { Processes, DecisionsStore, OverridesStore } from '@nortuscc/machine';
 import { makeRepo, tempDir, gitSync, commitFiles } from '../../source-watch/checks/fixtures.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture, accept, EFFORT } from './support/setup-fixture.ts';
+import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { SetupSource } from '@nortuscc/sync';
 import { startAgent, makeSession } from '../src/index.ts';
 import { sourceEnvironment, sourceIdentity } from '../src/operations/sources.ts';
 
@@ -529,4 +531,51 @@ test('sourceDecision has an exact SHA contract and rejects arbitrary author dest
     assert.throws(()=>decodeOperationInput('previewChange',{change:{kind:'sourceDecision',sourceId:'Owner/Repo',action,revision:'a'.repeat(40)}}));
   }
   assert.throws(()=>decodeOperationInput('previewChange',{change:{kind:'sourceDecision',sourceId:'Owner/Repo',action:'unpin',path:'/private'}}));
+});
+
+test('pinImpact includes machine additions under normalized source casing without writing policy', async t => {
+  const m = agentMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const repo = makeRepo(m.root);
+  const from = repo.commit('old', { 'skills/one/SKILL.md': 'old', 'skills/added/SKILL.md': 'same' });
+  const to = repo.commit('new', { 'skills/one/SKILL.md': 'new' });
+  const manifest = '[Owner/Repo]\none\n';
+  const pins = JSON.stringify({ version: 1, pins: { 'Owner/Repo': from } });
+  commitFiles(m.paths.repo, 'author', { 'skills-manifest.txt': manifest, 'skill-pins.json': pins });
+  const overridesPath = join(m.paths.stateRoot, 'overrides.json');
+  const overridesBytes = JSON.stringify({ version: 2, skillAdditions: [{ source: 'owner/repo', name: 'added', targets: ['codex'] }] });
+  m.write(overridesPath, overridesBytes);
+  const f = setupFixture(join(m.root, 'setup'), { headFiles: { 'skills-manifest.txt': manifest, 'skill-pins.json': pins } });
+  const overrides = await m.run(OverridesStore.use(store => store.read));
+  const compose = <T extends { repo: string }>(snapshot: T) => Effect.gen(function* () {
+    return { ...snapshot, desired: yield* loadProfile(snapshot.repo, { overrides }).pipe(Effect.provide(nodeFiles)) };
+  }).pipe(Effect.orDie);
+  const source = Layer.succeed(SetupSource, { ...f.service,
+    current: f.service.current.pipe(Effect.flatMap(compose)),
+    load: revision => f.service.load(revision).pipe(Effect.flatMap(compose)),
+    effective: decisions => f.service.effective(decisions).pipe(Effect.flatMap(value => Effect.gen(function* () {
+      return { ...value, applied: yield* compose(value.applied), effective: yield* compose(value.effective) };
+    }))),
+  });
+  await m.trust(); await m.run(DecisionsStore.use(store => store.record(accept(EFFORT))));
+  const index = readFileSync(join(m.paths.repo, '.git/index'));
+  await m.run(Effect.scoped(Effect.gen(function* () {
+    const h = yield* startAgent(() => m.domains, { deferStart: true });
+    const processes = yield* Processes;
+    const s = yield* makeSession(h, { domains: () => m.domains, signal: new AbortController().signal }).pipe(
+      Effect.provide(sourceEnvironment({ PATH: process.env.PATH!, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_ALLOW_PROTOCOL: 'file' })),
+      Effect.provideService(Processes, { run: command => {
+        assert.equal(command.cmd, 'git');
+        return processes.run({ ...command, args: command.args.map(arg => arg === 'https://github.com/Owner/Repo.git' ? repo.url : arg) });
+      } }),
+    );
+    yield* s.inspect('mcp');
+    const impact = yield* s.pinImpact(decodeOperationInput('pinImpact', { sourceId: 'Owner/Repo', revision: to }));
+    assert.deepEqual(impact.skills.map(skill => skill.name), ['one', 'added']);
+    assert.deepEqual(impact.skills.map(skill => skill.skillId), ['skill:Owner/Repo/one', 'skill:owner/repo/added']);
+  })), source);
+  assert.equal(m.read(join(m.paths.repo, 'skills-manifest.txt')), manifest);
+  assert.equal(m.read(join(m.paths.repo, 'skill-pins.json')), pins);
+  assert.equal(m.read(overridesPath), overridesBytes);
+  assert.deepEqual(readFileSync(join(m.paths.repo, '.git/index')), index);
+  assert.equal(gitSync(m.paths.repo, 'status', '--porcelain'), '');
 });

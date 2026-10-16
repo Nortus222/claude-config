@@ -99,9 +99,11 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
         result = yield* readSkillContents(args.source, args.commit, args.name, { cacheDir: join(paths.stateRoot, 'agent', 'author', 'cache') }).pipe(Effect.provideService(Git, git), Effect.provideService(Fs, fs));
       } else {
         const { repoUrl, documents, profiles } = yield* snapshot;
-        const resolved = profiles.map(name => ({ name, config: resolveNamedProfile({ documents, name }) }));
-        if (resolved.some(p => p.config.issues.length)) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Author profiles contain invalid declarations'));
-        if (name === 'authorProfiles') result = { repoUrl, profiles: resolved.map(({ name, config }) => ({ name,
+        const allProfiles = profiles.map(name => ({ name, config: resolveNamedProfile({ documents, name }) }));
+        const issues = allProfiles.filter(p => p.config.issues.length).map(p => ({ profile: p.name, issues: p.config.issues }));
+        const resolved = allProfiles.filter(p => p.config.issues.length === 0);
+        const problems = issues.length ? { issues } : {};
+        if (name === 'authorProfiles') result = { repoUrl, ...problems, profiles: resolved.map(({ name, config }) => ({ name,
           extends: documents[`profiles/${name}.json`] ? parseProfileDocument(documents[`profiles/${name}.json`]!, `profiles/${name}.json`).value.extends ?? null : null,
           skills: config.skills.map(s => ({ source: s.source, name: s.name, included: s.install, from: s.from.source })),
           files: config.files.map(f => ({ fileId: f.id, path: f.managed ? f.src : null, from: f.from.source })),
@@ -109,13 +111,13 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
         else if (name === 'authorFile') {
           const args = input as OperationInput<'authorFile'>;
           const file = resolved.find(p => p.name === args.profile)?.config.files.find(f => f.id === args.fileId);
-          if (!file) return yield* Effect.fail(invalid('Unknown profile or file'));
-          const text = file.managed ? documents[file.src] ?? '' : '';
-          result = { path: file.managed ? file.src : null, text: Buffer.from(text).subarray(0, CAPTURE_MAX_BYTES).toString('utf8'), truncated: Buffer.byteLength(text) > CAPTURE_MAX_BYTES };
+          if (!file && !issues.some(p => p.profile === args.profile)) return yield* Effect.fail(invalid('Unknown profile or file'));
+          const text = file?.managed ? documents[file.src] ?? '' : '';
+          result = { ...problems, path: file?.managed ? file.src : null, text: Buffer.from(text).subarray(0, CAPTURE_MAX_BYTES).toString('utf8'), truncated: Buffer.byteLength(text) > CAPTURE_MAX_BYTES };
         } else {
           const browsed = yield* sources;
           const all = new Set([...resolved.flatMap(p => p.config.skills.map(s => s.source)), ...browsed.map(s => s.source)]);
-          result = { sources: [...all].sort().map(source => ({ source, inProfiles: resolved.filter(p => p.config.skills.some(s => s.source === source && s.install)).map(p => p.name),
+          result = { ...problems, sources: [...all].sort().map(source => ({ source, inProfiles: resolved.filter(p => p.config.skills.some(s => s.source === source && s.install)).map(p => p.name),
             pin: resolved.flatMap(p => p.config.skills).find(s => s.source === source)?.pin?.ref ?? null, discovery: browsed.find(s => s.source === source) ?? null })) };
         }
       }
@@ -163,11 +165,11 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
             if (state !== 'ready') return yield* Effect.fail(new SessionError(state === 'missing' ? 'APP_UNAVAILABLE' : 'NOT_SIGNED_IN', 'GitHub sign-in did not complete'));
           } else if (change.kind === 'deleteDraft') yield* store.delete(id!);
           else yield* store.write(next!);
-          yield* lifecycle.parity({ kind: change.kind, state: 'committed', committedKeys: [key], remainingKeys: [], backupIds: (yield* backups.dir) ? [basename((yield* backups.dir)!)] : [] });
+          yield* lifecycle.parity({ kind: change.kind, state: 'committed', committedKeys: [key], remainingKeys: [], backupIds: change.kind === 'ghLogin' ? [] : (yield* backups.dir) ? [basename((yield* backups.dir)!)] : [] });
         }).pipe(Effect.catch(failure)),
       } satisfies PreparedParityChange;
     }).pipe(Effect.catch(failure));
-    return { read, prepare: (change: AuthorChange) => withBackups(change.kind === 'publishDraft' ? publisher.preparePublish(change) : change.kind === 'announcePublication' ? publisher.prepareAnnounce(change) : prepareLocal(change)).pipe(
+    return { read, prepare: (change: AuthorChange) => change.kind === 'ghLogin' ? prepareLocal(change) : withBackups(change.kind === 'publishDraft' ? publisher.preparePublish(change) : change.kind === 'announcePublication' ? publisher.prepareAnnounce(change) : prepareLocal(change)).pipe(
       Effect.map(prepared => ({ ...prepared, execute: (lifecycle, signal) => withBackups(prepared.execute(lifecycle, signal)) } satisfies PreparedParityChange))),
       recoverPublication: (run: Parameters<typeof publisher.recoverPublication>[0]) => withBackups(publisher.recoverPublication(run)),
     };

@@ -79,7 +79,7 @@ export const PublishDraftChangeSchema = Schema.Struct({ kind: Schema.Literal('pu
 export const AnnouncePublicationChangeSchema = Schema.Struct({ kind: Schema.Literal('announcePublication'), runId: IdSchema });
 // Author sources are Git remotes, never installer URL modes or credential-bearing URLs.
 export const AuthorSourceSchema = Schema.String.check(Schema.isMaxCodePoints(2048), Schema.makeFilter(value => {
-  if (/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$(?![\s\S])/u.test(value)) return true;
+  if (/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._][A-Za-z0-9._-]*$(?![\s\S])/u.test(value)) return true;
   if (!/^https:\/\//i.test(value) || /[\s\\\x00-\x1f]/u.test(value)) return false;
   try {
     const url = new URL(value);
@@ -480,11 +480,14 @@ export const DiscoveryResultSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('complete'), source: Schema.String, commit: SourceRevision, skills: Schema.Array(Schema.Struct({ name: Schema.String, description: Schema.String })) }),
   Schema.Struct({ kind: Schema.Literal('unavailable'), source: Schema.String, reason: Schema.Literals(['cli-failed', 'unparseable', 'head-moved', 'timeout', 'too-large']) }),
 ]);
-export const AuthorProfilesResultSchema = Schema.Struct({ repoUrl: RepoUrlSchema, profiles: Schema.Array(Schema.Struct({ name: ProfileNameSchema, extends: Schema.NullOr(ProfileNameSchema),
+const authorIssues = { issues: Schema.optionalKey(Schema.Array(Schema.Struct({ profile: ProfileNameSchema, issues: Schema.Array(Schema.Struct({
+  layer: Schema.Literals(['base', 'profile', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String,
+})) }))) };
+export const AuthorProfilesResultSchema = Schema.Struct({ ...authorIssues, repoUrl: RepoUrlSchema, profiles: Schema.Array(Schema.Struct({ name: ProfileNameSchema, extends: Schema.NullOr(ProfileNameSchema),
   skills: Schema.Array(Schema.Struct({ source: Schema.String, name: Schema.String, included: Schema.Boolean, from: Schema.String })),
   files: Schema.Array(Schema.Struct({ fileId: Schema.String, path: Schema.NullOr(Schema.String), from: Schema.String })) })) });
-export const AuthorFileResultSchema = Schema.Struct({ path: Schema.NullOr(Schema.String), text: Schema.String, truncated: Schema.Boolean });
-export const UpstreamsResultSchema = Schema.Struct({ sources: Schema.Array(Schema.Struct({ source: Schema.String, inProfiles: Schema.Array(ProfileNameSchema), pin: Schema.NullOr(SourceRevision), discovery: Schema.NullOr(DiscoveryResultSchema) })) });
+export const AuthorFileResultSchema = Schema.Struct({ ...authorIssues, path: Schema.NullOr(Schema.String), text: Schema.String, truncated: Schema.Boolean });
+export const UpstreamsResultSchema = Schema.Struct({ ...authorIssues, sources: Schema.Array(Schema.Struct({ source: Schema.String, inProfiles: Schema.Array(ProfileNameSchema), pin: Schema.NullOr(SourceRevision), discovery: Schema.NullOr(DiscoveryResultSchema) })) });
 export const UpstreamSkillResultSchema = Schema.Union([
   Schema.Struct({ path: Schema.String, text: Schema.String, files: Schema.Array(Schema.String) }),
   Schema.Struct({ unavailable: Schema.String }),

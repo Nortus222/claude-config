@@ -95,7 +95,7 @@ export const discoverSkills = (source: string, options: { tempDir: string }): Ef
     );
     const body = Effect.gen(function* () {
       const before = yield* head();
-      const stdout = yield* run('npx', ['-y', `skills@${SKILLS_CLI_VERSION}`, 'add', source, '--list', '--full-depth']);
+      const stdout = yield* run('npx', ['-y', `skills@${SKILLS_CLI_VERSION}`, 'add', '--', source, '--list', '--full-depth']);
       const after = yield* head();
       if (before !== after) return yield* Effect.fail(new DiscoveryFailed({ reason: 'head-moved' }));
       const parsed = parseSkillsList(stdout);

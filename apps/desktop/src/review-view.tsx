@@ -47,7 +47,7 @@ const domainText = {
   announcePublication: ['Announce publication', 'Retry announcements for the published commit.'],
   reconcile: ['Reconcile selected items', 'Existing owner guards and selected targets apply.'],
   machineIntent: ['Machine intent', 'Reset reveals inherited intent. Disabling or removing a declaration does not physically remove content.'],
-  capture: ['Capture configuration', 'Writes selected author documents. Commit and publication remain explicit CLI actions.'],
+  capture: ['Capture configuration', 'Capture selected configuration into a draft, then review and publish it in the app.'],
   uninstallConfig: ['Restore recorded configuration', 'Restores recorded documents through their owner; general backup restoration is unavailable.'],
   update: ['Update selected skills', 'Addition repair requires the verified addition workflow. Author changes use draft intents.'],
   setupApply: ['Apply incoming setup choices', 'Saves every reviewed choice and applies the selected machine plan in one run.'],
