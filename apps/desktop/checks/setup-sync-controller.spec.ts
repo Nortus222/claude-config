@@ -168,17 +168,40 @@ test('late review replies after disconnect or disposal cannot restore a preview'
   await f.reconnect(); const next = deferred<unknown>(); f.handlers.setupReview = () => next.promise;
   const reload = f.controller.reload(); f.controller.dispose(); const state = f.controller.state; next.resolve(review()); await reload; assert.equal(f.controller.state, state);
 });
-test('a stale Apply shows the replacement preview and lost Apply is never repeated', async t => {
-  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+test('a stale follow shows the replacement preview and lost Apply is never repeated', async t => {
+  const f = await setup(t);
+  f.handlers.inspectProfiles = () => ({ followed: { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null }, available: [{ name: 'default', extends: null }, { name: 'team', extends: null }] });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  await f.controller.reload(); await f.controller.switchProfile('team');
   const freshPreview = { ...f.controller.state.preview!, planId: 'fresh' };
   f.handlers.applyChange = () => ({ status: 'stale', preview: freshPreview });
   await f.controller.apply();
   assert.equal(f.controller.state.preview?.planId, 'fresh'); assert.equal(f.controller.state.previewNotice, 'This Mac changed. Review the updated plan.');
+  assert.equal(f.controller.state.switchTarget, 'team');
   assert.equal(f.controller.state.run, null); assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 1);
   f.handlers.applyChange = () => { throw new Error('Reply lost'); }; await f.controller.apply(); await f.controller.apply();
   const applies = f.calls.filter(c => c.name === 'applyChange');
   assert.equal(applies.length, 2); assert.equal(applies[1]?.input.planId, 'fresh');
   assert.match(f.controller.state.error ?? '', /Reply lost/); assert.equal(f.controller.state.previewNotice, null);
+});
+test('a stale incoming Apply drops the agent replacement, re-reads the review and keeps choices only for unchanged rows', async t => {
+  const f = await setup(t);
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); f.controller.choose({ itemId: 'setting:b', action: 'hold' }); await f.controller.preview();
+  const newer = { kind: 'local' as const, commit: 'c'.repeat(40) };
+  f.handlers.applyChange = () => ({ status: 'stale', preview: changePreview({ planId: 'replacement', change: { ...change, revision: newer } }) });
+  f.handlers.setupReview = () => review({ revision: newer, rows: [{ itemId: 'setting:a', kind: 'setting', change: 'changed', held: false, conflict: true, before: 'old', after: 'newer', mine: 'mine' },
+    { itemId: 'setting:b', kind: 'setting', change: 'added', held: false, conflict: false, after: 'offered' }] });
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  await f.controller.apply();
+  assert.equal(f.controller.state.preview, null); assert.equal(f.controller.state.eligibility.apply, false);
+  assert.equal(f.controller.state.previewError, 'Your profile changed. Review the new values and choose again.');
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').at(-1)?.input.refetch, false);
+  assert.equal(f.controller.state.review?.rows[0]?.after, 'newer');
+  assert.deepEqual(f.controller.state.choices, [{ itemId: 'setting:b', action: 'hold' }]);
+  await f.controller.apply(); assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 1);
+  await f.controller.preview();
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { ...change, revision: newer, choices: [{ itemId: 'setting:b', action: 'hold' }] });
 });
 test('On this Mac previews a reconcile of the included items and never the legacy preview', async t => {
   const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();

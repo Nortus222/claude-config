@@ -33,6 +33,9 @@ const PAGE_SIZE = 100;
 const MAX_CHOICES = 1000;
 const MAX_RUN_PAGES = 5;
 const STALE = 'This Mac changed. Review the updated plan.';
+const PROFILE_CHANGED = 'Your profile changed. Review the new values and choose again.';
+// What a person saw of a row when choosing for it.
+const seen = (row: Review['rows'][number]) => JSON.stringify([row.change, row.held, row.conflict, row.before ?? null, row.after ?? null, row.mine ?? null]);
 // Runs that change this Mac; the Changes page shows one while it is active or interrupted.
 const MACHINE_KINDS: ReadonlySet<string> = new Set(['setupApply', 'followProfile', 'reconcile', 'uninstallConfig', 'update', 'addSkill', 'machineIntent', 'syncDecision']);
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
@@ -354,14 +357,17 @@ export class SetupSyncController {
     this.runRead++;
     const target = this.state.switchTarget;
     const mark = this.mark(); this.update({ pending: true, preview: null, previewNotice: null, switchTarget: null, error: null });
-    let finished: RunView | undefined;
+    let finished: RunView | undefined, changed: { rows: Map<string, string>; choices: readonly SetupChoice[] } | undefined;
     const requestId = crypto.randomUUID();
     this.lost = null;
     try {
       const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId });
       if (!result) return;
-      // Nothing ran: the agent re-planned against this Mac as it is now, so "On this Mac" is inspected again.
-      if (result.status === 'stale') {
+      // Nothing ran. Incoming choices were made against values the agent has since replaced, so its
+      // replacement is dropped and the review re-read; a follow or this Mac's items adopt the re-plan.
+      if (result.status === 'stale' && preview.change.kind === 'setupApply') {
+        changed = { rows: new Map((this.state.review?.rows ?? []).map(row => [row.itemId, seen(row)])), choices: preview.change.choices };
+      } else if (result.status === 'stale') {
         this.update({ preview: result.preview, previewNotice: STALE, ...(result.preview.change.kind === 'followProfile' ? { switchTarget: target } : {}) });
         if (result.preview.change.kind === 'reconcile') void this.machine.inspect();
       } else {
@@ -371,7 +377,17 @@ export class SetupSyncController {
       }
     } catch (error) {
       if (this.current(mark)) { this.lost = requestId; this.update({ error: `${errorText(error)}. It is not known whether it ran. Reload to check before trying again.` }); }
-    } finally { if (this.current(mark)) { this.update({ pending: false }); if (finished) await this.finished(finished); } }
+    } finally {
+      if (this.current(mark)) { this.update({ pending: false }); if (finished) await this.finished(finished); if (changed) await this.restage(changed.rows, changed.choices); }
+    }
+  }
+  // Re-reads the review after a stale incoming Apply, keeping the choices whose rows read the same as before.
+  private async restage(rows: ReadonlyMap<string, string>, choices: readonly SetupChoice[]) {
+    await this.load(false);
+    const review = this.state.review;
+    if (!review) return;
+    const fresh = new Map(review.rows.map(row => [row.itemId, seen(row)]));
+    this.update({ choices: choices.filter(choice => rows.has(choice.itemId) && rows.get(choice.itemId) === fresh.get(choice.itemId)), previewError: PROFILE_CHANGED });
   }
   // Prepares a fresh preview of an interrupted run's change; a reconcile keeps only what is still waiting.
   async repreview() {

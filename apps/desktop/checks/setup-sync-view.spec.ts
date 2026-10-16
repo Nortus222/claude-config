@@ -93,11 +93,18 @@ test('a switch preview names the dropped holds and overrides before its Apply', 
   assert.match(panel(text), /Overrides removed[\s\S]*Skill old/);
 });
 
-test('a stale Apply shows the updated plan with its notice', async t => {
-  const { c, html, handlers } = await page(t); c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview();
+test('a stale reconcile shows the updated plan with its notice', async t => {
+  const { c, html, handlers } = await page(t, f => { f.report.items = localItems(); }); await c.previewLocal();
   const fresh = { ...c.state.preview!, planId: 'fresh' }; handlers.applyChange = () => ({ status: 'stale', preview: fresh }); await c.apply();
   const top = panel(html());
-  assert.match(top, /This Mac changed. Review the updated plan./); assert.deepEqual(applyButtons(top), ['Apply 1 incoming change']);
+  assert.match(top, /This Mac changed. Review the updated plan./); assert.deepEqual(applyButtons(top), ['Apply 2 changes to this Mac']);
+});
+test('a stale incoming Apply asks to choose again beside the review, with no Apply offered', async t => {
+  const { c, html, handlers } = await page(t); c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview();
+  const fresh = { ...c.state.preview!, planId: 'fresh' }; handlers.applyChange = () => ({ status: 'stale', preview: fresh }); await c.apply();
+  const text = html();
+  assert.equal(panel(text), ''); assert.deepEqual(applyButtons(text), []);
+  assert.match(text, /Your profile changed. Review the new values and choose again./);
 });
 
 test('On this Mac lists items to apply with checkboxes, previews them, and keeps one Apply', async t => {
