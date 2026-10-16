@@ -16,6 +16,7 @@ import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 
 const repoUrl = 'https://github.com/example/setup.git';
+const sshRepoUrl = 'ssh://git@github.com/example/setup.git';
 const fixture = async (t: import('node:test').TestContext, intercept?: (command: Command) => Effect.Effect<import('@nortuscc/machine').Completed, import('@nortuscc/machine').LaunchFailed> | undefined, authorClient?: import('@nortuscc/hosted-client').HostedClient, failChallenge = false) => {
   const commands: Command[] = [];
   const m = agentMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true }));
@@ -42,7 +43,7 @@ const fixture = async (t: import('node:test').TestContext, intercept?: (command:
       if (c.cmd === 'gh') return Effect.succeed({ code: 0, stdout: c.args[0] === 'api' ? '{"login":"fixture","id":42}' : '' });
       assert.equal(c.cmd, 'git');
       const transport = c.args.some(a => ['clone', 'fetch', 'push', 'ls-remote'].includes(a));
-      return processes.run({ ...c, args: transport ? ['-c', `url.${origin}.insteadOf=${repoUrl}`, ...c.args] : c.args });
+      return processes.run({ ...c, args: transport ? [...[repoUrl, sshRepoUrl, 'ssh://github.com/example/setup.git'].flatMap(url => ['-c', `url.${origin}.insteadOf=${url}`]), ...c.args] : c.args });
     } }), Effect.provideService(RunStore, { ...runStore, write: receipt => failChallenge && receipt.view.ghCode ? Effect.fail(new RunStoreError('Challenge storage failed')) : runStore.write(receipt) }));
   })), setup.source);
   return { m, within, git, origin, commands };
@@ -530,5 +531,19 @@ test('author operations ask to follow a setup when the CLI checkout is absent', 
   await f.within(s => Effect.gen(function* () {
     const error = yield* Effect.flip(read(s, 'authorProfiles'));
     assert.equal((error as any).message, 'Follow your setup repository first');
+  }));
+});
+
+
+test('authoring preserves the public SSH login name while removing URL passwords', async t => {
+  const f = await fixture(t);
+  f.git('-C', f.m.paths.repo, 'remote', 'set-url', 'origin', 'ssh://git:secret@github.com/example/setup.git');
+  await f.within(s => Effect.gen(function* () {
+    const profiles = yield* s.authorProfiles(decodeOperationInput('authorProfiles', {}));
+    assert.equal(profiles.repoUrl, sshRepoUrl);
+    const preview = yield* s.previewChange({ kind: 'editDraft', draftId: null, intent: { kind: 'createProfile', profile: 'new', extends: 'base' } } as any);
+    const run = yield* apply(s, preview.planId, 'ssh-edit');
+    assert.equal(run.state, 'succeeded');
+    assert.equal(((yield* read(s, 'drafts')) as any).drafts[0].repoUrl, sshRepoUrl);
   }));
 });

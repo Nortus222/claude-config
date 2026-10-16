@@ -58,9 +58,11 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
       const selection = yield* followed.read;
       const url = selection?.repoUrl ?? ((yield* fs.exists(paths.repo)) ? yield* originUrl(paths.repo).pipe(Effect.provideService(Processes, processes)) : undefined);
       if (!url) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Follow your setup repository first'));
-      // HTTPS credentials must never enter drafts, run receipts or hosted metadata.
+      // Keep SSH's public login name; passwords and HTTPS credentials never enter drafts or receipts.
       if (!url.includes('://')) return url;
-      const clean = new URL(url); clean.username = ''; clean.password = '';
+      const clean = new URL(url);
+      if (clean.protocol !== 'ssh:') clean.username = '';
+      clean.password = '';
       return clean.toString();
     });
     const failure = (error: unknown): Effect.Effect<never, SessionError> => Effect.gen(function* () {
