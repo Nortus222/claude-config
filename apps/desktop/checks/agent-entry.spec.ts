@@ -141,7 +141,9 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
   writeFileSync(shell, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(shell, 0o755);
   const controller = new AbortController(); t.after(() => controller.abort());
   let now = 0;
-  t.mock.method(performance, 'now', () => now);
+  const originalNow = performance.now;
+  t.after(() => { performance.now = originalNow; });
+  performance.now = () => now;
   let expire: (() => void) | undefined;
   let deadlineCleared = false;
   const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
