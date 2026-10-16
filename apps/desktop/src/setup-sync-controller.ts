@@ -179,7 +179,7 @@ export class SetupSyncController {
     } catch (error) {
       if (this.current(mark)) {
         const text = message(error);
-        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => text.includes(group.source)).map(group => [group.source, text]));
+        const groupErrors = Object.fromEntries((this.state.review?.pinGroups ?? []).filter(group => `Choices for ${group.source} must match: its items share one pin.` === text).map(group => [group.source, text]));
         this.update({ error: text, groupErrors });
       }
     } finally { if (this.current(mark)) this.update({ pending: false }); }

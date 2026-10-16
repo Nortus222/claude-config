@@ -96,6 +96,20 @@ test('mixed pin-group refusal is shown next to the group', async t => {
   f.handlers.previewChange = () => { throw new Error('Choices for owner/repo must match: its items share one pin.'); };
   await f.controller.preview(); assert.match(f.controller.state.groupErrors['owner/repo'] ?? '', /must match/); assert.equal(f.controller.state.preview, null);
 });
+test('a pin-group refusal highlights only the exact source', async t => {
+  const f = await setup(t);
+  f.handlers.setupReview = () => review({ pinGroups: [
+    { source: 'owner/repo', itemIds: ['setting:a'] },
+    { source: 'owner/repo-2', itemIds: ['setting:b'] },
+  ] });
+  await f.controller.reload();
+  f.controller.choose({ itemId: 'setting:b', action: 'accept' });
+  const refusal = 'Choices for owner/repo-2 must match: its items share one pin.';
+  f.handlers.previewChange = () => { throw new Error(refusal); };
+  await f.controller.preview();
+  assert.deepEqual(f.controller.state.groupErrors, { 'owner/repo-2': refusal });
+  assert.equal(f.controller.state.preview, null);
+});
 test('paging retains issued selections and a replacement review clears them', async t => {
   const f = await setup(t); f.handlers.setupReview = input => input.cursor ? review({ rows: [{ itemId: 'setting:c', kind: 'setting', change: 'unchanged', conflict: false, held: true }], nextCursor: null }) : review({ nextCursor: 'next' });
   await f.controller.reload(); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.page('next');
