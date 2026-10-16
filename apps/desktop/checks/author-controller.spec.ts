@@ -218,3 +218,31 @@ test('run discovery stops after five pages of unrelated history', async t => {
   await f.controller.reload();
   assert.equal(f.calls.filter(call => call.name === 'listRuns').length - before, 5);
 });
+
+test('a failed action is recorded so its error renders beside its button, and the next action clears it', async t => {
+  const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  f.handlers.draftPreview = () => { throw new Error('Main is unreachable'); };
+  await f.controller.previewDraft();
+  assert.equal(f.controller.state.failedAction, 'preview');
+  f.handlers.draftPreview = () => draftPreview();
+  await f.controller.previewDraft();
+  assert.equal(f.controller.state.failedAction, null); assert.equal(f.controller.state.error, null);
+});
+
+test('finished runs leave no generic action status behind', async t => {
+  const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  assert.equal(f.controller.state.run?.state, 'succeeded');
+  assert.equal(f.controller.state.message, '');
+});
+
+test('Publish and Delete ask first, and any other action dismisses the question', async t => {
+  const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true); await f.controller.previewDraft();
+  f.controller.askPublish(); assert.deepEqual(f.controller.state.confirming, { action: 'publish' });
+  await f.controller.previewDraft(); assert.equal(f.controller.state.confirming, null);
+  const id = f.controller.state.draft!.id;
+  f.controller.askDelete(); assert.deepEqual(f.controller.state.confirming, { action: 'deleteDraft', draftId: id });
+  f.controller.dismiss(); assert.equal(f.controller.state.confirming, null);
+  f.controller.askDelete(); await f.controller.deleteDraft(id);
+  assert.equal(f.controller.state.confirming, null);
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'deleteDraft', draftId: id });
+});
