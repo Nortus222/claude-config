@@ -81,7 +81,7 @@ export class SetupSyncController {
   // The session the review was last loaded in, so an entered page loads it once per session as soon as it
   // can; an invalidation clears it.
   private loaded: number | null = null;
-  // The request of an Apply whose reply was lost; Reload looks for its run.
+  // The request of the last Apply until its reply arrives, so Reload can find its run if the reply is lost.
   private lost: string | null = null;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
@@ -372,10 +372,11 @@ export class SetupSyncController {
     const mark = this.mark(); this.update({ pending: true, preview: null, previewNotice: null, switchTarget: null, error: null });
     let finished: RunView | undefined, changed: { review: Review | null; choices: readonly SetupChoice[] } | undefined;
     const requestId = crypto.randomUUID();
-    this.lost = null;
+    this.lost = requestId;
     try {
       const result = await this.call(mark, 'applyChange', { scope: SCOPE, planId: preview.planId, requestId });
       if (!result) return;
+      this.lost = null;
       // Nothing ran. Incoming choices were made against values the agent has since replaced, so its
       // replacement is dropped and the review re-read; a follow or this Mac's items adopt the re-plan.
       if (result.status === 'stale' && preview.change.kind === 'setupApply') {
@@ -389,7 +390,7 @@ export class SetupSyncController {
         else finished = result.run;
       }
     } catch (error) {
-      if (this.current(mark)) { this.lost = requestId; this.update({ error: `${errorText(error)}. It is not known whether it ran. Reload to check before trying again.` }); }
+      if (this.current(mark)) this.update({ error: `${errorText(error)}. It is not known whether it ran. Reload to check before trying again.` });
     } finally {
       if (this.current(mark)) { this.update({ pending: false }); if (finished) await this.finished(finished); if (changed) await this.restage(changed.review, changed.choices); }
     }

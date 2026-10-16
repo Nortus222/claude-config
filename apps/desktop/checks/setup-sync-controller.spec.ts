@@ -558,6 +558,28 @@ test('Reload after a lost Apply reply shows that run even when it already finish
   const after = inspections(f); await f.controller.reload(); await flush();
   assert.equal(f.controller.state.run?.runId, 'lost-run'); assert.equal(inspections(f), after + 1);
 });
+test('an Apply whose request fails after a disconnect is found by its requestId after Reconnect and Reload', async t => {
+  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  f.handlers.applyChange = () => { f.emit({ event: 'disconnected', detail: 'Agent disconnected; restart explicitly' }); throw new Error('Agent disconnected; restart explicitly'); };
+  await f.controller.apply();
+  const requestId = f.calls.find(c => c.name === 'applyChange')!.input.requestId;
+  await f.reconnect();
+  const finished = run({ runId: 'lost-run', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  const done = { ...finished, intent: { ...finished.intent, requestId } } as typeof finished;
+  f.handlers.listRuns = () => ({ runs: [run({ runId: 'other', state: 'succeeded', result: { status: 'done', ok: 2, failed: 0 } }), done], nextBefore: null });
+  await f.controller.reload(); await flush();
+  assert.equal(f.controller.state.run?.runId, 'lost-run'); assert.equal(f.controller.state.run?.state, 'succeeded');
+});
+test('an Apply that got its reply is not adopted again as a lost one', async t => {
+  const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  f.handlers.applyChange = () => ({ status: 'stale', preview: changePreview({ planId: 'replacement' }) });
+  await f.controller.apply();
+  const requestId = f.calls.find(c => c.name === 'applyChange')!.input.requestId;
+  const finished = run({ runId: 'old', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  f.handlers.listRuns = () => ({ runs: [{ ...finished, intent: { ...finished.intent, requestId } } as typeof finished], nextBefore: null });
+  await f.controller.reload(); await flush();
+  assert.equal(f.controller.state.run, null);
+});
 test('a page left before connecting does not load, and loads when entered later', async t => {
   const f = await fixture({ connect: false }); const controller = new SetupSyncController(f.bridge, f.machine);
   t.after(() => { controller.dispose(); f.machine.dispose(); });
