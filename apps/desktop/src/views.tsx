@@ -11,7 +11,14 @@ export type Screen = 'overview' | 'review' | 'setup' | 'skills' | 'profiles' | '
 const screens = [['overview', 'Overview'], ['review', 'Review & apply'], ['setup', 'Setup'], ['skills', 'Skills'], ['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['resolved', 'Resolved'], ['settings', 'Settings']] as const;
 export const screenForReview = (screen: Screen, previous: number, requested: number): Screen => requested > previous ? 'review' : screen;
 
-export function ShellView({ screen, navigate, children }: { screen: Screen; navigate: (screen: Screen) => void; children: ReactNode }) {
+// A lost agent connection is reported once, above every screen, with the way back.
+function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onReconnect: () => void }) {
+  return <div className="alert shell-banner" role="alert">
+    <div><strong>The local agent is disconnected.</strong> <span>{machine.detail}</span></div>
+    <button disabled={machine.pending} onClick={onReconnect}>Reconnect</button>
+  </div>;
+}
+export function ShellView({ screen, navigate, children, machine, onReconnect }: { screen: Screen; navigate: (screen: Screen) => void; children: ReactNode; machine?: ViewState; onReconnect?: () => void }) {
   return (
     <div className="app-shell">
       <aside className="shell-nav">
@@ -25,7 +32,7 @@ export function ShellView({ screen, navigate, children }: { screen: Screen; navi
         </nav>
         <p className="muted">Inspect, review, then apply.</p>
       </aside>
-      <main>{children}</main>
+      <main>{machine?.connection === 'disconnected' && onReconnect ? <DisconnectedBanner machine={machine} onReconnect={onReconnect} /> : null}{children}</main>
     </div>
   );
 }

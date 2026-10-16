@@ -25,6 +25,16 @@ test('browser preview has only implemented navigation and real empty states', ()
   for (const name of ['Discover', 'Machines', 'History', 'Publish', 'Updates', 'fixture-login']) assert.doesNotMatch(markup, new RegExp(name));
   assert.match(markup, /Browser preview/);
 });
+test('every screen shows one disconnected banner with the reason and a Reconnect action', () => {
+  const c = machine(); let reconnects = 0;
+  const state = { ...c.state, connection: 'disconnected' as const, detail: 'Agent request timed out; restart explicitly' };
+  const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'skills', navigate: () => {}, machine: state, onReconnect: () => { reconnects++; }, children: null }));
+  assert.match(markup, /class="[^"]*shell-banner[^"]*" role="alert"[\s\S]*Agent request timed out; restart explicitly[\s\S]*>Reconnect<\/button>/);
+  assert.equal(markup.match(/shell-banner/g)?.length, 1);
+  const connected = renderToStaticMarkup(createElement(ShellView, { screen: 'skills', navigate: () => {}, machine: { ...state, connection: 'connected' as const }, onReconnect: () => {}, children: null }));
+  assert.doesNotMatch(connected, /shell-banner/);
+  assert.equal(reconnects, 0);
+});
 const status = { at: '2026-10-11T12:00:00Z', policy: 'notify' as const, paused: { at: 'now', reason: 'Cancelled' }, trusted: false, pending: [], drift: [], conflicts: [], probeErrors: [], counts: { pending: 3, held: 1, ready: 2, drift: 0 } };
 const hosted = { enabled: true, recovered: true, signingIn: false, accountId: null, login: null, machineId: null, auth: 'signed-out' as const, setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 test('an existing installation waiting for native setup does not flash first-run consent', async () => {

@@ -790,6 +790,8 @@ input[type='text'], select {
 }
 .notice { border: 1px solid #37404c; background: #1a1f27; color: #c3ccd6; }
 .alert { border: 1px solid #5a3a36; background: #2a1e1d; color: #efc2b9; }
+.shell-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.shell-banner > div { min-width: 0; flex: 1 1 240px; }
 .setup-sync-view header { align-items: flex-start; gap: 16px; flex-wrap: wrap; }
 .setup-sync-view header > div:first-child { min-width: 0; flex: 1 1 320px; }
 .setup-sync-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-width: 0; }

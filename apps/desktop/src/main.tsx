@@ -76,7 +76,7 @@ function App() {
 
   return <StartupBoundary setup={setupState} setupController={setup} machine={state} machineController={machine}
     updatesAttention={updateAttention(updateState)} updates={<UpdateView state={updateState} controller={updates} />}>
-    <ShellView screen={screen} navigate={setScreen}>
+    <ShellView screen={screen} navigate={setScreen} machine={state} onReconnect={() => void machine.restart()}>
       {screen === 'overview' ? <OverviewView state={state} navigate={setScreen} controller={machine} /> : null}
       {screen === 'review' ? <ReviewView state={state} controller={machine} reviewTarget={reviewTarget} /> : null}
       {screen === 'setup' ? <SetupSyncView state={setupSyncState} controller={setupSync} /> : null}
