@@ -193,11 +193,10 @@ export class SetupSyncController {
       }
     } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: errorText(error) }); }
   }
-  // A run this window saw finish changed this Mac: re-read what is incoming when it can have changed,
-  // and re-inspect so "On this Mac" shows what is left.
+  // A run this window saw finish changed this Mac: re-inspect once so "On this Mac" shows what is left, beside
+  // re-reading what is incoming when it can have changed.
   private async finished(run: RunView) {
-    if (settles(run)) { this.invalidate(); await this.reload(); }
-    void this.machine.inspect();
+    if (settles(run)) { this.invalidate(); await this.reload(); } else void this.machine.inspect();
   }
   private receive(event: HostEvent) {
     if (!this.machine.ownsSession(this.machine.sessionToken(), { generation: event.generation, data: null })) return;

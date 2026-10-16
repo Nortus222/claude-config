@@ -9,6 +9,7 @@ async function setup(t: test.TestContext, options: { maintenance?: () => boolean
   t.after(() => { controller.dispose(); f.machine.dispose(); });
   await controller.reload(); return { ...f, controller };
 }
+const inspections = (f: { commands: string[] }) => f.commands.filter(command => command === 'inspect_machine').length;
 test('Refetch shows incoming rows and offers no Apply until a choice is made', async t => {
   const f = await setup(t); await f.controller.refetch();
   assert.equal(f.controller.state.review?.rows[0]?.after, 'new');
@@ -73,14 +74,15 @@ test('a status for another run does not end this run\'s progress', async t => {
   f.emit({ version: 3, event: 'status', runId: 'setup-run', status: { ...f.machine.state.status!, applying: false } }); await flush();
   assert.equal(f.controller.state.run?.state, 'succeeded');
 });
-test('a finished setup Apply reloads the review so applied rows leave it', async t => {
+test('a finished setup Apply reloads the review so applied rows leave it, and inspects this Mac once', async t => {
   const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview(); await f.controller.apply();
-  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length, before = inspections(f);
   f.handlers.setupReview = () => review({ rows: [] });
   f.handlers.getRun = () => run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
   f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
   assert.deepEqual(f.controller.state.review?.rows, []); assert.equal(f.controller.state.run?.state, 'succeeded');
+  assert.equal(inspections(f), before + 1);
 });
 test('a setup Apply seen finishing before this Mac stops applying re-reads the review once reading is allowed', async t => {
   const f = await setup(t); f.controller.enter(); await flush();
@@ -485,7 +487,6 @@ test('a page entered while connecting loads profiles and the review once connect
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, 2);
   assert.ok(controller.state.review);
 });
-const inspections = (f: { commands: string[] }) => f.commands.filter(command => command === 'inspect_machine').length;
 test('Reload inspects this Mac again beside re-reading the review', async t => {
   const f = await setup(t); f.report.items = localItems();
   const before = inspections(f), reviews = f.calls.filter(c => c.name === 'setupReview').length;
