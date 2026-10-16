@@ -63,10 +63,10 @@ function App() {
   useEffect(() => {
     if (state.reviewRequested <= reviewSeen.current) return;
     const previous = reviewSeen.current;
-    focusReview.current = true;
-    setScreen((current) => screenForReview(current, previous, state.reviewRequested));
+    focusReview.current = screenForReview(screen, previous, state.reviewRequested, state.status) === 'review';
+    setScreen((current) => screenForReview(current, previous, state.reviewRequested, state.status));
     reviewSeen.current = state.reviewRequested;
-  }, [state.reviewRequested]);
+  }, [state.reviewRequested, state.status]);
   useEffect(() => {
     if (screen !== 'review' || !focusReview.current || !reviewTarget.current) return;
     reviewTarget.current.focus();

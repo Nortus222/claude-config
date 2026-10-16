@@ -260,9 +260,12 @@ test('Review remains usable locally with selection, preview and external activit
   const markup = renderToStaticMarkup(createElement(ReviewView, { controller: c, state: { ...c.state, connection: 'connected', status: { ...status, applying: true } } }));
   assert.match(markup, /Review &amp; apply/); assert.match(markup, /Cancel<\/button>/); assert.doesNotMatch(markup, /disabled="">Cancel<\/button>/); assert.match(markup, /Automatic apply paused/);
 });
-test('new notification requests route every screen to Review without previewing or applying', () => {
-  for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2), 'review');
-  assert.equal(screenForReview('settings', 2, 2), 'settings');
+test('item notifications open Setup, where incoming items are decided; agent failures open Review', () => {
+  for (const screen of ['overview', 'resolved', 'settings', 'review'] as const) assert.equal(screenForReview(screen, 1, 2, { ...status, paused: null }), 'setup');
+  assert.equal(screenForReview('overview', 1, 2, null), 'setup');
+  assert.equal(screenForReview('overview', 1, 2, status), 'review', 'a paused agent sent the failure notification');
+  assert.equal(screenForReview('overview', 1, 2, { ...status, paused: null, error: 'JOB_FAILED' }), 'review');
+  assert.equal(screenForReview('settings', 2, 2, null), 'settings');
 });
 
 test('startup updates stay compact until a real update needs attention or a failed read needs retry', async () => {

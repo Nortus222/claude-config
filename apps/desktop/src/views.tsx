@@ -9,7 +9,10 @@ import type { MachineController, ViewState } from './controller.ts';
 
 export type Screen = 'overview' | 'review' | 'setup' | 'skills' | 'profiles' | 'upstreams' | 'resolved' | 'settings';
 const screens = [['overview', 'Overview'], ['review', 'Review & apply'], ['setup', 'Setup'], ['skills', 'Skills'], ['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['resolved', 'Resolved'], ['settings', 'Settings']] as const;
-export const screenForReview = (screen: Screen, previous: number, requested: number): Screen => requested > previous ? 'review' : screen;
+// A notification click names no notification. Agent failures (error or pause) are reviewed on Review &
+// apply; item notifications count incoming items, which are decided on Setup.
+export const screenForReview = (screen: Screen, previous: number, requested: number, status: ViewState['status']): Screen =>
+  requested <= previous ? screen : status?.error || status?.paused ? 'review' : 'setup';
 
 // A lost agent connection is reported once, above every screen, with the way back.
 function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onReconnect: () => void }) {
