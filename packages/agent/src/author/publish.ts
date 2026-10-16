@@ -158,6 +158,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
           yield* checkpoint(lifecycle, publication);
         }
       }
+      yield* client.sync();
     });
     yield* hosted.pipe(Effect.catch(() => Effect.void));
     if (publication.pending.length === 0) {

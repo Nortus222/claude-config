@@ -4,7 +4,7 @@ import { basename, join } from 'node:path';
 import { Effect, Layer, Schema, Semaphore } from 'effect';
 import { Backups, Fs, MachinePaths, Processes, homeDir, backupsForRun, canonical, captureFileText } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, parseProfileDocument, resolveNamedProfile } from '@nortuscc/profile-engine';
-import { AccessDenied, FollowedStore, originUrl, readDocuments } from '@nortuscc/sync';
+import { AccessDenied, FollowedStore, originUrl, normalizeRepoUrl, readDocuments } from '@nortuscc/sync';
 import { Git, IGNORES_FILE, discoverSkills, machineGit, readSkillContents } from '@nortuscc/source-watch';
 import { DraftStore, draftStore, type Draft } from '../author/drafts.ts';
 import { CAPTURE_MAX_BYTES } from '../author/intents.ts';
@@ -123,7 +123,9 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
         const issues = allProfiles.filter(p => p.config.issues.length).map(p => ({ profile: p.name, issues: p.config.issues }));
         const resolved = allProfiles.filter(p => p.config.issues.length === 0);
         const problems = issues.length ? { issues } : {};
+        const hosted = name === 'authorProfiles' && handle.authorClient ? yield* handle.authorClient.state : undefined;
         if (name === 'authorProfiles') result = { repoUrl, ...problems, profiles: resolved.map(({ name, config }) => ({ name,
+          setupId: hosted?.accountId ? hosted.setups.find(setup => setup.owned && setup.profile === name && normalizeRepoUrl(setup.repoUrl) === normalizeRepoUrl(repoUrl))?.setupId ?? null : null,
           extends: documents[`profiles/${name}.json`] ? parseProfileDocument(documents[`profiles/${name}.json`]!, `profiles/${name}.json`).value.extends ?? null : null,
           skills: config.skills.map(s => ({ source: s.source, name: s.name, included: s.install, from: s.from.source })),
           files: config.files.map(f => ({ fileId: f.id, path: f.managed ? f.src : null, from: f.from.source })),

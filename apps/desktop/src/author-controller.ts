@@ -259,6 +259,10 @@ export class AuthorController {
         try {
           const acceptance = run.intent.parity;
           await this.loadDrafts(mark, acceptance && 'draftId' in acceptance ? acceptance.draftId ?? undefined : undefined);
+          if (publication(run)) {
+            const profiles = await this.call(mark, 'authorProfiles', { scope: SCOPE });
+            if (profiles) this.update({ profiles });
+          }
           const gh = await this.call(mark, 'ghState', { scope: SCOPE });
           if (gh) { this.settled.add(runId); this.update({ gh }); }
         } finally {

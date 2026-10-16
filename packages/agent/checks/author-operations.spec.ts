@@ -500,3 +500,22 @@ test('machine settings capture uses the selected profile allowlist', async t => 
     assert.deepEqual(JSON.parse(file.text), { alwaysThinkingEnabled: true });
   }));
 });
+
+
+test('author profiles expose only the signed-in owners matching setup IDs', async t => {
+  let accountId: string | null = 'owner';
+  const setups = [
+    { setupId: 'personal-setup', repoUrl: 'git@github.com:Example/Setup.git', profile: 'personal', owned: true, latestRevision: 1 },
+    { setupId: 'not-owned', repoUrl, profile: 'team', owned: false, latestRevision: 1 },
+    { setupId: 'other-repo', repoUrl: 'https://github.com/elsewhere/config', profile: 'base', owned: true, latestRevision: 1 },
+  ];
+  const client = { state: Effect.sync(() => ({ accountId, setups })) } as unknown as import('@nortuscc/hosted-client').HostedClient;
+  const f = await fixture(t, undefined, client);
+  await f.within(s => Effect.gen(function* () {
+    const result = yield* s.authorProfiles(decodeOperationInput('authorProfiles', {}));
+    assert.deepEqual(result.profiles.map(p => [p.name, (p as any).setupId]), [['base', null], ['personal', 'personal-setup'], ['team', null]]);
+    accountId = null;
+    const signedOut = yield* s.authorProfiles(decodeOperationInput('authorProfiles', {}));
+    assert.ok(signedOut.profiles.every(p => (p as any).setupId === null));
+  }));
+});

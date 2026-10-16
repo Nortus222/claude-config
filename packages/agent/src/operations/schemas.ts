@@ -496,7 +496,7 @@ export const DiscoveryResultSchema = Schema.Union([
 const authorIssues = { issues: Schema.optionalKey(Schema.Array(Schema.Struct({ profile: ProfileNameSchema, issues: Schema.Array(Schema.Struct({
   layer: Schema.Literals(['base', 'profile', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String,
 })) }))) };
-export const AuthorProfilesResultSchema = Schema.Struct({ ...authorIssues, repoUrl: RepoUrlSchema, profiles: Schema.Array(Schema.Struct({ name: ProfileNameSchema, extends: Schema.NullOr(ProfileNameSchema),
+export const AuthorProfilesResultSchema = Schema.Struct({ ...authorIssues, repoUrl: RepoUrlSchema, profiles: Schema.Array(Schema.Struct({ name: ProfileNameSchema, setupId: Schema.NullOr(IdSchema), extends: Schema.NullOr(ProfileNameSchema),
   skills: Schema.Array(Schema.Struct({ source: Schema.String, name: Schema.String, included: Schema.Boolean, from: Schema.String })),
   files: Schema.Array(Schema.Struct({ fileId: Schema.String, path: Schema.NullOr(Schema.String), from: Schema.String })) })) });
 export const AuthorFileResultSchema = Schema.Struct({ ...authorIssues, path: Schema.NullOr(Schema.String), text: Schema.String, truncated: Schema.Boolean });

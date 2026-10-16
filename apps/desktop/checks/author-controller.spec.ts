@@ -125,3 +125,16 @@ test('Announce repairs a missing tag even when no profile announcements remain',
   await f.controller.announce();
   assert.equal(f.calls.filter(c=>c.name==='previewChange').at(-1)?.input.change.kind,'announcePublication');
 });
+
+
+test('finishing a publication refreshes the profile follow links', async t => {
+  const f = await authorFixture(t);
+  await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
+  await f.controller.previewDraft();
+  const profiles = f.controller.state.profiles!;
+  f.handlers.authorProfiles = () => ({ ...profiles, profiles: profiles.profiles.map(profile => ({ ...profile, setupId: 'announced-setup' })) });
+  f.handlers.getRun = () => authorRun({ kind: 'publishDraft', draftId: f.controller.state.draft!.id, digest: 'b'.repeat(64) }, { runId: 'new-publication', state: 'succeeded', result: { status: 'succeeded', message: 'Published and announced' } });
+  f.handlers.applyChange = () => ({ status: 'started', run: f.handlers.getRun() });
+  await f.controller.publish();
+  assert.equal(f.controller.state.profiles?.profiles.find(profile => profile.name === 'team')?.setupId, 'announced-setup');
+});

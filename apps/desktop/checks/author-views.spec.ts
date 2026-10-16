@@ -71,3 +71,14 @@ test('profile resolution failures disable Publish and show the profile reason', 
   assert.match(html, /other: missing parent profile/);
   assert.match(html, /<button[^>]*disabled=""[^>]*>Publish<\/button>/);
 });
+
+test('an announced profile shows its follow link and a Copy button', async t => {
+  const f = await authorFixture(t);
+  f.controller.state = { ...f.controller.state, profiles: { ...f.controller.state.profiles!, profiles: f.controller.state.profiles!.profiles.map(profile => ({ ...profile, setupId: profile.name === 'team' ? 'team-setup' : null })) } };
+  await f.controller.selectProfile('team');
+  const html = render(ProfilesView, f);
+  assert.match(html, /nortuscc:\/\/follow\/team-setup/);
+  assert.match(html, /<button[^>]*aria-label="Copy follow link for team"[^>]*>Copy<\/button>/);
+  await f.controller.selectProfile('base');
+  assert.doesNotMatch(render(ProfilesView, f), /nortuscc:\/\/follow\//);
+});

@@ -11,8 +11,8 @@ export const authorRun = (change: OperationChange = {kind:'ghLogin'}, fields = {
 export async function authorFixture(t: test.TestContext, options: {maintenance?:()=>boolean} = {}) {
   const f = await fixture(); let saved = {...draft, intents:[...draft.intents]}; let latest = authorRun();
   Object.assign(f.handlers, {
-    authorProfiles: () => ({repoUrl,profiles:[{name:'base',extends:null,skills:[],files:[{fileId:'claude:CLAUDE.md',path:'claude/CLAUDE.md',from:'base'}]},
-      {name:'team',extends:'base',skills:[],files:[{fileId:'claude:CLAUDE.md',path:'claude/CLAUDE.md',from:'base'}]}]}),
+    authorProfiles: () => ({repoUrl,profiles:[{name:'base',setupId:null,extends:null,skills:[],files:[{fileId:'claude:CLAUDE.md',path:'claude/CLAUDE.md',from:'base'}]},
+      {name:'team',setupId:null,extends:'base',skills:[],files:[{fileId:'claude:CLAUDE.md',path:'claude/CLAUDE.md',from:'base'}]}]}),
     authorFile: () => ({path:'claude/CLAUDE.md',text:'repo text',truncated:false}),
     machineFile: () => ({fileId:'claude:CLAUDE.md',exists:true,text:'machine text',truncated:false}),
     upstreams: () => ({sources:[{source:'owner/repo',inProfiles:[],pin:null,discovery:{kind:'complete',source:'owner/repo',commit:'a'.repeat(40),skills:[{name:'tdd',description:'Test first'}]}}]}),

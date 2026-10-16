@@ -7,17 +7,22 @@ export function ProfilesView({ state, controller }: AuthorProps) {
   const [repoPath, setRepoPath] = useState('');
   const profile = state.profiles?.profiles.find(p => p.name === state.selectedProfile);
   const capture = state.capture;
+  const [copyMessage, setCopyMessage] = useState('');
+  const shareLink = profile?.setupId ? `nortuscc://follow/${profile.setupId}` : null;
   return <div className="author-view">
     <header><div><p className="eyebrow">AUTHOR</p><h1>Profiles</h1><p className="intro">Resolved profile skills and files, with their origins.</p></div>
       <button disabled={!state.canRead} onClick={() => void controller.reload()}>Reload profiles</button></header>
     <AuthorFeedback state={state} /><AuthorIssues value={state.profiles} />
     <section className="card"><h2>Profiles</h2>
       {state.profiles ? <p><code>{state.profiles.repoUrl}</code></p> : null}
-      <label className="field">Selected profile<select disabled={!state.canRead} value={state.selectedProfile} onChange={e => {setChoice(null); void controller.selectProfile(e.target.value);}}>
+      <label className="field">Selected profile<select disabled={!state.canRead} value={state.selectedProfile} onChange={e => {setChoice(null); setCopyMessage(''); void controller.selectProfile(e.target.value);}}>
         {!state.profiles?.profiles.length ? <option value="">No profiles available</option> : null}
         {state.profiles?.profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
       </select></label>
       {profile ? <><h3>{profile.name}</h3><p>{profile.extends ? `Extends ${profile.extends}` : 'No parent profile'}</p><AuthorIssues value={profile} />
+        {shareLink ? <div><p>Share this profile: <code>{shareLink}</code></p>
+          <button aria-label={`Copy follow link for ${profile.name}`} onClick={() => { void navigator.clipboard.writeText(shareLink).then(() => setCopyMessage('Link copied'), () => setCopyMessage('Could not copy the link')); }}>Copy</button>
+          {copyMessage ? <p role="status">{copyMessage}</p> : null}</div> : null}
         <h3>Resolved skills</h3><ul>{profile.skills.map(skill => <li key={`${skill.source}:${skill.name}`}>
           <code>{skill.source}:{skill.name}</code>. {skill.included ? 'Included' : 'Excluded'}. From {skill.from}
         </li>)}</ul>{!profile.skills.length ? <p>No skills declared.</p> : null}
