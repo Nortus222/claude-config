@@ -177,68 +177,141 @@ function Following({ state, controller, repoUrl = DEFAULT_REPO_URL }: Props) {
   </section>;
 }
 
-function Row({ row, index, state, controller }: { row: ReviewRow; index: number; state: SetupSyncState; controller: Actions }) {
-  const staged = state.choices.find(choice => choice.itemId === row.itemId);
-  // A bulk take stages accept, which also releases a held row.
-  const chosen = staged?.action === 'accept' && row.held ? { ...staged, action: 'release' as const } : staged;
-  const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
-  const label = itemLabel(row.itemId);
-  return <li className="row setup-sync-row">
-    <div className="row-main"><span className="row-title"><Label label={label} /></span>
-      {row.held || row.conflict ? <span className="row-sub">{[row.held ? 'On hold at the current value' : '', row.conflict ? 'This Mac overrides this value' : ''].filter(Boolean).join(' · ')}</span> : null}</div>
-    <div className="row-trail"><span className={`pill ${CHANGE_TONE[row.change]}`}>{CHANGE[row.change]}</span></div>
-    <div className="row-detail">
-      <fieldset className="setup-sync-choices"><legend className="sr-only">Choice for {label.text}</legend>
-        {actions.map(action => <label key={action} className="setup-sync-choice"><input type="radio" name={`incoming-${index}`} value={action}
-          checked={chosen?.action === action} disabled={!state.eligibility.choose} onChange={() => controller.choose({ itemId: row.itemId, action })} />{pairLabel(row, action)}</label>)}
-      </fieldset>
-      <details className="setup-sync-values"><summary>Values and differences</summary>
-        {([['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const).map(([name, value]) => <div key={name}>
-          <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
-        </div>)}
-        {row.truncated ? <p className="setup-sync-warn">Values are shortened. Only part of each value is shown.</p> : null}
-      </details>
-    </div>
-  </li>;
+type PinGroup = Review['pinGroups'][number];
+type ChoiceActions = Pick<Actions, 'choose' | 'chooseAll'>;
+// One entry of the incoming list: a row on its own, or a pin group with its rows on this page.
+type Entry = { row: ReviewRow } | { group: PinGroup; rows: ReviewRow[] };
+
+// Orders the page's rows for display: each pin group takes the place of its first row on this page, so a group
+// with no row here is left out.
+export function incomingEntries(review: Pick<Review, 'rows' | 'pinGroups'>): Entry[] {
+  const groupOf = new Map(review.pinGroups.flatMap(group => group.itemIds.map(id => [id, group] as const)));
+  const entries: Entry[] = [], placed = new Map<string, { group: PinGroup; rows: ReviewRow[] }>();
+  for (const row of review.rows) {
+    const group = groupOf.get(row.itemId);
+    if (!group) { entries.push({ row }); continue; }
+    let entry = placed.get(group.source);
+    if (!entry) { entry = { group, rows: [] }; placed.set(group.source, entry); entries.push(entry); }
+    entry.rows.push(row);
+  }
+  return entries;
 }
 
-// Groups with no row on this page have nothing to decide here.
-function Pins({ review, state, controller }: { review: Review; state: SetupSyncState; controller: Actions }) {
-  const onPage = new Set(review.rows.map(row => row.itemId));
-  const groups = review.pinGroups.filter(group => group.itemIds.some(id => onPage.has(id)));
-  if (!groups.length) return null;
-  return <div className="rows setup-sync-pins" role="group" aria-label="Source pins">
-    <p className="group-label">Source pins</p>
-    <p className="row-sub pins-note">A pin moves a whole source, so choose one action for all its items, including those on other pages.</p>
-    {groups.map(group => { const elsewhere = group.itemIds.filter(id => !onPage.has(id)).length; return <fieldset key={group.source} className="setup-sync-pin">
-      <legend className="sr-only">{group.source}</legend>
-      <div className="row">
-        <div className="row-main"><span className="row-title" aria-hidden="true">{group.source}</span>
-          <span className="row-sub">{count(group.itemIds.length, 'affected item')}, {elsewhere} not on this page</span></div>
-        <div className="row-trail"><button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('accept', group.source)}>Take this group</button>
-          <button disabled={!state.eligibility.choose} onClick={() => controller.chooseAll('hold', group.source)}>Hold this group</button></div>
-        <div className="row-detail">
-          <details><summary>Affected items</summary><ul className="changes-list">{group.itemIds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></details>
-          {state.groupErrors[group.source] ? <p className="alert" role="alert">{state.groupErrors[group.source]}</p> : null}
-        </div>
-      </div>
-    </fieldset>; })}
+// The pin a group's changed rows move to, when every offered skill value names the same new pin; else null.
+export function pinMove(rows: readonly Pick<ReviewRow, 'change' | 'before' | 'after'>[]): string | null {
+  const pinOf = (text: string | undefined) => {
+    try { const pin = text === undefined ? undefined : (JSON.parse(text) as { pin?: unknown } | null)?.pin; return typeof pin === 'string' ? pin : null; } catch { return null; }
+  };
+  const moved = rows.filter(row => row.change !== 'unchanged' && row.after !== undefined);
+  const pins = new Set(moved.map(row => pinOf(row.after))), [pin] = pins;
+  return pins.size === 1 && typeof pin === 'string' && moved.some(row => pinOf(row.before) !== pin) ? pin : null;
+}
+
+type Option<T extends string> = { value: T; text: string; title?: string };
+// A compact single choice: a radiogroup of buttons. With nothing chosen no segment is checked; the arrow keys
+// move between segments and choose, as native radios do.
+export function Segmented<T extends string>({ label, options, selected, disabled, onSelect }: {
+  label: string; options: readonly Option<T>[]; selected: T | undefined; disabled: boolean; onSelect: (value: T) => void;
+}) {
+  const focusable = Math.max(0, options.findIndex(option => option.value === selected));
+  return <div role="radiogroup" aria-label={label} className="segmented">
+    {options.map((option, index) => <button key={option.value} type="button" role="radio" aria-checked={option.value === selected} title={option.title}
+      tabIndex={index === focusable ? 0 : -1} disabled={disabled} onClick={() => onSelect(option.value)}
+      onKeyDown={event => {
+        const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
+        if (!step) return;
+        event.preventDefault();
+        const next = (index + step + options.length) % options.length;
+        onSelect(options[next]!.value);
+        (event.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus();
+      }}>{option.text}</button>)}
   </div>;
 }
 
+// Shows and hides what opens below a row: `text` is what it shows, `label` its accessible name.
+function Disclosure({ open, onToggle, controls, text, label }: { open: boolean; onToggle: () => void; controls: string; text: string; label: string }) {
+  return <button type="button" className="link incoming-toggle" aria-expanded={open} aria-controls={open ? controls : undefined} aria-label={label} onClick={onToggle}>
+    <span className="chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>{text}</button>;
+}
+
+const SEGMENT: Readonly<Record<SetupChoice['action'], string>> = { hold: 'Hold', accept: 'Take', release: 'Take', takeTheirs: 'Replace mine' };
+const domId = (prefix: string, key: string) => `${prefix}-${encodeURIComponent(key)}`;
+
+// One incoming row on one line: its label and change, its choices, and its values behind Details. A pin
+// group's member shows no choices, since its group decides for it.
+export function IncomingRow({ row, state, controller, open, onToggle, member = false }: {
+  row: ReviewRow; state: SetupSyncState; controller: ChoiceActions; open: boolean; onToggle: () => void; member?: boolean;
+}) {
+  const staged = state.choices.find(choice => choice.itemId === row.itemId);
+  // A bulk take stages accept, which also releases a held row.
+  const chosen = staged?.action === 'accept' && row.held ? 'release' : staged?.action;
+  const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
+  const label = itemLabel(row.itemId), values = domId('values', row.itemId);
+  return <li className={`row incoming-row${member ? ' incoming-member' : ''}`}>
+    <span className="incoming-name"><Label label={label} />
+      <span className={`pill ${CHANGE_TONE[row.change]}`}>{CHANGE[row.change]}</span>
+      {row.held ? <span className="pill" title="On hold at the current value">On hold</span> : null}
+      {row.conflict ? <span className="pill pill-warning" title="This Mac overrides this value">Overridden here</span> : null}</span>
+    {member ? null : <Segmented label={`Choice for ${label.text}`} disabled={!state.eligibility.choose} selected={chosen}
+      options={actions.map(action => ({ value: action, text: SEGMENT[action], title: pairLabel(row, action) }))}
+      onSelect={action => controller.choose({ itemId: row.itemId, action })} />}
+    <Disclosure open={open} onToggle={onToggle} controls={values} text="Details" label={`Values of ${label.text}`} />
+    {open ? <div className="incoming-detail" id={values}>
+      {([['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const).map(([name, value]) => <div key={name}>
+        <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
+      </div>)}
+      {row.truncated ? <p className="setup-sync-warn">Values are shortened. Only part of each value is shown.</p> : null}
+    </div> : null}
+  </li>;
+}
+
+// A pin group as one row. Its Hold | Take decides for the whole group, members on other pages included, since a
+// pin moves a whole source; its members open below, read-only, each with its values.
+export function PinGroupRow({ group, rows, state, controller, open, onToggle, isOpen, toggle }: {
+  group: PinGroup; rows: readonly ReviewRow[]; state: SetupSyncState; controller: ChoiceActions; open: boolean; onToggle: () => void;
+  isOpen: (itemId: string) => boolean; toggle: (itemId: string) => void;
+}) {
+  const onPage = new Set(rows.map(row => row.itemId)), elsewhere = group.itemIds.filter(id => !onPage.has(id));
+  const staged = new Map(state.choices.map(choice => [choice.itemId, choice.action]));
+  const actions = new Set(rows.map(row => staged.get(row.itemId))), [only] = actions;
+  const selected = actions.size !== 1 ? undefined : only === 'hold' ? 'hold' as const : only === 'accept' || only === 'release' ? 'accept' as const : undefined;
+  const changes = new Set(rows.map(row => row.change)), change = changes.size === 1 ? [...changes][0]! : 'changed';
+  const pin = pinMove(rows), members = domId('members', group.source), error = state.groupErrors[group.source];
+  return <li className="row incoming-row incoming-group">
+    <span className="incoming-name"><span className="changes-label">{[<>Skills from <strong>{group.source}</strong></>, count(group.itemIds.length, 'skill'),
+      pin ? `pin moves to ${short(pin)}` : '', elsewhere.length ? `${elsewhere.length} on other pages` : ''].filter(Boolean)
+        .map((part, index, parts) => <React.Fragment key={index}><span className={index ? 'incoming-part' : undefined}>{part}{index < parts.length - 1 ? ' ·' : ''}</span>{index < parts.length - 1 ? ' ' : ''}</React.Fragment>)}</span>
+      <span className={`pill ${CHANGE_TONE[change]}`}>{CHANGE[change]}</span></span>
+    <Segmented label={`Choice for every skill from ${group.source}`} disabled={!state.eligibility.choose} selected={selected}
+      options={[{ value: 'hold', text: 'Hold', title: 'Hold every skill from this source at the current value' }, { value: 'accept', text: 'Take', title: "Take your profile's value for every skill from this source" }]}
+      onSelect={action => controller.chooseAll(action, group.source)} />
+    <Disclosure open={open} onToggle={onToggle} controls={members} text="Skills" label={`Skills from ${group.source}`} />
+    {error ? <p className="alert incoming-detail" role="alert">{error}</p> : null}
+    {open ? <ul className="rows incoming-detail incoming-members" id={members} aria-label={`Skills from ${group.source}`}>
+      {rows.map(row => <IncomingRow key={row.itemId} row={row} state={state} controller={controller} member open={isOpen(row.itemId)} onToggle={() => toggle(row.itemId)} />)}
+      {elsewhere.map(id => <li key={id} className="row incoming-row incoming-member"><span className="incoming-name"><Label label={itemLabel(id)} /><span className="muted">On another page</span></span></li>)}
+    </ul> : null}
+  </li>;
+}
+
 function Incoming({ review, state, controller }: { review: Review; state: SetupSyncState; controller: Actions }) {
+  const [open, setOpen] = React.useState<ReadonlySet<string>>(new Set());
+  const toggle = (key: string) => setOpen(current => { const next = new Set(current); if (!next.delete(key)) next.add(key); return next; });
   const can = state.eligibility, { incoming, held } = incomingCounts(review);
   const from = state.profiles?.followed?.profile ?? 'your profile';
   const page = state.pageIndex ? ` · page ${state.pageIndex + 1}` : '';
-  const rows = review.rows.length > 0;
+  const rows = review.rows.length > 0, entries = incomingEntries(review);
+  const grouped = entries.some(entry => 'group' in entry);
   return <section className="card setup-sync-review" aria-labelledby="changes-incoming-h">
     <div className="card-head"><div><h2 id="changes-incoming-h">{incoming + held ? `${count(incoming, 'incoming change')} from ${from}${held ? ` · ${held} on hold` : ''}${page}` : `Nothing incoming from ${from}${page}`}</h2>
-      <p>{rows ? "Choose for each item. Items you don't choose will be held." : "You're up to date."}</p></div>
+      <p>{rows ? `Choose for each item.${grouped ? ' Skills from one source share a pin, so they share one choice.' : ''} Items you don't choose will be held.` : "You're up to date."}</p></div>
       {review.rows.some(row => row.change !== 'unchanged') ? <div className="actions" role="group" aria-label="Choose for every incoming row">
         <button disabled={!can.choose} onClick={() => controller.chooseAll('accept')}>Take all incoming</button>
         <button disabled={!can.choose} onClick={() => controller.chooseAll('hold')}>Hold all incoming</button></div> : null}</div>
-    {review.pinGroups.length ? <Pins review={review} state={state} controller={controller} /> : null}
-    {rows ? <ul className="rows setup-sync-rows">{review.rows.map((row, index) => <Row key={row.itemId} row={row} index={index} state={state} controller={controller} />)}</ul> : null}
+    {rows ? <ul className="rows setup-sync-rows incoming-rows">{entries.map(entry => 'group' in entry
+      ? <PinGroupRow key={`group:${entry.group.source}`} group={entry.group} rows={entry.rows} state={state} controller={controller}
+        open={open.has(`group:${entry.group.source}`)} onToggle={() => toggle(`group:${entry.group.source}`)} isOpen={id => open.has(id)} toggle={toggle} />
+      : <IncomingRow key={entry.row.itemId} row={entry.row} state={state} controller={controller} open={open.has(entry.row.itemId)} onToggle={() => toggle(entry.row.itemId)} />)}</ul> : null}
     {review.nextCursor || state.pageIndex ? <nav className="setup-sync-actions" aria-label="Review pages"><button disabled={!can.browse || !state.pageIndex} onClick={() => void controller.page('previous')}>Previous page</button>
       <button disabled={!can.browse || !review.nextCursor} onClick={() => void controller.page('next')}>Next page</button></nav> : null}
     {rows ? <div className="setup-sync-actions section-foot"><button className="primary" disabled={!can.preview} title={can.preview ? undefined : state.choices.length ? undefined : 'Choose at least one item first.'} onClick={() => void controller.preview()}>Preview</button>

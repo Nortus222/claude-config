@@ -50,20 +50,98 @@
   color: var(--warning);
   font-size: var(--text-small);
 }
-/* An incoming row keeps its choices and the values disclosure on one line until the values open. */
-.setup-sync-row > .row-detail {
+/* An incoming row is one line: label and pills, then its choices and a disclosure in fixed-width columns so
+   they line up from row to row. What the disclosure opens spans the row below. */
+.incoming-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 64px;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-height: 40px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.incoming-member {
+  grid-template-columns: minmax(0, 1fr) 64px;
+  min-height: 36px;
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
+}
+.incoming-name {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1) var(--space-4);
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
 }
-.setup-sync-values[open] {
-  flex-basis: 100%;
+.incoming-part {
+  white-space: nowrap;
 }
-.setup-sync-choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-4);
+.incoming-name .muted {
+  font-size: var(--text-small);
+}
+button.incoming-toggle {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+}
+button.incoming-toggle:hover:enabled,
+button.incoming-toggle[aria-expanded='true'] {
+  color: var(--text);
+  text-decoration: none;
+}
+.incoming-detail {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+/* A group's members sit in an inset panel under its row. */
+.rows.incoming-members {
+  margin: 0 0 var(--space-1);
+  background: var(--inset);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.rows > .incoming-member:first-child {
+  border-top: 0;
+}
+/* A compact Hold | Take choice; nothing is shown selected until a choice is made. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-control);
+  background: var(--raised);
+}
+.segmented > button {
+  min-height: 22px;
+  padding: 1px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-small);
+}
+.segmented > button:hover:enabled {
+  filter: none;
+  color: var(--text);
+}
+.segmented > button[aria-checked='true'] {
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--border);
+  color: var(--text);
+}
+.segmented > button:focus-visible {
+  box-shadow: var(--focus);
+}
+.segmented > button:disabled {
+  background: transparent;
+  color: var(--disabled-text);
+}
+.segmented > button[aria-checked='true']:disabled {
+  background: var(--disabled-bg);
 }
 .setup-sync-choice {
   display: flex;
@@ -78,12 +156,6 @@
 .setup-sync-choice:has(input:disabled) {
   cursor: default;
   color: var(--text-secondary);
-}
-.setup-sync-pin {
-  display: block;
-}
-.pins-note {
-  padding: 0 var(--space-4) var(--space-2);
 }
 .local-text {
   display: grid;

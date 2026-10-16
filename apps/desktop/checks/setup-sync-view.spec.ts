@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElement } from 'react';
+import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SetupSyncView, SetupProfiles } from '../src/setup-sync-view.tsx';
+import { SetupSyncView, SetupProfiles, IncomingRow, PinGroupRow, Segmented, incomingEntries, pinMove } from '../src/setup-sync-view.tsx';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
 import { fixture, review, run, localItems, localRun, flush } from './support/setup-sync.ts';
@@ -25,24 +25,129 @@ const outsideDetails = (html: string) => {
   const visible = html.replace(/<details class="[^"]*(changes-details|run-details)"[\s\S]*?<\/details>/g, '');
   return [...visible.matchAll(/aria-label="([^"]*)"/g)].map(match => match[1]).join('\n') + '\n' + visible.replace(/<[^>]+>/g, '\n');
 };
+// Every radiogroup named `label` (rows can share a label), joined; and the radios in markup with their state.
+const group = (html: string, label: string) => [...html.matchAll(/<div role="radiogroup" aria-label="([^"]*)"[^>]*>[\s\S]*?<\/div>/g)].filter(match => match[1] === label).map(match => match[0]).join('');
+const radios = (html: string) => [...html.matchAll(/<button type="button" role="radio" aria-checked="(true|false)"[^>]*>([^<]*)<\/button>/g)].map(match => ({ checked: match[1] === 'true', text: match[2]! }));
+// Markup as the text a reader sees, tags removed.
+const plainText = (html: string) => html.replace(/<[^>]+>/g, '');
+// The first element in a component's own output that matches; child components are not rendered.
+function find(node: ReactNode, match: (element: ReactElement<any>) => boolean): ReactElement<any> | undefined {
+  if (Array.isArray(node)) { for (const child of node) { const found = find(child, match); if (found) return found; } return undefined; }
+  if (!node || typeof node !== 'object' || !('props' in node)) return undefined;
+  const element = node as ReactElement<any>;
+  return match(element) ? element : find(element.props.children, match);
+}
 const followProfiles = (f: Awaited<ReturnType<typeof fixture>>) => {
   f.handlers.inspectProfiles = () => ({ followed: { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null }, available: [{ name: 'default', extends: null }, { name: 'team', extends: 'default' }] });
 };
 
-test('Changes shows accessible values and warns that unchosen incoming items will be held', async t => {
+test('Changes warns that unchosen incoming items will be held and names every choice of an overridden row', async t => {
   const { html } = await page(t); const text = html();
   assert.match(text, /<h1>Changes<\/h1>/); assert.doesNotMatch(text, /eyebrow/);
-  assert.match(text, /aria-label="Current value of /); assert.match(text, /aria-label="Offered value of /); assert.match(text, /mine/);
   assert.match(text, /Items you don&#x27;t choose will be held/); assert.deepEqual(applyButtons(text), []);
-  assert.match(text, /keep this Mac&#x27;s override/); assert.match(text, /backed up first/);
+  // setting:a is overridden on this Mac, so it offers Hold, Take (keeping the override) and Replace mine.
+  assert.deepEqual(radios(group(text, 'Choice for Item')).map(radio => radio.text), ['Hold', 'Take', 'Replace mine', 'Hold', 'Take']);
+  assert.match(text, /title="Take your profile&#x27;s value · keep this Mac&#x27;s override"[^>]*>Take</);
+  assert.match(text, /title="Use your profile&#x27;s value and remove this Mac&#x27;s override \(backed up first\)"[^>]*>Replace mine</);
+  assert.match(text, />Overridden here</);
 });
-test('pin-group refusal is rendered beside its source and unchanged siblings remain selectable', async t => {
+
+test('an incoming row hides its values behind Details until it is opened', async t => {
+  const { c, html } = await page(t);
+  const text = html();
+  assert.match(text, /<button type="button" class="[^"]*" aria-expanded="false" aria-label="Values of Item">[\s\S]*?Details<\/button>/);
+  assert.doesNotMatch(text, /aria-label="Current value of /);
+  let toggled = 0;
+  const props = { row: c.state.review!.rows[0]!, state: c.state, controller: c, onToggle: () => { toggled++; } };
+  const closed = IncomingRow({ ...props, open: false });
+  find(closed, element => element.props.text === 'Details')!.props.onToggle();
+  assert.equal(toggled, 1);
+  const open = renderToStaticMarkup(createElement(IncomingRow, { ...props, open: true }));
+  const controls = /aria-expanded="true" aria-controls="([^"]+)"/.exec(open)?.[1];
+  assert.ok(controls); assert.match(open, new RegExp(`id="${controls}"`));
+  assert.match(open, /aria-label="Current value of Item"><code>old</); assert.match(open, /aria-label="Offered value of Item"><code>new</);
+  assert.match(open, /aria-label="This Mac&#x27;s value of Item"><code>mine</);
+});
+
+test('an undecided row has no selected segment, and a choice selects exactly its segment', async t => {
+  const { c, html } = await page(t);
+  const undecided = radios(group(html(), 'Choice for Item'));
+  assert.ok(undecided.length > 0); assert.ok(undecided.every(radio => !radio.checked));
+  // With nothing chosen, the first segment is the one Tab reaches.
+  assert.match(group(html(), 'Choice for Item'), /^<div role="radiogroup"[^>]*><button type="button" role="radio" aria-checked="false"[^>]*tabindex="0"/);
+  c.choose({ itemId: 'setting:a', action: 'takeTheirs' });
+  assert.deepEqual(radios(group(html(), 'Choice for Item')).slice(0, 3).map(radio => radio.checked), [false, false, true]);
+  c.choose({ itemId: 'setting:a', action: 'hold' });
+  assert.deepEqual(radios(group(html(), 'Choice for Item')).slice(0, 3).map(radio => radio.checked), [true, false, false]);
+});
+
+test('a held row reads Take as chosen after a bulk take', async t => {
+  const { c, html } = await page(t, f => { f.handlers.setupReview = () => review({ rows: [{ itemId: 'setting:claude:settings.json#tui', kind: 'setting', change: 'changed', held: true, conflict: false, before: '"a"', after: '"b"' }] }); });
+  assert.match(html(), />On hold</);
+  c.chooseAll('accept');
+  assert.deepEqual(c.state.choices, [{ itemId: 'setting:claude:settings.json#tui', action: 'accept' }]);
+  assert.deepEqual(radios(group(html(), 'Choice for Claude setting tui')).map(radio => [radio.text, radio.checked]), [['Hold', false], ['Take', true]]);
+});
+
+test('the segmented control chooses on click and moves its choice with the arrow keys', () => {
+  const chosen: string[] = [];
+  const element = Segmented({ label: 'Choice', options: [{ value: 'hold', text: 'Hold' }, { value: 'accept', text: 'Take' }], selected: undefined, disabled: false, onSelect: value => { chosen.push(value); } });
+  const [hold, take] = element.props.children as ReactElement<any>[];
+  hold!.props.onClick(); assert.deepEqual(chosen, ['hold']);
+  const key = (button: ReactElement<any>, name: string) => { let prevented = false; button.props.onKeyDown({ key: name, preventDefault: () => { prevented = true; }, currentTarget: { parentElement: null } }); return prevented; };
+  assert.equal(key(hold!, 'ArrowRight'), true); assert.equal(key(take!, 'ArrowRight'), true); assert.equal(key(hold!, 'ArrowLeft'), true);
+  assert.deepEqual(chosen, ['hold', 'accept', 'hold', 'accept']);
+  assert.equal(key(hold!, 'Tab'), false); assert.equal(chosen.length, 4);
+});
+
+test('a pin group is one row whose Hold | Take decides for every member, with its members read-only below', async t => {
+  const rows = ['a', 'b'].map(name => ({ itemId: `skill:owner/repo/${name}`, kind: 'skill' as const, change: 'changed' as const, held: false, conflict: false,
+    before: '{"exact":false,"install":true,"optional":false,"pin":null}', after: `{"exact":false,"install":true,"optional":false,"pin":"${'1'.repeat(40)}"}` }));
+  const { c, html } = await page(t, f => { f.handlers.setupReview = () => review({ rows: [...rows, { itemId: 'setting:claude:settings.json#loose', kind: 'setting', change: 'added', held: false, conflict: false, after: '1' }],
+    pinGroups: [{ source: 'owner/repo', itemIds: ['skill:owner/repo/a', 'skill:owner/repo/b', 'skill:owner/repo/c'] }] }); });
+  const text = html();
+  assert.match(plainText(text), /Skills from owner\/repo · 3 skills · pin moves to 111111111111 · 1 on other pages/); assert.match(text, /Skills from <strong>owner\/repo<\/strong>/);
+  assert.equal(radios(group(text, 'Choice for every skill from owner/repo')).length, 2);
+  assert.ok(radios(group(text, 'Choice for every skill from owner/repo')).every(radio => !radio.checked));
+  // Members have no controls of their own, and the loose row keeps its own.
+  assert.doesNotMatch(text, /Choice for Skill/); assert.match(text, /aria-label="Choice for Claude setting loose"/);
+  assert.doesNotMatch(text, /Skill <strong>a<\/strong>/);
+
+  const props = { group: c.state.review!.pinGroups[0]!, rows: c.state.review!.rows.slice(0, 2), state: c.state, controller: c, open: false, isOpen: () => false, toggle: () => {} };
+  let opened = 0;
+  const row = PinGroupRow({ ...props, onToggle: () => { opened++; } });
+  const segmented = find(row, element => element.type === Segmented)!;
+  const take = (Segmented(segmented.props).props.children as ReactElement<any>[]).find(button => button.props.children === 'Take')!;
+  take.props.onClick();
+  assert.deepEqual(c.state.choices, [{ itemId: 'skill:owner/repo/a', action: 'accept' }, { itemId: 'skill:owner/repo/b', action: 'accept' }]);
+  assert.deepEqual(radios(group(html(), 'Choice for every skill from owner/repo')).map(radio => [radio.text, radio.checked]), [['Hold', false], ['Take', true]]);
+  find(row, element => element.props.text === 'Skills')!.props.onToggle(); assert.equal(opened, 1);
+
+  const open = renderToStaticMarkup(createElement(PinGroupRow, { ...props, open: true, onToggle: () => {} }));
+  assert.match(open, /aria-label="Skills from owner\/repo"[\s\S]*Skill <strong>a<\/strong> from owner\/repo[\s\S]*Skill <strong>b<\/strong>[\s\S]*Skill <strong>c<\/strong> from owner\/repo[\s\S]*On another page/);
+  assert.doesNotMatch(open.slice(open.indexOf('incoming-members')), /role="radiogroup"/);
+  assert.match(open, /aria-label="Values of Skill a from owner\/repo"/);
+});
+
+test('pin-group refusal is rendered on its group row, which still counts members on other pages', async t => {
   const { c, html, handlers } = await page(t, f => { f.handlers.setupReview = () => review({ rows: [{ itemId: 'skill:owner/repo/a', kind: 'skill', change: 'unchanged', held: false, conflict: false }], pinGroups: [{ source: 'owner/repo', itemIds: ['skill:owner/repo/a', 'skill:owner/repo/b'] }] }); });
   c.choose({ itemId: 'skill:owner/repo/a', action: 'accept' });
   handlers.previewChange = () => { throw new Error('Choices for owner/repo must match: its items share one pin.'); }; await c.preview();
   const text = html();
-  assert.match(text, /<fieldset[^>]*class="setup-sync-pin"[\s\S]*owner\/repo[\s\S]*role="alert"/); assert.match(text, /Unchanged/); assert.match(text, /1 not on this page/);
-  assert.match(text, /Skill <strong>b<\/strong> from owner\/repo/);
+  assert.match(plainText(text), /Skills from owner\/repo · 2 skills · 1 on other pagesUnchanged/);
+  assert.match(text, /Unchanged[\s\S]*?role="alert"[^>]*>Choices for owner\/repo must match/);
+  assert.equal(text.match(/role="alert"/g)?.length, 1);
+});
+
+test('incoming entries keep review order, put each group where its first row is, and pinMove needs one new pin', () => {
+  const row = (itemId: string) => ({ itemId, kind: 'setting' as const, change: 'changed' as const, held: false, conflict: false });
+  const entries = incomingEntries({ rows: [row('setting:a'), row('skill:o/r/x'), row('setting:b'), row('skill:o/r/y')], pinGroups: [{ source: 'o/r', itemIds: ['skill:o/r/x', 'skill:o/r/y'] }, { source: 'gone', itemIds: ['skill:gone/z'] }] });
+  assert.deepEqual(entries.map(entry => 'group' in entry ? `group ${entry.group.source} ${entry.rows.length}` : entry.row.itemId), ['setting:a', 'group o/r 2', 'setting:b']);
+  const skill = (before: string | null, after: string | null) => ({ change: 'changed' as const, before: JSON.stringify({ pin: before }), after: JSON.stringify({ pin: after }) });
+  assert.equal(pinMove([skill(null, 'abc'), skill('old', 'abc')]), 'abc');
+  assert.equal(pinMove([skill(null, 'abc'), skill(null, 'def')]), null);
+  assert.equal(pinMove([skill('abc', 'abc')]), null);
+  assert.equal(pinMove([{ change: 'changed', before: 'a', after: 'not json' }]), null);
 });
 
 test('a failed Preview is reported beside the Preview button, not at the top of the page', async t => {
@@ -60,7 +165,7 @@ test('Changes offers take all, hold all and one control per pin group, and hides
     pinGroups: [{ source: 'owner/repo', itemIds: ['skill:owner/repo/one'] }, { source: 'cursor/plugins', itemIds: ['skill:cursor/plugins/x'] }] }); });
   const text = html();
   assert.match(text, />Take all incoming</); assert.match(text, />Hold all incoming</);
-  assert.match(text, /<fieldset[^>]*class="setup-sync-pin"[\s\S]*owner\/repo[\s\S]*>Take this group<[\s\S]*>Hold this group</);
+  assert.deepEqual(radios(group(text, 'Choice for every skill from owner/repo')).map(radio => radio.text), ['Hold', 'Take']);
   assert.doesNotMatch(text, /cursor\/plugins/);
 });
 
@@ -186,7 +291,7 @@ test('profile listing failures appear inline while the cached review stays visib
   const { html } = await page(t, f => { f.handlers.inspectProfiles = () => { throw new Error('Profile clone unavailable'); }; });
   const text = html();
   assert.match(text, /Profile clone unavailable/);
-  assert.match(text, /aria-label="Current value of /);
+  assert.match(text, /aria-label="Values of Item"/);
 });
 
 test('the Changes heading counts incoming rows like Home and the badge: not unchanged, not on hold', async t => {
