@@ -56,7 +56,7 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
     const sourcesPath = join(paths.stateRoot, 'agent', 'author', 'sources.json');
     const repo = Effect.gen(function* () {
       const selection = yield* followed.read;
-      const url = selection?.repoUrl ?? (yield* originUrl(paths.repo).pipe(Effect.provideService(Processes, processes)));
+      const url = selection?.repoUrl ?? ((yield* fs.exists(paths.repo)) ? yield* originUrl(paths.repo).pipe(Effect.provideService(Processes, processes)) : undefined);
       if (!url) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Follow your setup repository first'));
       // HTTPS credentials must never enter drafts, run receipts or hosted metadata.
       if (!url.includes('://')) return url;

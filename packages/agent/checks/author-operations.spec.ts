@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Deferred, Effect, Fiber } from 'effect';
+import { migrateFollowed, SetupsStore } from '@nortuscc/sync';
 import { liveLockHolder } from '@nortuscc/machine';
 import { Processes, type Command } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
@@ -434,7 +435,9 @@ test('oversized machine file is reported truncated and cannot be captured', asyn
 
 test('author operations use the migrated followed repository through a real agent session', async t => {
   const f = await fixture(t);
-  f.m.write(join(f.m.paths.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed: { repoUrl, profile: 'personal', setupId: 'hosted-setup' } }));
+  await f.m.run(SetupsStore.use(store => store.write([{ setupId: 'hosted-setup', repoUrl, checkout: f.m.paths.repo, trustedAt: '2026-10-06T00:00:00.000Z' }])));
+  const followed = await f.m.run(migrateFollowed(f.m.paths));
+  assert.equal(followed?.setupId, 'hosted-setup');
   f.git('-C', f.m.paths.repo, 'remote', 'set-url', 'origin', 'https://github.com/unrelated/checkout');
   await f.within(s => Effect.gen(function* () {
     const profiles = (yield* read(s, 'authorProfiles')) as any;
@@ -518,5 +521,14 @@ test('author profiles expose only the signed-in owners matching setup IDs', asyn
     accountId = null;
     const signedOut = yield* s.authorProfiles(decodeOperationInput('authorProfiles', {}));
     assert.ok(signedOut.profiles.every(p => (p as any).setupId === null));
+  }));
+});
+
+
+test('author operations ask to follow a setup when the CLI checkout is absent', async t => {
+  const f = await fixture(t); rmSync(f.m.paths.repo, { recursive: true });
+  await f.within(s => Effect.gen(function* () {
+    const error = yield* Effect.flip(read(s, 'authorProfiles'));
+    assert.equal((error as any).message, 'Follow your setup repository first');
   }));
 });
