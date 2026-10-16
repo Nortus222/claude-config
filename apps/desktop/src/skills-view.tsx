@@ -9,6 +9,17 @@ type Inventory = { readonly items: readonly OperationOutput<'inspectIntent'>['it
 type Observation = Pick<InspectResult['items'][number], 'state' | 'disposition' | 'note'>;
 const changed = (row: SkillCheck['items'][number]) => row.state === 'outdated' || row.state === 'off-pin';
 const same = (a: { source: string; name: string }, b: { source: string; name: string }) => a.source === b.source && a.name === b.name;
+type RunState = NonNullable<SkillsViewState['run']>['state'];
+// Run headings in words, by kind; `active` covers accepted and running.
+const RUN_HEADINGS: Readonly<Record<string, Readonly<Record<Exclude<RunState, 'accepted' | 'running'> | 'active', string>>>> = {
+  update: { active: 'Updating skills…', succeeded: 'Skills updated', failed: 'Update failed', cancelled: 'Update cancelled', interrupted: 'Update interrupted', abandoned: 'Update abandoned' },
+  machineIntent: { active: 'Saving skill choice…', succeeded: 'Skill choice saved', failed: 'Saving the skill choice failed', cancelled: 'Saving the skill choice was cancelled',
+    interrupted: 'Saving the skill choice was interrupted', abandoned: 'Saving the skill choice was abandoned' },
+};
+const runHeading = (run: NonNullable<SkillsViewState['run']>) => {
+  const state = run.state === 'accepted' || run.state === 'running' ? 'active' : run.state;
+  return RUN_HEADINGS[run.intent.change.kind]?.[state] ?? (state === 'active' ? `${changeTitle(run.intent.change.kind)}…` : `${changeTitle(run.intent.change.kind)} ${state}`);
+};
 const UPSTREAM = { current: 'Up to date', outdated: 'Update available', 'off-pin': 'Differs from pin', gone: 'Removed upstream', unknown: 'Unknown', available: 'Available', local: 'Local' };
 
 // Search keeps source order and drops groups without matching skills.
@@ -86,7 +97,7 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
         {choicePreview.machineIntent.installationEffects.map((effect, index) => <p className="muted" key={index}>{effect}</p>)}
         <button disabled={blocked !== null} onClick={() => void controller.setChoice(choicePatch.source, choicePatch.name, choicePatch.action === 'reset' ? 'inherit' : choicePatch.action === 'enable' ? 'on' : 'off')}>Retry saving choice</button>
       </section> : null}
-      {state.run ? <section className="form-section" aria-label="Skills run"><h2>{changeTitle(state.run.intent.change.kind)} · {state.run.state}</h2>
+      {state.run ? <section className="form-section" aria-label="Skills run"><h2>{runHeading(state.run)}</h2>
         {state.run.steps.length ? <p>{stepCounts(state.run.steps)}</p> : null}
         {state.run.parity?.backupIds.length ? <p className="muted">{count(state.run.parity.backupIds.length, 'backup')} kept before changing files.</p> : null}
         {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}

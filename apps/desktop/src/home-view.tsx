@@ -1,7 +1,8 @@
 import React, { type ReactNode } from 'react';
 import type { RunView } from '@nortuscc/agent/operations';
 import type { ViewState } from './controller.ts';
-import { incomingCounts, type SetupSyncState } from './setup-sync-controller.ts';
+import { incomingCounts, MACHINE_KINDS, type SetupSyncState } from './setup-sync-controller.ts';
+import { AUTHOR_RUN_KINDS } from './controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
 import { changeTitle } from './copy.ts';
@@ -15,7 +16,6 @@ export type HomeProps = {
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 // "Nortus222/claude-config" for a GitHub URL; other repositories keep their URL.
 const repoName = (url: string) => url.replace(/^(?:https:\/\/github\.com\/|git@github\.com:)/, '').replace(/\.git$/, '');
-const AUTHOR_KINDS = new Set(['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication']);
 const POLICY = { 'auto-apply': 'applies incoming changes automatically', notify: 'tells you about incoming changes', manual: 'waits for you to check for changes' } as const;
 
 function Line({ tone, children, action }: { tone?: 'attention'; children: ReactNode; action: ReactNode }) {
@@ -41,8 +41,10 @@ function interruptedLine(run: RunView, { home, controller, navigate }: HomeProps
     <button disabled={home.abandoning} onClick={() => controller.cancelAbandon()}>Keep</button>
     {home.abandonError ? <span role="alert" className="home-error">{home.abandonError}</span> : null}
   </>}>Abandon “{title}”? Its remaining steps won’t run. Finished steps and backups are kept.</Line>;
+  // Review opens the screen that adopts this kind of run; other kinds can only be abandoned here.
+  const kind = run.intent.change.kind, screen = AUTHOR_RUN_KINDS.has(kind) ? 'publish' : MACHINE_KINDS.has(kind) ? 'changes' : null;
   return <Line key={run.runId} tone="attention" action={<>
-    <button onClick={() => navigate(AUTHOR_KINDS.has(run.intent.change.kind) ? 'publish' : 'changes')}>Review</button>
+    {screen ? <button onClick={() => navigate(screen)}>Review</button> : null}
     <button disabled={busy || home.confirming !== null} onClick={() => controller.confirmAbandon(run.runId)}>Abandon</button>
   </>}>{title} was interrupted.</Line>;
 }
@@ -74,7 +76,7 @@ export function HomeView(props: HomeProps) {
         ? <Line action={open('changes')}>{plural(incoming, 'incoming change')}{more}{held ? ` · ${held}${more} on hold` : ''}</Line>
         : <Line action={open('changes', 'Open Changes')}>No incoming changes.</Line> : null}
       {waiting ? <Line action={open('changes')}>{plural(waiting, 'change')} waiting to apply on this Mac</Line> : null}
-      {changedHere ? <Line action={open('changes')}>{plural(changedHere, 'file')} changed on this Mac</Line> : null}
+      {changedHere ? <Line action={open('changes')}>{plural(changedHere, 'item')} changed on this Mac</Line> : null}
       {interruptedRuns(home.runs).map(run => interruptedLine(run, props))}
       {drafts ? <Line action={open('publish')}>{plural(drafts, 'draft')} not published</Line> : null}
       {unannounced ? <Line action={open('publish')}>Published, not announced</Line> : null}

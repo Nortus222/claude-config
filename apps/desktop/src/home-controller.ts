@@ -70,6 +70,9 @@ export class HomeController {
   private update(patch: Partial<HomeState>) {
     if (this.disposed) return;
     this.state = { ...this.state, ...patch };
+    // A confirmation lasts only while its run is still listed as interrupted.
+    const confirming = this.state.confirming;
+    if (confirming && this.state.runs && !interruptedRuns(this.state.runs).some(run => run.runId === confirming)) this.state = { ...this.state, confirming: null, abandonError: null };
     for (const listener of this.listeners) listener();
   }
   private ready() { return !this.disposed && !!this.bridge && this.machine.state.connection === 'connected'; }

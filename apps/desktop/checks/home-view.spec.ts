@@ -54,7 +54,7 @@ test('Home says when this Mac follows no profile', async t => {
 test('Home lists changes waiting on this Mac and files changed here', async t => {
   const html = (await home(t)).render();
   assert.match(html, /3 changes waiting to apply on this Mac/);
-  assert.match(html, /2 files changed on this Mac/);
+  assert.match(html, /2 items changed on this Mac/);
 });
 
 test('an interrupted setup apply is named in words with Review and Abandon', async t => {
@@ -102,4 +102,19 @@ test('Home never reads author profiles and shows no ISO times, IDs or JSON', asy
   assert.doesNotMatch(html, /setup-run|publish-run|[0-9a-f]{40}/);
   assert.doesNotMatch(html, /[{}[\]]|&quot;/);
   assert.doesNotMatch(html, /setupApply|publishDraft|interrupted<|skill:|setting:|file:/);
+});
+
+test('Review opens the screen that adopts the interrupted run; other kinds offer Abandon only', async t => {
+  const h = await home(t);
+  const interrupted = (runId: string, change: object) => ({ ...run({ runId, state: 'interrupted' }), intent: { ...run().intent, change } }) as ReturnType<typeof run>;
+  h.controller.state = { ...h.controller.state, runs: [
+    interrupted('reconcile-run', { kind: 'reconcile', only: ['skill:tdd'] }),
+    interrupted('delete-run', { kind: 'deleteDraft', draftId }),
+    interrupted('prune-run', { kind: 'pruneBackups' }),
+  ] };
+  const lines = h.render().match(/<li class="home-line[^"]*">[\s\S]*?<\/li>/g) ?? [];
+  const line = (title: string) => lines.find(text => text.includes(`${title} was interrupted`)) ?? '';
+  assert.match(line('Apply changes to this Mac'), />Review<\/button>[\s\S]*>Abandon<\/button>/);
+  assert.match(line('Delete draft'), />Review<\/button>[\s\S]*>Abandon<\/button>/);
+  assert.doesNotMatch(line('Remove old backups'), />Review<\/button>/); assert.match(line('Remove old backups'), />Abandon<\/button>/);
 });

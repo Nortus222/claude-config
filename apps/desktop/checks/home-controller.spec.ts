@@ -91,6 +91,21 @@ test('Keep closes the confirmation without abandoning, and only interrupted runs
   assert.equal(named(f.calls, 'abandonRun').length, 0);
 });
 
+test('a confirmation ends when a refresh shows its run is no longer interrupted', async t => {
+  const f = await setup(t);
+  f.handlers.listRuns = () => ({ runs: [run({ state: 'interrupted' })], nextBefore: null });
+  await f.controller.refresh(); f.controller.confirmAbandon('setup-run');
+  f.handlers.listRuns = () => ({ runs: [run({ state: 'abandoned' })], nextBefore: null });
+  await f.controller.refresh();
+  assert.equal(f.controller.state.confirming, null);
+  f.handlers.listRuns = () => ({ runs: [run({ state: 'interrupted' }), run({ runId: 'other', state: 'interrupted' })], nextBefore: null });
+  await f.controller.refresh(); f.controller.confirmAbandon('other');
+  f.handlers.listRuns = () => ({ runs: [run({ state: 'interrupted' })], nextBefore: null });
+  await f.controller.refresh();
+  assert.equal(f.controller.state.confirming, null);
+  f.controller.confirmAbandon('setup-run'); assert.equal(f.controller.state.confirming, 'setup-run');
+});
+
 test('derived lines: interrupted runs, unannounced publication and draft count', () => {
   const published = authorRun({ kind: 'publishDraft', draftId, digest: 'b'.repeat(64) }, { state: 'succeeded',
     publication: { commit: 'c'.repeat(40), pushed: true, tagged: true, announced: [], pending: ['team'] } });

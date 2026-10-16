@@ -83,7 +83,7 @@ test('run and update cards show no run ID or digest', () => {
   const base = updates().items[0]!;
   const html = render({ run: { ...receipt(), runId }, check: updates({ items: [{ ...base, offered: { kind: 'tree' as const, digest } }] }) });
   assert.doesNotMatch(html, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/); assert.doesNotMatch(html, new RegExp(digest));
-  assert.doesNotMatch(html, /Run <code>/); assert.match(html, /Save skill choice/);
+  assert.doesNotMatch(html, /Run <code>/); assert.match(html, /Saving skill choice…/);
 });
 test('the run card counts steps and backups instead of listing their keys and IDs', () => {
   const run = { ...receipt('failed'), steps: [{ key: 'skills:tdd', outcome: 'ok' as const, note: 'Step completed' }, { key: 'skills:grill', outcome: 'ok' as const, note: 'Step completed' },
@@ -91,4 +91,15 @@ test('the run card counts steps and backups instead of listing their keys and ID
   const html = render({ run: run as SkillsViewState['run'] & object });
   assert.match(html, /2 steps done, 1 failed/); assert.match(html, /2 backups kept before changing files/);
   assert.doesNotMatch(html, /skills:tdd|skills:review|backup-7f3a|backup-9c1d|Backups:/);
+});
+
+test('the Skills run heading says what happened in words, never a raw state', () => {
+  const update = { kind: 'update' as const, only: ['skill:tdd'], authorManifest: false };
+  const heading = (run: ReturnType<typeof receipt>) => /aria-label="Skills run"><h2>([^<]*)<\/h2>/.exec(render({ run }))?.[1];
+  assert.equal(heading(receipt('running', update)), 'Updating skills…');
+  assert.equal(heading(receipt('succeeded', update)), 'Skills updated');
+  assert.equal(heading(receipt('failed', update)), 'Update failed');
+  assert.equal(heading(receipt('running')), 'Saving skill choice…');
+  assert.equal(heading(receipt('succeeded')), 'Skill choice saved');
+  for (const run of [receipt('accepted', update), receipt('cancelled'), receipt('interrupted', update)]) assert.doesNotMatch(heading(run) ?? '', /·|running|accepted|succeeded/);
 });

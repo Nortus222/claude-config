@@ -39,7 +39,7 @@ const PROFILE_CHANGED = 'Your profile changed. Review the new values and choose 
 // What a person saw of a row when choosing for it.
 const seen = (row: Review['rows'][number]) => JSON.stringify([row.change, row.held, row.conflict, row.before ?? null, row.after ?? null, row.mine ?? null]);
 // Runs that change this Mac; the Changes page shows one while it is active or interrupted.
-const MACHINE_KINDS: ReadonlySet<string> = new Set(['setupApply', 'followProfile', 'reconcile', 'uninstallConfig', 'update', 'addSkill', 'machineIntent', 'syncDecision']);
+export const MACHINE_KINDS: ReadonlySet<string> = new Set(['setupApply', 'followProfile', 'reconcile', 'uninstallConfig', 'update', 'addSkill', 'machineIntent', 'syncDecision']);
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 // A finished setup apply or a successful follow changes what is incoming, so the review is re-read.
 const settles = (run: RunView) => !active(run) && (run.intent.change.kind === 'setupApply' || run.intent.change.kind === 'followProfile' && run.state === 'succeeded');
