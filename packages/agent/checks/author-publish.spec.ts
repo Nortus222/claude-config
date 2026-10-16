@@ -9,6 +9,7 @@ import { Effect, Layer } from 'effect';
 import { Processes, backupsForRun, machinePaths, nodeFs, nodeProcesses, decisionsStore, historyStore, type Command, type Completed, type LaunchFailed } from '@nortuscc/machine';
 import { machineGit } from '@nortuscc/source-watch';
 import { HostedFailure, HostedTransport, MachineTokenStore, hostedStore, makeHostedClient, type HostedRequest, type HostedResponse } from '@nortuscc/hosted-client';
+import { hostedSetupSourceLayer, SetupSource, worktreeDocuments, itemValues } from '@nortuscc/sync';
 import { parseSyncQuery, type RevisionRecord, type SetupRecord } from '@nortuscc/hosted-protocol';
 import { authorWorkspaceLayer, GIT_TIMEOUT_MS } from '../src/author/workspace.ts';
 import { DraftStore, DraftStoreError, draftStore, type Draft } from '../src/author/drafts.ts';
@@ -41,16 +42,13 @@ const fixture = async (t: TestContext) => {
       return Effect.succeed({ code: 0, stdout: '{"login":"fixture","id":42}' });
     }
     assert.equal(c.cmd, 'git');
-    return real.run({ ...c, args: c.args.map(a => a === repoUrl ? origin : a) });
+    const transport = c.args.some(arg => ['clone', 'fetch', 'push', 'ls-remote'].includes(arg));
+    return real.run({ ...c, args: transport ? ['-c', `url.${origin}.insteadOf=${repoUrl}`, ...c.args] : c.args });
   } }))).pipe(Layer.provide(nodeProcesses({ env })));
   const paths = { repo: checkout, stateRoot: join(root, 'state'), backups: join(root, 'backups'), claude: root, codex: root, codexOpenRouter: root, agentsSkills: root };
   const base = Layer.mergeAll(machinePaths(paths), nodeFs, processes);
   const backups = backupsForRun().pipe(Layer.provide(base));
-  // Production checks clone identity against the original URL. Route only transport commands.
-  const originalProcesses = await Effect.runPromise(Processes.pipe(Effect.provide(processes)));
-  const routed = Layer.succeed(Processes, { run: (c: Command) => c.args.includes('get-url')
-    ? Effect.succeed({ code: 0, stdout: repoUrl + '\n' }) : originalProcesses.run(c) });
-  const workspaceRouted = authorWorkspaceLayer({ env }).pipe(Layer.provide(Layer.mergeAll(base, backups, routed)));
+  const workspaceRouted = authorWorkspaceLayer({ env }).pipe(Layer.provide(Layer.merge(base, backups)));
   const stores = Layer.mergeAll(draftStore, runStore, hostedStore, decisionsStore, historyStore()).pipe(Layer.provide(Layer.merge(base, backups)));
   const setups: SetupRecord[] = []; const revisions: RevisionRecord[] = [];
   let hostedFailure = false; let lostHostedReply: 'network' | 'revision_conflict' | undefined;
@@ -105,7 +103,7 @@ const fixture = async (t: TestContext) => {
       const id = randomUUID(); const accepted = yield* runs.submit({ requestId: id, inputDigest: operationDigest(id), planId: id, actor: 'app' });
       return yield* runs.get(accepted.runId);
     })).pipe(Effect.provideService(RunStore, receiptStore)));
-    return { owner, withDrafts, client, drafts, runStore, save, execute, run, git, origin, checkout, first, revisions, setups,
+    return { paths, processes, repoUrl, owner, withDrafts, client, drafts, runStore, save, execute, run, git, origin, checkout, first, revisions, setups,
       intercept: (f: typeof intercept) => { intercept = f; }, failHosted: (value: boolean) => { hostedFailure = value; }, loseHostedReply: (code: 'network' | 'revision_conflict' = 'network') => { lostHostedReply = code; }, failProfile: (profile?: string) => { failedProfile = profile; },
       move: (path = 'rival.txt', text = 'rival\n') => { git(checkout, 'pull', '-q', '--ff-only', 'origin', 'main'); mkdirSync(join(checkout, path, '..'), { recursive: true }); writeFileSync(join(checkout, path), text); git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'rival'); git(checkout, 'push', '-q', 'origin', 'main'); },
     };
@@ -489,4 +487,32 @@ test('a profile changed by a hand push is announced on the next publish', async 
   const unchanged = await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'last\n', choice: { kind: 'updateShared' } }]);
   const last = await publish(f, unchanged);
   assert.deepEqual(last.publication?.announced, ['base']);
+});
+
+
+test('a follower verifies and loads the same profile items announced by publishing a draft', async t => {
+  const f = await fixture(t);
+  const first = await publish(f, await f.save());
+  f.move('codex/AGENTS.md', 'hand-pushed instructions\n');
+  const second = await publish(f, await f.save([{ kind: 'captureFile', profile: 'personal', fileId: 'claude:CLAUDE.md', text: 'follower rules\n', choice: { kind: 'ownCopy', repoPath: 'claude/personal.md' } }]));
+  const setup = f.setups.find(setup => setup.profile === 'personal')!;
+  const records = f.revisions.filter(record => record.setupId === setup.setupId).map(({ publishedAt: _, machineId: __, ...revision }) => revision);
+  assert.equal(records.length, 2);
+  assert.equal(records[0]!.commitSha, first.publication?.commit);
+  assert.equal(records[1]!.commitSha, second.publication?.commit);
+  const paths = { ...f.paths, stateRoot: join(f.paths.stateRoot, 'follower'), repo: join(f.paths.stateRoot, 'absent-checkout') };
+  const layer = hostedSetupSourceLayer(paths, { accountId: 'follower', currentAccountId: Effect.succeed('follower'), setupId: setup.setupId,
+    repoUrl: f.repoUrl, profile: 'personal', followed: { repoUrl: f.repoUrl, profile: 'personal', setupId: setup.setupId }, records: Effect.succeed(records), processes: f.processes });
+  const loaded = await Effect.runPromise(SetupSource.use(source => Effect.gen(function* () {
+    const head = yield* source.fetch;
+    assert.equal(typeof head.head === 'string' ? head.head : head.head.commitSha, second.publication?.commit);
+    const snapshot = yield* source.load(head.head);
+    const documents = yield* worktreeDocuments(snapshot.repo);
+    return { snapshot, documents, items: [...itemValues(documents, 'personal').keys()] };
+  })).pipe(Effect.provide(layer), Effect.provide(nodeFs)));
+  assert.deepEqual(loaded.snapshot.desired.issues, []);
+  assert.equal(loaded.documents['claude/personal.md'], 'follower rules\n');
+  assert.equal(loaded.documents['codex/AGENTS.md'], 'hand-pushed instructions\n');
+  assert.deepEqual(loaded.items, ['file:claude:CLAUDE.md', 'file:codex:AGENTS.md']);
+  assert.deepEqual(records[1]!.items, [{ id: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' }, { id: 'file:codex:AGENTS.md', kind: 'file', change: 'added' }]);
 });
