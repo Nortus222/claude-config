@@ -5,7 +5,8 @@ import { decodeRunView, type OperationChange, type OperationOutput } from '@nort
 export const draftId = '00000000-0000-4000-8000-000000000001';
 export const repoUrl = 'https://github.com/example/setup.git';
 export const draft = { version: 1 as const, id: draftId, repoUrl, createdAt: '2026-10-16T12:00:00.000Z', intents: [] as Extract<OperationChange, {kind:'editDraft'}>['intent'][] };
-export const draftPreview = (fields = {}): OperationOutput<'draftPreview'> => ({ draftId, base: 'a'.repeat(40), digest: 'b'.repeat(64), diff: [{path:'profiles/team.json', before:'{}', after:'{"skills":[]}'}], invalid: [], affectedProfiles: ['team'], ...fields });
+export const draftPreview = (fields = {}): OperationOutput<'draftPreview'> => ({ draftId, base: 'a'.repeat(40), digest: 'b'.repeat(64), diff: [{path:'profiles/team.json', before:'{}', after:'{"skills":[]}'}], invalid: [], affectedProfiles: ['team'],
+  items: [{profile:'team', itemId:'skill:owner/repo/tdd', kind:'skill', change:'added'}], ...fields });
 export const authorRun = (change: OperationChange = {kind:'ghLogin'}, fields = {}) => decodeRunView({ ...Object.fromEntries(Object.entries(run()).filter(([key]) => key !== 'parity')), runId:'author-run', intent: {requestId:'request',inputDigest:'a'.repeat(64),planId:'plan',change,
   parity: {kind:change.kind,generation:'1',baselineDigest:'a'.repeat(64),planDigest:'a'.repeat(64),plannedKeys:[],...(['publishDraft','announcePublication'].includes(change.kind)?{publication:{repoUrl,base:'a'.repeat(40),draftId,draftDigest:'b'.repeat(64),profiles:['team'],accountId:null},...(change.kind==='announcePublication'?{commit:'c'.repeat(40)}:{})}:{draftId})}}, ...fields });
 export async function authorFixture(t: test.TestContext, options: {maintenance?:()=>boolean} = {}) {
