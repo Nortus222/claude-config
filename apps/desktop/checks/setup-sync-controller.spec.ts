@@ -492,7 +492,8 @@ test('Reload after a lost Apply reply shows that run even when it already finish
   const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
   f.handlers.applyChange = () => { throw new Error('Reply lost'); }; await f.controller.apply();
   const requestId = f.calls.find(c => c.name === 'applyChange')!.input.requestId;
-  const done = run({ runId: 'lost-run', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 }, intent: { ...run().intent, requestId } });
+  const finished = run({ runId: 'lost-run', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  const done = { ...finished, intent: { ...finished.intent, requestId } } as typeof finished;
   f.handlers.listRuns = () => ({ runs: [run({ runId: 'other', state: 'succeeded', result: { status: 'done', ok: 2, failed: 0 } }), done], nextBefore: null });
   const reviews = f.calls.filter(c => c.name === 'setupReview').length;
   await f.controller.reload(); await flush();
