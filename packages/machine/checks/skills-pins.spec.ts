@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, checkUpdates, execute, inspectSkills, lockRef, machinePaths, nodeFs, pinnedSource, pinsBySource, plan, planUpdates, Processes,
+  backupsForRun, checkUpdates, execute, inspectSkills, lockRef, machinePaths, nodeFs, nodeFileIntegrity, pinnedSource, pinsBySource, plan, planUpdates, Processes,
   samePlan, selectAll, skillsDomain, skillsUpdateDomain, splitPinned, updateItems,
   type Command, type MachineReport, type Observed, type Plan, type Progress,
 } from '../src/index.ts';
@@ -22,7 +22,7 @@ const skillsMachine = () => {
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
     stateRoot: join(home, 'state'), backups: join(home, 'state', 'backups'),
   };
-  const layer = Layer.mergeAll(machinePaths(paths), nodeFs);
+  const layer = Layer.mergeAll(machinePaths(paths), nodeFs, nodeFileIntegrity);
   const run = <A, E>(effect: Effect.Effect<A, E, any>) => Effect.runPromise(effect.pipe(Effect.provide(layer)) as Effect.Effect<A, E>);
   return { home, paths, layer, run };
 };
@@ -174,7 +174,7 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
   const src = skillSource(m.home);
   const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const r = report([item('a', 'off-pin', 'apply')], [skill('a', 'o/r', pin(sha))]);
   const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
   const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
@@ -196,7 +196,7 @@ test('update re-exposes a pinned skill lacking an agent link at its pin, never a
   const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
   writeLock(m.paths, { a: { source: 'o/r', ref: sha } });
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   // `stale` makes the plan non-empty, so it carries an expose step; `a` lacks only its claude-code link.
   const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r', pin(sha))]);
   const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
@@ -219,7 +219,7 @@ test('update backs up an unpinned skill before re-exposing it at upstream latest
   src.commit({ 'skills/a/SKILL.md': '# a latest\n' });
   writeLock(m.paths, { a: { source: 'o/r' } });
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   // `stale` makes the plan non-empty, so it carries an expose step; `a` lacks only its claude-code link.
   const r = report([item('stale', 'outdated', 'apply', 'x/y')], [skill('a', 'o/r')]);
   const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
@@ -268,7 +268,7 @@ test('removing a pin reinstalls the skill without a ref', async () => {
   writeFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), '# a old\n');
   writeLock(m.paths, { a: { source: 'o/r', sourceUrl: src.url, skillPath: 'skills/a/SKILL.md', ref: old } });
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const desired = desiredWith([skill('a', 'o/r')]);
   const plan0 = await Effect.runPromise(checkUpdates(desired).pipe(Effect.provide(layer)));
   const r = report(updateItems(plan0, desired), [skill('a', 'o/r')]);
@@ -287,7 +287,7 @@ test('scoped legacy update keeps source pins, content verification and selected 
   const m = skillsMachine(); mkdirSync(m.paths.repo,{ recursive: true }); mkdirSync(join(m.paths.agentsSkills,'a'),{ recursive:true });
   writeFileSync(join(m.paths.agentsSkills,'a','SKILL.md'),'# old\n'); writeLock(m.paths,{ a: { source:'o/r',ref:NEXT } });
   const src = skillSource(m.home); const sha = src.commit({ 'skills/a/SKILL.md':'# accepted pin\n' }); const installer = fakeInstaller(m.paths,src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths),nodeFs,installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths),nodeFs, nodeFileIntegrity,installer.layer)));
   const r = report([item('a','off-pin','apply')],[skill('a','o/r',pin(sha))]); const domain = skillsUpdateDomain(['claude']);
   const p = plan('update',r,{ ...selectAll,targets:['claude'],only:['skill:a'] },[domain]);
   const events = [...await Effect.runPromise(Stream.runCollect(execute(p,r,[domain])).pipe(Effect.provide(layer)))];

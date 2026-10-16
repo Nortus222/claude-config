@@ -7,19 +7,19 @@ import {
   loadProfile, nodeFiles, type DesiredConfig, type Input, type MachineOverrides, type ReadFailed, type Target,
 } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, configDomain, execute, integrationsDomain, machinePaths, nodeFs, nodeProcesses, overridesStore,
+  acquireApplyLock, backupsForRun, configDomain, execute, integrationsDomain, machinePaths, nodeFs, nodeFileIntegrity, nodeProcesses, overridesStore,
   OverridesStore, pathsFromEnvironment, skillsDomain, stateStore,
-  type Backups, type Domain, type DomainServices, type Fs, type FsFailed, type IntegrationsServices, type LaunchFailed, type LockHeld,
-  type MachinePaths, type MachinePathsValue, type MachineReport, type MaintenancePending, type Plan, type PluginState, type Processes, type RepoNotFound,
+  Fs, Processes, MachinePaths, type Backups, type FileIntegrity, type Domain, type DomainServices, type FsFailed, type IntegrationsServices, type LaunchFailed, type LockHeld,
+  type MachinePathsValue, type MachineReport, type MaintenancePending, type Plan, type PluginState, type RepoNotFound,
   type StateStore, type Step,
 } from '@nortuscc/machine';
-import { desiredFor, SyncStore, syncStore, type Holds, type Snapshot, type SyncStateInvalid } from '@nortuscc/sync';
+import { requireCheckoutCoherence, type CheckoutCoherenceFailed, desiredFor, SyncStore, syncStore, type Holds, type Snapshot, type SyncStateInvalid } from '@nortuscc/sync';
 import { resolveConfigMode, type ConfigMode } from './config-mode.ts';
 
 // The checkout this file belongs to: where a machine with no recorded checkout runs from.
 export const CHECKOUT = fileURLToPath(new URL('..', import.meta.url));
 
-export type CliServices = MachinePaths | Fs | Processes | StateStore | OverridesStore | Backups;
+export type CliServices = MachinePaths | Fs | Processes | StateStore | OverridesStore | Backups | FileIntegrity;
 
 export type Opened = {
   paths: MachinePathsValue;
@@ -31,7 +31,27 @@ export type Opened = {
   checkout: string;
   // This machine's held items (sync.json); empty from openMachine.
   held: Holds;
+  preflight?: CheckoutPreflight;
 };
+
+export type CheckoutPreflight = Effect.Effect<void, CheckoutCoherenceFailed | LaunchFailed | FsFailed>;
+
+// Capture the author checkout and its services before composing held documents.
+export const checkoutPreflight = (paths: MachinePathsValue) => Effect.gen(function* () {
+  const fs = yield* Fs;
+  const processes = yield* Processes;
+  return requireCheckoutCoherence(paths).pipe(
+    Effect.provideService(Fs, fs), Effect.provideService(Processes, processes),
+  );
+});
+
+// Choice reads may migrate legacy state, so check the checkout under the shared lock first.
+export const withCheckoutFence = <A, E, R>(paths: MachinePathsValue, body: Effect.Effect<A, E, R>) =>
+  Effect.scoped(Effect.gen(function* () {
+    yield* acquireApplyLock.pipe(Effect.provideService(MachinePaths, paths));
+    yield* requireCheckoutCoherence(paths);
+    return yield* body;
+  }));
 
 // This machine's paths from the environment. `warn` hears about a recorded repo that is no longer a checkout.
 export function resolvePaths(warn?: (message: string) => void): Effect.Effect<MachinePathsValue, RepoNotFound> {
@@ -41,7 +61,7 @@ export function resolvePaths(warn?: (message: string) => void): Effect.Effect<Ma
 // The CLI's services over `paths`.
 export function cliLayer(paths: MachinePathsValue): Layer.Layer<CliServices> {
   return Layer.mergeAll(stateStore, overridesStore, backupsForRun())
-    .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeProcesses())));
+    .pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, nodeFileIntegrity, nodeProcesses())));
 }
 
 // Prints each overrides issue to stderr as `nortuscc: <source>: <message>`.
@@ -124,10 +144,15 @@ export function composeHeld(input: { checkout: string; held: Holds; overrides?: 
 // openMachine with this machine's held items (sync.json) composed over the working tree, for the
 // commands that apply or report desired state. With holds, paths.repo is a temporary directory of the
 // composed documents, removed when the caller's scope closes, and `checkout` stays the git checkout.
+// Read-only callers skip the mutation fence and executor preflight.
 // An invalid sync.json fails with SyncStateInvalid, so the command changes nothing.
-export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}) {
+export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsValue; readOnly?: boolean } = {}) {
   return Effect.gen(function* () {
-    const opened = yield* openMachine(options);
+    const original = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
+    const layer = cliLayer(original);
+    const preflight = options.readOnly ? undefined : yield* checkoutPreflight(original).pipe(Effect.provide(layer));
+    if (!options.readOnly) yield* withCheckoutFence(original, Effect.void).pipe(Effect.provide(layer));
+    const opened = { ...(yield* openMachine({ ...options, paths: original })), preflight };
     const held = yield* readHolds(opened.layer);
     if (Object.keys(held).length === 0) return opened;
     const value = options.mode ? resolveConfigMode(options.mode, opened.overrides.value).overrides : opened.overrides.value;
@@ -176,14 +201,14 @@ export type Ran = {
 
 // Executes a plan, returning per-step results and the run's backup folder. `signal` stops the run
 // after the current step (or interrupts it, when the step is interruptible).
-export function runPlan<const D extends ReadonlyArray<Domain<any>>>(
+export function runPlan<const D extends ReadonlyArray<Domain<any>>, E = never>(
   plan: Plan,
   report: MachineReport,
   domains: D,
-  options: { signal?: AbortSignal; onStarted?: (step: Step) => void } = {},
-): Effect.Effect<Ran, LockHeld | MaintenancePending, DomainServices<D> | MachinePaths | Backups> {
+  options: { signal?: AbortSignal; onStarted?: (step: Step) => void; preflight?: Effect.Effect<void, E> } = {},
+): Effect.Effect<Ran, LockHeld | MaintenancePending | E, DomainServices<D> | MachinePaths | Backups> {
   const ran: Ran = { results: [], cancelled: false };
-  return Stream.runForEach(execute(plan, report, domains, { signal: options.signal }), (event) => Effect.sync(() => {
+  return Stream.runForEach(execute(plan, report, domains, { signal: options.signal, preflight: options.preflight }), (event) => Effect.sync(() => {
     switch (event.type) {
       case 'started':
         options.onStarted?.(event.step);

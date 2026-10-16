@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { additionRunPlan } from './skill-addition.ts';
 import { Cause, Effect, Exit, Fiber, Layer } from 'effect';
 import {
-  acceptedSkillLockMatches, additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, Fs, MachinePaths, machinePaths, OverridesStore, overridesPath, Processes, readSkillCandidates,
+  acceptedSkillLockMatches, additionLockEntry, verifyInstalledSkillTree, type TreeEntry, canonical, FileIntegrity, Fs, MachinePaths, machinePaths, OverridesStore, overridesPath, Processes, readSkillCandidates,
   sourceOf, skillLockPath, agentSkillsDirs, inspectSkills, type Plan, type SkillCandidate,
 } from '@nortuscc/machine';
 import {
@@ -38,7 +38,7 @@ export const makeSkillOperations = (options: {
   readonly generation: Effect.Effect<number>;
   readonly readCandidates?: typeof readSkillCandidates;
 }) => Effect.gen(function* () {
-  const context = yield* Effect.context<Fs | Processes | MachinePaths | OverridesStore | AgentClock>();
+  const context = yield* Effect.context<FileIntegrity | Fs | Processes | MachinePaths | OverridesStore | AgentClock>();
   const clock = yield* AgentClock;
   const fs = yield* Fs;
   const store = yield* OverridesStore;

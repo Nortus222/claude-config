@@ -4,11 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { Effect, Layer, Stream } from 'effect';
 import { decodeOverrides, loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import {
-  authorDigest, bindAuthorCheckout, canonical, executeUpdateManifest, installedSkillNames, prepareUpdateManifest, readSkillLockEvidence, stateStore, UpdateManifestRefused, validateAuthorBinding, backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
+  authorDigest, bindAuthorCheckout, canonical, executeUpdateManifest, installedSkillNames, prepareUpdateManifest, readSkillLockEvidence, stateStore, UpdateManifestRefused, validateAuthorBinding, backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeFileIntegrity, nodeProcesses,
   LaunchFailed, Processes, pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
   type PreparedAuthorEdit, type Observed, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
-import { checkoutGroups, decodeSyncState, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
+import { requireCheckoutCoherence, checkoutGroups, decodeSyncState, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
 import { composeHeld } from '../machine.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { select } from '../select.ts';
@@ -424,6 +424,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
   const program = Effect.gen(function* () {
     const paths = yield* MachinePaths;
+    if (!flags.check) yield* requireCheckoutCoherence(paths);
     const fs = yield* Fs;
     const choicePath = join(paths.stateRoot, 'overrides.json');
     const choiceBytes = yield* fs.readBytes(choicePath);
@@ -455,6 +456,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
   return Effect.runPromise(program.pipe(
     Effect.provide(stateStore),
+    Effect.provide(nodeFileIntegrity),
     Effect.provide(deps.layer),
     Effect.catch((error: unknown) => Effect.sync(() => {
       console.error(`nortuscc: ${messageOf(error)}`);

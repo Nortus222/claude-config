@@ -4,6 +4,8 @@ import { TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engi
 import { Backups } from '../backups.ts';
 import type { Domain, MachineReport, Observed, PlanKind, Selection, Skipped, Step, StepResult } from '../model.ts';
 import { Fs } from '../fs.ts';
+import { FileIntegrity } from '../file-integrity.ts';
+import { checkSkillOwnership, disableOwnedSkill } from './ownership.ts';
 import { MachinePaths } from '../paths.ts';
 import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
@@ -21,7 +23,7 @@ const STORE_UNREADABLE = 'store unreadable';
 export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   { items: Observed[]; probeErrors: string[] },
   never,
-  Fs | MachinePaths
+  Fs | MachinePaths | FileIntegrity
 > => Effect.gen(function* () {
   const store = (yield* MachinePaths).agentsSkills;
   const lock = yield* readSkillLock;
@@ -41,6 +43,13 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
     // An unlistable store says nothing about what is installed; reading it as missing would reinstall everything.
     if (listed._tag === 'Failure') {
       items.push({ ...base, state: 'unknown', disposition: 'blocked', note: STORE_UNREADABLE });
+    } else if (!skill.install && skill.from.layer === 'machine') {
+      const ownership = yield* checkSkillOwnership(desired, skill.name);
+      items.push(ownership.kind === 'blocked'
+        ? { ...base, state: 'disabled', disposition: 'blocked', note: ownership.reason }
+        : ownership.kind === 'owned'
+          ? { ...base, state: 'disabled', disposition: 'apply', note: 'disable pending' }
+          : { ...base, state: 'missing', disposition: 'excluded', note: 'disabled on this machine' });
     } else if (present.has(skill.name)) {
       okSkills.push({ name: skill.name, source: skill.source });
       const recorded = lockRef(skill.targets ? additionLockEntry(lock, skill.name)?.meta : lock.skills[skill.name]);
@@ -93,7 +102,7 @@ const sortedUnique = (names: Iterable<string>) => [...new Set(names)].sort(byCod
 const touchesOf = (names: Iterable<string>) => sortedUnique(names).map((n) => `skills/${n}`);
 // Skills step keys; an install step's key is `install` followed by its installer source, `o/r#<sha>` when pinned.
 export const SKILL_STEP = {
-  remove: 'skills:remove', update: 'skills:update', install: 'skills:install:', expose: 'skills:expose', manifest: 'skills:manifest',
+  disable: 'skills:disable:', remove: 'skills:remove', update: 'skills:update', install: 'skills:install:', expose: 'skills:expose', manifest: 'skills:manifest',
 } as const;
 
 // The skill names a skills step acts on, read back from its `skills/<name>` touches.
@@ -121,9 +130,14 @@ const applySteps = (items: ReadonlyArray<Observed>, selection: Selection, pins: 
     || (i.state === 'unlinked' && i.target !== undefined && selection.targets.includes(i.target)));
   const skipped: Skipped[] = [
     ...items.filter((i) => i.state === 'missing' && i.disposition === 'excluded').map((i) => ({ key: i.key, reason: 'optional, not chosen' })),
-    ...items.filter((i) => i.disposition === 'blocked').map((i) => ({ key: i.key, reason: STORE_UNREADABLE })),
+    ...items.filter((i) => i.disposition === 'blocked').map((i) => ({ key: i.key, reason: i.note ?? STORE_UNREADABLE })),
   ];
-  return { steps: installSteps(wanted, selection.targets, pins), skipped };
+  const disables: Step[] = items.filter(i => i.state === 'disabled' && i.disposition === 'apply')
+    .sort((a, b) => byCodePoint(a.label, b.label)).map(i => ({
+      key: `${SKILL_STEP.disable}${i.label}`, domain: 'skills', action: 'remove',
+      summary: `disabling ${i.label} on this machine`, touches: touchesOf([i.label]), interruptible: false,
+    }));
+  return { steps: [...disables, ...installSteps(wanted, selection.targets, pins)], skipped };
 };
 
 // Prune, refresh, adopt or move to a pin, then re-expose; the manifest is rewritten only when the skill set changed.
@@ -164,11 +178,13 @@ const updateSteps = (items: ReadonlyArray<Observed>, selection: Selection, pins:
 
 const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: PlanKind, desired: DesiredConfig) => {
   const additions = new Set(desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
-  const blocked = items.filter(i => additions.has(i.label) && (kind === 'update' || i.disposition === 'apply'));
-  const legacy = items.filter(i => !additions.has(i.label));
+  const disabled = new Set(desired.skills.filter(s => !s.install && s.from.layer === 'machine').map(s => s.name));
+  const active = items.filter(i => !disabled.has(i.label) || kind === 'apply' && i.state === 'disabled');
+  const blocked = active.filter(i => !disabled.has(i.label) && additions.has(i.label) && (kind === 'update' || i.disposition === 'apply'));
+  const legacy = active.filter(i => disabled.has(i.label) || !additions.has(i.label));
   const result = kind === 'apply' ? applySteps(legacy, selection, pinsBySource(desired))
     : kind === 'update' ? updateSteps(legacy, selection, pinsBySource(desired)) : { steps: [], skipped: [] };
-  return { ...result, skipped: [...result.skipped, ...blocked.map(i => ({ key: i.key,
+  return { ...result, skipped: [...result.skipped, ...items.filter(i => !active.includes(i)).map(i => ({ key: i.key, reason: 'disabled on this machine' })), ...blocked.map(i => ({ key: i.key,
     reason: 'Resolve and preview this skill addition to repair or update it with native verification' }))] };
 };
 
@@ -223,7 +239,9 @@ const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: Rea
 const reExpose = (step: Step, report: MachineReport, scopedRemoval = false) => Effect.gen(function* () {
   const installed = new Set(yield* installedSkillNames);
   const additions = new Set(report.desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
-  const scope = sortedUnique(scopedRemoval ? skillNamesOf(step) : [...report.desired.skills.map(s => s.name),...skillNamesOf(step)]).filter(n => installed.has(n) && !additions.has(n));
+  const disabled = new Set(report.desired.skills.filter(s => !s.install && s.from.layer === 'machine').map(s => s.name));
+  const scope = sortedUnique(scopedRemoval ? skillNamesOf(step) : [...report.desired.skills.map(s => s.name),...skillNamesOf(step)])
+    .filter(n => installed.has(n) && !additions.has(n) && !disabled.has(n));
   const lock = yield* readSkillLock;
   const pins = pinsBySource(report.desired);
   const exposure = yield* readExposure(step.targets ?? TARGETS);
@@ -280,11 +298,12 @@ const writeManifest = (report: MachineReport) => Effect.gen(function* () {
   return { ok: true, note: `written — ${outcome.reason}` };
 });
 
-const runSkillStep = (step: Step, report: MachineReport, scopedTargets?: readonly Target[]): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups> =>
+const runSkillStep = (step: Step, report: MachineReport, scopedTargets?: readonly Target[]): Effect.Effect<StepResult, unknown, Fs | MachinePaths | Processes | Backups | FileIntegrity> =>
   Effect.gen(function* () {
     const names = skillNamesOf(step);
     switch (step.action) {
       case 'remove':
+        if (step.key.startsWith(SKILL_STEP.disable) && names.length === 1) return yield* disableOwnedSkill(report.desired, names[0]!);
         yield* preserveAll(names);
         {
           const removed = yield* runInstaller(removeCommand(names, scopedTargets));
@@ -329,7 +348,7 @@ const runSkillStep = (step: Step, report: MachineReport, scopedTargets?: readonl
     return { ok: false, note: `skills cannot run ${step.action}` };
   });
 
-export const skillsDomain: Domain<Fs | MachinePaths | Processes | Backups> = {
+export const skillsDomain: Domain<Fs | MachinePaths | Processes | Backups | FileIntegrity> = {
   name: 'skills',
   inspect: inspectSkills,
   steps: skillSteps,

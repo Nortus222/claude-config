@@ -184,7 +184,7 @@ export const IntentItemSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('configTargets'), value: IntentTargets, from: IntentOrigin }),
   Schema.Struct({ kind: Schema.Literal('file'), id: PatchId, target: Schema.Literals(['claude', 'codex']), managed: Schema.Boolean, from: IntentOrigin }),
   Schema.Struct({ kind: Schema.Literal('setting'), fileId: PatchId, key: PatchId, value: IntentValueSchema, from: IntentOrigin }),
-  Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, enabled: Schema.Boolean, from: IntentOrigin, declaredFrom: IntentOrigin, targets: IntentTargets,
+  Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, choice: Schema.NullOr(Schema.Boolean), defaultEnabled: Schema.Boolean, enabled: Schema.Boolean, from: IntentOrigin, declaredFrom: IntentOrigin, targets: IntentTargets,
     policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']), revision: Schema.optionalKey(SkillRevisionSchema) }),
   Schema.Struct({ kind: Schema.Literal('integration'), id: PatchId, type: Schema.Literals(['hook', 'mcp', 'plugin', 'marketplace', 'unknown']), target: Schema.optionalKey(Schema.Literals(['claude', 'codex'])), enabled: Schema.Boolean, from: IntentOrigin, prerequisites: Schema.Array(Text).check(Schema.isMaxLength(4)) }),
   Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId, message: Schema.Literal('Configuration input is invalid; inspect the owning document in the app') }),

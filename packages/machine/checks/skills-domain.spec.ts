@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, emitManifest, execute, inspectSkills, machinePaths, nodeFs, plan, Processes, samePlan, selectAll, skillsDomain,
+  backupsForRun, emitManifest, execute, inspectSkills, machinePaths, nodeFs, nodeFileIntegrity, plan, Processes, samePlan, selectAll, skillsDomain,
   type Command, type MachinePathsValue, type MachineReport, type Observed, type Plan, type Progress,
 } from '../src/index.ts';
 
@@ -17,7 +17,7 @@ const skillsMachine = () => {
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
     stateRoot: join(home, 'state'), backups: join(home, 'state', 'backups'),
   };
-  const layer = Layer.mergeAll(machinePaths(paths), nodeFs);
+  const layer = Layer.mergeAll(machinePaths(paths), nodeFs, nodeFileIntegrity);
   const run = <A, E>(effect: Effect.Effect<A, E, any>) => Effect.runPromise(effect.pipe(Effect.provide(layer)) as Effect.Effect<A, E>);
   return { home, paths, layer, run };
 };
@@ -283,7 +283,7 @@ const runMachine = (behaviour: { readonly fail?: 'add' | 'update' | 'remove' } =
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
   const installer = fakeInstaller(m.paths, behaviour);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const go = async (p: Plan, r: MachineReport): Promise<Progress[]> =>
     [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
   const argv = () => installer.commands.map((c) => [c.cmd, ...c.args].join(' '));
@@ -451,4 +451,58 @@ test('generic repair and update expose an addition prerequisite rather than invo
     assert.ok(planned.steps.every(s => !s.touches.some(t => t === 'skills/personal' || t === 'skills/overlay')));
     assert.equal(planned.skipped.filter(s => /native verification/.test(s.reason)).length, 2);
   }
+});
+
+test('machine Off disables an owned installed skill after backing up its destinations', async (t) => {
+  const m = runMachine(); t.after(() => rmSync(m.home, { recursive: true, force: true }));
+  m.install('tdd');
+  writeFileSync(join(m.paths.claude, 'skills', 'tdd', 'SKILL.md'), '# tdd\n');
+  const desired = desiredWith([skill('tdd', 'o/r', { install: false, from: { layer: 'machine', source: 'overrides.json' } })]);
+  const report = { desired, ...await m.run(inspectSkills(desired)) };
+  assert.deepEqual(report.items.map(i => [i.state, i.disposition]), [['disabled', 'apply']]);
+  const planned = plan('apply', report, { ...selectAll, targets: ['codex'] }, [skillsDomain]);
+  assert.deepEqual(planned.steps.map(s => [s.key, s.action]), [['skills:disable:tdd', 'remove']]);
+  const events = await m.go(planned, report);
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.equal(done.failed, 0); assert.equal(done.ok, 1);
+  for (const prefix of ['', 'claude']) assert.equal(readFileSync(join(done.backups!, prefix, 'skills', 'tdd', 'SKILL.md'), 'utf8'), '# tdd\n');
+  assert.equal(existsSync(join(m.paths.agentsSkills, 'tdd')), false);
+  assert.equal(existsSync(join(m.paths.claude, 'skills', 'tdd')), false);
+  assert.deepEqual(readLock(m.paths), {}); assert.deepEqual(m.argv(), []);
+});
+
+test('machine Off leaves a foreign or modified destination and reports it blocked', async (t) => {
+  for (const foreign of [false, true]) {
+    const m = runMachine(); t.after(() => rmSync(m.home, { recursive: true, force: true }));
+    m.install('tdd', foreign ? 'foreign/source' : 'o/r');
+    writeFileSync(join(m.paths.claude, 'skills', 'tdd', 'SKILL.md'), 'local edits\n');
+    const desired = desiredWith([skill('tdd', 'o/r', { install: false, from: { layer: 'machine', source: 'overrides.json' } })]);
+    const report = { desired, ...await m.run(inspectSkills(desired)) };
+    assert.equal(report.items[0]!.disposition, 'blocked');
+    const planned = plan('apply', report, { ...selectAll, force: true }, [skillsDomain]);
+    assert.deepEqual(planned.steps, []); assert.match(planned.skipped[0]!.reason, /source|differs/);
+    assert.equal(readFileSync(join(m.paths.claude, 'skills', 'tdd', 'SKILL.md'), 'utf8'), 'local edits\n');
+    assert.deepEqual(m.argv(), []);
+  }
+});
+
+test('an update of another skill never re-exposes a machine Off skill', async t => {
+  const m = runMachine(); t.after(() => rmSync(m.home, { recursive: true, force: true }));
+  m.install('off', 'o/r', false); m.install('active', 'o/r');
+  const r = report([item('off', 'disabled', 'apply'), item('active', 'outdated', 'apply')], [
+    skill('off', 'o/r', { install: false, from: { layer: 'machine', source: 'overrides.json' } }), skill('active', 'o/r'),
+  ]);
+  await m.go(plan('update', r, selectAll, [skillsDomain]), r);
+  assert.equal(existsSync(join(m.paths.claude, 'skills', 'off')), false);
+  assert.ok(m.argv().every(cmd => !cmd.includes('--skill off')));
+  assert.equal(existsSync(join(m.paths.agentsSkills, 'off')), true);
+});
+
+test('inherited optional Off preserves an installed skill without planning a disable', async t => {
+  const m = runMachine(); t.after(() => rmSync(m.home, { recursive: true, force: true }));
+  m.install('optional');
+  const desired = desiredWith([skill('optional', 'o/r', { install: false, optional: true })]);
+  const report = { desired, ...await m.run(inspectSkills(desired)) };
+  assert.deepEqual(plan('apply', report, selectAll, [skillsDomain]).steps, []);
+  assert.equal(existsSync(join(m.paths.agentsSkills, 'optional')), true);
 });
