@@ -9,13 +9,13 @@ import { activeAccount, changeAccount } from './machines.ts';
 import { newId } from './ids.ts';
 
 export function projectSetup(setup: SetupDocument): SetupRecord {
-  return { setupId:setup.setupId,name:setup.name,repoUrl:setup.repoUrl,latestRevision:setup.latestRevision,createdAt:setup.createdAt };
+  return { setupId:setup.setupId,name:setup.name,repoUrl:setup.repoUrl,profile:setup.profile,latestRevision:setup.latestRevision,createdAt:setup.createdAt };
 }
 export function ownedSetup(store: Store['Service'], accountId: string, setupId: string) {
   return Effect.gen(function* () {
     const snapshot = yield* store.readPartition('setups',setupId);
     const setup = snapshot.documents.find((d): d is SetupDocument => d.type === 'setup');
-    if (!setup || setup.ownerAccountId !== accountId) return yield* Effect.fail(new ServiceFailure({ code:'not_found' }));
+    if (snapshot.closed || !setup || setup.ownerAccountId !== accountId) return yield* Effect.fail(new ServiceFailure({ code:'not_found' }));
     return { snapshot,setup };
   });
 }
@@ -29,11 +29,11 @@ function materialize(store: Store['Service'], accountId: string, reservation: Se
       const snapshot = yield* store.readPartition('setups',reservation.setupId);
       const existing = snapshot.documents.find((d): d is SetupDocument => d.type === 'setup');
       if (existing) {
-        if (existing.ownerAccountId !== accountId || existing.name !== reservation.name || existing.repoUrl !== reservation.repoUrl || existing.createdAt !== reservation.createdAt) return yield* Effect.fail(new ServiceFailure({ code:'unavailable' }));
+        if (existing.ownerAccountId !== accountId || existing.name !== reservation.name || existing.repoUrl !== reservation.repoUrl || existing.profile !== reservation.profile || existing.createdAt !== reservation.createdAt) return yield* Effect.fail(new ServiceFailure({ code:'unavailable' }));
         return existing;
       }
       if (reservation.state === 'ready' || snapshot.version !== null) return yield* Effect.fail(new ServiceFailure({ code:'not_found' }));
-      const setup: SetupDocument = { type:'setup',version:1,id:reservation.setupId,setupId:reservation.setupId,ownerAccountId:accountId,name:reservation.name,repoUrl:reservation.repoUrl,
+      const setup: SetupDocument = { type:'setup',version:1,id:reservation.setupId,setupId:reservation.setupId,ownerAccountId:accountId,name:reservation.name,repoUrl:reservation.repoUrl,profile:reservation.profile,
         createdAt:reservation.createdAt,latestRevision:0,publicationDay:null,publicationsToday:0 };
       if (yield* store.commitPartition('setups',setup.setupId,snapshot.version,[{ type:'upsert',document:setup }])) return setup;
     }
@@ -84,8 +84,8 @@ export function setupRoute(request: ServiceRequest, principal: AuthenticatedPrin
     if (request.method !== 'POST') return undefined;
     const registration = yield* Effect.try({ try:() => decodeRequestBody(SetupRegistrationSchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
     const reservation: SetupReservation = { setupId:newId(now()),...registration,createdAt:new Date(now()).toISOString(),state:'reserved',publishedHead:0 };
-    yield* changeAccount(store,principal.accountId,(_snapshot,account) => {
-      if (account.setups.length >= MAX_SETUPS) throw new ServiceFailure({ code:'limit_reached' });
+    yield* changeAccount(store,principal.accountId,(snapshot,account) => {
+      if (account.setups.length + snapshot.documents.filter(d => d.type === 'subscription').length >= MAX_SETUPS) throw new ServiceFailure({ code:'limit_reached' });
       return { mutations:[{ type:'upsert',document:{ ...account,setups:[...account.setups,reservation] } }],value:undefined };
     });
     const setup = yield* materialize(store,principal.accountId,reservation);

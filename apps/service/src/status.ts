@@ -4,7 +4,7 @@ import type { AuthenticatedPrincipal } from './auth.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
 import type { Store } from './store.ts';
 import { ServiceFailure } from './errors.ts';
-import { ownedSetup } from './setups.ts';
+import { readableSetup } from './subscriptions.ts';
 import { revisionRange } from './revisions.ts';
 import { changeAccount } from './machines.ts';
 
@@ -13,7 +13,7 @@ export function statusRoute(request: ServiceRequest, principal: AuthenticatedPri
     if (request.method !== 'PUT' || request.path !== '/v1/machines/self/status') return undefined;
     const summary = yield* Effect.try({ try:() => decodeRequestBody(StatusSummarySchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
     for (const report of summary.setups) {
-      const { setup,snapshot } = yield* ownedSetup(store,principal.accountId,report.setupId);
+      const { setup,snapshot } = yield* readableSetup(store,principal.accountId,report.setupId);
       if (report.revisionApplied > setup.latestRevision) return yield* Effect.fail(new ServiceFailure({ code:'invalid' }));
       const history = yield* Effect.try({ try:() => revisionRange(snapshot,setup.latestRevision,0),catch:(e) => e as ServiceFailure });
       const known = new Set(history.flatMap((r) => r.items.map((i) => i.id)));

@@ -3,7 +3,7 @@ import { MAX_PARTITION_MUTATIONS, PARTITION_MARKER_ID, type Container, type Muta
 
 export const belongsTo = (document: ServiceDocument, container: Container, key: string): boolean => {
   switch (document.type) {
-    case 'account': case 'machine': case 'issuanceFence': case 'deviceReservation': case 'decision': case 'status':
+    case 'subscription': case 'account': case 'machine': case 'issuanceFence': case 'deviceReservation': case 'decision': case 'status':
       return container === 'accounts' && document.accountId === key;
     case 'setup': case 'revision':
       return container === 'setups' && document.setupId === key;

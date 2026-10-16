@@ -12,7 +12,7 @@ const fixtures = [
   ['device poll request', p.DevicePollRequestSchema, { pendingId: 'pending-1' }],
   ['device poll pending', p.DevicePollPendingSchema, { interval: 5 }],
   ['device poll success', p.DevicePollSuccessSchema, success],
-  ['setup registration', p.SetupRegistrationSchema, { name: setup.name, repoUrl: setup.repoUrl }],
+  ['setup registration', p.SetupRegistrationSchema, { name: setup.name, repoUrl: setup.repoUrl, profile: setup.profile }],
   ['setup record', p.SetupRecordSchema, setup],
   ['setup list', p.SetupsResponseSchema, { setups: [setup] }],
   ['revision item', p.RevisionItemSchema, item],
@@ -157,4 +157,23 @@ test('valid maximum wire counts and all decision outcomes remain usable', () => 
   assert.deepEqual(p.decodeDecisionsResponse(p.decodeHosted(p.DecisionsRequestSchema, { decisions }), { seq: 43, results }).results, results);
   assert.deepEqual(p.decodeHosted(p.MachinePatchSchema, { reportStatus: false }), { reportStatus: false });
   assert.deepEqual(p.decodeHosted(p.MachineRecordSchema, { ...machine, reportStatus: false, status: null }).status, null);
+});
+
+
+test('setup registration requires a valid profile name', () => {
+  const registration = { name: 'Config', repoUrl: setup.repoUrl, profile: 'personal-1' };
+  assert.deepEqual(p.decodeRequestBody(p.SetupRegistrationSchema, registration), registration);
+  for (const profile of [undefined, '', 'Personal', '-team', 'a'.repeat(64), '../base']) {
+    assert.throws(() => p.decodeRequestBody(p.SetupRegistrationSchema, { ...registration, profile }));
+  }
+});
+
+test('sync response carries owned and subscribed setups', () => {
+  const body = { ...sync, setups: [
+    { ...sync.setups[0], profile: 'personal', owned: true },
+    { ...sync.setups[0], setupId: 'shared', profile: 'team', owned: false, closed: true },
+  ] };
+  assert.deepEqual(p.decodeHosted(p.SyncResponseSchema, body), body);
+  const { owned, ...missingOwnership } = body.setups[0];
+  assert.throws(() => p.decodeHosted(p.SyncResponseSchema, { ...body, setups: [missingOwnership] }));
 });

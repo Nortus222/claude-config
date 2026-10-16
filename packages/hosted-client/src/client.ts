@@ -3,6 +3,8 @@ import { Effect, Schema, Semaphore } from 'effect';
 import { DecisionsStore, HistoryStore, type Actor, type Decision as LocalDecision } from '@nortuscc/machine';
 import { DeviceStartRequestSchema, DeviceStartResponseSchema, DevicePollPendingSchema, DevicePollSuccessSchema,
   DecisionsRequestSchema, MachinePatchSchema, MachineRecordSchema, MachineTokenSchema, SyncResponseSchema, decodeDecisionsResponse,
+  IdSchema, RevisionCursorSchema, SetupRegistrationSchema, SetupRecordSchema, RevisionPublicationSchema, RevisionRecordSchema, RevisionsResponseSchema, PublicSetupSchema,
+  type SetupRegistration, type SetupRecord, type RevisionPublication, type RevisionRecord, type PublicSetup,
   IsoTimeSchema, StatusSummarySchema, type StatusSummary,
   decodeHosted, decodeRequestBody, formatSyncQuery, jsonByteLength, MAX_DECISIONS, MAX_REQUEST_BODY_BYTES,
   type DeviceStartRequest, type MachinePatch, type Policy, type SyncRevision, type SyncedDecision, type SyncMachine, type SyncSetup } from '@nortuscc/hosted-protocol';
@@ -33,6 +35,12 @@ export type HostedClient = {
   readonly signInFlow: Effect.Effect<string | null>;
   readonly state: Effect.Effect<HostedState, HostedFailure>;
   readonly revisions: (setupId: string) => Effect.Effect<ReadonlyArray<SyncRevision>, HostedFailure>;
+  readonly registerSetup: (input: SetupRegistration) => Effect.Effect<SetupRecord, HostedFailure>;
+  readonly publishRevision: (setupId: string, publication: RevisionPublication) => Effect.Effect<RevisionRecord, HostedFailure>;
+  readonly listRevisions: (setupId: string, after?: number) => Effect.Effect<readonly RevisionRecord[], HostedFailure>;
+  readonly publicSetup: (setupId: string) => Effect.Effect<PublicSetup, HostedFailure>;
+  readonly subscribe: (setupId: string) => Effect.Effect<void, HostedFailure>;
+  readonly unsubscribe: (setupId: string) => Effect.Effect<void, HostedFailure>;
   readonly startSignIn: (request: SignInRequest, reportStatus?: boolean) => Effect.Effect<SignInStarted, HostedFailure>;
   readonly pollSignIn: () => Effect.Effect<SignInPoll, HostedFailure>;
   readonly signOut: () => Effect.Effect<void, HostedFailure>;
@@ -210,9 +218,14 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     if (!a || a.auth !== 'signed-in' || (a.retryAt !== null && Date.parse(a.retryAt) > now().getTime())) return project(a);
     const initial = a;
     const work = Effect.gen(function* () {
-      a = yield* flush(initial);
-      const query = { since: a.seq, setups: a.cursors };
-      const result = yield* request(a, { method: 'GET', path: `/sync?${formatSyncQuery(query)}`, ...(a.etag === undefined ? {} : { etag: a.etag }) });
+      a = yield* flush(initial).pipe(Effect.catch(error => error.code === 'not_found' ? requireAccount : Effect.fail(error)));
+      let query = { since: a.seq, setups: a.cursors };
+      const result = yield* request(a, { method: 'GET', path: `/sync?${formatSyncQuery(query)}`, ...(a.etag === undefined ? {} : { etag: a.etag }) }).pipe(Effect.catch(error => {
+        if (error.code !== 'not_found' || query.setups.length === 0) return Effect.fail(error);
+        // Another machine may have removed a subscription since these cursors were stored.
+        query = { since:query.since, setups:[] };
+        return request(a!, { method:'GET', path:`/sync?${formatSyncQuery(query)}` });
+      }));
       if (result.status === 304) {
         const doc = yield* updateAccount(a.accountId, (current) => ({ ...current, lastSyncAt: now().toISOString(), retryAt: null, error: null,
           ...(result.etag === undefined ? {} : { etag: result.etag }) }));
@@ -225,6 +238,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       if (body.decisions.some((d) => d.revision < (a!.authoritative.find((old) => key(old) === key(d))?.revision ?? 0))) return yield* Effect.fail(invalidResponse());
       for (const cursor of query.setups) if (!body.setups.some((s) => s.setupId === cursor.setupId && s.latestRevision >= cursor.revision)) return yield* Effect.fail(invalidResponse());
       for (const setup of body.setups) {
+        if (setup.closed) continue;
         const since = query.setups.find((c) => c.setupId === setup.setupId)?.revision ?? 0;
         const records = body.revisions.filter((r) => r.setupId === setup.setupId);
         if (records.length !== setup.latestRevision - since || records.some((r, i) => r.number !== since + i + 1)) return yield* Effect.fail(invalidResponse());
@@ -232,8 +246,9 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
         if (cache.length < since || cache.length > setup.latestRevision) return yield* Effect.fail(invalidResponse());
       }
       // Validate all ranges before any cache write; cache immutability handles cache-ahead replay.
-      for (const setup of body.setups) yield* store.cache(a.accountId, setup.setupId, body.revisions.filter((r) => r.setupId === setup.setupId));
-      const authoritative = mergeDecisions(a.authoritative, body.decisions);
+      for (const setup of body.setups.filter(s => !s.closed)) yield* store.cache(a.accountId, setup.setupId, body.revisions.filter((r) => r.setupId === setup.setupId));
+      const removed = new Set(a.setups.filter(old => !body.setups.some(s => s.setupId === old.setupId)).map(s => s.setupId));
+      const authoritative = mergeDecisions(a.authoritative.filter(d => !removed.has(d.setupId)), body.decisions);
       for (const d of body.decisions) {
         const previous = a.authoritative.find((old) => key(old) === key(d));
         if (d.machineId !== a.machineId && (!previous || previous.decision !== d.decision || previous.revision !== d.revision || previous.machineId !== d.machineId)) {
@@ -244,7 +259,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       // Persist incoming decisions with the checkpoint, then repair their local projection on restart.
       const doc = yield* updateAccount(a.accountId, (current) => ({ ...withoutEtag(current), seq: body.seq,
         cursors: body.setups.map((s) => ({ setupId: s.setupId, revision: s.latestRevision })), setups: body.setups,
-        authoritative, machine: body.machine, pollAfter: body.pollAfter, lastSyncAt: now().toISOString(), retryAt: null, error: null,
+        authoritative, outbox:current.outbox.filter(e => e.kind !== 'decision' || !removed.has(e.decision.setupId)), machine: body.machine, pollAfter: body.pollAfter, lastSyncAt: now().toISOString(), retryAt: null, error: null,
         ...(result.etag === undefined ? {} : { etag: result.etag }) }));
       const next = active(doc)!;
       yield* reconcile(next); yield* applyPolicy(next);
@@ -252,8 +267,75 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
     });
     return yield* work.pipe(Effect.catch((error) => persistFailure(initial, error).pipe(Effect.andThen(Effect.fail(error)))));
   }).pipe(lock.withPermit);
+  const metadataRequest = (input: Omit<HostedRequest, 'token'>) => Effect.gen(function* () {
+    const a = yield* requireAccount;
+    if (a.auth !== 'signed-in') return yield* Effect.fail(new HostedFailure({ code:'unauthenticated' }));
+    return yield* request(a, input).pipe(Effect.catch(error => persistFailure(a, error).pipe(Effect.andThen(Effect.fail(error)))));
+  });
+  const subscription = (setupId: string, method: 'PUT' | 'DELETE') => Effect.gen(function* () {
+    yield* decode(IdSchema, setupId, true);
+    const result = yield* metadataRequest({ method, path:`/subscriptions/${setupId}` });
+    if (result.status !== 204) return yield* Effect.fail(invalidResponse());
+    const a = yield* requireAccount;
+    const doc = yield* updateAccount(a.accountId, current => {
+      const remove = method === 'DELETE' && !current.setups.some(s => s.setupId === setupId && s.owned);
+      return { ...withoutEtag(current),
+        setups:remove ? current.setups.filter(s => s.setupId !== setupId) : current.setups,
+        cursors:remove ? current.cursors.filter(s => s.setupId !== setupId) : current.cursors,
+        authoritative:remove ? current.authoritative.filter(d => d.setupId !== setupId) : current.authoritative,
+        outbox:remove ? current.outbox.filter(e => e.kind !== 'decision' || e.decision.setupId !== setupId) : current.outbox };
+    });
+    yield* reconcile(active(doc)!);
+  }).pipe(lock.withPermit);
   return {
     state,
+    registerSetup: input => Effect.gen(function* () {
+      const body = yield* decode(SetupRegistrationSchema, input, true);
+      const result = yield* metadataRequest({ method:'POST', path:'/setups', body });
+      if (result.status !== 201) return yield* Effect.fail(invalidResponse());
+      const setup = yield* decode(SetupRecordSchema, result.body);
+      if (setup.name !== body.name || setup.repoUrl !== body.repoUrl || setup.profile !== body.profile) return yield* Effect.fail(invalidResponse());
+      const a = yield* requireAccount;
+      yield* updateAccount(a.accountId, withoutEtag);
+      return setup;
+    }).pipe(lock.withPermit),
+    publishRevision: (setupId, publication) => Effect.gen(function* () {
+      yield* decode(IdSchema, setupId, true);
+      const body = yield* decode(RevisionPublicationSchema, publication, true);
+      const result = yield* metadataRequest({ method:'POST', path:`/setups/${setupId}/revisions`, body });
+      if (result.status !== 201) return yield* Effect.fail(invalidResponse());
+      const record = yield* decode(RevisionRecordSchema, result.body);
+      if (record.setupId !== setupId || record.number !== publication.number) return yield* Effect.fail(invalidResponse());
+      const a = yield* requireAccount;
+      yield* updateAccount(a.accountId, withoutEtag);
+      return record;
+    }).pipe(lock.withPermit),
+    listRevisions: (setupId, after = 0) => Effect.gen(function* () {
+      yield* decode(IdSchema, setupId, true);
+      yield* decode(RevisionCursorSchema, after, true);
+      const records: RevisionRecord[] = [];
+      let cursor = after;
+      for (;;) {
+        const result = yield* metadataRequest({ method:'GET', path:`/setups/${setupId}/revisions?after=${cursor}` });
+        if (result.status !== 200) return yield* Effect.fail(invalidResponse());
+        const page = yield* decode(RevisionsResponseSchema, result.body);
+        if (page.revisions.some((r, i) => r.setupId !== setupId || r.number !== cursor + i + 1)) return yield* Effect.fail(invalidResponse());
+        records.push(...page.revisions);
+        if (page.nextAfter === null) return records;
+        if (page.nextAfter <= cursor) return yield* Effect.fail(invalidResponse());
+        cursor = page.nextAfter;
+      }
+    }).pipe(lock.withPermit),
+    publicSetup: setupId => Effect.gen(function* () {
+      yield* decode(IdSchema, setupId, true);
+      const result = yield* metadataRequest({ method:'GET', path:`/setups/${setupId}/public` });
+      if (result.status !== 200) return yield* Effect.fail(invalidResponse());
+      const setup = yield* decode(PublicSetupSchema, result.body);
+      if (setup.setupId !== setupId) return yield* Effect.fail(invalidResponse());
+      return setup;
+    }).pipe(lock.withPermit),
+    subscribe: setupId => subscription(setupId, 'PUT'),
+    unsubscribe: setupId => subscription(setupId, 'DELETE'),
     signInFlow: Effect.sync(() => pending?.binding ?? null),
     revisions: (setupId) => Effect.flatMap(store.read, (doc) => {
       const a = active(doc);

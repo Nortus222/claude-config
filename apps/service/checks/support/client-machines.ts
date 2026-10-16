@@ -53,7 +53,7 @@ export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, op
   const commitSha = git(['rev-parse', 'HEAD'], repo); git(['tag', 'v1'], repo); git(['push', '-q', 'origin', 'main', 'refs/tags/v1'], repo);
   const items = diffItems(itemValues({}), itemValues(docs)).map((item) => ({ id: item.itemId, kind: item.kind, change: 'added' as const }));
   const register = async (token: string) => {
-    const response = await f.call('POST', '/v1/setups', { name: 'Fixture config', repoUrl: REPO_URL }, token);
+    const response = await f.call('POST', '/v1/setups', { name: 'Fixture config', repoUrl: REPO_URL, profile: 'default' }, token);
     assert.equal(response.status, 201); return decodeHosted(SetupRecordSchema, await response.json());
   };
   const publish = async (token: string, setupId: string, number: number, overrides: Partial<RevisionPublication> = {}) => {
