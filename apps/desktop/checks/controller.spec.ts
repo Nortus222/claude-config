@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MachineController, advance, type RunView } from '../src/controller.ts';
+import type { RunView as OperationRunView } from '@nortuscc/agent/operations';
 import { skillRun } from './support/skill-run.ts';
 import { authorRun } from './support/author.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
@@ -1209,4 +1210,55 @@ test('only a matching status cause refreshes the current shared run', async () =
     f.emit({ generation: 1, version: 3, event: 'status', runId: 'addition-run', status: status({ applying: false }) }); await settleReceipt();
     assert.equal(c.state.run?.outcome, 'done');
   } finally { c.dispose(); }
+});
+
+// A durable reconcile run of three planned steps, as the Changes page starts one.
+const reconcileRun = (fields: Partial<OperationRunView> = {}): OperationRunView => decodeRunView(Object.fromEntries(Object.entries({ runId: 'reconcile-run', state: 'running', operation: 'applyChange', scope: { kind: 'machine' },
+  intent: { requestId: 'reconcile-request', inputDigest: 'a'.repeat(64), planId: 'reconcile-plan', change: { kind: 'reconcile', only: ['skill:a', 'skill:b', 'config:c'] },
+    parity: { kind: 'reconcile', generation: '0', baselineDigest: 'a'.repeat(64), planDigest: 'a'.repeat(64), plannedKeys: ['skills:install:owner/a', 'skills:install:owner/b', 'config:c'] } },
+  intentSaved: false, steps: [{ key: 'skills:install:owner/a', outcome: 'ok', note: 'Machine effect observed' }], result: null,
+  current: { key: 'skills:install:owner/b', summary: 'installing 4 skill(s) from owner/b' }, ...fields }).filter(([, value]) => value !== undefined)));
+
+test('a Mac busy with a run shows what it applies, how far it is and the step in flight', async () => {
+  let run = reconcileRun();
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying: true }),
+    list_operation_runs: () => ({ runs: [run], nextBefore: null }), get_operation_run: () => run, inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge); await c.connect();
+  assert.deepEqual(c.state.busy, { kind: 'reconcile', description: 'Applying changes on this Mac', done: 1, total: 3, step: 'installing 4 skill(s) from owner/b', runId: 'reconcile-run' });
+  run = reconcileRun({ steps: [...run.steps, { key: 'skills:install:owner/b', outcome: 'ok', note: 'Machine effect observed' }], current: { key: 'config:c', summary: 'write config:c' } });
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: run.runId }); await settle();
+  assert.deepEqual([c.state.busy?.done, c.state.busy?.step], [2, 'write config:c']);
+});
+
+test('applying ends with the run even when its terminal progress was missed, so the Mac is inspected again', async () => {
+  let run = reconcileRun(), applying = true;
+  const f = fake({ agent_generation: () => operationHello, agent_status: () => status({ applying }),
+    list_operation_runs: () => ({ runs: [run], nextBefore: null }), get_operation_run: () => run, inspect_machine: () => inspection(['config:a']) });
+  const c = new MachineController(f.bridge); await c.connect();
+  assert.equal(c.state.inspection, null, 'an app opened mid-run does not inspect');
+  run = reconcileRun({ state: 'succeeded', current: undefined, result: { status: 'done', ok: 3, failed: 0 } }); applying = false;
+  f.emit({ generation: 1, version: 3, event: 'operation-run', runId: run.runId }); await settle(); await settle();
+  assert.equal(c.state.run?.outcome, 'done');
+  assert.notEqual(c.state.status?.applying, true);
+  assert.equal(c.state.busy, null);
+  assert.equal(c.snapshot().inspection?.items.length, 1);
+});
+
+test('an apply the agent reports without a run this app follows is still a busy Mac', async () => {
+  const f = fake({ agent_status: () => status({ applying: true }) });
+  const c = new MachineController(f.bridge); await c.connect();
+  assert.deepEqual(c.state.busy, { kind: null, description: 'The agent is applying changes on this Mac', done: null, total: null, step: null, runId: null });
+  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) });
+  assert.equal(c.state.busy, null);
+});
+
+test('a legacy run counts its finished steps against the total its progress reports', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a', 'config:b']) });
+  const c = new MachineController(f.bridge); await c.connect();
+  f.emit(event('r1', { type: 'started', index: 0, total: 2, step: step('config:a') }));
+  f.emit(event('r1', { type: 'finished', index: 0, total: 2, key: 'config:a', outcome: 'ok', note: '' }));
+  f.emit(event('r1', { type: 'started', index: 1, total: 2, step: step('config:b') }));
+  assert.deepEqual(c.state.busy, { kind: null, description: 'Applying changes on this Mac', done: 1, total: 2, step: 'write config:b', runId: 'r1' });
+  f.emit(event('r1', { type: 'done', ok: 2, failed: 0 }));
+  assert.equal(c.state.busy, null);
 });

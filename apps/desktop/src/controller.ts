@@ -17,6 +17,21 @@ export type RunView = {
   // Steps the agent reported as failed when the run finished.
   readonly failed?: number;
   readonly backups?: string;
+  // Planned steps, as the run's progress reports them.
+  readonly total?: number;
+};
+// What this Mac is busy with: a run in progress, or an apply the agent reports without a run this app
+// follows (an automatic apply, or one from the CLI). Every page that changes this Mac waits while it is set.
+export type MachineBusy = {
+  // The run's change kind ('reconcile', 'setupApply', 'followProfile', 'update', 'addSkill', ...); null when unknown.
+  readonly kind: string | null;
+  readonly description: string;
+  // Finished and planned steps, when known.
+  readonly done: number | null;
+  readonly total: number | null;
+  // The step in flight, when known.
+  readonly step: string | null;
+  readonly runId: string | null;
 };
 export type ViewState = {
   readonly connection: 'connecting' | 'connected' | 'disconnected' | 'browser';
@@ -31,6 +46,8 @@ export type ViewState = {
   readonly detail: string;
   readonly reviewRequested: number;
   readonly session: number;
+  // Derived from `run` and `status`.
+  readonly busy: MachineBusy | null;
 };
 
 // Terminal events remembered while a run discovery read is in flight.
@@ -47,6 +64,29 @@ const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
   catch { throw new Error('MALFORMED: incompatible agent response. Restart or reinstall the agent explicitly.'); }
 };
 
+const BUSY: Readonly<Record<string, string>> = {
+  reconcile: 'Applying changes on this Mac', setupApply: 'Applying incoming changes from your profile',
+  followProfile: 'Switching the profile this Mac follows', update: 'Updating skills', addSkill: 'Adding a skill',
+  machineIntent: 'Saving a choice for this Mac', uninstallConfig: 'Restoring configuration files', syncDecision: 'Saving a choice about an incoming change',
+  setPolicy: 'Changing the apply policy', resume: 'Resuming automatic apply', signIn: 'Signing in', signOut: 'Signing out',
+  syncAccount: 'Syncing your account', patchMachineMetadata: 'Updating this Mac\'s details', pruneBackups: 'Removing old backups',
+};
+const FINISHED: ReadonlySet<StepStatus> = new Set(['ok', 'failed', 'cancelled']);
+// The run in progress, else an apply the agent reports.
+export function machineBusy(state: Pick<ViewState, 'connection' | 'run' | 'status'>): MachineBusy | null {
+  if (state.connection !== 'connected') return null;
+  const run = state.run;
+  if (run?.outcome === 'running') {
+    const receipt = run.receipt, kind = receipt?.intent.change.kind ?? null;
+    const planned = receipt?.intent.parity && 'plannedKeys' in receipt.intent.parity ? receipt.intent.parity.plannedKeys.length : undefined;
+    const total = planned ?? run.total ?? null;
+    const step = run.steps.find(step => step.status === 'running')?.summary ?? receipt?.current?.summary ?? null;
+    return { kind, description: kind === null ? BUSY.reconcile! : BUSY[kind] ?? 'Working on this Mac', done: total === null ? null : run.steps.filter(step => FINISHED.has(step.status)).length,
+      total, step, runId: run.runId };
+  }
+  return state.status?.applying ? { kind: null, description: 'The agent is applying changes on this Mac', done: null, total: null, step: null, runId: null } : null;
+}
+
 // Folds one progress event into a run's view.
 export function advance(run: RunView, progress: RunProgress): RunView {
   const mark = (index: number, status: StepStatus, note = '') =>
@@ -58,10 +98,10 @@ export function advance(run: RunView, progress: RunProgress): RunView {
       const steps = current < 0
         ? [...run.steps, { ...started, index: progress.index }]
         : run.steps.map((step, index) => index === current ? { ...step, ...started } : step);
-      return { ...run, steps, summary: progress.step.summary };
+      return { ...run, steps, summary: progress.step.summary, total: progress.total };
     }
     case 'finished':
-      return { ...run, steps: mark(progress.index, progress.outcome, progress.note) };
+      return { ...run, steps: mark(progress.index, progress.outcome, progress.note), total: progress.total };
     case 'done':
       return { ...run, outcome: 'done', summary: `${progress.ok} applied, ${progress.failed} failed`, failed: progress.failed, ...backups(progress.backups) };
     case 'cancelled':
@@ -76,7 +116,7 @@ export class MachineController {
   state: ViewState = {
     connection: 'connecting', inspection: null, status: null, hello: null, run: null, pending: false,
     initialReadPending: true, waitingForReport: false, initialReadError: null,
-    detail: 'Connecting to the local agent', reviewRequested: 0, session: 0,
+    detail: 'Connecting to the local agent', reviewRequested: 0, session: 0, busy: null,
   };
   private bridge: Bridge | null;
   private generation: number | null = null;
@@ -120,6 +160,8 @@ export class MachineController {
     if (this.disposed) return;
     if ('run' in update && this.state.run && update.run?.runId !== this.state.run.runId) this.latestRunRead++;
     this.state = { ...this.state, ...update };
+    const busy = machineBusy(this.state);
+    if (JSON.stringify(busy) !== JSON.stringify(this.state.busy)) this.state = { ...this.state, busy };
     if (this.state.connection !== 'connected') {
       this.discoveryFlight = null;
       this.discoveryPending = false;
@@ -286,6 +328,8 @@ export class MachineController {
       const staleChallenge = receipt.parity?.kind === 'signIn' && receipt.parity.signIn?.state === 'awaiting-user' && statusRevision !== this.statusRevision;
       const failed = receipt.result && 'failed' in receipt.result ? { failed: receipt.result.failed } : {};
       this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, ...failed, receipt, challengeCurrent: !staleChallenge }, detail: summary });
+      // A run seen ending without its terminal progress changed this Mac too: read status and inspect again.
+      if (sameRun?.outcome === 'running' && outcome !== 'running') void this.inspect();
       if (staleChallenge && this.ownsSession(token) && this.state.run?.runId === receipt.runId) await this.refreshRun(receipt.runId);
     } catch {
       // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
