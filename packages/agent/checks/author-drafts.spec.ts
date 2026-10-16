@@ -56,16 +56,30 @@ test('replacement backs up the old draft and readers see complete atomic snapsho
   assert.deepEqual(JSON.parse(await readFile(join(f.root, 'backups', 'nortuscc-2026-10-16T12-00-00-000Z', 'agent', 'author', 'drafts', `${draft.id}.json`), 'utf8')), draft);
 });
 
-test('corrupt and mismatched drafts fail visibly while any draft can still be deleted', async t => {
+test('a corrupt draft is listed by id and can be deleted while other drafts still list', async t => {
   const f = await fixture();
   t.after(() => rm(f.root, { recursive: true, force: true }));
   await f.run(DraftStore.use(store => store.write(draft)));
+  const other: Draft = { ...draft, id: '11111111-1111-4111-8111-111111111111' };
+  await f.run(DraftStore.use(store => store.write(other)));
   await writeFile(f.path, JSON.stringify({ ...draft, id: '11111111-1111-4111-8111-111111111111' }));
   await assert.rejects(f.run(DraftStore.use(store => store.read(draft.id))), /identity mismatch/);
+  const mismatched = await f.run(DraftStore.use(store => store.list()));
+  assert.deepEqual(mismatched.find(entry => entry.id === other.id), other);
+  const entry = mismatched.find(entry => entry.id === draft.id);
+  assert.ok(entry && 'error' in entry);
+  assert.match(String(entry.error), /identity mismatch/);
   await writeFile(f.path, '{broken');
-  await assert.rejects(f.run(DraftStore.use(store => store.list())));
+  const listed = await f.run(DraftStore.use(store => store.list()));
+  assert.equal(listed.length, 2);
+  assert.deepEqual(listed.find(entry => entry.id === other.id), other);
+  const corrupt = listed.find(entry => entry.id === draft.id);
+  assert.ok(corrupt && 'error' in corrupt);
+  assert.equal(typeof corrupt.error, 'string');
+  assert.ok(corrupt.error.length > 0);
   await f.run(DraftStore.use(store => store.delete(draft.id)));
-  assert.deepEqual(await f.run(DraftStore.use(store => store.list())), []);
+  assert.deepEqual(await f.run(DraftStore.use(store => store.list())), [other]);
+  assert.equal(await readFile(join(f.root, 'backups', 'nortuscc-2026-10-16T12-00-00-000Z', 'agent', 'author', 'drafts', `${draft.id}.json`), 'utf8'), '{broken');
 });
 
 test('draft IDs cannot escape the draft directory', async t => {

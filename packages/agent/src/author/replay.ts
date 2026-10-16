@@ -1,5 +1,5 @@
 import { Effect } from 'effect';
-import { listProfiles, memoryFiles, parseProfileDocument, profilesUsingPath, resolveNamedProfile, type ProfileDocument } from '@nortuscc/profile-engine';
+import { listProfiles, memoryFiles, normalizeSkillSource, parseProfileDocument, profilesUsingPath, resolveNamedProfile, type ProfileDocument } from '@nortuscc/profile-engine';
 import { DocumentInvalid, editEntry, IGNORES_FILE, PINS_FILE } from '@nortuscc/source-watch';
 import type { Intent } from './intents.ts';
 
@@ -58,14 +58,15 @@ function apply(documents: Documents, intent: Intent): Record<string, string> {
     }
     case 'includeSkill': case 'excludeSkill':
       return editProfile(documents, intent.profile, document => {
+        const source = normalizeSkillSource(intent.source)!;
         const action = intent.kind === 'includeSkill' ? 'add' : 'remove';
         const opposite = action === 'add' ? 'remove' : 'add';
         const skills = { ...document.skills };
-        if (skills[opposite]) skills[opposite] = skills[opposite].map(group => group.source === intent.source
-          ? { ...group, names: group.names.filter(name => name !== intent.name) } : group).filter(group => group.source !== intent.source || group.names.length > 0);
+        if (skills[opposite]) skills[opposite] = skills[opposite].map(group => group.source === source
+          ? { ...group, names: group.names.filter(name => name !== intent.name) } : group).filter(group => group.source !== source || group.names.length > 0);
         const selections = [...skills[action] ?? []];
-        const index = selections.findIndex(group => group.source === intent.source);
-        if (index < 0) selections.push({ source: intent.source, names: [intent.name] });
+        const index = selections.findIndex(group => group.source === source);
+        if (index < 0) selections.push({ source, names: [intent.name] });
         else if (!selections[index]!.names.includes(intent.name)) selections[index] = { ...selections[index]!, names: [...selections[index]!.names, intent.name] };
         skills[action] = selections;
         document.skills = skills;

@@ -21,7 +21,10 @@ const FileId = Schema.String.check(Schema.makeFilter(value => FILES.some(file =>
 const RepoPath = Schema.String.check(Schema.makeFilter(value =>
   !value.includes('\\') && !value.includes('\0') && !/^[a-z]:/i.test(value)
   && value.split('/').every(part => part !== '' && part !== '.' && part !== '..')));
-const CopyPath = RepoPath.check(Schema.isPattern(/^(?:claude|codex)\/.+/u));
+const CopyPath = RepoPath.check(
+  Schema.isPattern(/^(?:claude|codex)\/.+$(?![\s\S])/u),
+  Schema.makeFilter(value => !/\p{Cc}/u.test(value) && value === value.trimEnd()),
+);
 
 export const IntentSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('createProfile'), profile: Profile, extends: Schema.NullOr(Profile) }),

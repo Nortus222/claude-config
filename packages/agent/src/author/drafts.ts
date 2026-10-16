@@ -11,12 +11,13 @@ export const DraftSchema = Schema.Struct({
   intents: Schema.Array(IntentSchema),
 });
 export type Draft = typeof DraftSchema.Type;
+export type DraftListEntry = Draft | { readonly id: string; readonly error: string };
 export class DraftStoreError extends Error {}
 const failure = (error: unknown) => new DraftStoreError(error instanceof Error ? error.message : String(error));
 const decode = Schema.decodeUnknownSync(DraftSchema);
 
 export class DraftStore extends Context.Service<DraftStore, {
-  readonly list: () => Effect.Effect<Draft[], DraftStoreError>;
+  readonly list: () => Effect.Effect<DraftListEntry[], DraftStoreError>;
   readonly read: (id: string) => Effect.Effect<Draft | undefined, DraftStoreError>;
   readonly write: (draft: Draft) => Effect.Effect<void, DraftStoreError>;
   readonly delete: (id: string) => Effect.Effect<void, DraftStoreError>;
@@ -44,10 +45,11 @@ export const draftStore = Layer.effect(DraftStore, Effect.gen(function* () {
   return {
     read,
     list: () => Effect.gen(function* () {
-      const drafts: Draft[] = [];
+      const drafts: DraftListEntry[] = [];
       for (const name of (yield* fs.list(dir)) ?? []) {
         if (!name.endsWith('.json') || !UUID.test(name.slice(0, -5))) continue;
-        const draft = yield* read(name.slice(0, -5));
+        const id = name.slice(0, -5);
+        const draft = yield* read(id).pipe(Effect.catch(error => Effect.succeed({ id, error: error.message })));
         if (draft !== undefined) drafts.push(draft);
       }
       return drafts;

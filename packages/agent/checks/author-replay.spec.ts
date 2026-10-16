@@ -29,6 +29,25 @@ test('the first created profile also writes an empty default profile', () => {
   });
 });
 
+test('including a skill by URL matches the manifest\'s owner/repo group', () => {
+  const before = {
+    'skills-manifest.txt': 'obra/superpowers: debug\n',
+    'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug'] }], remove: [{ source: 'obra/superpowers', names: ['tdd'] }] } }),
+  };
+  const intent = Schema.decodeUnknownSync(IntentSchema)({ kind: 'includeSkill', profile: 'personal', source: 'https://github.com/obra/superpowers', name: 'tdd' });
+  const result = replay(before, [intent]);
+  assert.deepEqual(result, { documents: { ...before, 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug', 'tdd'] }], remove: [] } }) }, invalid: [] });
+  const skills = resolveNamedProfile({ documents: result.documents as Record<string, string>, name: 'personal' }).skills;
+  assert.deepEqual(skills.map(skill => [skill.source, skill.name, skill.install]), [['obra/superpowers', 'debug', true], ['obra/superpowers', 'tdd', true]]);
+});
+
+test('excluding a skill by URL cancels its canonical inclusion', () => {
+  const before = { 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['tdd', 'debug'] }] } }) };
+  const intent = Schema.decodeUnknownSync(IntentSchema)({ kind: 'excludeSkill', profile: 'personal', source: 'https://github.com/Obra/Superpowers.git/', name: 'tdd' });
+  const result = replay(before, [intent]);
+  assert.deepEqual(result, { documents: { 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug'] }], remove: [{ source: 'obra/superpowers', names: ['tdd'] }] } }) }, invalid: [] });
+});
+
 test('an intent for a missing profile is invalid with its index and reason', () => {
   const result = replay(shared, [
     { kind: 'pin', source: 'obra/superpowers', commit: 'a'.repeat(40) },
@@ -78,6 +97,12 @@ test('capture schema caps UTF-8 bytes and rejects paths outside the two config d
     assert.throws(() => decode({ ...intent, choice: { kind: 'ownCopy', repoPath } }), repoPath);
   }
 });
+
+for (const repoPath of ['claude/a\nb', 'claude/a\u0001b', 'codex/a\u007fb', 'claude/a\u0085b', 'claude/a ', 'codex/a\u00a0']) {
+  test(`capture schema rejects control characters and trailing whitespace in ${JSON.stringify(repoPath)}`, () => {
+    assert.throws(() => Schema.decodeUnknownSync(IntentSchema)({ kind: 'captureFile', profile: 'personal', fileId: 'claude:CLAUDE.md', text: 'frozen', choice: { kind: 'ownCopy', repoPath } }));
+  });
+}
 
 test('profile edits replay in order and preserve inherited skill choices without duplicates', () => {
   const before = { ...shared, 'profiles/base.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['tdd'] }] } }) };
