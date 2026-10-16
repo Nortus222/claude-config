@@ -7,8 +7,8 @@ import type { AccountController, AccountViewState } from './account-controller.t
 import type { UpdateViewState } from './update-controller.ts';
 import type { MachineController, ViewState } from './controller.ts';
 
-export type Screen = 'overview' | 'review' | 'resolved' | 'settings';
-const screens = [['overview', 'Overview'], ['review', 'Review & apply'], ['resolved', 'Resolved'], ['settings', 'Settings']] as const;
+export type Screen = 'overview' | 'review' | 'setup' | 'skills' | 'resolved' | 'settings';
+const screens = [['overview', 'Overview'], ['review', 'Review & apply'], ['setup', 'Setup'], ['skills', 'Skills'], ['resolved', 'Resolved'], ['settings', 'Settings']] as const;
 export const screenForReview = (screen: Screen, previous: number, requested: number): Screen => requested > previous ? 'review' : screen;
 
 export function ShellView({ screen, navigate, children }: { screen: Screen; navigate: (screen: Screen) => void; children: ReactNode }) {
