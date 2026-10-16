@@ -144,13 +144,14 @@ export function composeHeld(input: { checkout: string; held: Holds; overrides?: 
 // openMachine with this machine's held items (sync.json) composed over the working tree, for the
 // commands that apply or report desired state. With holds, paths.repo is a temporary directory of the
 // composed documents, removed when the caller's scope closes, and `checkout` stays the git checkout.
+// Read-only callers skip the mutation fence and executor preflight.
 // An invalid sync.json fails with SyncStateInvalid, so the command changes nothing.
-export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}) {
+export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsValue; readOnly?: boolean } = {}) {
   return Effect.gen(function* () {
     const original = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
     const layer = cliLayer(original);
-    const preflight = yield* checkoutPreflight(original).pipe(Effect.provide(layer));
-    yield* withCheckoutFence(original, Effect.void).pipe(Effect.provide(layer));
+    const preflight = options.readOnly ? undefined : yield* checkoutPreflight(original).pipe(Effect.provide(layer));
+    if (!options.readOnly) yield* withCheckoutFence(original, Effect.void).pipe(Effect.provide(layer));
     const opened = { ...(yield* openMachine({ ...options, paths: original })), preflight };
     const held = yield* readHolds(opened.layer);
     if (Object.keys(held).length === 0) return opened;

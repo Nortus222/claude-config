@@ -5,7 +5,7 @@ import { constants, homedir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  acquireApplyLock, Backups, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, StateStore,
+  acquireApplyLock, Backups, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, peekMachineState, StateStore,
   withApplied, type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { MachineOverrides } from '@nortuscc/profile-engine';
@@ -260,7 +260,7 @@ const record = (input: {
 const reportIntegrations = (target: TargetChoice, rest: ReadonlyArray<string>) =>
   Effect.scoped(Effect.gen(function* () {
     if (rest.includes('--install')) return 0;
-    const opened = yield* openDesired();
+    const opened = yield* openDesired({ readOnly: true });
     const { manifestErrors, planned } = yield* inspectIntegrations(opened, selectedTargets(target)).pipe(Effect.provide(opened.layer));
     if (manifestErrors.length) {
       process.stdout.write('\n' + section('integrations', manifestErrors.map((m) => formatRow('manifest', 'invalid', m))));
@@ -329,7 +329,7 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     const head = behind ? fetched : before;
 
     // 3. What changed since the applied commit, measured from this machine's holds.
-    const recorded = (yield* (yield* StateStore).read).applied?.commit;
+    const recorded = (flags.check ? yield* peekMachineState : yield* (yield* StateStore).read).applied?.commit;
     const known = recorded === undefined ? undefined : yield* revParse(repo, recorded);
     if (recorded !== undefined && known === undefined) {
       console.error(`nortuscc: the applied commit ${short(recorded)} is not in this checkout; measuring from ${short(before)}`);
@@ -413,7 +413,7 @@ export async function run(args: string[] = [], deps: SyncDeps = { select: realSe
       env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
     });
     const layer = Layer.mergeAll(syncStore, decisionsStore, historyStore()).pipe(Layer.provideMerge(cliLayer(paths)));
-    yield* withCheckoutFence(paths, Effect.void).pipe(Effect.provide(layer));
+    if (!flags.check) yield* withCheckoutFence(paths, Effect.void).pipe(Effect.provide(layer));
     return yield* syncMachine(paths, target, flags, deps).pipe(Effect.provide(layer));
   }));
 }

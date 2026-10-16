@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { Effect } from 'effect';
-import { configDomain, inspect, plan, selectAll } from '@nortuscc/machine';
+import { acquireApplyLock, configDomain, inspect, MachinePaths, plan, selectAll } from '@nortuscc/machine';
 import { openDesired, runPlan } from '../src/machine.ts';
 import { coherenceFixture } from './support/checkout-coherence.ts';
 import { installerCalls, machine, runCli, writeFakeBin } from './support/cli.ts';
@@ -23,7 +23,7 @@ function blackbox(t: { after: (f: () => void) => void }) {
   const m = { ...machine({ repo: 'checkout' }), home: f.home, repo: f.repo, state: f.paths.stateRoot,
     claude: f.paths.claude, codex: f.paths.codex, openrouter: f.paths.codexOpenRouter, agents: f.paths.agentsSkills, log: join(f.home, 'install.log') };
   // Block every transport or mutating Git command. Read-only guard commands may use this fixture.
-  writeFakeBin(m.bin, 'git', `#!${process.execPath}\nimport { spawnSync } from 'node:child_process';\nimport { appendFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst a=process.argv.slice(2); let i=0; while(['-c','-C','--git-dir','--work-tree'].includes(a[i])) i+=2;\nif(process.env.NORTUSCC_COHERENCE_AUTHOR) { if(['add','commit','push'].includes(a[i])) { appendFileSync(join(process.env.HOME,'author-git.log'),a[i]+'\\n'); process.exit(0); } if(a[i]==='diff'&&a.includes('--quiet')) process.exit(1); }\nif(process.env.NORTUSCC_COHERENCE_UPSTREAM) { if(a[i]==='symbolic-ref') { console.log('main'); process.exit(0); } if(a[i]==='config') { console.log(a.at(-1).endsWith('.remote')?'origin':'refs/heads/main'); process.exit(0); } if(a[i]==='rev-parse'&&a.at(-1).includes('refs/remotes/origin/main')) { console.log(process.env.NORTUSCC_COHERENCE_UPSTREAM); process.exit(0); } }\nif(!['rev-parse','merge-base','ls-files','ls-tree','cat-file','symbolic-ref','config','rev-list','diff'].includes(a[i])) { process.stderr.write('blocked fixture Git '+a[i]); process.exit(91); }\nconst r=spawnSync('/usr/bin/git',a,{env:process.env,stdio:'inherit'}); process.exit(r.status??1);\n`);
+  writeFakeBin(m.bin, 'git', `#!${process.execPath}\nimport { spawnSync } from 'node:child_process';\nimport { appendFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst a=process.argv.slice(2); let i=0; while(['-c','-C','--git-dir','--work-tree'].includes(a[i])) i+=2;\nif(process.env.NORTUSCC_COHERENCE_AUTHOR) { if(['add','commit','push'].includes(a[i])) { appendFileSync(join(process.env.HOME,'author-git.log'),a[i]+'\\n'); process.exit(0); } if(a[i]==='diff'&&a.includes('--quiet')) process.exit(1); }\nif(process.env.NORTUSCC_COHERENCE_UPSTREAM) { if(a[i]==='fetch') process.exit(0); if(a[i]==='symbolic-ref') { console.log('main'); process.exit(0); } if(a[i]==='config') { console.log(a.at(-1).endsWith('.remote')?'origin':'refs/heads/main'); process.exit(0); } if(a[i]==='rev-parse'&&a.at(-1).includes('refs/remotes/origin/main')) { console.log(process.env.NORTUSCC_COHERENCE_UPSTREAM); process.exit(0); } }\nif(!['rev-parse','merge-base','ls-files','ls-tree','cat-file','symbolic-ref','config','rev-list','diff'].includes(a[i])) { process.stderr.write('blocked fixture Git '+a[i]); process.exit(91); }\nconst r=spawnSync('/usr/bin/git',a,{env:process.env,stdio:'inherit'}); process.exit(r.status??1);\n`);
   return { f, m, env: Object.fromEntries(Object.entries(f.env).filter((e): e is [string,string] => e[1] !== undefined && e[0] !== 'PATH')) };
 }
 
@@ -34,6 +34,92 @@ test('CLI refuses machine changes when its checkout is behind the applied baseli
     await assert.rejects(Effect.runPromise(Effect.scoped(openDesired({ paths: f.paths }))), /checkout/i);
   }
 });
+
+test('status reports a stale checkout instead of refusing', async t => {
+  const { f, m, env } = blackbox(t); f.state();
+  f.git('update-ref', 'refs/heads/main', f.B);
+  const applied = await runCli(m, ['apply', '--target', 'claude'], { env });
+  assert.equal(applied.code, 0, applied.stdout + applied.stderr);
+  for (const [head, relation] of [[f.A, 'behind'], [f.C, 'diverged']] as const) {
+    f.git('update-ref', 'refs/heads/main', head);
+    const before = snapshot(f.home);
+    const result = await runCli(m, ['status', '--target', 'claude'], { env });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`checkout\\s+${relation}\\s+.*applied`));
+    assert.match(result.stdout, /^config$/m);
+    assert.match(result.stdout, /^skills$/m);
+    assert.doesNotMatch(result.stdout, /everything is in agreement/);
+    assert.doesNotMatch(result.stderr, /checkout refused/i);
+    assert.deepEqual(snapshot(f.home), before);
+    assert.equal(existsSync(join(m.state, 'apply.lock')), false);
+    assert.deepEqual(installerCalls(m), []);
+  }
+});
+
+test('status reports unavailable applied evidence instead of refusing', async t => {
+  const { f, m, env } = blackbox(t);
+  for (const baseline of ['malformed', 'f'.repeat(40)]) {
+    f.state(baseline);
+    const before = snapshot(f.home);
+    const result = await runCli(m, ['status', '--target', 'claude'], { env });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /checkout\s+unavailable\s+.*applied/);
+    assert.match(result.stdout, /^config$/m);
+    assert.doesNotMatch(result.stderr, /checkout refused/i);
+    assert.deepEqual(snapshot(f.home), before);
+    assert.equal(existsSync(join(m.state, 'apply.lock')), false);
+    assert.deepEqual(installerCalls(m), []);
+  }
+});
+
+test('status works while another run holds the apply lock', async t => {
+  const { f, m, env } = blackbox(t); f.state(f.A);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* acquireApplyLock.pipe(Effect.provideService(MachinePaths, f.paths));
+    const lock = readFileSync(join(m.state, 'apply.lock'), 'utf8');
+    const before = snapshot(f.home);
+    const result = yield* Effect.promise(() => runCli(m, ['status', '--target', 'claude'], { env }));
+    assert.match(result.stdout, /^config$/m);
+    assert.match(result.stdout, /^skills$/m);
+    assert.doesNotMatch(result.stderr, /holds .*apply\.lock/);
+    assert.deepEqual(snapshot(f.home), before);
+    assert.equal(readFileSync(join(m.state, 'apply.lock'), 'utf8'), lock);
+    assert.deepEqual(installerCalls(m), []);
+  })));
+});
+
+test('status works while an app update is pending', async t => {
+  const { f, m, env } = blackbox(t); f.state(f.A);
+  mkdirSync(join(m.state, 'agent'), { recursive: true });
+  writeFileSync(join(m.state, 'agent', 'pending-update.json'), '{}');
+  const before = snapshot(f.home);
+  const result = await runCli(m, ['status', '--target', 'claude'], { env });
+  assert.match(result.stdout, /^config$/m);
+  assert.match(result.stdout, /^skills$/m);
+  assert.deepEqual(snapshot(f.home), before);
+  assert.equal(existsSync(join(m.state, 'apply.lock')), false);
+  assert.deepEqual(installerCalls(m), []);
+});
+
+for (const command of ['update', 'sync']) {
+  test(`${command} --check reports from a stale checkout while the apply lock is held`, async t => {
+    const { f, m, env } = blackbox(t); f.state();
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      yield* acquireApplyLock.pipe(Effect.provideService(MachinePaths, f.paths));
+      const lock = readFileSync(join(m.state, 'apply.lock'), 'utf8');
+      const before = snapshot(f.home);
+      const result = yield* Effect.promise(() => runCli(m, [command, '--check'], {
+        env: { ...env, NORTUSCC_COHERENCE_UPSTREAM: f.B },
+      }));
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, new RegExp(`^${command}$`, 'm'));
+      assert.doesNotMatch(result.stderr, /checkout refused|holds .*apply\.lock/i);
+      assert.deepEqual(snapshot(f.home), before);
+      assert.equal(readFileSync(join(m.state, 'apply.lock'), 'utf8'), lock);
+      assert.deepEqual(installerCalls(m), []);
+    })));
+  });
+}
 
 test('CLI accepts a checkout containing the baseline with dirty edits', async t => {
   const f = fixture(t); f.state();

@@ -36,11 +36,11 @@ export const checkoutCoherence = (input: { repo: string; applied: string | undef
     return behind.code === 0 ? 'behind' : behind.code === 1 ? 'diverged' : 'unavailable';
   });
 
-// Read only the applied commit before a store read can migrate legacy choices.
-export const requireCheckoutCoherence = (paths: MachinePathsValue):
-  Effect.Effect<void, CheckoutCoherenceFailed | LaunchFailed | FsFailed, Fs | Processes> => Effect.gen(function* () {
+// Observe the applied baseline without a store read, migration or apply lock.
+export const readCheckoutCoherence = (paths: MachinePathsValue):
+  Effect.Effect<CheckoutRelation, LaunchFailed | FsFailed, Fs | Processes> => Effect.gen(function* () {
     const text = yield* (yield* Fs).readText(join(paths.stateRoot, 'state.json'));
-    const applied = yield* Effect.try({ try: () => {
+    const applied = yield* Effect.result(Effect.try({ try: () => {
       if (text === undefined) return undefined;
       const state: unknown = JSON.parse(text);
       if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('invalid state');
@@ -49,7 +49,14 @@ export const requireCheckoutCoherence = (paths: MachinePathsValue):
       if (!value || typeof value !== 'object' || !('commit' in value) || typeof value.commit !== 'string'
         || !('at' in value) || typeof value.at !== 'string' || Number.isNaN(Date.parse(value.at))) throw new Error('invalid baseline');
       return value.commit;
-    }, catch: () => new CheckoutCoherenceFailed({ relation: 'unavailable' }) });
-    const relation = yield* checkoutCoherence({ repo: paths.repo, applied });
+    }, catch: () => new CheckoutCoherenceFailed({ relation: 'unavailable' }) }));
+    if (applied._tag === 'Failure') return 'unavailable';
+    return yield* checkoutCoherence({ repo: paths.repo, applied: applied.success });
+  });
+
+// Refuse machine changes before a store read can migrate legacy choices.
+export const requireCheckoutCoherence = (paths: MachinePathsValue):
+  Effect.Effect<void, CheckoutCoherenceFailed | LaunchFailed | FsFailed, Fs | Processes> => Effect.gen(function* () {
+    const relation = yield* readCheckoutCoherence(paths);
     if (relation !== 'compatible') return yield* Effect.fail(new CheckoutCoherenceFailed({ relation }));
   });

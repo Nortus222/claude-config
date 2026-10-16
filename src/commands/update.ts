@@ -424,7 +424,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
   const program = Effect.gen(function* () {
     const paths = yield* MachinePaths;
-    yield* requireCheckoutCoherence(paths);
+    if (!flags.check) yield* requireCheckoutCoherence(paths);
     const fs = yield* Fs;
     const choicePath = join(paths.stateRoot, 'overrides.json');
     const choiceBytes = yield* fs.readBytes(choicePath);

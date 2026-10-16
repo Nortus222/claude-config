@@ -8,6 +8,8 @@ import { MachinePaths } from '../paths.ts';
 import type { StepResult } from '../model.ts';
 import { additionLockEntry, skillLockPath } from './store.ts';
 
+const MAX_SKILL_LOCK_BYTES = 1024 * 1024;
+
 export const safeSkillName = (name: string): boolean =>
   /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(name) && !['constructor', '__proto__'].includes(name);
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -52,7 +54,7 @@ export const checkSkillOwnership = (desired: DesiredConfig, name: string, previo
   if (!present && !lockStat && exposureStats.every((info) => !info)) return { kind: 'absent' as const };
   if (lockStat?.kind !== 'file') return blocked('installer lock is missing or not a regular file');
   const lockText = yield* fs.readText(lockPath);
-  if (lockText === undefined || Buffer.byteLength(lockText) > 1024 * 1024) return blocked('installer lock is unavailable');
+  if (lockText === undefined || Buffer.byteLength(lockText) > MAX_SKILL_LOCK_BYTES) return blocked('installer lock is unavailable');
   let document: unknown;
   try { document = JSON.parse(lockText); } catch { return blocked('installer lock is invalid'); }
   if (!record(document) || !record(document.skills)) return blocked('installer lock is invalid');
