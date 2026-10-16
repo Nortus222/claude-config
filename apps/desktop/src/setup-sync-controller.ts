@@ -16,6 +16,7 @@ export type SetupSyncState = {
 const SCOPE = { kind: 'machine' } as const;
 const PAGE_SIZE = 100;
 const MAX_CHOICES = 1000;
+const MAX_RUN_PAGES = 5;
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -92,12 +93,18 @@ export class SetupSyncController {
     if (!this.bridge || this.machine.state.connection !== 'connected') return;
     const mark = this.mark(), serial = ++this.runRead;
     try {
-      const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: PAGE_SIZE });
-      if (result && serial === this.runRead && !active(this.state.run) && !this.state.pending) {
+      let before: string | undefined;
+      const cursors = new Set<string>();
+      for (let page = 0; page < MAX_RUN_PAGES; page++) {
+        const result = await this.call(mark, 'listRuns', { scope: SCOPE, limit: PAGE_SIZE, ...(before ? { before } : {}) });
+        if (!result || serial !== this.runRead || active(this.state.run) || this.state.pending) return;
         const run = result.runs.find(run => run.intent.change.kind === 'setupApply');
-        if (run) { this.update({ run, preview: null }); await this.readRun(run.runId); }
+        if (run) { this.update({ run, preview: null }); await this.readRun(run.runId); return; }
+        if (!result.nextBefore || cursors.has(result.nextBefore)) return;
+        before = result.nextBefore;
+        cursors.add(before);
       }
-    } catch (error) { if (this.current(mark)) this.update({ error: message(error) }); }
+    } catch (error) { if (this.current(mark) && serial === this.runRead) this.update({ error: message(error) }); }
   }
   private async readRun(runId: string) {
     if (!this.bridge || this.machine.state.connection !== 'connected') return;

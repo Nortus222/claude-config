@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { skillRun } from './support/skill-run.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
 import { fixture, review, run, flush, deferred, change, preview as changePreview } from './support/setup-sync.ts';
 
@@ -199,4 +200,46 @@ test('a read started during Abandon cannot replace its terminal receipt', async 
   f.handlers.abandonRun = () => { f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); return run({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } }); };
   await f.controller.abandon(); late.resolve(interrupted); await flush();
   assert.equal(f.controller.state.run?.state, 'abandoned');
+});
+
+test('an interrupted setup run beyond the first page is still offered for recovery', async t => {
+  const f = await setup(t);
+  const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
+  const unrelated = skillRun({ runId: 'newer-skill-run' });
+  f.handlers.listRuns = input => input.before
+    ? { runs: [interrupted], nextBefore: 'older' }
+    : { runs: [unrelated], nextBefore: 'newer-skill-run' };
+  f.handlers.getRun = () => interrupted;
+  await f.controller.reload();
+  assert.equal(f.controller.state.run?.runId, interrupted.runId);
+  assert.equal(f.controller.state.run?.state, 'interrupted');
+  assert.deepEqual(f.calls.filter(c => c.name === 'listRuns').slice(-2).map(c => c.input.before), [undefined, 'newer-skill-run']);
+  await f.controller.repreview();
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, change);
+});
+
+test('setup run discovery stops after five pages or a repeated cursor', async t => {
+  const f = await setup(t);
+  for (const repeat of [false, true]) {
+    let pages = 0;
+    f.handlers.listRuns = () => ({ runs: [], nextBefore: repeat ? 'same' : `page-${++pages}` });
+    const before = f.calls.filter(c => c.name === 'listRuns').length;
+    await f.controller.reload();
+    assert.equal(f.calls.filter(c => c.name === 'listRuns').length - before, repeat ? 2 : 5);
+    assert.equal(f.controller.state.run, null);
+  }
+});
+
+test('a late recovery page cannot replace a run started after discovery', async t => {
+  const f = await setup(t);
+  const page = deferred<unknown>();
+  const unrelated = skillRun({ runId: 'skill-run' });
+  f.handlers.listRuns = input => input.before ? page.promise : { runs: [unrelated], nextBefore: 'skill-run' };
+  f.controller.enter(); await flush();
+  assert.ok(f.calls.some(c => c.name === 'listRuns' && c.input.before === 'skill-run'));
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview(); await f.controller.apply();
+  page.resolve({ runs: [run({ runId: 'old-interrupted', state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } })], nextBefore: null });
+  await flush();
+  assert.equal(f.controller.state.run?.runId, 'setup-run');
+  assert.equal(f.controller.state.run?.state, 'running');
 });
