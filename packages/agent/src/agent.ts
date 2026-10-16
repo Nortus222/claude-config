@@ -76,6 +76,9 @@ export type AgentHandle = {
   // before the job's requests are answered, so it is not ordered relative to their replies.
   // The cause identifies the latest caused request in that job's batch, if any.
   readonly onStatus: (listener: (status: AgentStatus, cause?: TriggerCause) => void) => () => void;
+  // Calls the onStatus listeners again with the latest status, without a job, so they re-read what
+  // changes outside jobs (whether a run is applying). Nothing happens before the first job.
+  readonly announce?: (cause?: TriggerCause) => Effect.Effect<void>;
   // Runs `effect` while no scheduled job runs, holding the next one back until it ends, so a job
   // run outside the scheduler never overlaps one.
   readonly exclusive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
@@ -223,6 +226,14 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+      announce: (cause) => Effect.flatMap(Ref.get(latest), (status) => Effect.sync(() => {
+        if (status === undefined) return;
+        for (const listener of listeners) {
+          try {
+            listener(status, cause);
+          } catch {}
+        }
+      })),
       exclusive: (effect) => jobs.withPermit(effect),
     };
     if (hosted) yield* Effect.forkScoped(Effect.forever(Effect.gen(function* () {

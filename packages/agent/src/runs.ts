@@ -95,11 +95,20 @@ export const makeAgentRuns = (driver: {
       signIn: { kind: 'signIn', state, expiresAt: parity.signIn.expiresAt },
     } }) };
   };
-  const persist = (receipt: RunReceipt) => store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
-    receipts.set(receipt.view.runId, copy(receipt));
-    requests.set(receipt.view.intent.requestId, receipt.view.runId);
-    publish(receipt);
-  })));
+  // Only a running receipt names a step in flight.
+  const settled = (receipt: RunReceipt): RunReceipt => {
+    if (receipt.view.state === 'running' || receipt.view.current === undefined) return receipt;
+    const { current: _current, ...view } = receipt.view;
+    return { ...receipt, view: view as RunView };
+  };
+  const persist = (written: RunReceipt) => Effect.suspend(() => {
+    const receipt = settled(written);
+    return store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
+      receipts.set(receipt.view.runId, copy(receipt));
+      requests.set(receipt.view.intent.requestId, receipt.view.runId);
+      publish(receipt);
+    })));
+  });
   const invalidChallenge = (receipt: RunReceipt, restart = false) => Effect.gen(function* () {
     const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
     if (challenge?.state !== 'awaiting-user') return undefined;
@@ -235,9 +244,10 @@ export const makeAgentRuns = (driver: {
         }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         progress: progress => Effect.gen(function* () {
           const receipt = yield* find(runId);
-          if (progress.type === 'started') yield* save({ ...receipt, inFlight: progress.step.key, view: { ...receipt.view, state: 'running' } });
+          if (progress.type === 'started') yield* save({ ...receipt, inFlight: progress.step.key, view: { ...receipt.view, state: 'running', current: { key: progress.step.key, summary: bounded(progress.step.summary, noteLimit) } } });
           if (progress.type === 'finished') {
-            const committed: RunReceipt = { ...receipt, inFlight: null, view: { ...receipt.view, steps: [...receipt.view.steps, {
+            const { current: _current, ...view } = receipt.view;
+            const committed: RunReceipt = { ...receipt, inFlight: null, view: { ...view, steps: [...receipt.view.steps, {
               key: progress.key, outcome: progress.outcome, note: bounded(progress.note, noteLimit),
             }] } };
             // Keep observed evidence available even when its durable write fails. The run stops.

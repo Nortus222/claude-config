@@ -347,3 +347,19 @@ test('app subscribers discover semantic receipts while legacy subscribers retain
   assert.ok(app.records.filter(r=>r.event==='operation-run').length>=2);
  });
 });
+
+test('every finished run is followed by a status event that is no longer applying', async () => {
+  await withServer({}, async s => {
+    const app = await s.open('app'); assert.equal((await ask(app, { command: 'subscribe', operationsProtocol: 1 })).ok, true);
+    const mcp = await s.open();
+    // Backup retention has no follow-up job, so only the run's own end can bring the status up to date.
+    const preview = await operation(mcp, 'previewChange', { change: { kind: 'pruneBackups' } });
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    const accepted = await operation(mcp, 'applyChange', { planId: preview.result.planId, requestId: 'status-after-run' });
+    assert.equal(accepted.ok, true, JSON.stringify(accepted));
+    const id = accepted.result.run.runId;
+    const done = await app.waitFor(r => r.event === 'progress' && r.runId === id && r.progress.type === 'done');
+    const status = await app.waitFor(r => r.event === 'status', app.records.indexOf(done) + 1);
+    assert.equal(status.status.applying, false);
+  });
+});

@@ -1,7 +1,7 @@
 import type { InspectResult } from '@nortuscc/agent/ipc/protocol';
 import type { ChangePreview, OperationInput, OperationName, OperationOutput, RunView } from '@nortuscc/agent/operations';
 import type { Bridge, HostEvent } from './bridge.ts';
-import type { MachineController } from './controller.ts';
+import type { MachineBusy, MachineController } from './controller.ts';
 import { errorText } from './copy.ts';
 import { operation } from './operations.ts';
 
@@ -28,6 +28,9 @@ export type SetupSyncState = {
   switchTarget: string | null;
   // Abandon of the interrupted run awaits its one confirmation.
   confirmingAbandon: boolean;
+  // What this Mac is busy with, mirrored from the machine controller; the page shows it instead of the
+  // review and "On this Mac" while set, and reads both again when it ends.
+  busy: MachineBusy | null;
   eligibility: { read: boolean; refetch: boolean; choose: boolean; preview: boolean; apply: boolean; cancel: boolean; browse: boolean; local: boolean; previewLocal: boolean };
 };
 const SCOPE = { kind: 'machine' } as const;
@@ -87,13 +90,17 @@ export class SetupSyncController {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
       pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {}, previewError: null,
-      inspection: machine.state.inspection, excluded: [], localError: null, previewNotice: null, switchTarget: null, confirmingAbandon: false,
+      inspection: machine.state.inspection, excluded: [], localError: null, previewNotice: null, switchTarget: null, confirmingAbandon: false, busy: machine.state.busy,
       eligibility: { read: false, refetch: false, choose: false, preview: false, apply: false, cancel: false, browse: false, local: false, previewLocal: false } };
     let session = machine.state.session, connection = machine.state.connection;
     this.unlisten = machine.subscribe(() => {
       const changed = session !== machine.state.session || connection !== machine.state.connection;
       session = machine.state.session; connection = machine.state.connection;
-      const inspection = this.mirror();
+      const inspection = this.mirror(), busy = machine.state.busy;
+      // An apply that changed this Mac ended: what is incoming and on this Mac is read again.
+      const ended = !changed && busy === null && this.state.busy !== null && (this.state.busy.kind === null || MACHINE_KINDS.has(this.state.busy.kind));
+      if (busy !== this.state.busy) this.update({ busy });
+      if (ended) this.invalidate();
       if (changed) {
         this.epoch++; this.runRead++; this.issued.clear(); this.cursors = [undefined];
         this.update({ ...inspection, connection, review: null, choices: [], preview: null, pending: false, pagePending: false, groupErrors: {}, previewError: null, localError: null, previewNotice: null, switchTarget: null });

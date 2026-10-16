@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { missingTools, probeLoginEnvironment } from '../agent/login-environment.ts';
+import { Effect } from 'effect';
+import { nodeProcesses } from '@nortuscc/machine';
+import { ghStatus } from '../../../packages/agent/src/author/gh.ts';
+import { MACOS_TOOL_DIRECTORIES, missingTools, probeLoginEnvironment, withToolDirectories } from '../agent/login-environment.ts';
 import type { StartupPhase, StartupStatus } from '../agent/startup-diagnostics.ts';
 import { assertExited, assertReaped } from './support/processes.ts';
 
@@ -174,4 +177,22 @@ test('missingTools names each tool not executable on PATH', {
     "'claude' was not found on the login shell's PATH",
     "'codex' was not found on the login shell's PATH",
   ]);
+});
+
+test('a login PATH without Homebrew still finds gh under a Homebrew prefix, after its own entries', unixShell, async () => {
+  const prefix = mkdtempSync(join(dir, 'homebrew-'));
+  const brewBin = join(prefix, 'bin');
+  mkdirSync(brewBin);
+  writeFileSync(join(brewBin, 'gh'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(brewBin, 'gh'), 0o755);
+  const empty = mkdtempSync(join(dir, 'launchd-path-'));
+  const status = (env: Record<string, string>) => Effect.runPromise(ghStatus().pipe(Effect.provide(nodeProcesses({ env }))));
+  // A launchd PATH, or a login shell that never set up Homebrew: gh is missing by its launch ENOENT.
+  assert.equal(await status({ PATH: empty }), 'missing');
+  const env = withToolDirectories({ PATH: empty, KEEP: 'me' }, [brewBin, '/usr/local/bin']);
+  assert.deepEqual(env, { PATH: `${empty}:${brewBin}:/usr/local/bin`, KEEP: 'me' });
+  assert.equal(await status(env), 'ready');
+  assert.deepEqual(withToolDirectories({ PATH: `${brewBin}:/usr/bin` }, [brewBin, '/usr/local/bin']), { PATH: `${brewBin}:/usr/bin:/usr/local/bin` }, 'login entries keep their order; none repeats');
+  assert.deepEqual(withToolDirectories({}, [brewBin]), { PATH: brewBin });
+  assert.deepEqual(MACOS_TOOL_DIRECTORIES, ['/opt/homebrew/bin', '/usr/local/bin']);
 });

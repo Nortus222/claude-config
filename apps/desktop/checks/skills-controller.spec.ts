@@ -152,7 +152,7 @@ test('an active Skills update cancels through its shared run', async () => {
 test('a foreign apply invalidates an outstanding inventory read', async () => {
   const held = deferred<unknown>(); const f = await connected({ inspectIntent: () => held.promise }); const pending = f.skills.reload();
   f.emit({ event: 'status', runId: 'foreign', status: status({ applying: true }) }); held.resolve(inventory()); await pending;
-  assert.equal(f.skills.state.view, null); assert.match(f.skills.state.stale!, /Reload/);
+  assert.equal(f.skills.state.view, null); assert.equal(f.skills.state.stale, null); assert.equal(f.skills.state.outdated, true);
 });
 test('a receipt invalidation during a held running read triggers another read', async () => {
   const held = deferred<RunView>(); let reads = 0;
@@ -216,4 +216,28 @@ test('a matching post-run status refreshes choices after inspection catches up',
   f.emit({ event: 'status', runId: 'other-run', status: status() }); await f.skills.idle(); assert.equal(f.skills.state.view!.items[0]!.choice, null);
   f.emit({ event: 'status', runId: 'run-1', status: status() }); await f.skills.idle();
   assert.equal(f.skills.state.view!.items[0]!.choice, false); assert.equal(f.skills.state.stale, null); assert.match(f.skills.state.detail, /Saved/);
+});
+const settled = async (f: Awaited<ReturnType<typeof connected>>) => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); await f.skills.idle(); };
+test('an apply elsewhere on this Mac never shows Skills as changed; an open Skills page reads again when it ends', async () => {
+  const f = await loaded(); f.skills.enter(); await settled(f);
+  const reads = names(f).filter(n => n === 'inspectIntent').length;
+  f.emit({ event: 'status', status: status({ applying: true }) });
+  f.emit({ event: 'operation-run', runId: 'foreign' }); await settled(f);
+  assert.equal(f.skills.state.stale, null); assert.equal(f.skills.state.outdated, true);
+  assert.ok(f.machine.state.busy); assert.match(f.skills.blocked()!, /apply is running/);
+  assert.equal(names(f).filter(n => n === 'inspectIntent').length, reads, 'nothing is read while the Mac is busy');
+  f.box.rows = inventory([row('tdd', { choice: false, enabled: false })]);
+  f.emit({ event: 'status', runId: 'foreign', status: status({ applying: false }) }); await settled(f);
+  assert.equal(names(f).filter(n => n === 'inspectIntent').length, reads + 1);
+  assert.equal(f.skills.state.view!.items[0]!.choice, false); assert.equal(f.skills.state.outdated, false); assert.equal(f.skills.state.stale, null);
+});
+test('Skills left during an apply reads again when entered, and a reconnect reads an open page again', async () => {
+  const f = await loaded(); f.skills.enter(); await settled(f); f.skills.leave();
+  f.emit({ event: 'operation-run', runId: 'foreign' }); await settled(f);
+  const reads = names(f).filter(n => n === 'inspectIntent').length;
+  assert.equal(f.skills.state.outdated, true);
+  f.skills.enter(); await settled(f);
+  assert.equal(names(f).filter(n => n === 'inspectIntent').length, reads + 1);
+  f.emit({ event: 'disconnected', detail: 'Backend exited' }); f.box.generation = 2; await f.machine.connect(); await settled(f);
+  assert.equal(names(f).filter(n => n === 'inspectIntent').length, reads + 2); assert.ok(f.skills.state.view);
 });

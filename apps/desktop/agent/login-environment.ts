@@ -138,6 +138,18 @@ const executable = (path: string) => {
   }
 };
 
+// Where Homebrew installs command-line tools such as gh on Apple silicon and Intel Macs.
+export const MACOS_TOOL_DIRECTORIES = ['/opt/homebrew/bin', '/usr/local/bin'] as const;
+
+// A login service may get launchd's PATH, or a login shell that sets up Homebrew only in a file the probe
+// does not read or that timed out. Appends each missing tool directory after the login PATH's own entries.
+export const withToolDirectories = (env: Readonly<Record<string, string>>, directories: ReadonlyArray<string>): Record<string, string> => {
+  const path = env.PATH ?? '';
+  const entries = path.split(':');
+  const missing = directories.filter((directory) => !entries.includes(directory));
+  return missing.length === 0 ? { ...env } : { ...env, PATH: [...(path === '' ? [] : [path]), ...missing].join(':') };
+};
+
 // One probe failure per tool that is not an executable file on `path`.
 export const missingTools = (tools: ReadonlyArray<string>, path: string): string[] =>
   tools

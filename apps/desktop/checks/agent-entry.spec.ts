@@ -78,7 +78,8 @@ test('the ensure helper resolves recorded checkout from login environment and pr
   assert.equal(f.probes(), 1);
   assert.ok(f.commands.some((c) => c.cmd === 'launchctl'));
   assert.equal(JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8')).agentVersion, 'bundle-hash');
-  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('/login/bin'));
+  // Homebrew's prefixes follow the login PATH, so a service finds gh and other tools a terminal would.
+  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('<string>/login/bin:/opt/homebrew/bin:/usr/local/bin</string>'));
 });
 
 test('missing recorded checkout refuses helper install instead of using bundled resource directory', async (t) => {

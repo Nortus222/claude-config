@@ -607,3 +607,29 @@ test('Abandon asks once, and the question ends when the run stops being interrup
   assert.equal(f.controller.state.run?.state, 'abandoned'); assert.equal(f.controller.state.confirmingAbandon, false);
   await f.controller.abandon(); assert.equal(f.calls.some(c => c.name === 'abandonRun'), false);
 });
+
+test('Changes shows a busy Mac and reads the review and this Mac again when the apply ends', async t => {
+  const f = await setup(t); f.controller.enter(); await flush();
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length, before = inspections(f);
+  f.agent.applying = true; f.emit({ version: 3, event: 'status', status: status({ applying: true }) }); await flush();
+  assert.equal(f.controller.state.busy?.description, 'The agent is applying changes on this Mac');
+  assert.equal(f.controller.state.eligibility.read, false);
+  f.handlers.setupReview = () => review({ rows: [] }); f.report.items = localItems();
+  f.agent.applying = false; f.emit({ version: 3, event: 'status', status: status({ applying: false }) }); await flush();
+  assert.equal(f.controller.state.busy, null);
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.deepEqual(f.controller.state.review?.rows, []);
+  assert.equal(inspections(f), before + 1); assert.equal(f.controller.state.inspection?.items.length, localItems().length);
+});
+
+test('a page left during an apply reads the review again when entered after it ends', async t => {
+  const f = await setup(t); f.controller.enter(); await flush(); f.controller.leave();
+  f.agent.applying = true; f.emit({ version: 3, event: 'status', status: status({ applying: true }) }); await flush();
+  f.handlers.setupReview = () => review({ rows: [] });
+  f.agent.applying = false; f.emit({ version: 3, event: 'status', status: status({ applying: false }) }); await flush();
+  const reviews = f.calls.filter(c => c.name === 'setupReview').length;
+  assert.equal(f.controller.state.review, null);
+  f.controller.enter(); await flush();
+  assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
+  assert.deepEqual(f.controller.snapshot().review?.rows, []);
+});
