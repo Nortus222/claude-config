@@ -9,7 +9,7 @@ import { createServer, type Socket } from 'node:net';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
-import { before, after, test } from 'node:test';
+import { before, after, test as nodeTest } from 'node:test';
 import { build } from 'esbuild';
 import { Deferred, Effect, Exit, Scope, Layer } from 'effect';
 import { AgentStateStore, makeSession, serveIpc, startAgent, SetupSource, type AgentDomain } from '@nortuscc/agent';
@@ -22,6 +22,8 @@ import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
 
+// The app MCP entry refuses to start off macOS, so every case that launches it runs on macOS only.
+const test = process.platform === 'darwin' ? nodeTest : nodeTest.skip;
 const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
 const bundle = join(fixtureRoot, 'Test.app/Contents/Resources/agent-runtime');
 const expectedApp = join(fixtureRoot, 'Test.app/Contents/MacOS/Test');
@@ -107,7 +109,7 @@ function fixtureProcesses(delegate: Processes['Service'], root: string, sourceUr
     return delegate.run({...command,args,envAllow:[],env:{...command.env,PATH:process.env.PATH!,HOME:root,USERPROFILE:root,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_ALLOW_PROTOCOL:'file'}});
   })};
 }
-test('MCP fixture refuses unfaked installers and non-fixture Git before the real process owner',async()=>{
+nodeTest('MCP fixture refuses unfaked installers and non-fixture Git before the real process owner',async()=>{
   let launches=0;
   const guard=fixtureProcesses({run:()=>{launches++;return Effect.succeed({code:0,stdout:''});}},'/tmp/owned-fixture');
   for(const command of [{cmd:'npx',args:['--yes','skills@1.7.2','add','owner/repo'],output:'capture' as const,cwd:'/tmp/owned-fixture'},
