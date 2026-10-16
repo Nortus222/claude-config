@@ -251,3 +251,60 @@ test('interrupting a command with piped stdin still waits for process cleanup', 
     assert.equal(pidAlive(result.pid), false);
   }).pipe(Effect.provide(nodeProcesses({ env: {} }))));
 });
+
+for (const stream of ['stdout', 'stderr'] as const) {
+  test(`captureLimit bounds raw ${stream} bytes and joins the owned process group`, { skip: process.platform === 'win32' }, async t => {
+    const directory = mkdtempSync(join(tmpdir(), 'machine-bounds-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const marker = join(directory, 'pid');
+    const script = `const c = require('node:child_process').spawn(${JSON.stringify(node)}, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);'], { stdio: ['ignore', 'inherit', 'inherit'] });
+      require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(c.pid));
+      process.${stream}.write('é'.repeat(40000)); setInterval(() => {}, 1000);`;
+    const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', script], output: 'capture', stderr: 'capture', captureLimit: { stdout: 1000, stderr: 1000 } })).pipe(Effect.timeout(3000)));
+    assert.ok(Exit.isFailure(exit)); assert.match(String(exit.cause), /capture byte limit exceeded/);
+    assert.equal(pidAlive(Number(readFileSync(marker, 'utf8'))), false);
+  });
+}
+
+test('captureLimit counts UTF-8 bytes and accepts the exact bound', async () => {
+  const bounded = (n: number) => run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("é")'], output: 'capture', captureLimit: { stdout: n } })));
+  assert.ok(Exit.isFailure(await bounded(1)));
+  const exact = await bounded(2); assert.deepEqual(Exit.isSuccess(exact) && exact.value, { code: 0, stdout: 'é' });
+});
+
+test('bounded capture reports an explicit cleanup deadline if group disappearance cannot be confirmed', { skip: process.platform === 'win32' }, async t => {
+  const kill = process.kill;
+  const started = Date.now();
+  const probeUntil = started + 3500;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && Date.now() < probeUntil ? true : kill(pid, signal));
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("x".repeat(2000)); setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 } })));
+  assert.ok(Exit.isFailure(exit));
+  assert.match(String(exit.cause), /capture cleanup deadline exceeded/);
+  assert.ok(Date.now() - started >= 2000 && Date.now() - started < 3000);
+});
+
+test('command envAllow removes inherited executable configuration while retaining explicit command values', async () => {
+  const exit = await Effect.runPromiseExit(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write(JSON.stringify([process.env.PATH, process.env.GIT_EXEC_PATH ?? null, process.env.GIT_TEMPLATE_DIR ?? null, process.env.SSH_ASKPASS ?? null, process.env.EXPLICIT]))'], output: 'capture', envAllow: ['PATH'], env: { EXPLICIT: 'safe' } }))
+    .pipe(Effect.provide(nodeProcesses({ env: { PATH: 'fixture-path', GIT_EXEC_PATH: 'fixture-helper', GIT_TEMPLATE_DIR: 'fixture-template', SSH_ASKPASS: 'fixture-askpass' } }))));
+  assert.ok(Exit.isSuccess(exit)); assert.deepEqual(JSON.parse(exit.value.stdout), ['fixture-path', null, null, null, 'safe']);
+});
+
+test('bounded cancellation reports its unconfirmed shutdown to the cleanup observer', { skip: process.platform === 'win32' }, async t => {
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => signal === 0 && pid < 0 ? true : kill(pid, signal));
+  const outcomes: boolean[] = [];
+  await Effect.runPromise(Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(Processes.use(p => p.run({ cmd: node, args: ['-e', 'setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 }, onCleanup: outcome => outcomes.push(outcome.joined) })));
+    yield* Effect.sleep(100);
+    yield* Fiber.interrupt(fiber);
+  }).pipe(Effect.provide(nodeProcesses())));
+  assert.deepEqual(outcomes, [false]);
+});
+
+test('cleanup observer exceptions cannot change a confirmed owned-group shutdown', async () => {
+  let observed = 0;
+  const exit = await run(Processes.use(p => p.run({ cmd: node, args: ['-e', 'process.stdout.write("x".repeat(2000)); setInterval(() => {}, 1000);'], output: 'capture', captureLimit: { stdout: 1000 }, onCleanup: () => { observed++; throw new Error('observer-fixture-secret'); } })));
+  assert.ok(Exit.isFailure(exit)); assert.match(String(exit.cause), /capture byte limit exceeded/);
+  assert.doesNotMatch(String(exit.cause), /observer-fixture-secret/);
+  assert.equal(observed, 1);
+});

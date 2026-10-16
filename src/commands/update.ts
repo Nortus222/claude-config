@@ -2,13 +2,13 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Effect, Layer, Stream } from 'effect';
-import { loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
+import { decodeOverrides, loadProfile, nodeFiles, parseSkillsManifest, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, emitManifest, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
-  pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
-  type Observed, type Processes, type RepoNotFound, type SkillLock,
+  authorDigest, bindAuthorCheckout, canonical, executeUpdateManifest, installedSkillNames, prepareUpdateManifest, readSkillLockEvidence, stateStore, UpdateManifestRefused, validateAuthorBinding, backupsForRun, execute, Fs, inspectUpdates, MachinePaths, MANIFEST_FILE, nodeFs, nodeProcesses,
+  LaunchFailed, Processes, pathsFromEnvironment, plan, readSkillLock, selectAll, short, SKILL_STEP, skillNamesOf, skillsDomain,
+  type PreparedAuthorEdit, type Observed, type RepoNotFound, type SkillLock,
 } from '@nortuscc/machine';
-import { checkoutGroups, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
+import { checkoutGroups, decodeSyncState, SyncStore, syncStore, type Holds } from '@nortuscc/sync';
 import { composeHeld } from '../machine.ts';
 import { formatRow, labelWidth, section } from '../report.ts';
 import { select } from '../select.ts';
@@ -200,9 +200,10 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
   // Inspects and acts on the configuration `loadDesired` answers, read from MachinePaths.repo. With
   // `holds`, that repo is the composed copy, and `holds.checkout` is the git checkout.
-  const act = <E>(loadDesired: Effect.Effect<DesiredConfig, E>, holds: { checkout: string; held: Holds } | null) => Effect.gen(function* () {
+  const act = <E>(loadDesired: Effect.Effect<DesiredConfig, E>, holds: { checkout: string; held: Holds } | null, acceptedChoices: { path: string; bytes: Uint8Array | undefined }) => Effect.gen(function* () {
     const inspection = Effect.gen(function* () {
       const desired = yield* loadDesired;
+      if (desired.issues.some(issue => issue.layer === 'machine')) return yield* Effect.fail(new Error('Skill addition choices are invalid; repair overrides.json before updating'));
       return { desired, ...(yield* inspectUpdates(desired)) };
     });
     // Git children run in their own process group, so the terminal's Ctrl-C never reaches them:
@@ -275,9 +276,12 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     const report = { desired, items, probeErrors };
     const selection = { ...selectAll, targets: selectedTargets(target) as Target[], only: keys };
     const p = plan('update', report, selection, [skillsDomain]);
+    const additionNames = new Set(desired.skills.filter(skill => skill.targets !== undefined).map(skill => skill.name));
+    const blockedAdditions = p.skipped.filter(item => keys.includes(item.key) && additionNames.has(item.key.slice('skill:'.length)));
+    for (const skipped of blockedAdditions) write(`\n${skipped.key}: ${skipped.reason}. Use resolveSkillCandidate, previewChange(addSkill), then applyChange.\n`);
     if (p.steps.length === 0) {
       write('nothing selected\n');
-      return exitCode({ items, failed: addFailed });
+      return exitCode({ items, failed: addFailed || blockedAdditions.length > 0 });
     }
 
     const before = yield* readSkillLock;
@@ -288,7 +292,49 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
     // Reported after the run, once the manifest has reached the checkout.
     let manifestNote: string | undefined;
 
-    yield* Stream.runForEach(execute(p, report, [skillsDomain], { signal: deps.signal }), (event) => Effect.sync(() => {
+    const paths = yield* MachinePaths; const fs = yield* Fs;
+    const authorRepo = holds?.checkout ?? paths.repo;
+    const syncPath = join(paths.stateRoot,'sync.json');
+    const syncBytes = yield* fs.readBytes(syncPath);
+    const acceptedHolds = yield* decodeSyncState(syncBytes === undefined ? undefined : new TextDecoder('utf-8',{ fatal:true }).decode(syncBytes),syncPath);
+    if (canonical(acceptedHolds) !== canonical(holds?.held ?? {})) return yield* Effect.fail(new Error('Sync choices changed; inspect and select again'));
+    const author = p.steps.some(step => step.key === SKILL_STEP.manifest) ? yield* bindAuthorCheckout({ ...paths,repo:authorRepo },[MANIFEST_FILE]) : undefined;
+    const authorGroups = author ? parseSkillsManifest(yield* fs.readText(join(author.realCheckout,MANIFEST_FILE))) : [];
+    const heldManifestGroups = checkoutGroups([],authorGroups,acceptedHolds); const heldItemIds = Object.keys(acceptedHolds);
+    const native = yield* readSkillLockEvidence; const installed = yield* installedSkillNames;
+    let prepared: PreparedAuthorEdit | undefined; let refusal: string | undefined;
+    if (author) {
+      const result = yield* Effect.result(prepareUpdateManifest({ author,desired,report,selected:p,heldManifestGroups,heldItemIds }));
+      if (result._tag === 'Success') prepared = result.success;
+      else if (result.failure instanceof UpdateManifestRefused) refusal = result.failure.reason;
+      else return yield* Effect.fail(result.failure);
+    }
+    const revalidateChoices = Effect.gen(function* () {
+      if (authorDigest(yield* fs.readBytes(acceptedChoices.path)) !== authorDigest(acceptedChoices.bytes)) return yield* Effect.fail(new Error('Skill addition choices changed; inspect and select again'));
+      if (authorDigest(yield* fs.readBytes(syncPath)) !== authorDigest(syncBytes)) return yield* Effect.fail(new Error('Sync choices changed; inspect and select again'));
+    });
+    const processes = yield* Processes;
+    const guardedProcesses: Processes['Service'] = { run: command => Effect.flatMap(
+      revalidateChoices.pipe(Effect.mapError(() => new LaunchFailed({ cmd: command.cmd, reason: 'Machine choices changed; inspect and select again' }))),
+      () => processes.run(command),
+    ) };
+    const updateDomain = { ...skillsDomain,run:(step:import('@nortuscc/machine').Step,input:import('@nortuscc/machine').MachineReport) => Effect.gen(function* () {
+      yield* revalidateChoices;
+      if (step.key !== SKILL_STEP.manifest) return yield* skillsDomain.run(step,input);
+      if (author) yield* validateAuthorBinding(author);
+      if (!prepared) return { ok:true,note:`left alone — ${refusal ?? 'no author change selected'}` };
+      const result = yield* executeUpdateManifest({ edit:prepared,desired,selected:p,heldManifestGroups,heldItemIds },deps.signal ?? new AbortController().signal,
+        { pending:() => Effect.void,committed:() => Effect.void },revalidateChoices);
+      const count = prepared.documents.length ? parseSkillsManifest(prepared.documents[0]!.text).reduce((count,group) => count+group.skills.length,0) : authorGroups.reduce((count,group) => count+group.skills.length,0);
+      return { ok:!result.remainingPaths.length,note:`written — ${count} skill(s)` };
+    }) };
+    const checkpoint = (event: Extract<import('@nortuscc/machine').Progress,{ type:'started' | 'finished' }>) => Effect.gen(function* () {
+      if (event.type !== 'started' || event.index !== 0) return;
+      yield* revalidateChoices;
+      if (author) yield* validateAuthorBinding(author);
+      if (authorDigest((yield* readSkillLockEvidence).bytes) !== authorDigest(native.bytes) || canonical(yield* installedSkillNames) !== canonical(installed)) return yield* Effect.fail(new Error('Machine update inputs changed; inspect and select again'));
+    });
+    yield* Stream.runForEach(execute(p, report, [updateDomain], { signal: deps.signal,checkpoint }), (event) => Effect.sync(() => {
       switch (event.type) {
         case 'started': {
           const key = event.step.key;
@@ -298,6 +344,7 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
         case 'finished':
           outcomes.set(event.key, event.outcome);
           if (event.outcome === 'failed') anyFailed = true;
+          if (event.key === SKILL_STEP.manifest && event.outcome !== 'ok') manifestNote = `failed — ${event.note ?? event.outcome}`;
           if (event.outcome !== 'ok') {
             if (event.note) write(`\n${event.key}: ${event.note}\n`);
           } else if (event.key === SKILL_STEP.expose && event.note) {
@@ -314,30 +361,9 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
           cancelled = true;
           write(`\ncancelled — not run: ${event.remaining.join(', ')}\n`);
       }
-    })).pipe(Effect.provide(backupsForRun()));
+    })).pipe(Effect.provide(backupsForRun()), Effect.provideService(Processes, guardedProcesses));
 
-    // The skills domain writes the manifest into paths.repo, which is the composed copy when items are
-    // held: carry it to the checkout with each held skill as the checkout declares it, so the held
-    // value is never published as an upstream change.
-    // The note then counts what reached the checkout, or says why nothing did.
-    let manifestWritten = manifestNote?.startsWith('written') ?? false;
-    if (manifestWritten && holds) {
-      const checkout = holds;
-      // Skills are already installed by now, so a failed carry-back is reported here, not thrown:
-      // the closing report and the backup path still print.
-      manifestNote = yield* Effect.gen(function* () {
-        const fs = yield* Fs;
-        const composed = parseSkillsManifest(yield* fs.readText(join((yield* MachinePaths).repo, MANIFEST_FILE)));
-        const target = join(checkout.checkout, MANIFEST_FILE);
-        const groups = checkoutGroups(composed, parseSkillsManifest(yield* fs.readText(target)), checkout.held);
-        yield* fs.writeTextAtomic(target, emitManifest(groups));
-        return `written — ${groups.reduce((n, g) => n + g.skills.length, 0)} skill(s)`;
-      }).pipe(Effect.catch((error: unknown) => Effect.sync(() => {
-        manifestWritten = false;
-        anyFailed = true;
-        return `failed — ${messageOf(error)}`;
-      })));
-    }
+    const manifestWritten = manifestNote?.startsWith('written') ?? false;
     if (manifestNote !== undefined) {
       write(`\nskills-manifest.txt ${manifestNote}\n`);
       if (manifestWritten) write('Run: nortuscc push -m "..."   to share it\n');
@@ -392,28 +418,43 @@ export async function runUpdate(allArgs: string[], deps: UpdateDeps): Promise<nu
 
     // Gone skills count as handled only once removed, off-pin ones only once reinstalled at their pin.
     return exitCode({
-      items, failed: anyFailed || addFailed || cancelled, prunedNames: removeOk ? removed : [], repinnedNames: repinned,
+      items, failed: anyFailed || addFailed || cancelled || blockedAdditions.length > 0, prunedNames: removeOk ? removed : [], repinnedNames: repinned,
     });
   });
 
   const program = Effect.gen(function* () {
     const paths = yield* MachinePaths;
+    const fs = yield* Fs;
+    const choicePath = join(paths.stateRoot, 'overrides.json');
+    const choiceBytes = yield* fs.readBytes(choicePath);
+    const document = yield* Effect.try({
+      try: () => choiceBytes === undefined ? { version: 2 } : JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(choiceBytes)),
+      catch: () => new Error('Skill addition choices are invalid; repair overrides.json before updating'),
+    });
+    const saved = decodeOverrides(document, choicePath);
+    if (saved.issues.length) return yield* Effect.fail(new Error('Skill addition choices are invalid; repair overrides.json before updating'));
+    // Legacy update ignores other overrides. Related skill choices still belong to addition resolution.
+    const names = new Set(saved.value.skillAdditions?.map(skill => skill.name));
+    const overrides = { ...saved, value: { skillAdditions: saved.value.skillAdditions,
+      skills: Object.fromEntries(Object.entries(saved.value.skills ?? {}).filter(([name]) => names.has(name))) } };
+    const choices = { path: choicePath, bytes: choiceBytes };
     // An invalid sync.json fails the run: SyncStateInvalid carries the message.
     const held = yield* Effect.gen(function* () {
       return yield* (yield* SyncStore).read;
     }).pipe(Effect.provide(syncStore));
     // No requireValid: an integrations.json issue must not block `update`.
-    if (Object.keys(held).length === 0) return yield* act(loadProfile(paths.repo).pipe(Effect.provide(nodeFiles)), null);
-    // Held items are composed over the working tree (no overrides: update never applied them).
+    if (Object.keys(held).length === 0) return yield* act(loadProfile(paths.repo, { overrides }).pipe(Effect.provide(nodeFiles)), null, choices);
+    // Held documents keep the same addition intent and publication provenance as ordinary updates.
     return yield* Effect.scoped(Effect.gen(function* () {
-      const snapshot = yield* composeHeld({ checkout: paths.repo, held });
-      return yield* act(Effect.succeed(snapshot.desired), { checkout: paths.repo, held }).pipe(
+      const snapshot = yield* composeHeld({ checkout: paths.repo, held, overrides });
+      return yield* act(Effect.succeed(snapshot.desired), { checkout: paths.repo, held }, choices).pipe(
         Effect.provideService(MachinePaths, { ...paths, repo: snapshot.repo }),
       );
     }));
   });
 
   return Effect.runPromise(program.pipe(
+    Effect.provide(stateStore),
     Effect.provide(deps.layer),
     Effect.catch((error: unknown) => Effect.sync(() => {
       console.error(`nortuscc: ${messageOf(error)}`);

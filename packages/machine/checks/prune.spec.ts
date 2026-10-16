@@ -75,3 +75,98 @@ test('pruneBackups with nothing to remove records nothing', async () => {
   assert.deepEqual(await run(pruneBackups(NOW, 'agent')), []);
   assert.deepEqual(await run(HistoryStore.use((h) => h.read)), []);
 });
+
+test('generated names reject normalized invalid dates and exact ninety-day boundary is retained', () => {
+  assert.equal(backupFolderTime('nortuscc-2026-02-30T00-00-00-000Z'), undefined);
+  const names = [...Array.from({length:20},(_,i)=>folderAt(daysAgo(i))),folderAt(daysAgo(90))];
+  assert.deepEqual(backupsToPrune(names,NOW),[]);
+});
+
+test('exact retention owner excludes links/files, binds inventory and caps each accepted batch', async () => {
+  const {paths,run}=machine();
+  const {inspectBackupFolders,planBackupPrune,executeBackupPrune}=await import('../src/index.ts');
+  const {symlinkSync,writeFileSync,rmSync}=await import('node:fs');
+  try {
+    const names=Array.from({length:122},(_,i)=>folderAt(daysAgo(100+i)));
+    for(const name of names)mkdirSync(join(paths.backups,name),{recursive:true});
+    const link=folderAt(daysAgo(500)),file=folderAt(daysAgo(501));
+    symlinkSync(paths.repo,join(paths.backups,link));writeFileSync(join(paths.backups,file),'private');
+    assert.equal((await run(inspectBackupFolders())).length,122);
+    const plan=await run(planBackupPrune(NOW));assert.equal(plan.folderIds.length,100);assert.equal(plan.limited,true);
+    mkdirSync(join(paths.backups,folderAt(daysAgo(502))));
+    await assert.rejects(run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.void,committed:()=>Effect.void})));
+    assert.equal(readdirSync(paths.backups).length,125);
+  }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});
+
+test('executor stops at removal two, records removal one and never copies backups',async()=>{
+ const {paths,run}=machine();
+ const {Fs:FsService,FsFailed,planBackupPrune,executeBackupPrune}=await import('../src/index.ts');
+ const {rmSync}=await import('node:fs');
+ try{
+  const names=Array.from({length:23},(_,i)=>folderAt(daysAgo(100+i)));
+  for(const id of names)mkdirSync(join(paths.backups,id),{recursive:true});
+  const result=await run(Effect.gen(function*(){
+   const fs=yield* FsService;let removes=0;
+   const plan=yield* planBackupPrune(NOW);
+   return yield* executeBackupPrune(plan,'mcp',{pending:()=>Effect.void,committed:()=>Effect.void}).pipe(Effect.provideService(FsService,{...fs,copy:()=>Effect.die('backup-of-backups'),remove:path=>++removes===2?Effect.fail(new FsFailed({op:'remove',path,reason:'fixture'})):fs.remove(path)}));
+  }));
+  assert.deepEqual(result,{removed:[names[20]],remaining:names.slice(21),failedId:names[21]});
+  const events=await run(HistoryStore.use(h=>h.read));assert.equal(events.length,1);
+  assert.deepEqual(events[0]?.kind==='backups-pruned'&&events[0].folders,[join(paths.backups,names[20]!)]);
+ }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});
+
+test('pending can interrupt before deletion and a swapped symlink never deletes its target',async()=>{
+ const {paths,run}=machine();
+ const {planBackupPrune,executeBackupPrune}=await import('../src/index.ts');
+ const {rmSync,symlinkSync,existsSync}=await import('node:fs');
+ try{
+  const names=Array.from({length:21},(_,i)=>folderAt(daysAgo(100+i)));
+  for(const id of names)mkdirSync(join(paths.backups,id),{recursive:true});
+  const plan=await run(planBackupPrune(NOW));
+  await assert.rejects(run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.fail('receipt unavailable'),committed:()=>Effect.void})));
+  assert.ok(existsSync(join(paths.backups,names[20]!)));
+  const result=await run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.sync(()=>{rmSync(join(paths.backups,names[20]!),{recursive:true});symlinkSync(paths.repo,join(paths.backups,names[20]!))}),committed:()=>Effect.void}));
+  assert.equal(result.failedId,names[20]);assert.deepEqual(result.removed,[]);assert.ok(existsSync(paths.repo));
+ }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});
+
+test('automatic retention skips a held common lock and maintenance, and under-lock wrapper does not reacquire',async()=>{
+ const {paths,run}=machine();
+ const {acquireApplyLock}=await import('../src/index.ts');
+ const {rmSync,writeFileSync}=await import('node:fs');
+ try{
+  const names=Array.from({length:21},(_,i)=>folderAt(daysAgo(100+i)));
+  for(const id of names)mkdirSync(join(paths.backups,id),{recursive:true});
+  await run(Effect.scoped(Effect.gen(function*(){yield* acquireApplyLock;assert.deepEqual(yield* pruneBackups(NOW,'agent'),[]);assert.deepEqual(yield* pruneBackups(NOW,'agent',{lockHeld:true}),[join(paths.backups,names[20]!)]);})));
+  mkdirSync(join(paths.stateRoot,'agent'),{recursive:true});writeFileSync(join(paths.stateRoot,'agent','pending-update.json'),'{}');
+  assert.deepEqual(await run(pruneBackups(NOW,'agent')),[]);
+ }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});
+
+test('limited cleanup deletes exactly the accepted hundred then needs a fresh plan',async()=>{
+ const {paths,run}=machine();
+ const {planBackupPrune,executeBackupPrune}=await import('../src/index.ts');const {rmSync}=await import('node:fs');
+ try{
+  const names=Array.from({length:122},(_,i)=>folderAt(daysAgo(100+i)));
+  for(const id of names)mkdirSync(join(paths.backups,id),{recursive:true});
+  const plan=await run(planBackupPrune(NOW));const observed:string[]=[];
+  const result=await run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.void,committed:id=>Effect.sync(()=>{observed.push(id)})}));
+  assert.deepEqual(result.removed,names.slice(20,120));assert.deepEqual(observed,result.removed);assert.deepEqual(result.remaining,[]);
+  const events=await run(HistoryStore.use(h=>h.read));assert.equal(events[0]?.kind==='backups-pruned'&&events[0].limited,true);
+  await assert.rejects(run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.die('replayed'),committed:()=>Effect.void})));
+  const next=await run(planBackupPrune(NOW));assert.deepEqual(next.folderIds,names.slice(120));assert.equal(next.limited,false);
+ }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});
+
+test('a changed latest History reference invalidates the exact retention preview',async()=>{
+ const {paths,run}=machine();const {planBackupPrune,executeBackupPrune}=await import('../src/index.ts');const {rmSync}=await import('node:fs');
+ try{
+  const names=Array.from({length:22},(_,i)=>folderAt(daysAgo(100+i)));
+  for(const id of names)mkdirSync(join(paths.backups,id),{recursive:true});
+  const plan=await run(planBackupPrune(NOW));await run(HistoryStore.use(h=>h.append(finished(join(paths.backups,names[21]!)))));
+  await assert.rejects(run(executeBackupPrune(plan,'mcp',{pending:()=>Effect.die('effect before stale refusal'),committed:()=>Effect.void})));
+  const fresh=await run(planBackupPrune(NOW));assert.equal(fresh.keepId,names[21]);assert.deepEqual(fresh.folderIds,[names[20]]);
+ }finally{rmSync(paths.repo,{recursive:true,force:true})}
+});

@@ -19,6 +19,8 @@ const gatedEntry = async (fail: boolean) => {
   const entry = join(root, 'agent.mjs');
   try {
     await build({ entryPoints: [source], outfile: entry, bundle: true, platform: 'node', format: 'esm', target: 'esnext',
+      // The fixture also runs on Node ESM; the shipped Bun runtime supplies CommonJS require itself.
+      banner: { js: 'import { createRequire as entryFixtureRequire } from "node:module"; const require = entryFixtureRequire(import.meta.url);' },
       plugins: [{ name: 'dependency-load-gate', setup: plugin => {
         plugin.onLoad({ filter: /desktop\/agent\/public-config\.ts$/ }, async args => {
           if (args.path !== gatedDependency) return;

@@ -5,8 +5,11 @@ import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
 import { Processes } from '../processes.ts';
 import { lockRef, short } from './pins.ts';
-import { readSkillLock } from './store.ts';
+import { normalizeSkillSource } from '@nortuscc/profile-engine';
+import { readSkillCandidates, type SkillCandidate } from './candidates.ts';
+import { additionLockEntry, readSkillLock } from './store.ts';
 import { skillFolder } from './upstream.ts';
+import type { SkillLock } from './manifest.ts';
 
 // One entry of a pinned skill folder's tree; `path` is relative to the skill folder.
 export type TreeEntry = { readonly mode: string; readonly path: string; readonly sha: string };
@@ -166,4 +169,40 @@ export const verifyPinned = (input: { source: string; sha: string; names: Readon
     }
   }
   return { failed, scripts };
+});
+
+// Local content comparison shared by preview and post-install verification.
+export const verifyInstalledSkillTree = (name: string, tree: readonly TreeEntry[], revision: string) => Effect.gen(function* () {
+  const installed = yield* installedHashes(name);
+  return installed ? compareInstall(tree, installed, revision) : ['installed files unreadable'];
+});
+
+// Preview and final verification share the same native lock identity requirements.
+export const acceptedSkillLockMatches = (lock: SkillLock, accepted: SkillCandidate): boolean => {
+  const native = additionLockEntry(lock, accepted.installedName);
+  const meta = native?.selectorName === accepted.selectorName ? native.meta : undefined;
+  const skillPath = accepted.sourceDir === '.' ? 'SKILL.md' : `${accepted.sourceDir}/SKILL.md`;
+  return isRecord(meta) && normalizeSkillSource(str(meta.source) ?? '') === accepted.source
+    && normalizeSkillSource(str(meta.sourceUrl) ?? '') === accepted.source
+    && lockRef(meta) === accepted.revision && meta.skillPath === skillPath
+    && meta.skillFolderHash === accepted.tree;
+};
+
+// The selected tuple owns the fetch URL and path. Lock metadata is evidence, never fetch authority.
+export const verifyAcceptedSkill = (accepted: SkillCandidate, reader = readSkillCandidates): Effect.Effect<
+  { readonly verified: boolean; readonly problems: readonly string[];
+    readonly cleanup?: { readonly reason: 'cleanup-failed'; readonly retainedDirectory?: string } }, never, Fs | Processes | MachinePaths
+> => Effect.gen(function* () {
+  if (!acceptedSkillLockMatches(yield* readSkillLock, accepted)) return { verified: false, problems: ['installed lock does not match accepted source, revision, path and tree'] };
+  let tree: readonly TreeEntry[] | undefined;
+  const result = yield* reader({ source: accepted.source, revision: accepted.revision, observeTree: (candidate, entries) => {
+    if (candidate.source === accepted.source && candidate.revision === accepted.revision && candidate.sourceDir === accepted.sourceDir && candidate.selectorName === accepted.selectorName
+      && candidate.installedName === accepted.installedName && candidate.blob === accepted.blob
+      && candidate.tree === accepted.tree && candidate.internal === accepted.internal) tree = entries;
+  } });
+  if (!result.ok && result.reason === 'cleanup-failed') return { verified: false, problems: ['Accepted source cleanup was not confirmed'],
+    cleanup: { reason: 'cleanup-failed', ...(result.retainedDirectory ? { retainedDirectory: [...result.retainedDirectory].slice(0, 4096).join('') } : {}) } };
+  if (!result.ok || result.source !== accepted.source || result.revision !== accepted.revision || !tree) return { verified: false, problems: [result.ok ? 'accepted metadata no longer matches' : `accepted source verification: ${result.reason}`] };
+  const problems = yield* verifyInstalledSkillTree(accepted.installedName, tree, accepted.revision);
+  return { verified: problems.length === 0, problems };
 });

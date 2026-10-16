@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { machinePaths, nodeFs, OverridesStore, overridesStore } from '../src/index.ts';
+import { Backups, backupsForRun, machinePaths, nodeFs, OverridesStore, overridesStore } from '../src/index.ts';
 
 const machine = () => {
   const home = mkdtempSync(join(tmpdir(), 'machine-overrides-'));
@@ -15,10 +15,14 @@ const machine = () => {
     codexOpenRouter: join(home, '.codex-openrouter'), agentsSkills: join(home, '.agents', 'skills'),
     stateRoot, backups: join(stateRoot, 'backups'),
   };
-  const layer = overridesStore.pipe(Layer.provide(Layer.mergeAll(machinePaths(paths), nodeFs)));
-  const run = <A, E>(f: (store: OverridesStore['Service']) => Effect.Effect<A, E>) =>
+  const services = Layer.mergeAll(machinePaths(paths), nodeFs);
+  const layer = Layer.mergeAll(overridesStore, backupsForRun()).pipe(Layer.provide(services));
+  const run = <A, E>(f: (store: OverridesStore['Service']) => Effect.Effect<A, E, Backups>) =>
     Effect.runPromise(OverridesStore.use(f).pipe(Effect.provide(layer)));
-  return { stateRoot, run };
+  const readWithoutBackups = () => Effect.runPromise(OverridesStore.use(store => store.read).pipe(
+    Effect.provide(overridesStore.pipe(Layer.provide(services))),
+  ));
+  return { paths, stateRoot, run, readWithoutBackups };
 };
 
 test('without overrides.json the legacy state fields are read', async () => {
@@ -65,3 +69,99 @@ test('write stamps the version and leaves state.json alone', async () => {
   assert.deepEqual(JSON.parse(readFileSync(join(stateRoot, 'overrides.json'), 'utf8')), { version: 1, manageConfig: false, configTargets: ['codex'] });
   assert.equal(readFileSync(join(stateRoot, 'state.json'), 'utf8'), legacy);
 });
+
+test('version 2 writes preserve unknown fields and privately back up original bytes', async () => {
+  const { stateRoot, run } = machine();
+  const path = join(stateRoot, 'overrides.json');
+  const original = '{ "version": 2, "future": { "value": 7 }, "skills": { "personal": false } }';
+  writeFileSync(path, original);
+  await run(s => s.write({ skillAdditions: [{ source: 'Owner/Repo', name: 'personal', targets: ['claude'] }], skills: { personal: true } }));
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { version: 2, future: { value: 7 }, skills: { personal: true },
+    skillAdditions: [{ source: 'owner/repo', name: 'personal', targets: ['claude'] }] });
+  const backupRoot = join(stateRoot, 'backups');
+  const backup = join(backupRoot, readdirSync(backupRoot)[0]!, 'overrides.json');
+  assert.equal(readFileSync(backup, 'utf8'), original);
+  assert.equal(statSync(backup).mode & 0o777, 0o600);
+});
+
+test('replacement and version migration preserve version 1 bytes', async () => {
+  for (const additions of [false, true]) {
+    const { stateRoot, run } = machine();
+    const path = join(stateRoot, 'overrides.json');
+    const original = '{ "version": 1, "manageConfig": false }';
+    writeFileSync(path, original);
+    await run(s => s.write(additions ? { skillAdditions: [{ source: 'a/b', name: 'personal', targets: ['codex'] }] } : { manageConfig: true }));
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, additions ? 2 : 1);
+    const root = join(stateRoot, 'backups');
+    assert.equal(readFileSync(join(root, readdirSync(root)[0]!, 'overrides.json'), 'utf8'), original);
+  }
+});
+
+test('malformed current or proposed documents refuse writes and preserve bytes', async () => {
+  for (const original of ['{oops', '{"version":1,"future":true}', '{"version":2,"skills":{"x":"yes"}}']) {
+    const { stateRoot, run } = machine();
+    const path = join(stateRoot, 'overrides.json');
+    writeFileSync(path, original);
+    await assert.rejects(run(s => s.write({ manageConfig: false })));
+    assert.equal(readFileSync(path, 'utf8'), original);
+  }
+  const { stateRoot, run } = machine();
+  const path = join(stateRoot, 'overrides.json');
+  const original = '{"version":2,"future":true}';
+  writeFileSync(path, original);
+  await assert.rejects(run(s => s.write({ skillAdditions: [{ source: '/tmp/repo', name: 'bad', targets: [] }] })));
+  assert.equal(readFileSync(path, 'utf8'), original);
+});
+
+test('a read-only store needs no Backups provider', async () => {
+  const { stateRoot, readWithoutBackups } = machine();
+  writeFileSync(join(stateRoot, 'overrides.json'), '{"version":2,"skillAdditions":[],"future":true}');
+  assert.deepEqual((await readWithoutBackups()).value, { skillAdditions: [] });
+});
+
+test('an edit during backup is refused without replacing the new document', async () => {
+  const { paths, stateRoot } = machine();
+  const path = join(stateRoot, 'overrides.json');
+  writeFileSync(path, '{"version":1}');
+  const edited = '{"version":2,"future":true}';
+  const services = Layer.mergeAll(machinePaths(paths), nodeFs);
+  const backup = Layer.succeed(Backups, {
+    dir: Effect.succeed(undefined), moveAside: () => Effect.succeed(undefined),
+    preserve: () => Effect.sync(() => { writeFileSync(path, edited); return undefined; }),
+  });
+  await assert.rejects(Effect.runPromise(OverridesStore.use(s => s.write({ manageConfig: false })).pipe(
+    Effect.provide(Layer.mergeAll(overridesStore, backup).pipe(Layer.provide(services))),
+  )));
+  assert.equal(readFileSync(path, 'utf8'), edited);
+});
+
+for (const edit of ['targets', 'manageConfig', 'bytes', 'created'] as const)
+  test(`first override creation refuses legacy ${edit} edit during backup`, async () => {
+    const { paths, stateRoot, run } = machine();
+    const path = join(stateRoot, 'overrides.json'); const statePath = join(stateRoot, 'state.json');
+    const original = JSON.stringify({ files: {}, configTargets: ['codex'], skillsOnly: true });
+    if (edit !== 'created') writeFileSync(statePath, original);
+    const before = await run(s => s.read);
+    const edited = edit === 'targets' || edit === 'created' ? JSON.stringify({ files: {}, configTargets: ['claude'], skillsOnly: true })
+      : edit === 'manageConfig' ? JSON.stringify({ files: {}, configTargets: ['codex'], skillsOnly: false }) : original + '\n';
+    const services = Layer.mergeAll(machinePaths(paths), nodeFs);
+    const backupCalls: string[] = [];
+    const backup = Layer.effect(Backups, Effect.map(Backups, real => ({ ...real,
+      preserve: (...args: Parameters<typeof real.preserve>) => real.preserve(...args).pipe(Effect.tap(() => Effect.sync(() => {
+        backupCalls.push(args[0]);
+        if (args[0] === statePath) writeFileSync(statePath, edited);
+      }))),
+    }))).pipe(Layer.provide(backupsForRun().pipe(Layer.provide(services))));
+    await assert.rejects(Effect.runPromise(OverridesStore.use(s => s.write({ ...before.value,
+      skillAdditions: [{ source: 'owner/repo', name: 'review', targets: ['codex'] }],
+    }, before.value)).pipe(Effect.provide(Layer.mergeAll(overridesStore, backup).pipe(Layer.provide(services))))));
+    assert.deepEqual(backupCalls, [path, statePath]);
+    assert.equal(existsSync(path), false); assert.equal(readFileSync(statePath, 'utf8'), edited);
+    const after = await run(s => s.read); assert.equal(after.source, statePath);
+    assert.deepEqual(after.value, edit === 'targets' || edit === 'created' ? { manageConfig: false, configTargets: ['claude'] }
+      : edit === 'manageConfig' ? { configTargets: ['codex'] } : before.value);
+    if (edit !== 'created') {
+      const root = join(stateRoot, 'backups'); const saved = join(root, readdirSync(root)[0]!, 'state.json');
+      assert.equal(readFileSync(saved, 'utf8'), original); assert.equal(statSync(saved).mode & 0o777, 0o600);
+    }
+  });

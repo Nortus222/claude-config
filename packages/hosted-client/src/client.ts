@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Effect, Schema, Semaphore } from 'effect';
 import { DecisionsStore, HistoryStore, type Actor, type Decision as LocalDecision } from '@nortuscc/machine';
 import { DeviceStartRequestSchema, DeviceStartResponseSchema, DevicePollPendingSchema, DevicePollSuccessSchema,
@@ -10,6 +11,9 @@ import { MachineTokenStore } from './token.ts';
 import { HostedStore, type HostedAccount, type HostedDocument, type OutboxEntry } from './store.ts';
 
 export type HostedState = {
+  readonly pendingMachinePatches?: ReadonlyArray<MachinePatch>;
+  readonly machinePersistence?: 'locally-queued' | 'confirmed';
+  readonly confirmedMachine?: SyncMachine | null;
   readonly accountId: string | null; readonly login: string | null; readonly machineId: string | null;
   readonly auth: 'signed-in' | 'signed-out' | 'unauthenticated'; readonly setups: ReadonlyArray<SyncSetup>;
   readonly machine: SyncMachine | null; readonly lastSyncAt: string | null; readonly retryAt: string | null;
@@ -25,6 +29,8 @@ export type HostedClientOptions = {
   readonly onPolicy: (policy: Policy, origin: 'local' | 'synced') => Effect.Effect<void, unknown>;
 };
 export type HostedClient = {
+  // Local opaque identity of the sole pending flow; never a credential or wire field.
+  readonly signInFlow: Effect.Effect<string | null>;
   readonly state: Effect.Effect<HostedState, HostedFailure>;
   readonly revisions: (setupId: string) => Effect.Effect<ReadonlyArray<SyncRevision>, HostedFailure>;
   readonly startSignIn: (request: SignInRequest, reportStatus?: boolean) => Effect.Effect<SignInStarted, HostedFailure>;
@@ -62,6 +68,8 @@ const effectiveMachine = (a: HostedAccount): SyncMachine => {
   return machine;
 };
 const project = (a: HostedAccount | undefined): HostedState => ({ accountId: a?.accountId ?? null, login: a?.login ?? null, machineId: a?.machineId ?? null,
+  pendingMachinePatches: a?.outbox.flatMap(e => e.kind === 'machine' ? [e.patch] : []) ?? [],
+  machinePersistence: a?.outbox.some(e => e.kind === 'machine') ? 'locally-queued' : 'confirmed', confirmedMachine: a?.machine ?? null,
   auth: a?.auth ?? 'signed-out', setups: a?.setups ?? [], machine: a ? effectiveMachine(a) : null, lastSyncAt: a?.lastSyncAt ?? null,
   retryAt: a?.retryAt ?? null, pollAfter: a?.pollAfter ?? 900, error: (a?.error as HostedFailureCode | null) ?? null });
 const osNames = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };
@@ -76,7 +84,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
   const history = yield* HistoryStore;
   const lock = yield* Semaphore.make(1);
   const now = options.now ?? (() => new Date());
-  let pending: { pendingId: string; expiresAt: number; nextAt: number; interval: number; reportStatus?: boolean } | undefined;
+  let pending: { binding: string; pendingId: string; expiresAt: number; nextAt: number; interval: number; reportStatus?: boolean } | undefined;
   const deadline = (seconds: number, jitter = false) => Effect.try({
     try: () => {
       const delay = seconds * 1000;
@@ -246,6 +254,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
   }).pipe(lock.withPermit);
   return {
     state,
+    signInFlow: Effect.sync(() => pending?.binding ?? null),
     revisions: (setupId) => Effect.flatMap(store.read, (doc) => {
       const a = active(doc);
       return a ? store.revisions(a.accountId, setupId) : Effect.succeed([]);
@@ -258,7 +267,7 @@ export const makeHostedClient = (options: HostedClientOptions): Effect.Effect<Ho
       const response = yield* decode(DeviceStartResponseSchema, reply.body);
       const expiresAt = yield* deadline(response.expiresIn);
       const nextAt = yield* deadline(response.interval);
-      pending = { pendingId: response.pendingId, expiresAt, nextAt, interval: response.interval, ...(reportStatus === undefined ? {} : { reportStatus }) };
+      pending = { binding: randomUUID(), pendingId: response.pendingId, expiresAt, nextAt, interval: response.interval, ...(reportStatus === undefined ? {} : { reportStatus }) };
       const { pendingId: _pendingId, ...safe } = response;
       return safe;
     }).pipe(lock.withPermit),

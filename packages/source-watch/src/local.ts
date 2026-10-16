@@ -1,4 +1,5 @@
-import { Effect } from 'effect';
+import { ordinaryFallback } from './services.ts';
+import { Cause, Effect } from 'effect';
 import { skillFolders } from './discover.ts';
 import { DIFF_FLAGS, Git, GitFailed, LOG_FORMAT, parseLog } from './git.ts';
 import type { LocalReport, LocalSkill } from './model.ts';
@@ -26,9 +27,8 @@ export function parseStatus(out: string): Array<{ path: string; untracked: boole
 // is not a git work tree, or any git failure, reads as `not-a-repo`.
 export const watchCheckout = (path: string): Effect.Effect<LocalReport, never, Git> =>
   inspect(path).pipe(
-    Effect.catch(() =>
-      Effect.succeed({ path, status: 'not-a-repo', unpushed: [], uncommitted: [], skills: [] } satisfies LocalReport),
-    ),
+    Effect.catchCause(cause => cause.reasons.some(reason=>!Cause.isFailReason(reason)) ? Effect.failCause(cause) as Effect.Effect<never> :
+      Effect.succeed({ path, status: 'not-a-repo', unpushed: [], uncommitted: [], skills: [] } satisfies LocalReport)),
   );
 
 const inspect = (path: string): Effect.Effect<LocalReport, GitFailed, Git> =>
@@ -39,22 +39,22 @@ const inspect = (path: string): Effect.Effect<LocalReport, GitFailed, Git> =>
 
     const branch = yield* run(['rev-parse', '--abbrev-ref', 'HEAD']).pipe(
       Effect.map((out) => out.trim()),
-      Effect.orElseSucceed(() => ''),
+      ordinaryFallback(() => ''),
     );
     const entries = parseStatus(yield* run(['status', '--porcelain=v1', '-z', '--untracked-files=all']));
     const hasUpstream = yield* run(['rev-parse', '--verify', '--quiet', '@{u}']).pipe(
       Effect.as(true),
-      Effect.orElseSucceed(() => false),
+      ordinaryFallback(() => false),
     );
     const since = hasUpstream
       ? (yield* run(['merge-base', 'HEAD', '@{u}']).pipe(
           Effect.map((out) => out.trim()),
-          Effect.orElseSucceed(() => 'HEAD'),
+          ordinaryFallback(() => 'HEAD'),
         ))
       : 'HEAD';
     const unpushed = hasUpstream ? parseLog(yield* run(['log', LOG_FORMAT, '@{u}..HEAD'])) : [];
 
-    const tracked = (yield* run(['diff', '--name-only', '-z', since]).pipe(Effect.orElseSucceed(() => '')))
+    const tracked = (yield* run(['diff', '--name-only', '-z', since]).pipe(ordinaryFallback(() => '')))
       .split('\0')
       .filter((p) => p !== '');
     const changed = [...tracked, ...entries.map((e) => e.path)];

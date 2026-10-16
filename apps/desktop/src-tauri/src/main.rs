@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod host;
+mod mcp;
 mod startup;
 mod startup_diagnostics;
 mod updates;
@@ -284,6 +285,16 @@ fn native_args<T: serde::de::DeserializeOwned>(request: tauri::ipc::Request<'_>)
     }
 }
 #[tauri::command]
+async fn get_operation_run(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::OperationRunArgs = native_args(request)?;
+    dispatch(owner, Request::GetOperationRun { run_id: args.run_id }).await
+}
+#[tauri::command]
+async fn list_operation_runs(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::OperationRunsArgs = native_args(request)?;
+    dispatch(owner, Request::ListOperationRuns { limit: args.limit }).await
+}
+#[tauri::command]
 async fn hosted_state(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; dispatch(owner, Request::HostedState).await
 }
@@ -487,6 +498,17 @@ fn smoke(home: PathBuf) -> Result<(), String> {
 }
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--mcp") {
+        let result = (|| {
+            if args.len() != 1 { return Err("Usage: --mcp".to_string()); }
+            let executable = std::env::current_exe().map_err(|_| "Installed MCP executable is unavailable")?;
+            mcp::run_mcp(&mcp::installed_resources(&executable)?)
+        })();
+        match result {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        }
+    }
     // Release preparation verifies files without creating a window, service or OS integration.
     if args.first().map(String::as_str)==Some("--verify-update-release") {
         let result=(|| {
@@ -545,7 +567,7 @@ fn main() {
                 Ok(())
             })
         })
-        .invoke_handler(tauri::generate_handler![agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
+        .invoke_handler(tauri::generate_handler![get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run_return(|app, event| {
             if matches!(event,tauri::RunEvent::Ready) {startup_diagnostics::trace(Operation::AppStartup).record(Phase::RuntimeReady,startup_diagnostics::Status::Completed,None);}
@@ -923,4 +945,14 @@ mod tests {
         });
         smoke(home.clone()).unwrap(); worker.join().unwrap(); std::fs::remove_dir_all(home).unwrap();
     }
+}
+
+#[tauri::command]
+async fn mcp_connections(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let action: host::ConnectionAction = native_args(request)?;
+    let owner = owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        owner.startup.wait()?;
+        helper_response(&owner.session, &owner.lifecycle, || host::mcp_connections(&owner.resources, action))
+    }).await.map_err(|_| "Connection helper failed".to_string())?
 }

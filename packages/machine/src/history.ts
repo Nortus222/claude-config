@@ -4,8 +4,14 @@ import type { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
 
+// Owners call pending before a possible effect and committed after observing completion.
+export type MutationObserver = {
+  readonly pending: (key: string) => Effect.Effect<void, unknown>;
+  readonly committed: (key: string) => Effect.Effect<void, unknown>;
+};
+
 // Who acted. `sync` marks another of the user's machines, whose event also carries its machineId.
-export type Actor = 'agent' | 'cli' | 'app' | 'sync';
+export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp';
 export type ItemReason = { readonly itemId: string; readonly reason: string };
 export type StepRecord = { readonly key: string; readonly outcome: 'ok' | 'failed' | 'cancelled'; readonly note: string };
 
@@ -19,6 +25,8 @@ export type HistoryEventBody =
     // Set only when reading: the folder was pruned, so `backup` reads 'pruned'.
     readonly prunedFolder?: string; readonly prunedAt?: string;
   }
+  | { readonly kind: 'operation-checkpoint'; readonly runId: string; readonly keys: readonly string[]; readonly committedKeys: readonly string[]; readonly remainingKeys: readonly string[]; readonly backupIds: readonly string[]; readonly state: 'pending' | 'committed' | 'partial' | 'needsInspection'; readonly message: string }
+  | { readonly kind: 'skill-addition'; readonly runId: string; readonly intentSaved: boolean; readonly intentState: 'pending' | 'saved' | 'needsInspection'; readonly installationState?: 'verified' | 'failed' | 'cancelled' | 'needsInspection'; readonly message: string }
   | { readonly kind: 'held' | 'ready'; readonly items: ReadonlyArray<ItemReason> }
   | {
     readonly kind: 'decided'; readonly setupId: string; readonly itemId: string;
@@ -29,10 +37,15 @@ export type HistoryEventBody =
   | { readonly kind: 'paused'; readonly reason: string; readonly runId?: string }
   | { readonly kind: 'resumed'; readonly reason: string }
   | { readonly kind: 'revision-verified' | 'revision-rejected'; readonly setupId: string; readonly revision: string | number; readonly error?: string }
-  | { readonly kind: 'backups-pruned'; readonly folders: ReadonlyArray<string> }
+  | { readonly kind: 'backups-pruned'; readonly runId?: string; readonly limited?: boolean; readonly folders: ReadonlyArray<string> }
   | { readonly kind: 'outbox-dropped'; readonly accountId: string; readonly count: number; readonly code: 'invalid' };
 
-export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string };
+export type OperationMetadata = {
+  readonly operation: 'applyChange';
+  readonly scope: { readonly kind: 'machine' };
+  readonly requestId: string;
+};
+export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string } & Partial<OperationMetadata>;
 export type HistoryEvent = HistoryInput & { readonly v: 1; readonly at: string };
 
 // Append-only History, shared by the agent and the CLI.
@@ -63,7 +76,7 @@ const parseLines = (text: string): HistoryEvent[] =>
 
 const markPruned = (events: ReadonlyArray<HistoryEvent>): HistoryEvent[] => {
   const prunedAt = new Map<string, string>();
-  for (const e of events) if (e.kind === 'backups-pruned') for (const folder of e.folders) prunedAt.set(folder, e.at);
+  for (const e of events) if (e.kind === 'backups-pruned' && Array.isArray(e.folders)) for (const folder of e.folders) if (typeof folder === 'string') prunedAt.set(folder, e.at);
   return events.map((e): HistoryEvent =>
     e.kind === 'apply-finished' && e.backup !== null && prunedAt.has(e.backup)
       ? { ...e, backup: 'pruned', prunedFolder: e.backup, prunedAt: prunedAt.get(e.backup)! }

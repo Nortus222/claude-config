@@ -14,3 +14,5 @@ export * from './setup-source.ts';
 export * from './checkout-groups.ts';
 
 export * from './hosted-source.ts';
+
+export * from './decisions.ts';

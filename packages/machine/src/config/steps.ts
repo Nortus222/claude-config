@@ -15,7 +15,8 @@ const step = (key: string, action: StepAction, summary: string, touches: string)
   ({ key, domain: 'config', action, summary, touches: [touches], interruptible: false });
 
 const blocked = (item: Observed): Skipped => skip(item,
-  item.state === 'missing-repo' ? 'missing from the repo'
+  item.state === 'routing-conflict' ? item.note ?? 'MCP routing ownership conflict; repair it before changing instructions'
+    : item.state === 'missing-repo' ? 'missing from the repo'
     : item.state === 'unparseable-local' ? 'not valid JSON on this machine; fix it by hand'
     : item.state === 'invalid' ? item.note ?? 'the repo file is invalid'
     : `nothing to do for ${item.state}`);
@@ -31,7 +32,8 @@ const applyDecision = (item: Observed, file: ResolvedFile, force: boolean): Deci
       return write();
     // Recording a clean settings key also prunes the document's dropped-key baselines.
     case 'clean':
-      return has(item, 'baseline-stale') ? step(item.key, action, `record ${item.label} as in sync`, machineSide(file))
+      return has(item, 'routing-retiring') ? write()
+        : has(item, 'baseline-stale') ? step(item.key, action, `record ${item.label} as in sync`, machineSide(file))
         : has(item, 'baseline-dropped') ? step(item.key, action, `forget dropped keys of ${file.dest}`, machineSide(file))
         : undefined;
     case 'local-ahead':
@@ -71,7 +73,10 @@ const uninstallSteps = (items: ReadonlyArray<Observed>, force: boolean, files: R
   for (const id of new Set(items.map((i) => configFileId(i.key)))) {
     const file = files.find((f) => f.id === id);
     const mine = items.filter((i) => configFileId(i.key) === id);
-    if (!file || !mine.some((i) => has(i, 'recorded'))) continue;
+    if (!file) continue;
+    const conflict = mine.find(i => i.state === 'routing-conflict');
+    if (conflict) { skipped.push(blocked(conflict)); continue; }
+    if (!mine.some((i) => has(i, 'recorded') || has(i, 'routing-recorded'))) continue;
     const key = itemKey(id);
     if (!force && mine.some((i) => has(i, 'local-changed'))) skipped.push({ key, reason: CHANGED_SINCE_APPLY });
     else steps.push(step(key, 'restore', `restore ${file.dest} to its state before nortuscc`, machineSide(file)));

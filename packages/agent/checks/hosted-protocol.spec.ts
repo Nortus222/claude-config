@@ -27,3 +27,9 @@ test('reporting choice exists only on strict local sign-in requests', () => {
   for (const reportStatus of [null, 'false', 0, {}]) assert.throws(() => protocol.decodeRequest({ version: 3, id: '1', command: 'signIn', reportStatus }));
   assert.throws(() => protocol.decodeRequest({ version: 3, id: '1', command: 'signIn', reportStatus: false, token: 'secret' }));
 });
+
+test('legacy hosted projection omits internal pending and confirmed metadata fields', () => {
+  const value={enabled:true,recovered:true,signingIn:false,accountId:null,login:null,machineId:null,auth:'signed-out',setups:[],machine:null,lastSyncAt:null,retryAt:null,pollAfter:900,error:null};
+  assert.deepEqual(protocol.toWireHostedState({...value,pendingMachinePatches:[{name:'PRIVATE'}],confirmedMachine:null,machinePersistence:'confirmed'}),value);
+  assert.throws(()=>protocol.decodeHostedState({...value,pendingMachinePatches:[]}));
+});

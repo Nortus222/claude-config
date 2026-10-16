@@ -1,13 +1,15 @@
 import { homedir, userInfo } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 import { Cause, Effect, Exit, Layer } from 'effect';
-import { agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
+import { agentSkillInstaller, agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
 import {
-  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, pathsFromEnvironment, skillsDomain,
+  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, nodeProcessDialogue, pathsFromEnvironment, skillsDomain,
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
 import { setupSourceLayer } from '@nortuscc/sync';
 import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
+import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
+import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
 import { ensureAgent } from './lifecycle.ts';
 import { probeLoginEnvironment } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
@@ -63,7 +65,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
   try {
     const code = await Effect.runPromise(Effect.gen(function* () {
       const [arg, appFlag, appPath] = input.args;
-      const serviceHelper = arg === '--startup' || arg === '--ensure' || arg === '--restart' || arg === '--bootstrap' || arg === '--prepare-update' || arg === '--recover-update' || arg === '--maintenance-state';
+      const serviceHelper = arg === '--startup' || arg === '--ensure' || arg === '--restart' || arg === '--bootstrap' || arg === '--prepare-update' || arg === '--recover-update' || arg === '--maintenance-state' || arg === '--mcp-connections';
       if (!(input.args.length === 0 || (['--paths', '--setup-state', '--install-git'].includes(arg ?? '') && input.args.length === 1)
         || (serviceHelper && input.args.length === 3 && appFlag === '--app' && appPath !== undefined
           && isAbsolute(appPath) && !/[\x00-\x1f\x7f]/.test(appPath)))) {
@@ -134,6 +136,11 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         });
         yield* operation.pipe(Effect.provide(nodeFileIntegrity),
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))));
+        if (context.outcome === 'ready' || context.outcome === 'recovered') {
+          yield* Effect.exit(repairConnections({ home, appPath: appPath! }).pipe(
+            Effect.provide(setupSourceLayer(paths, { processes })),
+            Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes }))))));
+        }
         return emit();
       }
       if (arg === '--paths' || arg === '--setup-state' || arg === '--install-git' || arg === '--bootstrap') {
@@ -163,17 +170,18 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         stdout(JSON.stringify({ stateRoot: paths.stateRoot }) + '\n');
         return 0;
       }
-      const agentVersion = yield* phase('runtime_metadata', Effect.gen(function* () {
+      const runtime = yield* phase('runtime_metadata', Effect.gen(function* () {
         const metadata = yield* Fs.use((fs) => fs.readText(resolve(input.resources, 'runtime.json'))).pipe(Effect.provide(nodeFs));
         return yield* Effect.try({
           try: () => {
             const parsed: unknown = JSON.parse(metadata ?? 'null');
             if (typeof parsed !== 'object' || parsed === null || !('agentVersion' in parsed)
               || typeof parsed.agentVersion !== 'string' || parsed.agentVersion.trim() === '') throw new Error('runtime.json has no agentVersion');
-            return parsed.agentVersion;
+            return { agentVersion: parsed.agentVersion, appVersion: 'appVersion' in parsed && typeof parsed.appVersion === 'string' ? parsed.appVersion : undefined, target: 'target' in parsed && typeof parsed.target === 'string' ? parsed.target : undefined };
           }, catch: (error) => error,
         });
       }));
+      const agentVersion = runtime.agentVersion;
       const login = yield* probe();
       if (login.error) stderr(`nortuscc agent: ${login.error}\n`);
       const env: Readonly<Record<string, string | undefined>> = { ...login.env, ...(input.env.NORTUSCC_DESKTOP_LOCAL_ONLY === undefined ? {} : { NORTUSCC_DESKTOP_LOCAL_ONLY: input.env.NORTUSCC_DESKTOP_LOCAL_ONLY }) };
@@ -190,6 +198,12 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
           target: { platform, home, uid: input.uid ?? process.getuid?.() ?? 0, user: input.user ?? userInfo().username, stateRoot: paths.stateRoot },
         };
         const operation = Effect.gen(function* () {
+          if (arg === '--mcp-connections') {
+            const action = yield* Effect.tryPromise({ try: () => readConnectionAction(input.stdin ?? process.stdin), catch: () => new Error('Invalid connection action') }).pipe(Effect.timeout(5000));
+            const connectionInput = { home, appPath: appPath! };
+            if (action.action === 'inspect') return yield* inspectConnections(connectionInput);
+            return { connections: [yield* (action.action === 'connect' ? connectHost : disconnectHost)({ ...connectionInput, target: action.target })] };
+          }
           if (arg === '--maintenance-state') return yield* maintenanceState(lifecycleInput);
           if (arg === '--prepare-update') return yield* prepareUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin, stdout: value => stdout(JSON.stringify(value) + '\n') });
           if (arg === '--recover-update') return yield* recoverUpdate(lifecycleInput, { stdin: input.stdin ?? process.stdin, installerAlive: pid => {
@@ -200,8 +214,14 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         });
         const result = yield* phase('lifecycle', operation.pipe(
           Effect.provide(nodeFileIntegrity),
+          Effect.provide(setupSourceLayer(paths, { processes })),
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))),
         ));
+        if (arg === '--ensure' || arg === '--restart' || arg === '--recover-update') {
+          yield* Effect.exit(repairConnections({ home, appPath: appPath! }).pipe(
+            Effect.provide(setupSourceLayer(paths, { processes })),
+            Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes }))))));
+        }
         stdout(JSON.stringify(result) + '\n');
         return 0;
       }
@@ -209,7 +229,8 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
-        paths, domains, source: setupSourceLayer(paths, { processes }), processes, agentVersion, ipc: platform !== 'win32', notifications: { platform },
+        ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: resolve(input.resources, '../../MacOS'), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
+        paths, domains, source: setupSourceLayer(paths, { processes }), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal,
         onLifecycle: trace.record,
       });
@@ -229,7 +250,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     return 1;
   } finally {
     clearTimeout(deadline);
-    if (['--startup', '--bootstrap', '--prepare-update', '--recover-update'].includes(input.args[0] ?? '') && input.stdin === undefined) process.stdin.destroy();
+    if (['--startup', '--bootstrap', '--prepare-update', '--recover-update', '--mcp-connections'].includes(input.args[0] ?? '') && input.stdin === undefined) process.stdin.destroy();
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
   }
@@ -256,4 +277,13 @@ export const readSetupChoices = async (stdin: AsyncIterable<string | Uint8Array>
     chunks.push(buffer);
   }
   return decodeSetupChoices(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+};
+
+const readConnectionAction = async (stdin: AsyncIterable<string | Uint8Array>) => {
+  let text = '';
+  for await (const chunk of stdin) {
+    text += Buffer.from(chunk).toString('utf8');
+    if (Buffer.byteLength(text) > 1024) throw new Error('Connection action exceeds limit');
+  }
+  return decodeConnectionAction(JSON.parse(text));
 };

@@ -17,12 +17,12 @@ export function parseJson(
 ): { ok: true; value: unknown } | { ok: false; issue: Issue } {
   try {
     return { ok: true, value: JSON.parse(text) };
-  } catch (err) {
-    return { ok: false, issue: issue(layer, source, '', `not valid JSON: ${(err as Error).message}`) };
+  } catch {
+    return { ok: false, issue: issue(layer, source, '', 'not valid JSON: check the document JSON syntax') };
   }
 }
 
-// Decodes against a Schema, reporting every problem at once and refusing unknown fields.
+// Refuses invalid documents and unknown fields without exposing rejected values or keys.
 export function decode<T>(
   schema: Schema.Codec<T, unknown>,
   value: unknown,
@@ -31,6 +31,6 @@ export function decode<T>(
 ): { ok: true; value: T } | { ok: false; issue: Issue } {
   const result = Schema.decodeUnknownResult(schema)(value, { errors: 'all', onExcessProperty: 'error' });
   return Result.isFailure(result)
-    ? { ok: false, issue: issue(layer, source, '', result.failure.message) }
+    ? { ok: false, issue: issue(layer, source, '', 'invalid document structure: check required fields, field types and unexpected keys') }
     : { ok: true, value: result.success };
 }

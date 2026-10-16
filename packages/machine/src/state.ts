@@ -1,18 +1,40 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
-import { overridesFromLegacyState } from '@nortuscc/profile-engine';
-import type { FsFailed } from './errors.ts';
+import { serializeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
+import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
-import { MachinePaths } from './paths.ts';
+import { MachinePaths, type MachinePathsValue } from './paths.ts';
+import { Backups } from './backups.ts';
 
 export type Baseline = { readonly hash: string; readonly appliedAt: string };
 // The setup commit this machine last applied in full, recorded by `nortuscc sync` (#43).
 export type Applied = { readonly commit: string; readonly at: string };
+export const MCP_ROUTING_BLOCK_ID = 'nortuscc-mcp-routing-v1' as const;
+export const MCP_ROUTING_BEGIN = '<!-- nortuscc:mcp-routing:v1:begin -->';
+export const MCP_ROUTING_END = '<!-- nortuscc:mcp-routing:v1:end -->';
+export const MCP_ROUTING_GUIDANCE = 'For nortuscc configuration, skills, plugins, and MCP connections, use the nortuscc MCP tools. Inspect before making changes and preview before applying them. Changes default to this machine. If a run was accepted, recover its status with nortuscc_get_run; use nortuscc_list_runs if its run ID is unavailable, and verify completion before reporting success. Only after verifying that a skill installation succeeded, ask exactly: "Do you want to share it with your other machines?" Mention promotion to a personal or shared profile as the sharing option. Share or publish only after an explicit user request and only when the required capability is available.';
+export const MCP_ROUTING_TEXT = `${MCP_ROUTING_BEGIN}\n${MCP_ROUTING_GUIDANCE}\n${MCP_ROUTING_END}`;
+// Separators belong to the receipt too; removing it never normalizes neighboring prose.
+export const MCP_ROUTING_BYTES = `\n\n${MCP_ROUTING_TEXT}\n`;
+export type McpRoutingFileId = 'claude:CLAUDE.md' | 'codex:AGENTS.md';
+export type McpRoutingReceipt = {
+  readonly fileId: McpRoutingFileId;
+  readonly blockId: typeof MCP_ROUTING_BLOCK_ID;
+  readonly bytes: typeof MCP_ROUTING_BYTES;
+  readonly state: 'active' | 'released';
+};
+export type McpRoutingOwnership = {
+  readonly version: 1;
+  readonly files: Readonly<Partial<Record<McpRoutingFileId, McpRoutingReceipt>>>;
+};
+
 export type MachineState = {
   readonly version: 1;
   readonly repo: string | null;
   readonly files: Readonly<Record<string, Baseline>>;
   readonly applied?: Applied;
+  // Untrusted JSON is retained on writes so malformed ownership cannot become permission to overwrite.
+  readonly mcpRouting?: unknown;
 };
 
 export const emptyState: MachineState = { version: 1, repo: null, files: {} };
@@ -23,6 +45,15 @@ const LEGACY_KEYS: Record<string, string> = { 'CLAUDE.md': 'claude:CLAUDE.md' };
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+export const isMcpRoutingFileId = (value: string): value is McpRoutingFileId =>
+  value === 'claude:CLAUDE.md' || value === 'codex:AGENTS.md';
+
+export const validMcpRouting = (value: unknown): value is McpRoutingOwnership =>
+  isRecord(value) && value.version === 1 && Object.keys(value).length === 2 && isRecord(value.files)
+  && Object.entries(value.files).every(([id, receipt]) => isMcpRoutingFileId(id) && isRecord(receipt)
+    && Object.keys(receipt).length === 4 && receipt.fileId === id && receipt.blockId === MCP_ROUTING_BLOCK_ID
+    && receipt.bytes === MCP_ROUTING_BYTES && (receipt.state === 'active' || receipt.state === 'released'));
+
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const appliedOf = (value: unknown): Applied | undefined =>
@@ -31,22 +62,25 @@ const appliedOf = (value: unknown): Applied | undefined =>
     ? { commit: value.commit, at: value.at }
     : undefined;
 
-// A record that is not the expected shape is treated as absent rather than trusted halfway. The
+// Legacy malformed records are absent; routing-bearing malformed records retain a conflict. The
 // legacy machine choices (skillsOnly, configTargets) are not state: they live in overrides.json.
 export const parseState = (text: string): MachineState | undefined => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return undefined;
+    return /"mcpRouting"\s*:/.test(text) ? { ...emptyState, mcpRouting: { invalid: text } } : undefined;
   }
-  if (!isRecord(parsed) || !isRecord(parsed.files)) return undefined;
+  if (!isRecord(parsed)) return undefined;
+  if (!isRecord(parsed.files)) return Object.hasOwn(parsed, 'mcpRouting')
+    ? { ...emptyState, mcpRouting: { invalid: parsed.mcpRouting } } : undefined;
   const applied = appliedOf(parsed.applied);
   return {
     version: 1,
     repo: typeof parsed.repo === 'string' ? parsed.repo : null,
     files: parsed.files as Record<string, Baseline>,
     ...(applied ? { applied } : {}),
+    ...(Object.hasOwn(parsed, 'mcpRouting') ? { mcpRouting: parsed.mcpRouting } : {}),
   };
 };
 
@@ -65,17 +99,42 @@ export const withApplied = (state: MachineState, commit: string, now = new Date(
   applied: { commit, at: now.toISOString() },
 });
 
+// Observe current bookkeeping without materializing the pre-Codex fallback.
+const observeState = (fs: Fs['Service'], paths: MachinePathsValue) => Effect.gen(function* () {
+  const text = yield* fs.readText(join(paths.stateRoot, 'state.json'));
+  if (text !== undefined) return { state: parseState(text) ?? emptyState, migrate: false };
+  const legacyText = yield* fs.readText(join(paths.claude, '.nortuscc-lock.json'));
+  const legacy = legacyText === undefined ? undefined : parseState(legacyText);
+  if (!legacy) return { state: emptyState, migrate: false };
+  const files: Record<string, Baseline> = {};
+  for (const [oldKey, newKey] of Object.entries(LEGACY_KEYS)) {
+    if (legacy.files[oldKey]) files[newKey] = legacy.files[oldKey];
+  }
+  return { state: { ...emptyState, repo: legacy.repo, files,
+    ...(Object.hasOwn(legacy, 'mcpRouting') ? { mcpRouting: legacy.mcpRouting } : {}) }, migrate: true };
+});
+
+export const peekMachineState = Effect.gen(function* () {
+  return (yield* observeState(yield* Fs, yield* MachinePaths)).state;
+});
+
 export class StateStore extends Context.Service<
   StateStore,
   {
     readonly read: Effect.Effect<MachineState, FsFailed>;
-    readonly write: (state: MachineState) => Effect.Effect<void, FsFailed>;
-    readonly update: (f: (state: MachineState) => MachineState) => Effect.Effect<MachineState, FsFailed>;
+    readonly write: (state: MachineState) => Effect.Effect<void, FsFailed, Backups>;
+    readonly update: (f: (state: MachineState) => MachineState) => Effect.Effect<MachineState, FsFailed, Backups>;
   }
 >()('machine/StateStore') {}
 
+// Exact bytes written by the state owner, also used to bind its observed capture replacements.
+export const serializeMachineState = (state: MachineState): string => {
+  const { version, repo, files, applied } = state;
+  return JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}), ...(Object.hasOwn(state, 'mcpRouting') ? { mcpRouting: state.mcpRouting } : {}) }, null, 2) + '\n';
+};
+
 // state.json: nortuscc's own bookkeeping (the repo, per-file baselines and the applied setup commit),
-// in the format earlier releases wrote plus an optional `applied`.
+// in the format earlier releases wrote plus optional applied commit and local routing ownership.
 export const stateStore = Layer.effect(
   StateStore,
   Effect.gen(function* () {
@@ -83,36 +142,32 @@ export const stateStore = Layer.effect(
     const fs = yield* Fs;
     const statePath = join(paths.stateRoot, 'state.json');
     const overridesPath = join(paths.stateRoot, 'overrides.json');
-    const legacyPath = join(paths.claude, '.nortuscc-lock.json');
 
-    // The first state write migrates the legacy machine choices from the on-disk state.json into
-    // overrides.json, unless that file already exists; reads never write it. state.json is then
-    // written without them.
+    const saveState = (state: MachineState) => fs.writeTextAtomic(statePath, serializeMachineState(state));
+
+    // Migrate choices only into an absent document. Preserve the old state before dropping them.
     const write = (state: MachineState) => Effect.gen(function* () {
-      if ((yield* fs.readText(overridesPath)) === undefined) {
-        const legacy = overridesFromLegacyState(yield* fs.readText(statePath)).value;
-        if (Object.keys(legacy).length > 0) {
-          yield* fs.writeTextAtomic(overridesPath, JSON.stringify({ version: 1, ...legacy }, null, 2) + '\n');
+      const before = yield* fs.readText(statePath);
+      const legacy = overridesFromLegacyState(before).value;
+      if (Object.keys(legacy).length > 0) {
+        yield* (yield* Backups).preserve(statePath, 'state.json', undefined, { private: true });
+        if ((yield* fs.readText(statePath)) !== before) return yield* Effect.fail(new FsFailed({
+          op: 'migrate choices', path: statePath, reason: 'state changed before migration',
+        }));
+        if ((yield* fs.readText(overridesPath)) === undefined) {
+          const serialized = serializeOverrides(legacy, undefined, overridesPath);
+          if (!serialized.ok) return yield* Effect.fail(new FsFailed({ op: 'migrate choices', path: overridesPath, reason: 'legacy choices are invalid' }));
+          yield* fs.writeTextAtomic(overridesPath, serialized.text);
         }
       }
-      const { version, repo, files, applied } = state;
-      yield* fs.writeTextAtomic(statePath, JSON.stringify({ version, repo, files, ...(applied ? { applied } : {}) }, null, 2) + '\n');
+      yield* saveState(state);
     });
 
     // Migrates the pre-Codex lock only when no state file exists; the old lock is left untouched.
     const read = Effect.gen(function* () {
-      const text = yield* fs.readText(statePath);
-      if (text !== undefined) return parseState(text) ?? emptyState;
-      const legacyText = yield* fs.readText(legacyPath);
-      const legacy = legacyText === undefined ? undefined : parseState(legacyText);
-      if (!legacy) return emptyState;
-      const files: Record<string, Baseline> = {};
-      for (const [oldKey, newKey] of Object.entries(LEGACY_KEYS)) {
-        if (legacy.files[oldKey]) files[newKey] = legacy.files[oldKey];
-      }
-      const migrated: MachineState = { ...emptyState, repo: legacy.repo, files };
-      yield* write(migrated);
-      return migrated;
+      const observed = yield* observeState(fs, paths);
+      if (observed.migrate) yield* saveState(observed.state);
+      return observed.state;
     });
 
     return {

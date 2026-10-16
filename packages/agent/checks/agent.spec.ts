@@ -474,7 +474,9 @@ test('runAgent reports cancellation after IPC cleanup and releases the lock', { 
     assert.ok(events.includes('running:started'));
     await Effect.runPromise(Fiber.interrupt(fiber));
     assert.ok(Exit.isFailure(await Effect.runPromise(Fiber.await(fiber))));
-    assert.deepEqual(events.slice(-3), ['shutdown:started', 'ipc_closed:completed', 'stopped:cancelled']);
+    assert.deepEqual(events.filter(event => /^(shutdown|ipc_closed|stopped):/.test(event)),
+      ['shutdown:started', 'ipc_closed:completed', 'stopped:cancelled']);
+    assert.equal(events.at(-1), 'stopped:cancelled');
     for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(m.paths.stateRoot, 'agent', name)), false, name);
   } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
 });

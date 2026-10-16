@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
-import { Processes, type Command } from '@nortuscc/machine';
+import { MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, Processes, type Command } from '@nortuscc/machine';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState, type OnboardingInput } from '../agent/onboarding.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
@@ -254,5 +254,25 @@ test('first target choice is recorded alongside existing unrelated overrides and
       { ...unrelated, manageConfig: configTargets.length > 0, configTargets: [...configTargets] });
     const backup = readdirSync(join(f.stateRoot, 'backups'))[0]!;
     assert.equal(readFileSync(join(f.stateRoot, 'backups', backup, 'overrides.json'), 'utf8'), before);
+  }
+});
+
+
+test('setup authority accepts legacy and bounded routing receipts, refusing malformed ownership without rewriting it', async (t) => {
+  const f = fixture(t); const repo = join(f.home, 'existing');
+  mkdirSync(join(repo, '.git'), { recursive: true }); mkdirSync(f.stateRoot);
+  const receipt = { fileId: 'claude:CLAUDE.md', blockId: MCP_ROUTING_BLOCK_ID, bytes: MCP_ROUTING_BYTES, state: 'released' };
+  const path = join(f.stateRoot, 'state.json');
+  for (const mcpRouting of [undefined, { version: 1, files: { 'claude:CLAUDE.md': receipt } }]) {
+    const text = JSON.stringify({ version: 1, repo, files: {}, ...(mcpRouting ? { mcpRouting } : {}) });
+    writeFileSync(path, text);
+    assert.equal((await setupState(f.input)).repo, repo);
+    assert.equal(readFileSync(path, 'utf8'), text);
+  }
+  for (const mcpRouting of [null, {}, { version: 1, files: { 'claude:CLAUDE.md': { ...receipt, bytes: 'foreign' } } }]) {
+    const text = JSON.stringify({ version: 1, repo, files: {}, mcpRouting });
+    writeFileSync(path, text);
+    await assert.rejects(setupState(f.input), /state.json.*invalid/);
+    assert.equal(readFileSync(path, 'utf8'), text);
   }
 });

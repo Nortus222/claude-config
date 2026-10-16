@@ -203,7 +203,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       && d.revision >= (changed.get(d.itemId) ?? Infinity) && range[d.revision - 1]?.items.some((i) => i.id === d.itemId)).map((d) => d.itemId));
   };
 
-  const compose = (decisions: ReadonlyArray<Decision>) => Effect.gen(function* () {
+  const compose = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
     const { repo, linked } = yield* repository;
     const range = yield* records;
     const cache = yield* verified(repo, range);
@@ -213,7 +213,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const headDocuments = cache.get(head.commitSha)!;
     let documents = headDocuments;
     const accepted = acceptedItems(range, decisions);
-    const overrides = yield* (yield* OverridesStore).read;
+    const overrides = choices?.overrides ?? (yield* (yield* OverridesStore).read);
     const conflicts = [...accepted].filter((id) => overrideOf(id, overrides.value) !== undefined).sort();
     // Accepted override conflicts stay visible, and use the baseline value under the override.
     const take = new Set([...accepted].filter((id) => !conflicts.includes(id)));
@@ -228,6 +228,14 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     return yield* snapshotFromDocuments({ documents, stateRoot: snapshotsRoot, overrides, now: now() });
   });
 
+  const offeredItems = Effect.gen(function* () {
+    const { repo } = yield* repository;
+    const range = yield* records;
+    yield* verified(repo, range);
+    const offers = new Map<string, SyncRevision>();
+    for (const revision of range) for (const item of revision.items) offers.set(item.id, revision);
+    return [...offers].map(([itemId, revision]) => ({ itemId, revision }));
+  });
   const fetch = Effect.gen(function* () { yield* repository; const range = yield* records; return { head: range[range.length - 1]! }; });
   const load = (revision: Revision) => Effect.gen(function* () {
     const { repo } = yield* repository;
@@ -236,8 +244,8 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const cache = yield* verified(repo, range.slice(0, revision.number));
     return yield* snapshot(cache.get(revision.commitSha)!, yield* (yield* OverridesStore).read);
   });
-  const effective = (decisions: ReadonlyArray<Decision>) => Effect.gen(function* () {
-    const composed = yield* compose(decisions);
+  const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
+    const composed = yield* compose(decisions, choices);
     return { applied: { ...yield* snapshot(composed.appliedDocuments, composed.overrides), revision: null }, effective: yield* snapshot(composed.documents, composed.overrides), conflicts: composed.conflicts };
   });
   const current = Effect.gen(function* () {
@@ -297,6 +305,6 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const available = <A>(effect: Effect.Effect<A, unknown, Services>) => provide(effect).pipe(
       Effect.catchTag('RevisionMismatch', () => unavailable('HEAD', 'hosted baseline unavailable')),
     );
-    return { setupId: options.setupId, trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>) => provide(effective(d)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
+    return { setupId: options.setupId, offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
   })).pipe(Layer.provide(services));
 };

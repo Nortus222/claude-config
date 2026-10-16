@@ -198,7 +198,7 @@ test('update writes the manifest into the checkout, with a held skill as the che
   assert.deepEqual(parseSkillsManifest(manifest).map((g) => [g.source, g.skills]), [['u/v', ['fresh', 'wizard']]]);
 });
 
-test('update reports a manifest it could not carry back to the checkout, and still closes its report', async (t) => {
+test('update reports a manifest it could not write to the author checkout, and still closes its report', async (t) => {
   if (process.platform === 'win32') return t.skip('Windows chmod does not deny directory writes');
   if (process.getuid?.() === 0) return t.skip('permissions are not enforced for root');
   const m = machine();

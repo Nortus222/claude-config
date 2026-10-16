@@ -7,7 +7,7 @@ import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
   backupsForRun, checkUpdates, execute, inspectSkills, lockRef, machinePaths, nodeFs, pinnedSource, pinsBySource, plan, planUpdates, Processes,
-  samePlan, selectAll, skillsDomain, splitPinned, updateItems,
+  samePlan, selectAll, skillsDomain, skillsUpdateDomain, splitPinned, updateItems,
   type Command, type MachineReport, type Observed, type Plan, type Progress,
 } from '../src/index.ts';
 import { fakeInstaller, readLock, skillSource } from './support/skills-source.ts';
@@ -280,4 +280,18 @@ test('removing a pin reinstalls the skill without a ref', async () => {
     ['npx -y skills add o/r --skill a --agent claude-code --global --yes']);
   assert.equal(readLock(m.paths).a!.ref, undefined);
   assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a latest\n');
+});
+
+
+test('scoped legacy update keeps source pins, content verification and selected native targets', async () => {
+  const m = skillsMachine(); mkdirSync(m.paths.repo,{ recursive: true }); mkdirSync(join(m.paths.agentsSkills,'a'),{ recursive:true });
+  writeFileSync(join(m.paths.agentsSkills,'a','SKILL.md'),'# old\n'); writeLock(m.paths,{ a: { source:'o/r',ref:NEXT } });
+  const src = skillSource(m.home); const sha = src.commit({ 'skills/a/SKILL.md':'# accepted pin\n' }); const installer = fakeInstaller(m.paths,src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths),nodeFs,installer.layer)));
+  const r = report([item('a','off-pin','apply')],[skill('a','o/r',pin(sha))]); const domain = skillsUpdateDomain(['claude']);
+  const p = plan('update',r,{ ...selectAll,targets:['claude'],only:['skill:a'] },[domain]);
+  const events = [...await Effect.runPromise(Stream.runCollect(execute(p,r,[domain])).pipe(Effect.provide(layer)))];
+  assert.equal(events.filter(event => event.type === 'finished' && event.outcome === 'failed').length,0);
+  assert.equal(readLock(m.paths).a!.ref,sha); assert.equal(readFileSync(join(m.paths.agentsSkills,'a/SKILL.md'),'utf8'),'# accepted pin\n');
+  assert.deepEqual(installer.commands[0]!.args,['-y','skills','add',`o/r#${sha}`,'--skill','a','--agent','claude-code','--global','--yes']);
 });

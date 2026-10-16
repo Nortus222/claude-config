@@ -1,8 +1,9 @@
-import { join } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { Context, Effect, Layer, Ref } from 'effect';
-import type { FsFailed } from './errors.ts';
+import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
 import { MachinePaths } from './paths.ts';
+import { privateFile } from './private-file.ts';
 
 // moveAside moves a live link as a link. preserve copies what a live link points at, so the backup
 // holds the content at that time rather than a link to the file about to change; a dangling link
@@ -10,12 +11,14 @@ import { MachinePaths } from './paths.ts';
 // moveAside/preserve return the backup path, or undefined when nothing was there. Within a run the
 // first call for a destination decides: a repeat returns that first answer untouched (the pre-run
 // copy, or undefined when the path was absent then), and moveAside still vacates the live path.
+// Private preservation accepts regular UTF-8 config files and writes 0600 bytes inside private
+// directories. It refuses redirected destinations and leaves the source permissions unchanged.
 export class Backups extends Context.Service<
   Backups,
   {
     readonly dir: Effect.Effect<string | undefined>;
     readonly moveAside: (path: string, relative: string, agent?: string) => Effect.Effect<string | undefined, FsFailed>;
-    readonly preserve: (path: string, relative: string, agent?: string) => Effect.Effect<string | undefined, FsFailed>;
+    readonly preserve: (path: string, relative: string, agent?: string, options?: { readonly private?: boolean }) => Effect.Effect<string | undefined, FsFailed>;
   }
 >()('machine/Backups') {}
 
@@ -40,7 +43,7 @@ export const backupsForRun = (started = new Date()) =>
           }
           yield* fs.copy(path, to);
         });
-      const keep = (op: 'move' | 'copy') => (path: string, relative: string, agent?: string) =>
+      const keep = (op: 'move' | 'copy') => (path: string, relative: string, agent?: string, options?: { readonly private?: boolean }) =>
         Effect.gen(function* () {
           const to = target(relative, agent);
           const seen = yield* Ref.get(first);
@@ -51,7 +54,27 @@ export const backupsForRun = (started = new Date()) =>
           const present = yield* fs.exists(path);
           if (present) {
             if (op === 'move') yield* fs.move(path, to);
-            else yield* copyOf(path, to);
+            else if (options?.private) {
+              if ((yield* fs.stat(path))?.kind !== 'file') return yield* Effect.fail(new FsFailed({ op: 'private backup', path, reason: 'requires a regular file' }));
+              const text = yield* fs.readText(path);
+              if (text === undefined) return yield* Effect.fail(new FsFailed({ op: 'private backup', path, reason: 'file disappeared' }));
+              // Resolve existing ancestors (including macOS's /var alias) before the private writer
+              // creates every new directory with 0700 and opens its temporary file with 0600.
+              let checked = dirname(to);
+              while (checked === paths.backups || checked.startsWith(paths.backups + sep)) {
+                const entry = yield* fs.stat(checked);
+                if (entry && entry.kind !== 'directory') return yield* Effect.fail(new FsFailed({ op: 'private backup', path: checked, reason: 'backup directory is redirected' }));
+                if (checked === paths.backups) break;
+                checked = dirname(checked);
+              }
+              let ancestor = dirname(to); const suffix = [basename(to)];
+              let real = yield* fs.realPath(ancestor);
+              while (!real && dirname(ancestor) !== ancestor) {
+                suffix.unshift(basename(ancestor)); ancestor = dirname(ancestor); real = yield* fs.realPath(ancestor);
+              }
+              if (!real) return yield* Effect.fail(new FsFailed({ op: 'private backup', path, reason: 'backup parent unavailable' }));
+              yield* privateFile(join(real, ...suffix)).write(text);
+            } else yield* copyOf(path, to);
           }
           const answer = present ? to : undefined;
           yield* Ref.update(first, (map) => new Map(map).set(to, answer));

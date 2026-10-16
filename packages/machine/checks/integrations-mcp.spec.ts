@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Effect } from 'effect';
-import { nodeProcesses } from '../src/index.ts';
+import { LaunchFailed, Processes, nodeProcesses } from '../src/index.ts';
 import { codexMcpListCommand, describeMcp, inspectMcp, mcpCommand, missingEnv, readCodexMcp } from '../src/integrations/mcp.ts';
 import { fakeBin } from './support/integrations.ts';
 import type { Declaration } from '../src/integrations/declaration.ts';
@@ -90,4 +90,16 @@ test('an absent codex, a non-zero exit or output of another shape is nothing con
   const object = fakeBin();
   object.codex({ installed: [] }, { marketplaces: [] }, 'process.exit(0)', { servers: SERVERS });
   assert.match((await mcpState(object.path)).error ?? '', /could not read the Codex MCP server list/);
+});
+
+for (const failure of ['parse', 'shape', 'exit', 'launch'] as const) test(`native MCP ${failure} diagnostics omit captured output and exception reasons`, async () => {
+  const secret = 'FAKE_TOKEN';
+  const result = await Effect.runPromise(readCodexMcp.pipe(Effect.provideService(Processes, {
+    run: () => failure === 'launch' ? Effect.fail(new LaunchFailed({ cmd: 'codex', reason: secret }))
+      : Effect.succeed({ code: failure === 'exit' ? 3 : 0, stdout: failure === 'shape' ? JSON.stringify({ secret }) : secret, stderr: secret }),
+  })));
+  assert.equal(result.servers.size, 0);
+  assert.ok(result.error);
+  assert.ok(!result.error.includes(secret));
+  assert.match(result.error, /could not (read|list).*Codex MCP/);
 });

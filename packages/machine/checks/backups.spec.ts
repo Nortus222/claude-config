@@ -123,3 +123,33 @@ test('the agent segment keeps two agents apart, and a folder without one sits un
   assert.equal(readFileSync(join(skill!, 'SKILL.md'), 'utf8'), '# tdd\n');
   assert.ok(existsSync(join(home, 'tdd', 'SKILL.md')));
 });
+
+test('private preservation keeps exact text in a private file and directory, including permissive sources', async () => {
+  const { home, run } = setup(); const live = join(home, 'registry.json');
+  writeFileSync(live, '{"credential":"private"}\r\n', { mode: 0o644 });
+  const backup = await run(b => b.preserve(live, 'registry.json', 'connections', { private: true }));
+  assert.equal(readFileSync(backup!, 'utf8'), '{"credential":"private"}\r\n');
+  assert.equal(lstatSync(backup!).mode & 0o777, 0o600);
+  assert.equal(lstatSync(join(backup!, '..')).mode & 0o777, 0o700);
+  assert.equal(lstatSync(live).mode & 0o777, 0o644);
+});
+
+test('private preservation records absence and rejects symlinks without touching their targets', async () => {
+  const { home, paths, run } = setup(); const target = join(home, 'target'); const link = join(home, 'link');
+  writeFileSync(target, 'secret'); symlinkSync(target, link);
+  await assert.rejects(run(b => b.preserve(link, 'registry.json', 'connections', { private: true })));
+  assert.equal(readFileSync(target, 'utf8'), 'secret'); assert.equal(existsSync(paths.backups), false);
+  await run(b => Effect.gen(function* () {
+    assert.equal(yield* b.preserve(join(home, 'missing'), 'missing', 'connections', { private: true }), undefined);
+    writeFileSync(join(home, 'missing'), 'new');
+    assert.equal(yield* b.preserve(join(home, 'missing'), 'missing', 'connections', { private: true }), undefined);
+  }));
+});
+
+test('private backups refuse redirected destination directories before writing secret bytes', async () => {
+  const { home, paths, run } = setup(); const live = join(home, 'registry'); const outside = join(home, 'outside');
+  writeFileSync(live, 'private'); mkdirSync(outside); mkdirSync(paths.stateRoot);
+  symlinkSync(outside, paths.backups);
+  await assert.rejects(run(b => b.preserve(live, 'registry', 'connections', { private: true })));
+  assert.deepEqual((await import('node:fs')).readdirSync(outside), []);
+});

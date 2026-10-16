@@ -193,3 +193,12 @@ test('notification requests and events have strict bounded opaque fields', () =>
     { ...event, notification: { ...notification, extra: true } },
   ]) assert.throws(() => decodeMessage(bad));
 });
+
+test('shared operation envelopes decode strictly and advertise an explicit compatible hello extension', () => {
+  const request = {...head,command:'operation',operation:'previewChange',input:{change:{kind:'reconcile',only:[]}}};
+  assert.deepEqual(decodeRequest(request), {...request,input:{...request.input,scope:{kind:'machine'}}});
+  for (const bad of [{...request,path:'/tmp'}, {...request,operation:'trustSetup'}, {...request,input:{...request.input,scope:{kind:'machine',force:true}}}]) assert.throws(() => decodeRequest(bad));
+  const hello = {agentVersion:'hash',protocol:3,policy:'notify',paused:null,operationsProtocol:1,app:{ownership:'app',version:'0.1.6',runtimeId:'hash'},operations:{available:true}};
+  assert.deepEqual(decodeHelloResult(hello), hello);
+  for (const bad of [{...hello,operationsProtocol:2},{...hello,app:{...hello.app,path:'/tmp'}},{...hello,operations:{available:true,enabled:true}}]) assert.throws(() => decodeHelloResult(bad));
+});

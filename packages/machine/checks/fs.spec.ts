@@ -267,3 +267,29 @@ test('appendText creates parents and appends in order', async () => {
   await run(Fs.use((fs) => Effect.andThen(fs.appendText(target, 'a\n'), fs.appendText(target, 'b\n'))));
   assert.equal(readFileSync(target, 'utf8'), 'a\nb\n');
 });
+
+test('createDirectory optionally creates parents while default claims remain exclusive', async () => {
+  const dir=scratch(), child=join(dir,'parent','child');
+  await run(Fs.use(fs=>fs.createDirectory(child,{recursive:true})));
+  await run(Fs.use(fs=>fs.createDirectory(child,{recursive:true})));
+  await assert.rejects(run(Fs.use(fs=>fs.createDirectory(child))));
+  await assert.rejects(run(Fs.use(fs=>fs.createDirectory(join(dir,'missing','claim')))));
+  assert.equal(statSync(child).isDirectory(),true);
+});
+
+test('exclusive file copies preserve collisions, including two simultaneous writers', async t => {
+  const dir=scratch();t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const source=join(dir,'source'),target=join(dir,'backup');writeFileSync(source,'dirty bytes\r\n');
+  const copy=()=>run(Fs.use(fs=>fs.copy(source,target,{exclusive:true})));
+  const results=await Promise.allSettled([copy(),copy()]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+  writeFileSync(source,'new bytes');await assert.rejects(copy());assert.equal(readFileSync(target,'utf8'),'dirty bytes\r\n');
+});
+
+test('default copies still replace files and preserve follow/symlink behavior', async t => {
+  const dir=scratch();t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const source=join(dir,'source'),target=join(dir,'target'),link=join(dir,'link');
+  writeFileSync(source,'new');writeFileSync(target,'old');symlinkSync(source,link);
+  await run(Fs.use(fs=>fs.copy(source,target)));assert.equal(readFileSync(target,'utf8'),'new');
+  await run(Fs.use(fs=>fs.copy(link,join(dir,'link-copy'))));assert.ok(lstatSync(join(dir,'link-copy')).isSymbolicLink());
+  await run(Fs.use(fs=>fs.copy(link,join(dir,'follow-copy'),{follow:true})));assert.ok(lstatSync(join(dir,'follow-copy')).isFile());assert.equal(readFileSync(join(dir,'follow-copy'),'utf8'),'new');
+});

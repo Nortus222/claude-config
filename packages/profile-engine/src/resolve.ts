@@ -7,6 +7,8 @@ import { SKILLS_SOURCE } from './skills.ts';
 import { INTEGRATIONS_SOURCE } from './integrations.ts';
 import { PINS_SOURCE } from './pins.ts';
 import { nestedSecretComplaints } from './secrets.ts';
+import { normalizeSkillSource } from './overrides.ts';
+import { resolveSkillAdditions } from './skill-additions.ts';
 
 type ResolveInput = {
   readonly base: BaseProfile;
@@ -15,8 +17,8 @@ type ResolveInput = {
 };
 
 // Layers pins and machine overrides over the base profile and records which layer decided every
-// value. Pure. An override or pin naming something the base does not declare becomes an issue and
-// changes nothing, so the base profile stays the only list of what may be managed.
+// value. Explicit machine skill declarations extend the skill list; other overrides still only
+// select declarations and owned settings from the base profile.
 export function resolveProfile({
   base,
   pins = { value: {}, source: PINS_SOURCE, issues: [] },
@@ -34,18 +36,20 @@ export function resolveProfile({
   }
   const files = base.files.map((file) => resolveFile(file, base, chosen, machine, complain));
 
-  const declaredSkills = new Set(base.skills.flatMap((g) => g.skills));
+  const additions = chosen.skillAdditions ?? [];
+  const declaredSkills = new Set([...base.skills.flatMap((g) => g.skills), ...additions.map(a => a.name)]);
   for (const name of Object.keys(chosen.skills ?? {})) {
     if (!declaredSkills.has(name)) complain(`skills.${name}`, `skill '${name}' is not in the skills manifest`);
   }
-  const declaredSources = new Set(base.skills.map((g) => g.source));
+  const sourceKey = (source: string) => additions.length ? normalizeSkillSource(source) ?? source : source;
+  const declaredSources = new Set([...base.skills.map((g) => sourceKey(g.source)), ...additions.map(a => sourceKey(a.source))]);
   for (const source of Object.keys(pins.value)) {
-    if (!declaredSources.has(source)) {
+    if (!declaredSources.has(sourceKey(source))) {
       issues.push(issue('pin', pins.source, `pins.${source}`, `source '${source}' is not in the skills manifest`));
     }
   }
   const pinOrigin: Origin = { layer: 'pin', source: pins.source };
-  const skills = base.skills.flatMap((group) =>
+  const inheritedSkills = base.skills.flatMap((group) =>
     group.skills.map((name) => {
       const choice = own(chosen.skills, name);
       const ref = own(pins.value, group.source);
@@ -60,6 +64,9 @@ export function resolveProfile({
       };
     }),
   );
+
+  const skills = additions.length
+    ? resolveSkillAdditions(inheritedSkills, additions, chosen.skills, pins, machine, issues) : inheritedSkills;
 
   const declaredIntegrations = new Set(base.integrations.map((i) => i.id));
   for (const id of Object.keys(chosen.integrations ?? {})) {

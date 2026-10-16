@@ -1,46 +1,44 @@
+import { IdSchema as Id, KeySchema as Key, MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HISTORY, HistoryCursorSchema, WirePausedSchema, ObservedSchema, IssueSchema, ProfileSchema, StepSchema, PlanSchema, PreviewResultSchema, ApplyResultSchema, ProgressSchema, WireStatusSchema, InspectResultSchema } from '../operations/wire.ts';
+export { MAX_EXCLUDED, MAX_KEY_LENGTH, MAX_HISTORY, HistoryCursorSchema, WirePausedSchema, ObservedSchema, IssueSchema, ProfileSchema, StepSchema, PlanSchema, PreviewResultSchema, ApplyResultSchema, ProgressSchema, WireStatusSchema, InspectResultSchema } from '../operations/wire.ts';
 import { DeviceStartResponseSchema, DisplayNameSchema, IdSchema as HostedId, ItemIdSchema as HostedItemId, RevisionNumberSchema, SyncSetupSchema, SyncMachineSchema, MachinePatchSchema, IsoTimeSchema as HostedTime } from '@nortuscc/hosted-protocol';
 import { HOSTED_FAILURE_CODES } from '@nortuscc/hosted-client/transport';
+import { operationDefinitions, type OperationName } from '../operations/index.ts';
 import { Schema } from 'effect';
 import type { HistoryEvent } from '@nortuscc/machine';
-import type { AgentStatus, StatusError } from '../job.ts';
+import type { AgentStatus } from '../job.ts';
 import { POLICIES } from '../policy-values.ts';
 
 // Protocol v3: JSON lines on the agent's socket. It is protocol v2 from the desktop backend,
-// unchanged, plus the `hello` handshake, the agent's own commands and status events. Every
-// argument is an opaque key, id or enum, never a path, command line or URL.
+// unchanged, plus hello, agent commands and status events. Shared operations use an additive
+// envelope with operationsProtocol 1; legacy requests and replies retain their v3 shapes.
+// Legacy arguments are opaque keys, ids and enums. Skill discovery adds a validated public source
+// identity, never a caller-selected filesystem path or command.
 export const PROTOCOL_VERSION = 3;
 export const MAX_RECORD_BYTES = 1_048_576;
-export const MAX_EXCLUDED = 10_000;
-export const MAX_KEY_LENGTH = 500;
 export const MAX_DECISIONS = 1000;
-export const MAX_HISTORY = 500;
 
 export type ErrorCode =
   | 'INVALID_REQUEST' | 'MALFORMED' | 'OVERSIZED' | 'SHUTDOWN' | 'BUSY' | 'LOCKED' | 'NO_REPORT' | 'UNKNOWN_KEY'
   | 'UNKNOWN_PLAN' | 'PROFILE_INVALID' | 'REPO_NOT_FOUND' | 'INSPECT_FAILED' | 'INTERNAL'
-  | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
+  | 'TARGET_UNAVAILABLE' | 'SKILL_INSTALL_UNAVAILABLE' | 'APP_UNAVAILABLE' | 'UNSUPPORTED_SCOPE' | 'UNKNOWN_RUN' | 'REQUEST_CONFLICT' | 'RUN_FAILED' | 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PAUSED' | 'UNKNOWN_BACKUP' | 'BACKUP_PRUNED' | 'NOT_SIGNED_IN';
 
 const Version = Schema.Literal(PROTOCOL_VERSION);
-const Id = Schema.String.check(Schema.isBetweenLength(1, 100));
-const Key = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
 const ItemId = Schema.String.check(Schema.isBetweenLength(1, MAX_KEY_LENGTH));
-const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 // A full SHA-1 or SHA-256 commit, lower-case hex.
 const Sha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}([0-9a-f]{24})?$/));
-const IsoTime = Schema.String.check(Schema.makeFilter((s: string) =>
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(s) && !Number.isNaN(Date.parse(s))));
-export const HistoryCursorSchema = Schema.Struct({
-  at: IsoTime,
-  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
-});
 const NotificationId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const Receipt = Schema.String.check(Schema.isBetweenLength(1, 200));
 export const NotificationSchema = Schema.Struct({ id: NotificationId, title: Schema.String.check(Schema.isMaxLength(100)), body: Schema.String.check(Schema.isMaxLength(500)) });
 export const NotificationEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('notification'), notification: NotificationSchema, receipt: Receipt });
 export const NotificationResultSchema = Schema.Struct({ notification: Schema.NullOr(NotificationSchema), receipt: Schema.NullOr(Receipt) });
 const Client = Schema.Literals(['app', 'cli']);
+export const OPERATIONS_PROTOCOL_VERSION = 1;
+export type AppRuntime = { readonly version: string; readonly runtimeId: string; readonly appDirectory: string; readonly platform: string; readonly target: string; readonly metadataPath: string };
+const AppIdentitySchema = Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Id), runtimeId: Schema.NullOr(Id) });
+const OperationRequestSchema = Schema.Union(Object.entries(operationDefinitions).map(([operation, definition]) => Schema.Struct({
+  version: Version, id: Id, command: Schema.Literal('operation'), operation: Schema.Literal(operation as OperationName), input: definition.input,
+})));
 const Policy = Schema.Literals(POLICIES);
-const STATUS_ERRORS = ['PROFILE_INVALID', 'DECISIONS_INVALID', 'REVISION_UNAVAILABLE', 'JOB_FAILED'] as const satisfies ReadonlyArray<StatusError>;
 
 const LocalDecisionSchema = Schema.Struct({
   setupId: Schema.Literal('local'),
@@ -52,6 +50,8 @@ const LocalDecisionSchema = Schema.Struct({
 const DecisionSchema = Schema.Union([LocalDecisionSchema, Schema.Struct({ setupId: HostedId, id: HostedItemId, revision: RevisionNumberSchema, decision: Schema.Literals(['accept', 'skip']) })]);
 
 export const RequestSchema = Schema.Union([
+  OperationRequestSchema,
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Schema.Literal('mcp'), runtimeId: Id }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['hostedState', 'signOut', 'syncNow']) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('signIn'), name: Schema.optionalKey(DisplayNameSchema), reportStatus: Schema.optionalKey(Schema.Boolean) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('trustSetup'), setupId: HostedId }),
@@ -59,7 +59,8 @@ export const RequestSchema = Schema.Union([
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notification'), notificationId: NotificationId }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('notificationAck'), notificationId: NotificationId, receipt: Receipt, delivered: Schema.Boolean }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('hello'), token: Schema.String.check(Schema.isBetweenLength(1, 200)), client: Client }),
-  Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['status', 'inspect', 'cancel', 'resume', 'shutdown', 'subscribe']) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literals(['status', 'inspect', 'cancel', 'resume', 'shutdown']) }),
+  Schema.Struct({ version: Version, id: Id, command: Schema.Literal('subscribe'), operationsProtocol: Schema.optionalKey(Schema.Literal(OPERATIONS_PROTOCOL_VERSION)) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('preview'), exclude: Schema.Array(Key).check(Schema.isMaxLength(MAX_EXCLUDED)) }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('apply'), planId: Id }),
   Schema.Struct({ version: Version, id: Id, command: Schema.Literal('decide'), items: Schema.Array(DecisionSchema).check(Schema.isMaxLength(MAX_DECISIONS)) }),
@@ -71,85 +72,21 @@ export const RequestSchema = Schema.Union([
   }),
 ]);
 
-const WirePausedSchema = Schema.NullOr(Schema.Struct({ reason: Schema.String, at: Schema.String }));
-
 export const HelloResultSchema = Schema.Struct({
+  operationsProtocol: Schema.optionalKey(Schema.Literal(OPERATIONS_PROTOCOL_VERSION)),
+  app: Schema.optionalKey(AppIdentitySchema),
+  operations: Schema.optionalKey(Schema.Struct({ available: Schema.Boolean, reason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(500))) })),
   agentVersion: Schema.String,
   protocol: Version,
   policy: Policy,
   paused: WirePausedSchema,
 });
 
-const Domain = Schema.Literals(['config', 'integrations', 'skills']);
-const Origin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String });
+export const OperationRunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('operation-run'), runId: Id });
+export type OperationRunEvent = typeof OperationRunEventSchema.Type;
 
-export const ObservedSchema = Schema.Struct({
-  key: Schema.String,
-  domain: Domain,
-  // Absent for an agent-neutral item (a shared skill).
-  target: Schema.optional(Schema.Literals(['claude', 'codex'])),
-  label: Schema.String,
-  group: Schema.String,
-  state: Schema.String,
-  disposition: Schema.Literals(['in-sync', 'apply', 'capture', 'blocked', 'excluded', 'undeclared']),
-  note: Schema.optional(Schema.String),
-  from: Schema.optional(Origin),
-});
-const IssueSchema = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String });
-const ProfileSchema = Schema.Struct({ repo: Schema.String, revision: Schema.NullOr(Schema.String), overrides: Schema.String, issues: Schema.Array(IssueSchema) });
-
-const StepSchema = Schema.Struct({
-  key: Schema.String,
-  domain: Domain,
-  action: Schema.Literals(['write-file', 'merge-keys', 'restore', 'remove', 'capture-file', 'write-manifest', 'install-integration', 'install-skills', 'update-skills']),
-  summary: Schema.String,
-  touches: Schema.Array(Schema.String),
-  interruptible: Schema.Boolean,
-  targets: Schema.optional(Schema.Array(Schema.Literals(['claude', 'codex']))),
-});
-const PlanSchema = Schema.Struct({
-  kind: Schema.Literals(['apply', 'uninstall', 'capture', 'update']),
-  steps: Schema.Array(StepSchema),
-  skipped: Schema.Array(Schema.Struct({ key: Schema.String, reason: Schema.String })),
-});
-export const PreviewResultSchema = Schema.Struct({ planId: Id, plan: PlanSchema });
-export const ApplyResultSchema = Schema.Union([
-  Schema.Struct({ status: Schema.Literal('started'), runId: Id }),
-  // The machine changed since the preview: nothing ran, and this is the new preview.
-  Schema.Struct({ status: Schema.Literal('stale'), planId: Id, plan: PlanSchema }),
-]);
-
-// @nortuscc/machine's Progress, plus `failed`: the run could not start or stopped on a defect.
-const ProgressSchema = Schema.Union([
-  Schema.Struct({ type: Schema.Literal('started'), index: Count, total: Count, step: StepSchema }),
-  Schema.Struct({ type: Schema.Literal('finished'), index: Count, total: Count, key: Schema.String, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Schema.String }),
-  Schema.Struct({ type: Schema.Literal('done'), ok: Count, failed: Count, backups: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal('cancelled'), remaining: Schema.Array(Schema.String), backups: Schema.optional(Schema.String) }),
-  Schema.Struct({ type: Schema.Literal('failed'), message: Schema.String }),
-]);
 export const RunEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('progress'), runId: Id, progress: ProgressSchema });
 
-// The agent's last job status, as clients see it.
-export const WireStatusSchema = Schema.Struct({
-  at: Schema.String,
-  policy: Policy,
-  paused: WirePausedSchema,
-  trusted: Schema.Boolean,
-  applying: Schema.optionalKey(Schema.Boolean),
-  pending: Schema.Array(Schema.Struct({
-    key: Schema.String,
-    itemId: Schema.String,
-    verdict: Schema.Literals(['inert', 'held']),
-    reason: Schema.optionalKey(Schema.String),
-  })),
-  drift: Schema.Array(Schema.String),
-  conflicts: Schema.Array(Schema.String),
-  probeErrors: Schema.Array(Schema.String),
-  error: Schema.optionalKey(Schema.Literals(STATUS_ERRORS)),
-  detail: Schema.optionalKey(Schema.String),
-  counts: Schema.Struct({ pending: Count, held: Count, ready: Count, drift: Count }),
-});
-export const InspectResultSchema = Schema.Struct({ profile: ProfileSchema, items: Schema.Array(ObservedSchema), probeErrors: Schema.Array(Schema.String), status: Schema.optionalKey(WireStatusSchema) });
 export const decodeWireStatus = Schema.decodeUnknownSync(WireStatusSchema, { onExcessProperty: 'error' });
 export const StatusEventSchema = Schema.Struct({ version: Version, event: Schema.Literal('status'), status: WireStatusSchema });
 
@@ -169,10 +106,13 @@ export const HostedStateSchema = Schema.Struct({
   pollAfter: RevisionNumberSchema, error: Schema.NullOr(Schema.Literals(HOSTED_FAILURE_CODES)),
 });
 export const decodeSignInResult = Schema.decodeUnknownSync(SignInResultSchema, strict);
+// Internal owner metadata must not change the existing app/CLI response contract.
+export const toWireHostedState = Schema.decodeUnknownSync(HostedStateSchema, { onExcessProperty: 'ignore' });
 export const decodeHostedState = Schema.decodeUnknownSync(HostedStateSchema, strict);
 export type WireHostedState = typeof HostedStateSchema.Type;
-export const decodeRequest = Schema.decodeUnknownSync(RequestSchema, strict);
-export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
+const decodeRequestSchema = Schema.decodeUnknownSync(RequestSchema, strict);
+export const decodeRequest = (input: unknown): Request => decodeRequestSchema(input) as Request;
+export const decodeMessage = Schema.decodeUnknownSync(Schema.Union([OperationRunEventSchema, RunEventSchema, StatusEventSchema, NotificationEventSchema, ResponseSchema]), strict);
 export const decodeHelloResult = Schema.decodeUnknownSync(HelloResultSchema, strict);
 export const decodeInspectResult = Schema.decodeUnknownSync(InspectResultSchema, strict);
 export const decodePreviewResult = Schema.decodeUnknownSync(PreviewResultSchema, strict);
@@ -183,7 +123,8 @@ export type HistoryResult = {
   readonly events: ReadonlyArray<HistoryEvent>;
   readonly nextBefore: HistoryCursor | null;
 };
-export type Request = typeof RequestSchema.Type;
+export type OperationRequest = { [N in OperationName]: { readonly version: typeof PROTOCOL_VERSION; readonly id: string; readonly command: 'operation'; readonly operation: N; readonly input: import('../operations/index.ts').OperationInput<N> } }[OperationName];
+export type Request = Exclude<typeof RequestSchema.Type, { readonly command: 'operation' }> | OperationRequest;
 export type WireDecision = typeof DecisionSchema.Type;
 export type HelloResult = typeof HelloResultSchema.Type;
 export type WireObserved = typeof ObservedSchema.Type;
@@ -201,7 +142,7 @@ export type StatusErrorCode = NonNullable<WireStatus['error']>;
 export type StatusEvent = typeof StatusEventSchema.Type;
 export type Response = typeof ResponseSchema.Type;
 export type NotificationEvent = typeof NotificationEventSchema.Type;
-export type Message = RunEvent | StatusEvent | NotificationEvent | Response;
+export type Message = OperationRunEvent | RunEvent | StatusEvent | NotificationEvent | Response;
 
 // A job's status for clients: verdicts flattened, the pause without its run id, no auto-apply
 // outcome, and counts. `ready` counts inert pending items this machine leaves to a person: on

@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { agentLayer, DEFAULT_STATE, unitPath, type ServiceTarget, type WireStatus } from '@nortuscc/agent';
-import { backupsForRun, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
+import { backupsForRun, MCP_ROUTING_BLOCK_ID, MCP_ROUTING_BYTES, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, type AgentConnection } from '../../../src/agent-client.ts';
-import { ensureAgent } from '../agent/lifecycle.ts';
+import { ensureAgent, validateExistingAuthority } from '../agent/lifecycle.ts';
 
 const STATUS: WireStatus = {
   at: '2026-10-06T12:00:00.000Z', policy: 'notify', paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [],
@@ -341,5 +341,24 @@ test('recorded executable follows successful relocation but failed registration 
 test('invalid executable refuses lifecycle before invoking service adapters', async (t) => {
   const f = fixture(t);
   await assert.rejects(f.run({ appPath: 'relative/app' }), /absolute|app path/);
+  assert.deepEqual(f.events, []);
+});
+
+
+test('lifecycle authority validates optional routing metadata before any service action', async (t) => {
+  const f = fixture(t);
+  const receipt = { fileId: 'codex:AGENTS.md', blockId: MCP_ROUTING_BLOCK_ID, bytes: MCP_ROUTING_BYTES, state: 'active' };
+  const path = join(f.paths.stateRoot, 'state.json');
+  const check = () => Effect.runPromise(validateExistingAuthority(f.input).pipe(Effect.provide(agentLayer(f.paths))));
+  for (const mcpRouting of [undefined, { version: 1, files: { 'codex:AGENTS.md': receipt } }]) {
+    const text = JSON.stringify({ version: 1, repo: f.paths.repo, files: {}, ...(mcpRouting ? { mcpRouting } : {}) });
+    writeFileSync(path, text); await check();
+    assert.equal(readFileSync(path, 'utf8'), text);
+  }
+  for (const mcpRouting of [null, [], { version: 1, files: { 'codex:AGENTS.md': { ...receipt, state: 'invalid' } } }]) {
+    const text = JSON.stringify({ version: 1, repo: f.paths.repo, files: {}, mcpRouting });
+    writeFileSync(path, text); await assert.rejects(check(), /setup authority is invalid/);
+    assert.equal(readFileSync(path, 'utf8'), text);
+  }
   assert.deepEqual(f.events, []);
 });

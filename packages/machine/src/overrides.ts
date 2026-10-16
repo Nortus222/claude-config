@@ -1,9 +1,13 @@
 import { join } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
-import { decodeOverrides, overridesFromLegacyState, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
-import type { FsFailed } from './errors.ts';
+import { decodeOverrides, serializeOverrides, overridesFromLegacyState, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
+import { FsFailed } from './errors.ts';
 import { Fs } from './fs.ts';
-import { MachinePaths } from './paths.ts';
+import { MachinePaths, type MachinePathsValue } from './paths.ts';
+import { canonical } from './config/file-state.ts';
+import { Backups } from './backups.ts';
+
+export const overridesPath = (paths: Pick<MachinePathsValue, 'stateRoot'>): string => join(paths.stateRoot, 'overrides.json');
 
 // overrides.json is the only record of this machine's choices. A machine whose choices are still
 // in state.json's legacy skillsOnly/configTargets has them moved here by the first state write
@@ -12,7 +16,7 @@ export class OverridesStore extends Context.Service<
   OverridesStore,
   {
     readonly read: Effect.Effect<Input<MachineOverrides>, FsFailed>;
-    readonly write: (overrides: MachineOverrides) => Effect.Effect<void, FsFailed>;
+    readonly write: (overrides: MachineOverrides, expected?: MachineOverrides) => Effect.Effect<void, FsFailed, Backups>;
   }
 >()('machine/OverridesStore') {}
 
@@ -23,7 +27,7 @@ export const overridesStore = Layer.effect(
   Effect.gen(function* () {
     const paths = yield* MachinePaths;
     const fs = yield* Fs;
-    const path = join(paths.stateRoot, 'overrides.json');
+    const path = overridesPath(paths);
     const statePath = join(paths.stateRoot, 'state.json');
 
     const read = Effect.gen(function* () {
@@ -41,7 +45,24 @@ export const overridesStore = Layer.effect(
 
     return {
       read,
-      write: (overrides) => fs.writeTextAtomic(path, JSON.stringify({ version: 1, ...overrides }, null, 2) + '\n'),
+      write: (overrides, expected) => Effect.gen(function* () {
+        const text = yield* fs.readText(path);
+        let current: unknown;
+        try { current = text === undefined ? undefined : JSON.parse(text); }
+        catch { return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'current document is invalid JSON' })); }
+        const legacyText = text === undefined ? yield* fs.readText(statePath) : undefined;
+        const baseline = text === undefined ? overridesFromLegacyState(legacyText, statePath) : decodeOverrides(current, path);
+        if (expected !== undefined && canonical(baseline.value) !== canonical(expected)) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'known choices changed since acceptance' }));
+        const serialized = serializeOverrides(overrides, current, path);
+        if (!serialized.ok) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'current or proposed overrides are invalid' }));
+        const backups = yield* Backups;
+        yield* backups.preserve(path, 'overrides.json', undefined, { private: true });
+        if (text === undefined) yield* backups.preserve(statePath, 'state.json', undefined, { private: true });
+        // Callers hold the apply lock; refuse an external edit during preservation as well.
+        if ((yield* fs.readText(path)) !== text) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path, reason: 'document changed before replacement' }));
+        if (text === undefined && (yield* fs.readText(statePath)) !== legacyText) return yield* Effect.fail(new FsFailed({ op: 'write overrides', path: statePath, reason: 'legacy choices changed before replacement' }));
+        yield* fs.writeTextAtomic(path, serialized.text);
+      }),
     };
   }),
 );

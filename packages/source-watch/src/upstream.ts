@@ -1,7 +1,8 @@
+import { guardedCacheRead, ordinaryFallback } from './services.ts';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { Fs, nodeFs } from '@nortuscc/machine';
 import { join } from 'node:path';
-import { Effect } from 'effect';
+import { Cause, Effect } from 'effect';
 import { skillFolders } from './discover.ts';
 import { DIFF_FLAGS, Git, GitFailed, LOG_FORMAT, parseLog } from './git.ts';
 import type { Revision, SkillChange, SourceReport, SourceStatus, WatchedSource } from './model.ts';
@@ -18,36 +19,32 @@ export function cacheFolder(cacheDir: string, url: string): string {
 }
 
 // One source's upstream: its latest revision, how that relates to the baseline, the commits
-// between them and what changed in the setup's skills. Any git failure becomes an
-// `unreachable` report, so one source never fails another.
-export const watchUpstream = (
+// between them and what changed in the setup's skills. Ordinary Git failures become
+// unreachable reports; cleanup defects retain ownership uncertainty.
+export const watchUpstreamWithServices = (
   source: WatchedSource,
-  options: { readonly cacheDir: string },
-): Effect.Effect<SourceReport, never, Git> =>
-  inspect(source, options.cacheDir).pipe(
-    Effect.catch((error) =>
-      Effect.succeed({
-        source: redact(source.source),
-        url: redact(source.url),
-        status: 'unreachable',
-        reason: error.reason,
-        commits: [],
-        skills: [],
-        added: [],
-      } satisfies SourceReport),
-    ),
+  options: { readonly cacheDir: string; readonly toRevision?: string },
+): Effect.Effect<SourceReport, never, Git | Fs> =>
+  guardedCacheRead(cacheFolder(options.cacheDir,source.url),inspect(source, options.cacheDir, options.toRevision)).pipe(
+    Effect.catchCause((cause) => {
+      // Ordinary Git failures become rows; mixed cleanup/interruption causes retain ownership facts.
+      if(cause.reasons.some(reason=>!Cause.isFailReason(reason))) return Effect.failCause(cause) as Effect.Effect<never>;
+      const error=cause.reasons.find(Cause.isFailReason);
+      return Effect.succeed({source:redact(source.source),url:redact(source.url),status:'unreachable',reason:error?.error.reason??'Source read unavailable',commits:[],skills:[],added:[]} satisfies SourceReport);
+    }),
   );
 
-const inspect = (source: WatchedSource, cacheDir: string): Effect.Effect<SourceReport, GitFailed, Git> =>
+const inspect = (source: WatchedSource, cacheDir: string, toRevision?: string): Effect.Effect<SourceReport, GitFailed, Git | Fs> =>
   Effect.gen(function* () {
     const git = yield* Git;
     const dir = cacheFolder(cacheDir, source.url);
     const run: Run = (args, ok) => git.run(args, ok === undefined ? { cwd: dir } : { cwd: dir, ok });
 
-    if (existsSync(dir)) yield* run(['fetch', '--prune', '--quiet', 'origin', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']);
+    if (yield* (yield* Fs).exists(dir)) yield* run(['fetch', '--prune', '--quiet', 'origin', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']);
     else yield* git.run(['clone', '--bare', '--filter=blob:none', '--quiet', '--', source.url, dir]);
 
-    const latest = yield* revision(run, 'HEAD');
+    if(toRevision?.startsWith('-')) return yield* Effect.fail(new GitFailed({reason:'Invalid source revision'}));
+    const latest = yield* revision(run, toRevision ?? 'HEAD');
     const atLatest = yield* skillsAt(run, latest.sha);
     const report = { source: redact(source.source), url: redact(source.url), latest, commits: [], added: [] };
 
@@ -104,7 +101,7 @@ const findCommit = (run: Run, ref: string): Effect.Effect<string | undefined, Gi
     );
     let sha = yield* resolve;
     if (sha === '' && FULL_SHA.test(ref)) {
-      yield* run(['fetch', '--quiet', 'origin', ref]).pipe(Effect.ignore);
+      yield* run(['fetch', '--quiet', 'origin', ref]).pipe(ordinaryFallback(() => undefined));
       sha = yield* resolve;
     }
     return sha === '' ? undefined : sha;
@@ -161,3 +158,6 @@ const compareSkill = (
       ...(skillMd === '' ? {} : { skillMd }),
     } satisfies SkillChange;
   });
+
+// Standalone convenience adapter preserves existing callers.
+export const watchUpstream = (...args: Parameters<typeof watchUpstreamWithServices>) => watchUpstreamWithServices(...args).pipe(Effect.provide(nodeFs));

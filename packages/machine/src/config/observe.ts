@@ -6,13 +6,14 @@ import { hashText } from '../hash.ts';
 import { homeDir, MachinePaths, type MachinePathsValue } from '../paths.ts';
 import type { Baseline } from '../state.ts';
 import { fileState, hashValue } from './file-state.ts';
+import { routingFile, splitMcpRouting } from './mcp-routing.ts';
 import { splitProjectTrust } from './project-trust.ts';
 
 // What `steps` needs beyond `state`. recorded: nortuscc holds a baseline. local-changed: the machine
 // side differs from it (uninstall's "changed since apply"). local-absent: nothing on the machine
 // side. baseline-stale: both sides agree, but on content newer than the baseline. baseline-dropped:
 // the document holds baselines for keys the repo no longer owns (on its first reading only).
-export type Fact = 'recorded' | 'local-changed' | 'local-absent' | 'baseline-stale' | 'baseline-dropped';
+export type Fact = 'recorded' | 'local-changed' | 'local-absent' | 'baseline-stale' | 'baseline-dropped' | 'routing-missing' | 'routing-retiring' | 'routing-recorded' | `copy-evidence:${string}`;
 
 // One copied file or settings key as it stands now.
 export type Reading = {
@@ -23,7 +24,7 @@ export type Reading = {
   readonly from: Origin;
   readonly note?: string;
 };
-export type CopyReading = Reading & { readonly repoText?: string; readonly localText?: string };
+export type CopyReading = Reading & { readonly repoText?: string; readonly localText?: string; readonly localBody?: string; readonly routing?: ReturnType<typeof splitMcpRouting> };
 export type Document =
   | { readonly kind: 'absent' }
   | { readonly kind: 'corrupt' }
@@ -69,7 +70,7 @@ const factsFor = (baseline: string | undefined, repo: string | undefined, local:
   ...(state === 'clean' && baseline !== repo ? ['baseline-stale' as const] : []),
 ];
 
-export const readCopy = (file: ResolvedFile, baselines: Readonly<Record<string, Baseline>>) =>
+export const readCopy = (file: ResolvedFile, baselines: Readonly<Record<string, Baseline>>, ownership?: unknown) =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const { src, dest } = filePaths(yield* MachinePaths, file);
@@ -77,10 +78,21 @@ export const readCopy = (file: ResolvedFile, baselines: Readonly<Record<string, 
     const localText = yield* fs.readText(dest);
     const baseline = baselines[file.id]?.hash;
     const repo = contentHash(file, repoText);
-    const local = contentHash(file, localText);
-    const state = fileState({ baseline, repo, local });
+    const localRouting = routingFile(file) ? splitMcpRouting(localText, file.id, ownership) : undefined;
+    const repoRouting = routingFile(file) ? splitMcpRouting(repoText, file.id, undefined) : undefined;
+    const routing = repoRouting?.status === 'conflict'
+      ? { ...localRouting!, status: 'conflict' as const, note: 'The repo contains a foreign MCP routing block; remove it before syncing instructions' }
+      : localRouting;
+    const localBody = routing ? routing.body : localText;
+    const local = contentHash(file, localBody);
+    const state = routing?.status === 'conflict' ? 'routing-conflict' : fileState({ baseline, repo, local });
+    const facts: Fact[] = factsFor(baseline, repo, local, state);
+    if (routingFile(file)) facts.push(`copy-evidence:${hashText(JSON.stringify({ repoText, localText, baseline, routing: routing?.receipt, conflict: routing?.status === 'conflict' ? ownership : undefined }))}`);
+    if (routing?.receipt && (routing.receipt.state === 'active' || routing.status === 'owned')) facts.push('routing-recorded');
+    if (routing?.receipt?.state === 'active' && routing.status === 'absent') facts.push('routing-missing');
+    if (routing?.receipt?.state === 'released' && routing.status === 'owned') facts.push('routing-retiring');
     const reading: CopyReading = {
-      key: itemKey(file.id), label: file.dest, state, facts: factsFor(baseline, repo, local, state), from: file.from, repoText, localText,
+      key: itemKey(file.id), label: file.dest, state, facts, from: file.from, repoText, localText, localBody, routing, ...(routing?.note ? { note: routing.note } : {}),
     };
     return reading;
   });
@@ -136,3 +148,7 @@ export const readMerge = (file: ResolvedFile, desired: DesiredConfig, baselines:
     const reading: DocumentReading = { readings, local, repoText };
     return reading;
   });
+
+// Exact config-domain evidence; public wire observations deliberately omit these facts.
+export const sameCopyEvidence = (expected: ReadonlyArray<string> | undefined, current: CopyReading): boolean =>
+  expected?.find(f => f.startsWith('copy-evidence:')) === current.facts.find(f => f.startsWith('copy-evidence:'));

@@ -50,7 +50,16 @@ export type BaseProfile = {
 // Approved revision per skill source.
 export type Pins = Readonly<Record<string, string>>;
 
+// A machine declaration names content and the native targets that must expose it.
+export type SkillAddition = {
+  readonly source: string;
+  readonly name: string;
+  readonly targets: ReadonlyArray<Target>;
+  readonly revision?: string;
+};
+
 export type MachineOverrides = {
+  readonly skillAdditions?: ReadonlyArray<SkillAddition>;
   readonly manageConfig?: boolean;
   readonly configTargets?: ReadonlyArray<Target>;
   readonly settings?: Readonly<Record<string, Settings>>;
@@ -64,6 +73,9 @@ export type ResolvedFile = FileEntry & {
   readonly keys?: Readonly<Record<string, { readonly value: unknown; readonly from: Origin }>>;
 };
 export type ResolvedSkill = {
+  // Present only when an explicit machine declaration contributes required targets.
+  readonly targets?: ReadonlyArray<Target>;
+  readonly declaredFrom?: Origin;
   readonly name: string;
   readonly source: string;
   readonly exact: boolean;

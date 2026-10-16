@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto';
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { bundleMcp } from './bundle-mcp.mjs';
+import { bundleRuntimeLicenses } from './bundle-runtime-licenses.mjs';
 
 // Portable test resources are independent of the macOS release bundler.
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -16,6 +18,7 @@ try {
     entryPoints: [join(root, 'agent/main.ts')], bundle: true, platform: 'node',
     format: 'esm', target: 'esnext', outfile: join(resources, 'agent.mjs'),
   });
+  const mcp = await bundleMcp({ root, resources });
   const sourceRuntime = process.env.DESKTOP_BUN_RUNTIME || execFileSync('bun', ['-e', 'console.log(process.execPath)'], {
     cwd: resources, encoding: 'utf8', timeout: 5000, windowsHide: true,
   }).trim();
@@ -32,13 +35,13 @@ try {
     if (!license.ok) throw new Error(`Bun ${bunVersion} license download failed: ${license.status}`);
     await writeFile(join(resources, 'BUN-LICENSE.md'), await license.text());
   }
-  await copyFile(join(dirname(require.resolve('effect/package.json')), 'LICENSE'), join(resources, 'EFFECT-LICENSE'));
+  await bundleRuntimeLicenses(resources);
   const agentVersion = createHash('sha256').update(await readFile(join(resources, 'agent.mjs'))).digest('hex');
   await writeFile(join(resources, 'runtime.json'), JSON.stringify({
     target: `${process.platform}-${process.arch}`, appVersion: JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version,
-    maintenanceProtocol: 1, bun: bunVersion, executable, agentVersion,
+    maintenanceProtocol: 1, mcp, bun: bunVersion, bunSha256: createHash('sha256').update(await readFile(join(resources, executable))).digest('hex'), executable, agentVersion,
   }, null, 2));
-  execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts'], {
+  execFileSync(process.execPath, [require.resolve('tsx/cli'), '--test', 'checks/agent-resources.spec.ts', 'checks/smoke.spec.ts', 'checks/mcp-launch.spec.ts'], {
     cwd: root, env: { ...process.env, DESKTOP_AGENT_RESOURCES: resources },
     stdio: 'inherit', windowsHide: true,
   });

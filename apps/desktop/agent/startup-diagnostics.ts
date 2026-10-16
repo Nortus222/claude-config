@@ -4,11 +4,11 @@ export const STARTUP_PREFIX = '[nortuscc-startup] ';
 export const STARTUP_PHASES = ['module_load', 'entry', 'runtime_metadata', 'login_probe', 'shell_spawn', 'shell_ready', 'environment_ready', 'probe_cleanup', 'paths', 'lifecycle', 'lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc', 'first_job', 'running', 'shutdown', 'ipc_closed', 'stopped', 'app_setup', 'startup_worker', 'runtime_ready', 'updater_source', 'preferences_paths', 'maintenance_state', 'setup_state', 'helper', 'ready_wait', 'runtime_identity'] as const;
 export type StartupPhase = typeof STARTUP_PHASES[number];
 export type StartupStatus = 'started' | 'completed' | 'failed' | 'timed_out' | 'fallback' | 'cancelled';
-export type StartupOperation = 'app_startup' | 'foreground' | 'ensure' | 'restart' | 'paths' | 'setup_state' | 'bootstrap' | 'install_git' | 'prepare_update' | 'recover_update' | 'maintenance_state' | 'invalid';
+export type StartupOperation = 'app_startup' | 'foreground' | 'ensure' | 'restart' | 'paths' | 'setup_state' | 'bootstrap' | 'install_git' | 'prepare_update' | 'recover_update' | 'maintenance_state' | 'mcp_connections' | 'invalid';
 const helperOperations: Readonly<Record<string, StartupOperation>> = {
   '--startup': 'app_startup', '--ensure': 'ensure', '--restart': 'restart', '--paths': 'paths',
   '--setup-state': 'setup_state', '--bootstrap': 'bootstrap', '--install-git': 'install_git',
-  '--prepare-update': 'prepare_update', '--recover-update': 'recover_update', '--maintenance-state': 'maintenance_state',
+  '--prepare-update': 'prepare_update', '--recover-update': 'recover_update', '--maintenance-state': 'maintenance_state', '--mcp-connections': 'mcp_connections',
 };
 export const startupOperation = (args: ReadonlyArray<string>): StartupOperation =>
   args.length === 0 ? 'foreground' : helperOperations[args[0] ?? ''] ?? 'invalid';
@@ -21,7 +21,7 @@ type Options = {
 };
 const statuses = new Set(['started', 'completed', 'failed', 'timed_out', 'fallback', 'cancelled']);
 const phases = new Set<string>(STARTUP_PHASES);
-const operations = new Set(['app_startup', 'foreground', 'ensure', 'restart', 'paths', 'setup_state', 'bootstrap', 'install_git', 'prepare_update', 'recover_update', 'maintenance_state', 'invalid']);
+const operations = new Set(['app_startup', 'foreground', 'ensure', 'restart', 'paths', 'setup_state', 'bootstrap', 'install_git', 'prepare_update', 'recover_update', 'maintenance_state', 'mcp_connections', 'invalid']);
 const validNumber = (value: number) => Number.isSafeInteger(value) && value >= 0;
 
 // Fixed metadata only; diagnostics must never interfere with startup or carry captured output.

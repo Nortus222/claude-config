@@ -4,6 +4,135 @@ The React renderer inspects, previews, applies and cancels through the local age
 
 The app ships a standalone Bun runtime and an agent bundle. A short-lived helper registers the per-user login service on first run, records `installedBy: 'app'`, and replaces its registration when the app moves or ships different agent code. Upgrades wait for idle status and a free shared apply lock, send `shutdown`, and restart through the service manager. Policy, pauses, trust, History and decisions persist. The renderer sends only opaque report keys and plan ids through Rust's fixed request allow-list.
 
+## MCP connections
+
+Install and configure the macOS arm64 app, then use Settings > MCP connections to connect
+Claude Code or Codex. The app registers its own installed executable with the fixed `--mcp`
+argument and maintains the owned registration and machine instruction block. Existing foreign
+registrations or edited owned blocks require resolving the displayed conflict. Disconnect removes
+only unchanged owned content; retry instruction cleanup when a registration is already absent.
+Unrelated host configuration and instruction prose remain user-owned.
+
+The hidden entry runs without a window and connects to the app-owned background agent. Closing
+the app window or an MCP client leaves accepted runs executing. A configured standalone CLI agent
+is insufficient. The entry derives resources from its installed app and resolves the configured
+state root through the app's read-only login-environment helper. It never selects the current
+project as its setup or uses a PATH runtime. Agent ownership, runtime identity and relocation are
+checked on every invocation. Open the app to finish setup, repair ownership or restart its agent
+when connection diagnostics request it. Pending app maintenance blocks mutations until the
+app completes or recovers the update; MCP cannot repair that fence.
+
+Registration and instruction status describe saved local configuration. The app cannot observe
+whether a coding host has loaded it. Reload the host or start a new session after connecting,
+relocating or upgrading the app, then inspect context in that session. App relocation repairs only
+owned registrations through the app lifecycle. The installed app is required for upgrades and
+maintenance; MCP is not a standalone engine or remote installation service. Other desktop
+packaging targets are unvalidated, and Windows has no supported agent IPC.
+
+The app exposes twenty-one machine operations:
+
+| MCP tool | Behavior |
+| --- | --- |
+| `nortuscc_get_context` | App/agent identity, targets, account/setup prerequisites and capabilities |
+| `nortuscc_resolve_skill_candidate` | Resolve a bounded exact selector or canonical name to a reviewed public GitHub source and revision |
+| `nortuscc_agent_status` | Bounded status, pending, drift and conflicts |
+| `nortuscc_list_backups` | Generated backup dates, IDs and latest History reference; exact retention cleanup uses preview/apply, at most 100 folders per batch |
+| `nortuscc_account_state` | Account, setups and machine metadata with queued versus confirmed persistence |
+| `nortuscc_inspect_setups` | Known setup identities and trust status |
+| `nortuscc_incoming_changes` | Verified exact revision and incoming item identities, held and conflict flags |
+| `nortuscc_prepare_trust_request` | Existing app repository trust action; grants no consent |
+| `nortuscc_watch_sources` | Up to eight declared sources, including trusted configured checkout edits, with bounded observation continuation |
+| `nortuscc_inspect_source_diff` | Exact revision diff or observed local skill diff selected by `localObservation`, with bounded text continuation |
+| `nortuscc_pin_impact` | Source-wide read-only pin impact with resolved revisions |
+| `nortuscc_draft_changelog` | Read-only draft with validated added and ignored selections |
+| `nortuscc_inspect_updates` | Bounded source-qualified update offers, target/revision policy and precise legacy or verified addition repair route |
+| `nortuscc_inspect_intent` | Effective owned values, provenance, enablement, required targets and source policy with bounded pages |
+| `nortuscc_inspect` | Inspected items, drift, conflicts and reconcile keys |
+| `nortuscc_preview_change` | Preview typed machine intent, selected reconciliation/update, author capture/source edits, config restoration, sync decisions, account/policy changes, backup pruning or a reviewed skill addition |
+| `nortuscc_apply_change` | Apply a reviewed `planId` with a caller-chosen durable `requestId` |
+| `nortuscc_get_run` | Recover a run's attributed intent, installation evidence, terminal outcome and follow-up prerequisites |
+| `nortuscc_list_runs` | List retained runs with bounded pagination |
+| `nortuscc_cancel_run` | Cancel an authorized run at a safe boundary |
+| `nortuscc_history` | Read bounded safe decision, setup, revision, policy, pause and backup details with actor, request, scope and run attribution |
+
+Every mutation uses the same preview, apply and durable run owner. Capture and selected manifest
+updates bind the configured author checkout, HEAD and exact bytes; observation snapshots are never
+author destinations. Source pins and ignores edit author documents and do not change machine
+policy. Publication and standalone pull remain CLI workflows. General physical skill/integration
+removal, selected-backup restoration, user pause, personal distribution and profile follow/promotion
+require owners that are not available through MCP.
+
+The connected app discovers accepted and changed runs through bounded run-ID notifications and
+reads the current safe receipt through its existing controller. Review & apply shows the operation's
+intent, author destination, committed and remaining effects, uncertainty and backups. Device
+sign-in success means initiation only. A current safe read may display the human challenge until
+its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
+from confirmed hosted state. History uses the shared bounded projection with constant fallback for
+unknown events and closed summaries for historical diagnostics.
+
+Source reads use declared identities only. Public GitHub names stay readable; other declared URLs
+and the trusted configured file checkout use stable opaque IDs. An extra local checkout requires
+an existing owner/trust mapping. Source pages contain at most eight sources with two concurrent
+readers. Cursors expire after ten minutes and invalidate after a conflicting observation or machine
+inspection; pages do not promise an atomic snapshot of several remotes. Diff and changelog text
+are bounded to 32 KiB. A limited or unavailable read never authorizes a source edit. Cleanup
+uncertainty retains the source cache's ownership marker and refuses reuse until it is inspected.
+
+Machine scope is the default. Review the preview before applying, retain the same `requestId`
+when acceptance is uncertain, and query runs after reconnecting. Reconciliation repairs existing
+declarations with their current consent, pin and installer rules. It saves no new declaration.
+Machine intent sets or resets owned settings, targets and enablement, or removes an explicit machine skill declaration. It backs up and saves choices and releases owned routing for unmanaged targets; it does not run installers or delete skill content.
+stdout contains MCP JSON-RPC records only; bounded results and stderr carry diagnostics.
+
+Skill additions resolve a candidate, preview its exact machine declaration and revision policy,
+then apply the reviewed plan. Select explicit required targets from setup context; the current
+coding host is a default hint and grants no permission. Skills use the shared `~/.agents/skills`
+store, which Codex also scans, even for Claude-only requests. Targets require usable exposure,
+not exclusive visibility. The app does not change user-owned Codex enablement settings.
+
+A verified installation requires accepted content integrity and effective native model-catalog
+discovery for every selected target. Claude catalog evidence does not attest invocation
+authorization or the selected source path; it covers the requested environment and managed
+startup remains active. Disabled, restricted, missing, ambiguous or incomplete native evidence
+cannot produce verified success. Supported installer mappings use the canonical home shared
+store and absolute Claude/Codex config roots. Alternate shared stores and nonempty XDG lock
+roots are refused before effects.
+
+Saved intent and observed installation appear separately in the app and MCP run receipts.
+When intent has been saved, a failed, cancelled or interrupted addition retains its declaration
+for inspection and repair, without a success claim or sharing offer. Repair through resolve, preview `addSkill`, and apply;
+generic legacy update/apply plans report a prerequisite for addition-touched entries so required
+targets and source policy survive. Reconnects recover the same durable result; uncertain
+acceptance retries retain the same caller-chosen `requestId`.
+
+Only verified installation returns `share_with_my_machines` and `promote_to_profile` suggestions.
+The coding agent should ask "Do you want to share it with your other machines?" and mention
+promotion to an owned profile. Both actions report readiness, required destination and prerequisite
+reason. They remain blocked until the personal sharing or profile publication workflow and its
+destination are available. Ignoring a suggestion keeps machine scope; neither suggestion
+authorizes publication or promotion. Each concerns only the accepted declaration.
+
+Automated fixtures cover authenticated MCP preview/apply, arbitrary chat working directories,
+lost-reply/reconnect retries, terminal outcomes and shared app result rendering with isolated
+installer/catalog services. Scripted transport success does not establish natural-language model
+routing. Actual Codex and Claude conversation checks require a disposable authorized installed-app
+environment. This milestone does not claim those host/model checks or untested native/platform
+combinations. The packaged MCP smoke checks inert reconciliation and connection recovery, not
+native skill installation or model conversations.
+
+The [checked engine inventory](../../packages/agent/src/operations/coverage.ts) maps every audited
+behavior to the implemented operations or its remaining workstream. Source inspection, diffs,
+pin impact and changelog drafts have bounded reads.
+`previewChange(sourceDecision)` and `applyChange` support backed-up pin/unpin/ignore/unignore
+edits in the configured author checkout. They bind fresh source revisions and exact dirty document,
+HEAD and index evidence. Previews distinguish author intent from current machine policy and include
+all affected declared skills. Ignore suppresses a source notification without disabling a skill.
+A source that exists only as a machine addition needs an author declaration before author policy edits.
+Account/policy/metadata operations, richer History and backup pruning remain pending. Author
+commit/push, general restoration, personal sharing and owned-profile publication
+require their owning workflows and separate authority. New registry operations and advertised
+capabilities must update the checked inventory before claiming availability.
+
 ## Local setup
 
 This package targets macOS arm64. It needs Node 24+, npm, Bun 1.3+, Rust, Xcode command line tools, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Other packaging targets are not validated. Windows agent IPC remains unsupported under ADR 0019.
@@ -26,14 +155,27 @@ npm run resources -w apps/desktop
 DESKTOP_AGENT_RESOURCES="$PWD/apps/desktop/src-tauri/resources/darwin-arm64" npm test -w apps/desktop
 npm run test:bun -w apps/desktop
 npm run typecheck -w apps/desktop
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 npm run smoke -w apps/desktop
 npm run typecheck
 npm run test:packages
 npm test
+# After one normal local desktop build, use the finished app, without GUI/service startup:
+app="$PWD/apps/desktop/src-tauri/target/release/bundle/macos/Nortuscc.app"
+node apps/desktop/scripts/verify-runtime.mjs "$app" 0.1.6
+npm run smoke -w apps/desktop -- "$app"
+npm run smoke:mcp -w apps/desktop -- "$app"
 ```
 
 The desktop Node checks cover v3 schemas, renderer event ordering and recovery, lifecycle ownership and upgrades with fake Processes, and the login environment. `DESKTOP_AGENT_RESOURCES` enables the resource and smoke checks after bundling; without it these checks skip. `test:bun` runs schemas and controller checks under Bun, then runs `test:resources` against a temporary bundled Bun fixture. Rust tests use fake Unix socket servers and helpers for handshake, framing, timeouts, disconnect and generation behavior.
+
+Installed MCP acceptance uses the exact app's native `--mcp` entry and bundled foreground agent
+with a temporary HOME, local Git origin and inert file copies. It verifies all eighteen tools, durable
+acceptance/retry, disconnect recovery, MCP History attribution, terminal cancellation lookup and
+unavailable-agent diagnostics, then joins its owned subprocesses before deleting the fixture. It installs no service
+and opens no GUI. This smoke does not establish host reload, natural-language skill addition,
+launchd behavior, signing/notarization or real updater installation. Resource generation must
+finish before resource-consuming checks; build only after those checks finish.
 
 On Windows and Linux, prepare temporary test resources independently of macOS release packaging:
 
@@ -42,7 +184,7 @@ npm test -w apps/desktop
 npm run test:resources -w apps/desktop
 ```
 
-`test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and the agent hash, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
+`test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and independent Bun, agent and MCP hashes, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
 
 Unknown local setup displays **Opening Claude Config**; first-run consent appears only after a validated setup-needed reply. Existing installations wait for genuine connection and initial reads. `status` may answer `NO_REPORT` before the first inspection; this remains connected with a waiting explanation and a read-only **Recheck agent status** action. A current report completes that wait, and an active apply exposes the existing Cancel control. Actual transport, setup and inspection failures remain visible with explicit recheck or Settings recovery; they are not treated as startup progress. Startup uses one focused loading card with confirmed Local setup, Agent connection and Local inspection milestones. Activity is indeterminate, announced politely and respects reduced motion. Updates remain available in a secondary disclosure independently of agent readiness; update activity, availability and retry open it automatically, while idle checks start compact. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
 
@@ -267,7 +409,9 @@ validation workflow run.
 
 The preparation job has read-only repository permissions. It signs the nested Bun executable before Tauri signs the app, requires
 notarization and stapled tickets for the app and DMG, checks Gatekeeper and arm64 binaries, and
-validates the signed bundle's version, runtime target, maintenance protocol and agent hash.
+validates the finished app and extracted updater payload's version, runtime target, maintenance
+protocol and independent Bun, agent and MCP hashes. The Bun hash is refreshed only after explicit
+inner signing and before outer bundling; signed artifacts are never patched.
 The final native verifier checks the archive signature against the configured public key and
 its authenticated version. Tauri CLI's signing-key warning is insufficient. The publication job
 rechecks transferred hashes and signatures before using its only write permission, `contents: write`.

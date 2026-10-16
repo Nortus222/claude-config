@@ -163,12 +163,14 @@ test('a newly declared integration upstream is reported with its fix, not instal
 test('an invalid integrations.json upstream is reported as an invalid manifest after applying', async () => {
   const m = machine();
   upstream(m, {
+    'claude/CLAUDE.md': '# independent valid configuration change\n',
     'integrations.json': JSON.stringify({ version: 1, integrations: [{ id: 'x', label: 'x', target: 'cursor', type: 'plugin', default: true, plugin: 'a@b' }] }) + '\n',
   });
 
   const result = await pull(m);
-  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /^apply$/m);
+  assert.doesNotMatch(result.stdout, /integration:[^\n]+removed/);
   assert.equal(readFileSync(join(m.claude, 'CLAUDE.md'), 'utf8'), readFileSync(join(m.repo, 'claude', 'CLAUDE.md'), 'utf8'));
   assert.match(result.stdout, /^integrations$/m);
   assert.match(result.stdout, /manifest\s+invalid/);

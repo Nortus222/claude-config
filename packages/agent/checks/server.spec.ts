@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore, HistoryStore, historyStore, integrationsDomain, Processes } from '@nortuscc/machine';
 import {
-  AgentStateStore, makeNotifier, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, startAgent, ServeFailed,
+  AgentStateStore, makeNotifier, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, SetupsStore, startAgent, ServeFailed,
   type AgentDomain, type AgentDomains, type AgentStatus, type Notifier,
 } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -434,8 +434,15 @@ test('an apply whose plan changed since the preview answers stale with the new p
     assert.deepEqual(preview.result.plan.steps.map((st: Wire) => st.key), [THEME_KEY, EFFORT_KEY, MODEL_KEY]);
     await ask(c, { command: 'decide', items: [EFFORT, MODEL].map((id) => ({ setupId: 'local', id, revision: HEAD, decision: 'skip' })) });
     const stale = await ask(c, { command: 'apply', planId: preview.result.planId });
-    assert.equal(stale.result.status, 'stale', JSON.stringify(stale));
+    assert.equal(stale.result?.status, 'stale', JSON.stringify(stale));
     assert.deepEqual(stale.result.plan.steps.map((st: Wire) => st.key), [THEME_KEY]);
+    assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
+    assert.equal((await ask(c, { command: 'apply', planId: preview.result.planId })).error.code, 'UNKNOWN_PLAN');
+    const from = c.records.length;
+    const applied = await ask(c, { command: 'apply', planId: stale.result.planId });
+    assert.equal(applied.result.status, 'started');
+    await c.waitFor(r => r.event === 'progress' && r.progress.type === 'done', from);
+    assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
   });
 });
 
@@ -519,7 +526,7 @@ test('a leftover socket is replaced', unixOnly, async () => {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'agent.sock'), 'stale');
   await m.run(Effect.scoped(Effect.gen(function* () {
-    yield* serveIpc({ paths: m.paths, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, handle, session: { onProgress: () => () => {}, runs: { onChange: () => () => {} } } as never, agentVersion: '0', onShutdown: () => {} });
     assert.equal(statSync(join(dir, 'agent.sock')).isSocket(), true);
   })));
 });
@@ -756,5 +763,43 @@ test('the default app posting budget accepts native completion after one second'
     const ack = await ask(app, { command: 'notificationAck', notificationId: notification.id, receipt: event.receipt, delivered: true });
     assert.equal(ack.result.accepted, true);
     assert.equal(await pending, true);
+  });
+});
+
+test('legacy local-decision recovery still refuses a changed setup identity over the socket', unixOnly, async () => {
+  await withServer({}, async s => {
+    const c = await s.open();
+    const inspected = await ask(c, { command: 'inspect' });
+    const exclude = inspected.result.items.filter((i: Wire) => i.domain !== 'config').map((i: Wire) => i.key);
+    const preview = await ask(c, { command: 'preview', exclude });
+    await ask(c, { command: 'decide', items: [{ setupId: 'local', id: EFFORT, revision: HEAD, decision: 'skip' }] });
+    await s.m.run(SetupsStore.use(store => store.write([])));
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.ok, false, JSON.stringify(applied));
+    assert.equal(applied.result, undefined);
+    assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
+  });
+});
+test('shared previews remain invalid after local decisions over the socket', unixOnly, async () => {
+  await withServer({}, async s => {
+    const c = await s.open();
+    await ask(c, { command: 'inspect' });
+    const preview = await ask(c, { command: 'operation', operation: 'previewChange', input: { change: { kind: 'reconcile', only: [THEME_KEY, EFFORT_KEY] } } });
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    await ask(c, { command: 'decide', items: [{ setupId: 'local', id: EFFORT, revision: HEAD, decision: 'skip' }] });
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.error.code, 'UNKNOWN_PLAN', JSON.stringify(applied));
+    assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
+  });
+});
+test('a policy mutation after local decisions still invalidates a legacy preview', unixOnly, async () => {
+  await withServer({}, async s => {
+    const c = await s.open();
+    await ask(c, { command: 'inspect' });
+    const preview = await ask(c, { command: 'preview', exclude: [] });
+    await ask(c, { command: 'decide', items: [{ setupId: 'local', id: EFFORT, revision: HEAD, decision: 'skip' }] });
+    await ask(c, { command: 'setPolicy', policy: 'manual' });
+    const applied = await ask(c, { command: 'apply', planId: preview.result.planId });
+    assert.equal(applied.error.code, 'UNKNOWN_PLAN', JSON.stringify(applied));
   });
 });

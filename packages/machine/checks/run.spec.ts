@@ -227,3 +227,17 @@ test('a caller that holds the lock runs without taking or releasing it', async (
   assert.ok(Exit.isSuccess(exit));
   assert.equal(readFileSync(join(stateRoot, 'apply.lock'), 'utf8'), held);
 });
+
+test('cancellation while checkpointing a step starts no new side effect', async () => {
+  const { collect } = machine();
+  const controller = new AbortController();
+  let calls = 0;
+  const domain = fake(() => Effect.sync(() => { calls++; return { ok: true }; }));
+  const exit = await collect(execute({ kind: 'apply', steps: [step('a')], skipped: [] }, empty, [domain], {
+    signal: controller.signal,
+    checkpoint: progress => Effect.sync(() => { if (progress.type === 'started') controller.abort(); }),
+  }));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(calls, 0);
+  assert.deepEqual(exit.value, [{ type: 'cancelled', remaining: ['a'], backups: undefined }]);
+});

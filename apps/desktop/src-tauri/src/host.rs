@@ -30,6 +30,8 @@ pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 pub enum Request {
     Status,
     Inspect,
+    GetOperationRun { run_id: String },
+    ListOperationRuns { limit: u16 },
     Preview { exclude: Vec<String> },
     Apply { plan_id: String },
     Cancel,
@@ -43,6 +45,7 @@ pub enum Request {
     Resume,
     Hello { token: String },
     Subscribe,
+    SubscribeOperations,
     Notification { notification_id: String },
     NotificationAck { notification_id: String, receipt: String, delivered: bool },
 }
@@ -51,6 +54,7 @@ impl Request {
         match self {
             Self::Status => "status",
             Self::Inspect => "inspect",
+            Self::GetOperationRun { .. } | Self::ListOperationRuns { .. } => "operation",
             Self::Preview { .. } => "preview",
             Self::Apply { .. } => "apply",
             Self::Cancel => "cancel",
@@ -63,7 +67,7 @@ impl Request {
             Self::SetPolicy { .. } => "setPolicy",
             Self::Resume => "resume",
             Self::Hello { .. } => "hello",
-            Self::Subscribe => "subscribe",
+            Self::Subscribe | Self::SubscribeOperations => "subscribe",
             Self::Notification { .. } => "notification",
             Self::NotificationAck { .. } => "notificationAck",
         }
@@ -80,6 +84,17 @@ impl Request {
     fn record(&self, id: &str) -> Result<String, String> {
         let mut record = json!({"version": 3, "id": id, "command": self.command()});
         match self {
+            Self::SubscribeOperations => { record["operationsProtocol"] = json!(1); }
+            Self::GetOperationRun { run_id } => {
+                if run_id.is_empty() || run_id.chars().count() > 100 { return Err("Invalid operation run id".into()); }
+                record["operation"] = json!("getRun");
+                record["input"] = json!({"scope":{"kind":"machine"},"runId":run_id});
+            }
+            Self::ListOperationRuns { limit } => {
+                if !(1..=500).contains(limit) { return Err("Invalid operation run limit".into()); }
+                record["operation"] = json!("listRuns");
+                record["input"] = json!({"scope":{"kind":"machine"},"limit":limit});
+            }
             Self::Preview { exclude } => {
                 if exclude.len() > MAX_EXCLUDED || exclude.iter().any(|key| key.is_empty() || key.encode_utf16().count() > MAX_KEY) {
                     return Err("Invalid item keys".into());
@@ -140,6 +155,12 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OperationRunArgs { pub run_id: String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationRunsArgs { pub limit: u16 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SignInArgs {
@@ -223,11 +244,26 @@ struct HelloResult {
     protocol: u8,
     policy: Policy,
     paused: Value,
+    #[serde(default)] operations_protocol: Option<u8>,
+    #[serde(default)] app: Option<AppIdentity>,
+    #[serde(default)] operations: Option<OperationCapability>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AppIdentity { ownership: Value, version: Value, runtime_id: Value }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationCapability { available: bool, #[serde(default)] reason: Option<String> }
 fn validate_hello(value: &Value) -> Result<(), String> {
     let hello: HelloResult = serde_json::from_value(value.clone()).map_err(|_| "Invalid agent hello")?;
     if hello.protocol != 3 { return Err("Incompatible agent protocol; restart explicitly".into()); }
     validate_paused(&hello.paused)?;
+    if hello.operations_protocol.is_some_and(|version|version != 1) { return Err("Incompatible shared operations protocol".into()); }
+    if let Some(app) = &hello.app {
+        if !(app.ownership.is_null() || matches!(app.ownership.as_str(),Some("app"|"cli"))) || !(app.version.is_null() || app.version.as_str().is_some_and(valid_id)) || !(app.runtime_id.is_null() || app.runtime_id.as_str().is_some_and(valid_id)) { return Err("Invalid app identity".into()); }
+    }
+    if let Some(capability) = &hello.operations { if capability.reason.as_deref().is_some_and(|reason|reason.encode_utf16().count()>500) { return Err("Invalid operation capability".into()); } let _=capability.available; }
+
     let _ = (hello.agent_version, hello.policy);
     Ok(())
 }
@@ -338,6 +374,12 @@ fn validate(message: &Value) -> Result<(), String> {
     if message.get("event").is_some() {
         if message["event"] == "notification" {
             crate::notifications::Delivery::decode(message.clone())?;
+        } else if message["event"] == "operation-run" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct OperationRunEvent { version: u8, event: String, #[serde(rename = "runId")] run_id: String }
+            let m: OperationRunEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid operation run event")?;
+            if m.version != 3 || m.event != "operation-run" || !valid_id(&m.run_id) { return Err("Invalid operation run event contract".into()); }
         } else if message["event"] == "status" {
             let m: StatusEvent = serde_json::from_value(message.clone()).map_err(|_| "Invalid status event")?;
             if m.version != 3 || m.event != "status" { return Err("Invalid status event contract".into()); }
@@ -456,7 +498,19 @@ impl Agent {
         let hello = agent.request_timeout_cancelled(Request::Hello { token }, remaining(hello_timeout),cancel.clone())?;
         validate_hello(&hello)?;
         agent.hello = hello;
-        if subscribe { agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?; }
+        if subscribe {
+            if agent.hello["operationsProtocol"] == 1 {
+                match agent.request_timeout_cancelled(Request::SubscribeOperations, remaining(Request::Subscribe.timeout()),cancel.clone()) {
+                    Err(error) if error.starts_with("INVALID_REQUEST:") => {
+                        // Earlier shared-operation agents accept only the legacy subscription.
+                        agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?;
+                    }
+                    result => { result?; }
+                }
+            } else {
+                agent.request_timeout_cancelled(Request::Subscribe, remaining(Request::Subscribe.timeout()),cancel)?;
+            }
+        }
         Ok(agent)
     }
     pub fn connect_notification(state_root: &Path, deadline: Instant) -> Result<Self, String> {
@@ -603,6 +657,7 @@ pub enum Setup {
     PrepareUpdate,
     RecoverUpdate,
     MaintenanceState,
+    McpConnections,
 }
 impl Setup {
     pub fn operation(self) -> Operation {
@@ -610,7 +665,7 @@ impl Setup {
             Self::Startup => Operation::AppStartup,
             Self::Ensure => Operation::Ensure, Self::Restart => Operation::Restart, Self::Paths => Operation::Paths,
             Self::State => Operation::SetupState, Self::Bootstrap => Operation::Bootstrap, Self::InstallGit => Operation::InstallGit,
-            Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState,
+            Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState, Self::McpConnections => Operation::McpConnections,
         }
     }
     fn argument(self) -> &'static str {
@@ -625,6 +680,7 @@ impl Setup {
             Self::PrepareUpdate => "--prepare-update",
             Self::RecoverUpdate => "--recover-update",
             Self::MaintenanceState => "--maintenance-state",
+            Self::McpConnections => "--mcp-connections",
         }
     }
 }
@@ -640,7 +696,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState | Setup::McpConnections) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -913,6 +969,36 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
 mod tests {
     use super::*;
     #[test]
+    fn semantic_run_invalidation_is_bounded_metadata_only() {
+        let subscription: Value = serde_json::from_str(&Request::SubscribeOperations.record("1").unwrap()).unwrap();
+        assert_eq!(subscription, json!({"version":3,"id":"1","command":"subscribe","operationsProtocol":1}));
+        let legacy: Value = serde_json::from_str(&Request::Subscribe.record("2").unwrap()).unwrap();
+        assert_eq!(legacy, json!({"version":3,"id":"2","command":"subscribe"}));
+        let good = json!({"version":3,"event":"operation-run","runId":"r"});
+        assert!(validate(&good).is_ok());
+        for patch in [json!({"runId":""}), json!({"runId":"r".repeat(101)}), json!({"runId":null}), json!({"version":4}), json!({"receipt":{}}), json!({"userCode":"private"}), json!({"verificationUri":"private"})] {
+            let mut bad = good.clone();
+            for (key, value) in patch.as_object().unwrap() { bad[key] = value.clone(); }
+            assert!(validate(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn fixed_operation_reads_use_shared_bounds_and_machine_scope() {
+        let record: Value = serde_json::from_str(&Request::GetOperationRun {run_id:"😀".repeat(100)}.record("1").unwrap()).unwrap();
+        assert_eq!(record["command"], "operation"); assert_eq!(record["operation"], "getRun");
+        assert_eq!(record["input"], json!({"scope":{"kind":"machine"},"runId":"😀".repeat(100)}));
+        for id in [String::new(), "😀".repeat(101)] { assert!(Request::GetOperationRun {run_id:id}.record("1").is_err()); }
+        for limit in [1,500] {
+            let record: Value = serde_json::from_str(&Request::ListOperationRuns {limit}.record("2").unwrap()).unwrap();
+            assert_eq!(record["operation"], "listRuns"); assert_eq!(record["input"], json!({"scope":{"kind":"machine"},"limit":limit}));
+        }
+        for limit in [0,501] { assert!(Request::ListOperationRuns {limit}.record("2").is_err()); }
+        assert!(decode_args::<OperationRunArgs>(json!({"runId":"r","operation":"inspect"})).is_err());
+        assert!(decode_args::<OperationRunsArgs>(json!({"limit":1,"scope":{"kind":"user"}})).is_err());
+    }
+
+    #[test]
     fn v3_replies_and_status_events_are_accepted() {
         assert!(validate(&json!({"version":3,"id":"1","ok":true,"result":null})).is_ok());
         assert!(validate(&json!({"version":3,"event":"status","status":{"at":"now","policy":"manual","paused":null,"trusted":true,"applying":false,"pending":[],"drift":[],"conflicts":[],"probeErrors":[],"counts":{"pending":0,"held":0,"ready":0,"drift":0}}})).is_ok());
@@ -1012,6 +1098,20 @@ mod socket_tests {
         assert!(validate_hello(&hello_result()).is_ok());
     }
     #[test]
+    fn shared_operation_hello_extension_is_strict_and_legacy_hello_still_works() {
+        let mut hello=hello_result();
+        hello["operationsProtocol"]=json!(1);
+        hello["app"]=json!({"ownership":"app","version":"0.1.6","runtimeId":"fake-v1"});
+        hello["operations"]=json!({"available":true});
+        assert!(validate_hello(&hello).is_ok());
+        hello["app"]["extra"]=json!(true); assert!(validate_hello(&hello).is_err());
+        hello["app"].as_object_mut().unwrap().remove("extra");
+        hello["app"].as_object_mut().unwrap().remove("runtimeId"); assert!(validate_hello(&hello).is_err());
+        hello["app"]["runtimeId"]=json!("fake-v1");
+        hello["operationsProtocol"]=json!(2); assert!(validate_hello(&hello).is_err());
+        assert!(validate_hello(&hello_result()).is_ok());
+    }
+    #[test]
     fn unknown_fields_and_invalid_status_disconnect_contract() {
         for value in [
             json!({"version":2,"id":"x","ok":true,"result":null}),
@@ -1047,6 +1147,34 @@ mod socket_tests {
         assert_eq!(agent.request(Request::Inspect).unwrap()["command"], "inspect");
         drop(agent);
         fixture.finish();
+    }
+    #[test]
+    fn semantic_subscription_negotiates_without_hiding_other_errors() {
+        for refusal in [None, Some("INVALID_REQUEST"), Some("UNAUTHORIZED")] {
+            let fixture = Fixture::new(move |mut wire| {
+                let hello = wire.next().unwrap();
+                let mut result = hello_result();
+                result["operationsProtocol"] = json!(1);
+                result["app"] = json!({"ownership":"app","version":"0.1.6","runtimeId":"fake-v1"});
+                result["operations"] = json!({"available":true});
+                wire.reply(&hello, result);
+                let subscribe = wire.next().unwrap();
+                assert_eq!(subscribe, json!({"version":3,"id":subscribe["id"],"command":"subscribe","operationsProtocol":1}));
+                if let Some(code) = refusal { wire.error(&subscribe, code); }
+                else { wire.reply(&subscribe, json!({"subscribed":true})); }
+                if refusal == Some("INVALID_REQUEST") {
+                    let legacy = wire.next().unwrap();
+                    assert_eq!(legacy, json!({"version":3,"id":legacy["id"],"command":"subscribe"}));
+                    wire.reply(&legacy, json!({"subscribed":true}));
+                }
+                assert!(wire.next().is_none());
+            });
+            let result = Agent::connect(&fixture.root, Arc::new(|_| {}));
+            if refusal == Some("UNAUTHORIZED") {
+                assert_eq!(result.err().unwrap(), "UNAUTHORIZED: refused");
+            } else { drop(result.unwrap()); }
+            fixture.finish();
+        }
     }
     #[test]
     fn every_connection_reads_the_fresh_token() {
@@ -1714,5 +1842,114 @@ mod onboarding_bridge_tests {
         let command = device_login_command();
         assert_eq!(command.get_program(), "/usr/bin/open");
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["https://github.com/login/device"]);
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionTarget { Codex, Claude }
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ConnectionAction { Inspect {}, Connect { target: ConnectionTarget }, Disconnect { target: ConnectionTarget } }
+pub fn mcp_connections(resources: &Path, action: ConnectionAction) -> Result<Value, String> {
+    let input = serde_json::to_string(&action).map_err(|_| "Invalid connection action")?;
+    let mut command = helper_command(resources, Setup::McpConnections, None)?;
+    command.stdin(Stdio::piped());
+    let value = run_json_helper(command, HELPER_TIMEOUT, Some(input.into_bytes()))?;
+    // Host registration/configuration output stays private; only the bounded public schema crosses IPC.
+    validate_connections(value)
+}
+fn validate_connections(value: Value) -> Result<Value, String> {
+    let Some(outer) = value.as_object() else { return Err("Invalid connections".into()); };
+    let Some(items) = value["connections"].as_array() else { return Err("Invalid connections".into()); };
+    if outer.len() != 1 || items.len() > 2 { return Err("Invalid connections".into()); }
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let keys = ["target", "registration", "routing", "session", "reload", "observation", "note"];
+        if item.as_object().is_none_or(|v| v.len()!=keys.len() || keys.iter().any(|k| !v.contains_key(*k)))
+            || !["codex","claude"].contains(&item["target"].as_str().unwrap_or(""))
+            || !seen.insert(item["target"].as_str().unwrap_or(""))
+            || !["configured","absent","repair-needed","conflict","unavailable"].contains(&item["registration"].as_str().unwrap_or(""))
+            || item["session"] != "unobserved" || item["observation"] != "local-registration"
+            || !["recommended","unknown"].contains(&item["reload"].as_str().unwrap_or(""))
+            || item["note"].as_str().is_none_or(|v| v.len()>500) { return Err("Invalid connection".into()); }
+        let route = &item["routing"];
+        if route.as_object().is_none_or(|v| v.len()!=4 || ["status","intent","blockStatus","offeredText"].iter().any(|k| !v.contains_key(*k)))
+            || !["installed","missing","released","absent","unmanaged","conflict","unavailable"].contains(&route["status"].as_str().unwrap_or(""))
+            || !["active","released","unowned","invalid","unknown"].contains(&route["intent"].as_str().unwrap_or(""))
+            || !["present","absent","conflict","unknown"].contains(&route["blockStatus"].as_str().unwrap_or(""))
+            || route["offeredText"].as_str().is_none_or(|v| v.len()>8192) { return Err("Invalid connection routing".into()); }
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn connection_helper_delivers_actions_and_validates_public_results() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resources(PathBuf);
+        impl Drop for Resources {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let root = Resources(std::env::temp_dir().join(format!("nortuscc-connection-input-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        std::fs::create_dir(&root.0).unwrap();
+        std::fs::write(root.0.join("agent.mjs"), "fixture").unwrap();
+        // This finite fake exits on EOF even when the caller panics before writing stdin.
+        // Drop removes only this test's owned resources on success or unwinding.
+        let result = json!({"connections":[{"target":"codex","registration":"configured",
+            "routing":{"status":"installed","intent":"active","blockStatus":"present","offeredText":"fixed guidance"},
+            "session":"unobserved","reload":"recommended","observation":"local-registration","note":""}]});
+        for (literal, action) in [
+            (r#"{"action":"inspect"}"#, ConnectionAction::Inspect {}),
+            (r#"{"action":"connect","target":"codex"}"#, ConnectionAction::Connect { target: ConnectionTarget::Codex }),
+            (r#"{"action":"disconnect","target":"claude"}"#, ConnectionAction::Disconnect { target: ConnectionTarget::Claude }),
+        ] {
+            let source = format!(r#"#!/bin/sh
+[ "$2" = --mcp-connections ] && [ "$3" = --app ] && [ "$#" = 4 ] || exit 8
+input=$(/bin/cat)
+printf '%s' "$input" > received
+[ "$input" = '{}' ] || exit 9
+printf '%s\n' '{}'
+"#, literal, result);
+            std::fs::write(root.0.join("bun"), source).unwrap();
+            std::fs::set_permissions(root.0.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(mcp_connections(&root.0, action).unwrap(), result);
+            assert_eq!(std::fs::read_to_string(root.0.join("received")).unwrap(), literal);
+        }
+        std::fs::write(root.0.join("bun"), "#!/bin/sh\n/bin/cat > received\nprintf '%s' '{\"connections\":[],\"secret\":\"private\"}'\n").unwrap();
+        assert!(mcp_connections(&root.0, ConnectionAction::Inspect {}).is_err());
+    }
+    #[test]
+    fn connection_actions_reject_paths_commands_and_unknown_targets() {
+        for value in [json!({"action":"connect","target":"codex","appPath":"/foreign"}),
+            json!({"action":"inspect","command":"shell"}), json!({"action":"connect","target":"other"})] {
+            assert!(serde_json::from_value::<ConnectionAction>(value).is_err());
+        }
+        assert!(serde_json::from_value::<ConnectionAction>(json!({"action":"disconnect","target":"claude"})).is_ok());
+    }
+    #[test]
+    fn connection_helper_derives_current_executable_and_has_no_renderer_argv() {
+        let root = std::env::temp_dir().join(format!("nortuscc-connection-command-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("bun"), "fixture").unwrap();
+        std::fs::write(root.join("agent.mjs"), "fixture").unwrap();
+        let command = helper_command(&root, Setup::McpConnections, None).unwrap();
+        let args: Vec<_> = command.get_args().map(|arg|arg.to_os_string()).collect();
+        assert_eq!(args, vec![root.join("agent.mjs").into_os_string(), "--mcp-connections".into(), "--app".into(), std::env::current_exe().unwrap().into_os_string()]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn public_connections_reject_secrets_and_unproven_sessions() {
+        let entry = json!({"target":"codex","registration":"configured","routing":{"status":"installed","intent":"active","blockStatus":"present","offeredText":"fixed guidance"},
+            "session":"unobserved","reload":"recommended","observation":"local-registration","note":""});
+        assert!(validate_connections(json!({"connections":[entry.clone()]})).is_ok());
+        let mut secret = entry.clone(); secret["env"] = json!({"TOKEN":"private"});
+        assert!(validate_connections(json!({"connections":[secret]})).is_err());
+        let mut connected = entry.clone(); connected["session"] = json!("connected");
+        assert!(validate_connections(json!({"connections":[connected]})).is_err());
+        assert!(validate_connections(json!({"connections":[entry.clone(),entry]})).is_err());
     }
 }

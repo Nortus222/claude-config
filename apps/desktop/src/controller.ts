@@ -2,12 +2,15 @@ import {
   decodeApplyResult, decodeInspectResult, decodePreviewResult, decodeHelloResult, decodeWireStatus,
   type HelloResult, type InspectResult, type PreviewResult, type RunEvent, type RunProgress, type WireStatus,
 } from '@nortuscc/agent/ipc/protocol';
+import { decodeRunView, decodeOperationOutput, type RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'cancelled';
-export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string };
+export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string; readonly index?: number };
 export type RunView = {
   readonly runId: string;
+  readonly receipt?: OperationRunView;
+  readonly challengeCurrent?: boolean;
   readonly steps: ReadonlyArray<StepView>;
   readonly outcome: 'running' | 'done' | 'cancelled' | 'failed';
   readonly summary: string;
@@ -46,10 +49,16 @@ const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
 // Folds one progress event into a run's view.
 export function advance(run: RunView, progress: RunProgress): RunView {
   const mark = (index: number, status: StepStatus, note = '') =>
-    run.steps.map((s, i) => (i === index ? { ...s, status, note } : s));
+    run.steps.map((s, i) => ((s.index ?? i) === index ? { ...s, status, note } : s));
   switch (progress.type) {
-    case 'started':
-      return { ...run, steps: mark(progress.index, 'running'), summary: progress.step.summary };
+    case 'started': {
+      const current = run.steps.findIndex((step, index) => (step.index ?? index) === progress.index);
+      const started: StepView = { key: progress.step.key, summary: progress.step.summary, status: 'running', note: '' };
+      const steps = current < 0
+        ? [...run.steps, { ...started, index: progress.index }]
+        : run.steps.map((step, index) => index === current ? { ...step, ...started } : step);
+      return { ...run, steps, summary: progress.step.summary };
+    }
     case 'finished':
       return { ...run, steps: mark(progress.index, progress.outcome, progress.note) };
     case 'done':
@@ -81,6 +90,11 @@ export class MachineController {
   private earlyStatuses = new Map<number, WireStatus>();
   private earlyDisconnects = new Map<number, Extract<HostEvent, { event: 'disconnected' }>>();
   private statusRevision = 0;
+  private latestRunRead = 0;
+  private discoveryPending = false;
+  private discoveryFlight: { dirty: boolean; observed: boolean; promise?: Promise<void> } | null = null;
+  private challengeTimer?: ReturnType<typeof setTimeout>;
+  private runDiscovery: { readonly terminalRunIds: Set<string>; overflow: boolean } | null = null;
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
@@ -105,9 +119,63 @@ export class MachineController {
 
   private update(update: Partial<ViewState>) {
     if (this.disposed) return;
+    if ('run' in update && this.state.run && update.run?.runId !== this.state.run.runId) this.latestRunRead++;
     this.state = { ...this.state, ...update };
+    if (this.state.connection !== 'connected') {
+      this.discoveryFlight = null;
+      this.discoveryPending = false;
+      if (this.state.run) this.state = { ...this.state, run: { ...this.state.run, challengeCurrent: false } };
+    }
+    if ('run' in update || 'connection' in update) this.scheduleChallengeExpiry();
     for (const listener of this.listeners) listener();
+    if (this.discoveryPending && this.state.run?.outcome !== 'running') void this.discoverRuns(true);
     if (update.pending === false) this.refreshReview();
+  }
+
+  // Unknown invalidations have no acceptance order. Coalesce them through the owner's latest-first list.
+  private async discoverRuns(observed = false) {
+    if (!this.bridge || this.state.connection !== 'connected' || this.state.hello?.operations?.available !== true) return;
+    if (this.state.run?.outcome === 'running') { this.discoveryPending = true; return; }
+    this.discoveryPending = false;
+    if (this.discoveryFlight) { this.discoveryFlight.dirty = true; this.discoveryFlight.observed ||= observed; return this.discoveryFlight.promise; }
+    const token = this.sessionToken();
+    const flight = { dirty: false, observed, promise: undefined as Promise<void> | undefined };
+    this.discoveryFlight = flight;
+    flight.promise = (async () => {
+      do {
+        flight.dirty = false;
+        await this.refreshRun(undefined, flight.observed);
+      } while (flight.dirty && this.ownsSession(token) && this.state.run?.outcome !== 'running');
+      if (flight.dirty && this.ownsSession(token)) this.discoveryPending = true;
+    })().finally(() => { if (this.discoveryFlight === flight) this.discoveryFlight = null; });
+    return flight.promise;
+  }
+
+  // A cached challenge is displayable only while its safe read and deadline remain current.
+  private scheduleChallengeExpiry() {
+    clearTimeout(this.challengeTimer);
+    this.challengeTimer = undefined;
+    const run = this.state.run;
+    const signIn = run?.receipt?.parity?.kind === 'signIn' ? run.receipt.parity.signIn : undefined;
+    if (this.state.connection !== 'connected' || !run || run.challengeCurrent === false || signIn?.state !== 'awaiting-user') return;
+    const token = this.sessionToken();
+    const remaining = Date.parse(signIn.expiresAt) - Date.now();
+    if (remaining <= 0) {
+      this.state = { ...this.state, run: { ...run, challengeCurrent: false } };
+      return;
+    }
+    this.challengeTimer = setTimeout(() => {
+      if (!this.ownsSession(token) || this.state.run !== run) return;
+      this.update({ run: { ...run, challengeCurrent: Date.now() < Date.parse(signIn.expiresAt) } });
+    }, Math.min(remaining, 2_147_483_647));
+  }
+
+  private concealChallenge() {
+    const run = this.state.run;
+    if (run?.receipt?.parity?.kind === 'signIn' && run.receipt.parity.signIn?.state === 'awaiting-user') {
+      if (run.challengeCurrent !== false) this.update({ run: { ...run, challengeCurrent: false } });
+      return run.runId;
+    }
   }
   private owns(revision: number) {
     return !this.disposed && this.revision === revision;
@@ -167,10 +235,70 @@ export class MachineController {
     return true;
   }
 
+  // Durable reads share this controller's session and never replace a different active run.
+  private async refreshRun(runId?: string, completionObserved = false) {
+    if (!this.bridge || this.state.hello?.operations?.available !== true) return;
+    const token = this.sessionToken();
+    const statusRevision = this.statusRevision;
+    const previousRunId = this.state.run?.runId;
+    const targetedAtStart = this.latestRunRead;
+    const targetedRead = runId ? ++this.latestRunRead : undefined;
+    if (runId) {
+      if (this.state.run?.runId === runId) this.concealChallenge();
+    }
+    const discovery = runId ? null : { terminalRunIds: new Set<string>(), overflow: false };
+    if (discovery) this.runDiscovery = discovery;
+    try {
+      const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
+        : await this.bridge.invoke('list_operation_runs', { limit: 1 });
+      if (!this.ownsSession(token, reply) || (runId ? targetedRead !== this.latestRunRead : this.runDiscovery !== discovery)) return;
+      if (!runId && this.discoveryFlight?.dirty) return;
+      if (discovery?.overflow) {
+        if (this.state.run) return;
+        const detail = 'Run activity exceeded the discovery limit. Reconnect to read current runs.';
+        this.revision++;
+        this.update({ connection: 'disconnected', pending: false, initialReadPending: false, waitingForReport: false, initialReadError: detail, detail });
+        return;
+      }
+      const receipt = runId ? checkedReply(decodeRunView, reply.data)
+        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
+      if (!receipt || runId && receipt.runId !== runId) return;
+      const current = this.state.run;
+      if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
+      if (!runId && current?.runId === receipt.runId && targetedAtStart !== this.latestRunRead) return;
+      if (runId && current && current.runId !== receipt.runId && current.runId !== previousRunId) return;
+      // A matching terminal event makes the discovery snapshot's state obsolete, even without a view.
+      if (discovery?.terminalRunIds.has(receipt.runId)) {
+        await this.refreshRun(receipt.runId, true);
+        return;
+      }
+      if (!current && this.state.status?.applying && receipt.result !== null && !completionObserved) return;
+      const outcome = receipt.state === 'accepted' || receipt.state === 'running' ? 'running'
+        : receipt.state === 'succeeded' ? 'done' : receipt.state === 'cancelled' ? 'cancelled' : 'failed';
+      const summary = receipt.installation?.message ?? (receipt.result && 'message' in receipt.result ? receipt.result.message : `Run ${receipt.state}`);
+      const sameRun = current?.runId === receipt.runId ? current : undefined;
+      const previous = sameRun?.steps ?? [];
+      const settled = new Map(receipt.steps.map(step => [step.key, step]));
+      const steps: StepView[] = previous.map(step => {
+        const completed = settled.get(step.key);
+        return completed ? { ...step, status: completed.outcome, note: completed.note } : step;
+      });
+      for (const step of receipt.steps) if (!previous.some(item => item.key === step.key)) steps.push({ ...step, summary: step.key, status: step.outcome });
+      const staleChallenge = receipt.parity?.kind === 'signIn' && receipt.parity.signIn?.state === 'awaiting-user' && statusRevision !== this.statusRevision;
+      this.update({ run: { ...sameRun, runId: receipt.runId, steps, outcome, summary, receipt, challengeCurrent: !staleChallenge }, detail: summary });
+      if (staleChallenge && this.ownsSession(token) && this.state.run?.runId === receipt.runId) await this.refreshRun(receipt.runId);
+    } catch {
+      // Older agents and legacy runs may have no shared receipt. Preserve their progress and connection.
+    } finally {
+      if (this.runDiscovery === discovery) this.runDiscovery = null;
+    }
+  }
+
   async connect() {
     if (!this.bridge) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.runDiscovery = null;
     this.reviewRefresh = false;
     this.earlyReviews.clear();
     this.earlyDisconnects.clear();
@@ -187,7 +315,9 @@ export class MachineController {
       this.unlisten = unlisten;
       if (!this.establish(await this.bridge.invoke('agent_generation'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision, true)) await this.load(revision);
+      const canInspect = await this.loadStatus(revision, true);
+      await this.discoverRuns();
+      if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
@@ -196,10 +326,12 @@ export class MachineController {
   }
 
   private showStatus(status: WireStatus) {
+    this.statusRevision++;
+    const challengeRun = this.concealChallenge();
+    if (challengeRun) void this.refreshRun(challengeRun);
     const detail = status.error ? `${status.error}${status.detail ? `: ${status.detail}` : ''}`
       : status.applying ? 'The agent is applying changes'
       : status.paused ? `Automatic apply paused: ${status.paused.reason}` : undefined;
-    this.statusRevision++;
     this.update({ status, waitingForReport: false,
       ...(status.applying || status.error ? { initialReadPending: false }
         : this.state.waitingForReport && !this.state.inspection ? { initialReadPending: true } : {}),
@@ -369,6 +501,7 @@ export class MachineController {
     if (!this.bridge || this.state.pending || (this.state.connection === 'connected' && (this.state.run?.outcome === 'running' || this.state.status?.applying === true))) return;
     const revision = ++this.revision;
     this.generation = null;
+    this.runDiscovery = null;
     this.reviewRefresh = false;
     this.earlyReviews.clear();
     this.starting = false;
@@ -379,7 +512,9 @@ export class MachineController {
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
-      if (await this.loadStatus(revision, true)) await this.load(revision);
+      const canInspect = await this.loadStatus(revision, true);
+      await this.discoverRuns();
+      if (canInspect && this.owns(revision)) await this.load(revision);
     } catch (error) {
       if (this.owns(revision)) this.update({ connection: 'disconnected', waitingForReport: false, initialReadError: message(error), detail: message(error) });
     } finally {
@@ -433,19 +568,44 @@ export class MachineController {
       if ((!this.state.inspection || externalApplyEnded) && !event.status.applying && !this.state.pending) void this.inspect();
       return;
     }
+    if (event.event === 'operation-run') {
+      if (!this.starting) {
+        if (this.state.run?.runId === event.runId) void this.refreshRun(event.runId, true);
+        else void this.discoverRuns(true);
+      }
+      return;
+    }
     if (this.starting) {
       if (this.early.length < MAX_EARLY_EVENTS) this.early.push(event);
       return;
     }
-    const run = this.state.run;
+    let run = this.state.run;
+    if (!run && this.runDiscovery
+      && (event.progress.type === 'done' || event.progress.type === 'failed' || event.progress.type === 'cancelled')) {
+      const discovery = this.runDiscovery;
+      if (!discovery.overflow && !discovery.terminalRunIds.has(event.runId)) {
+        if (discovery.terminalRunIds.size === MAX_EARLY_EVENTS) {
+          discovery.overflow = true;
+          discovery.terminalRunIds.clear();
+        } else discovery.terminalRunIds.add(event.runId);
+      }
+      return;
+    }
+    const discoversRun = event.progress.type === 'started' && run?.outcome !== 'running';
+    if (event.progress.type === 'started' && run?.outcome !== 'running') {
+      run = { runId: event.runId, steps: [], outcome: 'running', summary: 'Applying machine changes' };
+      this.update({ preview: null, status: this.state.status ? { ...this.state.status, applying: true } : null });
+    }
     if (!run || run.runId !== event.runId || run.outcome !== 'running') return;
     const next = advance(run, event.progress);
     if (next.outcome === 'running') {
       this.update({ run: next, detail: next.summary });
+      if (discoversRun || event.progress.type === 'finished' && event.progress.key.startsWith('skill-intent:')) void this.refreshRun(event.runId);
       return;
     }
     // The preview is spent and the machine has changed: look again.
     this.update({ run: next, detail: next.summary, preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null });
+    void this.refreshRun(event.runId);
     void this.inspect();
   }
 }

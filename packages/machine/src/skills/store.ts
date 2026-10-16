@@ -1,8 +1,10 @@
 import { dirname, join } from 'node:path';
 import { Effect } from 'effect';
 import type { Target } from '@nortuscc/profile-engine';
+import { FsFailed } from '../errors.ts';
 import { Fs } from '../fs.ts';
 import { MachinePaths, type MachinePathsValue } from '../paths.ts';
+import { isSkillCandidateSelector, nativeInstalledName } from './candidates.ts';
 import { SKILL_AGENTS } from './installer.ts';
 import type { SkillLock } from './manifest.ts';
 
@@ -12,18 +14,26 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 // A sibling of the store, so redirecting the store (NORTUSCC_AGENTS_DIR) redirects the lock too.
 export const skillLockPath = (paths: MachinePathsValue) => join(dirname(paths.agentsSkills), '.skill-lock.json');
 
-// The installer owns the lock; anything unreadable or misshapen degrades to "nothing known".
-export const readSkillLock: Effect.Effect<SkillLock, never, Fs | MachinePaths> = Effect.gen(function* () {
-  const fs = yield* Fs;
-  const text = yield* fs.readText(skillLockPath(yield* MachinePaths)).pipe(Effect.orElseSucceed(() => undefined));
-  if (text === undefined) return { skills: {} };
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return { skills: isRecord(parsed) && isRecord(parsed.skills) ? parsed.skills : {} } as SkillLock;
-  } catch {
-    return { skills: {} };
-  }
+const decodeSkillLock = (bytes: Uint8Array | undefined, path: string): Effect.Effect<SkillLock, FsFailed> => {
+  if (bytes === undefined) return Effect.succeed({ skills: {} });
+  return Effect.try({ try: () => {
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (!isRecord(parsed) || !isRecord(parsed.skills)) throw new Error('invalid');
+    return { skills: parsed.skills };
+  }, catch: () => new FsFailed({ op: 'read', path, reason: 'Native skill lock is unavailable or invalid' }) });
+};
+// Authorizing update reads retain exact bytes and refuse unavailable or malformed evidence.
+export const readSkillLockEvidence = Effect.gen(function* () {
+  const fs = yield* Fs; const path = skillLockPath(yield* MachinePaths);
+  const bytes = yield* fs.readBytes(path);
+  return { lock: yield* decodeSkillLock(bytes,path), bytes };
 });
+// Legacy observations retain their non-authorizing fallback through the same native lock decoder.
+export const readSkillLock: Effect.Effect<SkillLock, never, Fs | MachinePaths> = Effect.gen(function* () {
+  const fs = yield* Fs; const path = skillLockPath(yield* MachinePaths);
+  const text = yield* fs.readText(path);
+  return yield* decodeSkillLock(text === undefined ? undefined : new TextEncoder().encode(text),path);
+}).pipe(Effect.catch(() => Effect.succeed({ skills: {} })));
 
 // Skill folders (or links to them) in the shared store, sorted.
 export const installedSkillNames = Effect.gen(function* () {
@@ -67,7 +77,7 @@ export const readExposure = (targets: ReadonlyArray<Target>): Effect.Effect<
   for (const target of targets) {
     const result = yield* Effect.result(exposedSkillNames(target));
     if (result._tag === 'Success') list[target] = result.success;
-    else errors.push(`could not read the skill directory for ${SKILL_AGENTS[target]}: ${result.failure.message}`);
+    else errors.push(`could not read the skill directory for ${SKILL_AGENTS[target]}; check directory access and permissions`);
   }
   return { list, errors };
 });
@@ -89,3 +99,11 @@ export function skillExposure(input: {
   }
   return { exposed, partial, missing };
 }
+
+// Vendor lock keys are native metadata selectors, distinct from sanitized store folders.
+// Only addition-aware callers opt into this mapping; ambiguous aliases never select a source.
+export const additionLockEntry = (lock: SkillLock, name: string): { readonly selectorName: string; readonly meta: unknown } | undefined => {
+  const matches = Object.entries(lock.skills).filter(([selector]) => isSkillCandidateSelector(selector) && nativeInstalledName(selector) === name);
+  if (matches.length !== 1) return undefined;
+  return { selectorName: matches[0]![0], meta: matches[0]![1] };
+};

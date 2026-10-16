@@ -1,8 +1,8 @@
-import { randomBytes } from 'node:crypto';
-import { constants } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
-import { parsePins } from '@nortuscc/profile-engine';
+import { buildBaseProfile, parsePins, resolveProfile } from '@nortuscc/profile-engine';
+import { authorDigest, Fs, nodeFs, validateAuthorBinding, type AuthorBinding, type AuthorServices, type PreparedAuthorEdit } from '@nortuscc/machine';
+import type { Git } from './git.ts';
+import type { WatchedSource } from './model.ts';
 import { Data, Effect } from 'effect';
 import { redact } from './redact.ts';
 
@@ -87,67 +87,108 @@ export type Written = { readonly previous?: string; readonly backup?: string }; 
 // Reading, backing up or replacing a document failed. `reason` is redacted.
 export class WriteFailed extends Data.TaggedError('WriteFailed')<{ readonly reason: string }> {}
 
-const io = <A>(work: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: work,
-    catch: (error) => new WriteFailed({ reason: redact(error instanceof Error ? error.message : String(error)) }),
-  });
-
-const readText = (path: string) =>
-  readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) =>
-    error.code === 'ENOENT' ? undefined : Promise.reject(error),
-  );
-
-// Copies the file to `<dir>/<name>.<UTC timestamp>`, adding `-<n>` when that name is taken.
-async function backUp(path: string, dir: string): Promise<string> {
-  const absolute = resolve(dir);
-  await mkdir(absolute, { recursive: true });
-  const base = join(absolute, `${basename(path)}.${new Date().toISOString().replace(/[-:.]/g, '')}`);
-  for (let n = 0; ; n++) {
-    const target = n === 0 ? base : `${base}-${n}`;
-    try {
-      await copyFile(path, target, constants.COPYFILE_EXCL);
-      return target;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+// Service-based legacy writer. Callers coordinate concurrent mutations and supply their clock.
+export const writeEntryWithServices = (
+  repoDir: string, field: Field, source: string, value: string | undefined,
+  options: WriteOptions, at: Date,
+): Effect.Effect<Written, DocumentInvalid | WriteFailed, Fs> => Effect.gen(function* () {
+  if (source === '') return yield* Effect.fail(invalid(field, 'cannot hold an empty source'));
+  const fs = yield* Fs;
+  if ((yield* fs.stat(repoDir))?.kind !== 'directory') return yield* Effect.fail(new WriteFailed({reason:'Source document directory is unavailable'}));
+  const path = join(repoDir, FILES[field]);
+  if ((yield* fs.stat(path))?.kind === 'symlink') return yield* Effect.fail(new WriteFailed({reason:'Source document must be a regular file'}));
+  const bytes = yield* fs.readBytes(path);
+  const old = bytes === undefined ? undefined : yield* Effect.try({try:()=>new TextDecoder('utf-8',{fatal:true}).decode(bytes),catch:()=>new WriteFailed({reason:'Source document is not UTF-8'})});
+  const {text,previous} = yield* Effect.try({try:()=>editEntry(old,field,source,value),catch:error=>error instanceof DocumentInvalid?error:invalid(field,'is invalid')});
+  const unchanged = previous === undefined ? {} : {previous};
+  if (text === old || (old === undefined && value === undefined)) return unchanged;
+  let backup: string | undefined;
+  if (bytes !== undefined) {
+    const dir = resolve(options.backupDir);
+    yield* fs.createDirectory(dir,{recursive:true});
+    const base = join(dir, `${basename(path)}.${at.toISOString().replace(/[-:.]/g,'')}`);
+    for (let n = 0; ; n++) {
+      const target = n === 0 ? base : `${base}-${n}`;
+      if (yield* fs.stat(target)) continue;
+      yield* fs.copy(path,target,{exclusive:true});
+      backup = target;
+      break;
     }
   }
-}
+  if (authorDigest(yield* fs.readBytes(path)) !== authorDigest(bytes)) return yield* Effect.fail(new WriteFailed({reason:'Source document changed; preview again'}));
+  yield* fs.writeTextAtomic(path,text);
+  return backup === undefined ? unchanged : {...unchanged,backup};
+}).pipe(Effect.mapError(error=>error instanceof DocumentInvalid||error instanceof WriteFailed?error:new WriteFailed({reason:'Source document could not be backed up or replaced'})));
 
-// Writes beside the file, then renames over it, so no reader sees a half-written document.
-async function replace(path: string, text: string): Promise<void> {
-  const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-  try {
-    await writeFile(temp, text, { flag: 'wx' });
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
-}
-
-// Sets or removes one source's entry in the repo's document for `field`. The existing file is
-// backed up before it changes; an invalid document is never rewritten; an edit that changes
-// nothing writes nothing. Undo by calling again with the returned `previous`.
+// Standalone convenience boundary preserves existing callers. App operations use PreparedAuthorEdit.
 export const writeEntry = (
-  repoDir: string,
-  field: Field,
-  source: string,
-  value: string | undefined,
-  options: WriteOptions,
-): Effect.Effect<Written, DocumentInvalid | WriteFailed> =>
-  Effect.gen(function* () {
-    if (source === '') return yield* Effect.fail(invalid(field, 'cannot hold an empty source'));
-    const path = join(repoDir, FILES[field]);
-    const old = yield* io(() => readText(path));
-    const { text, previous } = yield* Effect.try({
-      try: () => editEntry(old, field, source, value),
-      catch: (error) =>
-        error instanceof DocumentInvalid ? error : new DocumentInvalid({ reason: redact(String(error)) }),
+  repoDir: string, field: Field, source: string, value: string | undefined, options: WriteOptions,
+): Effect.Effect<Written, DocumentInvalid | WriteFailed> => Effect.flatMap(Effect.sync(()=>new Date()), at =>
+  writeEntryWithServices(repoDir,field,source,value,options,at).pipe(Effect.provide(nodeFs)));
+
+// JSON.parse accepts duplicate keys; author edits refuse them so serialization cannot erase dirty intent.
+const duplicateKeys = (text: string): boolean => {
+  JSON.parse(text);
+  const objects: (Set<string> | undefined)[] = [];
+  for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}\[\]]/g)) {
+    const token = match[0];
+    if (token === '{') objects.push(new Set());
+    else if (token === '[') objects.push(undefined);
+    else if (token === '}' || token === ']') objects.pop();
+    else {
+      let next = match.index! + token.length;
+      while (/\s/.test(text[next] ?? '') && next < text.length) next++;
+      if (text[next] !== ':') continue;
+      const key: string = JSON.parse(token), keys = objects.at(-1);
+      if (keys?.has(key)) return true;
+      keys?.add(key);
+    }
+  }
+  return false;
+};
+
+export type SourceDecisionAction = 'pin' | 'unpin' | 'ignore' | 'unignore';
+// Reads only the exact accepted author files. A tolerant reader must never turn an error into absence.
+export const prepareSourceEdit = (input: {
+  readonly author: AuthorBinding; readonly source: WatchedSource;
+  readonly action: SourceDecisionAction; readonly revision?: string;
+}): Effect.Effect<PreparedAuthorEdit, unknown, AuthorServices | Git> => Effect.gen(function* () {
+  const { author, source, action, revision } = input;
+  const setting = action === 'pin' || action === 'ignore';
+  const field: Field = action === 'pin' || action === 'unpin' ? 'pins' : 'ignored';
+  if (setting ? revision === undefined || !/^[a-f0-9]{40}$(?![\s\S])/.test(revision) : revision !== undefined)
+    return yield* Effect.fail(invalid(field, 'requires an exact lowercase SHA for pin/ignore and no revision for reset'));
+  yield* validateAuthorBinding(author);
+  const fs = yield* Fs;
+  const texts = new Map<string, string | undefined>();
+  for (const path of ['skills-manifest.txt', PINS_FILE, IGNORES_FILE]) {
+    const accepted = author.files.find(file => file.path === path);
+    const bytes = yield* fs.readBytes(join(author.realCheckout, path));
+    if (!accepted || accepted.sha256 !== authorDigest(bytes)) return yield* Effect.fail(invalid(field, 'changed; preview again'));
+    const text = bytes === undefined ? undefined : yield* Effect.try({
+      try: () => new TextDecoder('utf-8', { fatal: true }).decode(bytes), catch: () => invalid(field, 'is not UTF-8'),
     });
-    const unchanged = previous === undefined ? {} : { previous };
-    if (text === old || (old === undefined && value === undefined)) return unchanged;
-    const backup = old === undefined ? undefined : yield* io(() => backUp(path, options.backupDir));
-    yield* io(() => replace(path, text));
-    return backup === undefined ? unchanged : { ...unchanged, backup };
-  });
+    texts.set(path, text);
+  }
+  const base = buildBaseProfile({ skillsManifest: texts.get('skills-manifest.txt') }, () => false);
+  if (!base.skills.some(group => group.source === source.source))
+    return yield* Effect.fail(new DocumentInvalid({ reason: 'This source has no declaration in the configured author manifest; add its author declaration before editing source policy' }));
+  for (const current of ['pins', 'ignored'] as const) {
+    const text = texts.get(FILES[current]);
+    if (text !== undefined) yield* Effect.try({ try: () => {
+      if (duplicateKeys(text)) throw invalid(current, 'contains duplicate keys');
+      const entries = readEntries(text, current);
+      if (current === 'ignored' && Object.values(entries).some(sha => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(sha))) throw invalid(current, 'has an invalid revision');
+      return entries;
+    }, catch: () => invalid(current, 'is invalid; repair it before editing') });
+  }
+  const before = texts.get(FILES[field]);
+  const edited = yield* Effect.try({ try: () => editEntry(before, field, source.source, revision), catch: () => invalid(field, 'is invalid; repair it before editing') });
+  // Resolve the proposed author policy with the engine, including unrelated existing source pins.
+  const proposed = resolveProfile({ base, pins: parsePins(field === 'pins' ? edited.text : texts.get(PINS_FILE)) });
+  if (proposed.issues.length) return yield* Effect.fail(invalid(field, 'does not resolve as a valid author source policy'));
+  yield* validateAuthorBinding(author);
+  return { author, documents: edited.text === before || (before === undefined && !setting) ? [] : [{
+    path: FILES[field], beforeSha256: authorDigest(before), text: edited.text, afterSha256: authorDigest(edited.text)!,
+  }] };
+});

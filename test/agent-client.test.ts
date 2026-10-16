@@ -312,3 +312,14 @@ test('hosted IPC rejects pending IDs, tokens and unknown nested result fields', 
     finally { conn.close(); }
   } finally { await f.close(); }
 });
+
+test('MCP authentication binds the expected app runtime and shared results reject unknown fields', {skip}, async () => {
+  const f=await fake((request,socket) => ok(socket,request.id,{runs:[],nextBefore:null,secret:'not returned'}));
+  try {
+    const conn=await connectAgent(f.paths,{client:'mcp',runtimeId:'bundle-hash'});
+    try {
+      assert.equal(f.seen[0]?.client,'mcp'); assert.equal(f.seen[0]?.runtimeId,'bundle-hash');
+      await assert.rejects(conn.request({command:'operation',operation:'listRuns',input:{limit:10}}),error => error instanceof AgentError && error.code==='MALFORMED' && !error.message.includes('not returned'));
+    } finally {conn.close();}
+  } finally {await f.close();}
+});

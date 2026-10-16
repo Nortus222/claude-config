@@ -7,16 +7,18 @@
     "dev": "vite --host 127.0.0.1",
     "test": "tsx --test --test-concurrency=2 checks/*.spec.ts",
     "test:resources": "node scripts/resource-check.mjs",
-    "test:bun": "bun test ./checks/protocol.spec.ts ./checks/controller.spec.ts ./checks/setup-controller.spec.ts ./checks/account-controller.spec.ts ./checks/views.spec.ts ./checks/update-controller.spec.ts ./checks/update-view.spec.ts ./checks/startup-diagnostics.spec.ts ./checks/startup-protocol.spec.ts ./checks/entry-loader.spec.ts ./checks/login-environment.spec.ts ./checks/agent-entry.spec.ts && npm run test:resources",
+    "test:bun": "bun test ./checks/protocol.spec.ts ./checks/controller.spec.ts ./checks/setup-controller.spec.ts ./checks/account-controller.spec.ts ./checks/views.spec.ts ./checks/update-controller.spec.ts ./checks/update-view.spec.ts ./checks/startup-diagnostics.spec.ts ./checks/startup-protocol.spec.ts ./checks/entry-loader.spec.ts ./checks/login-environment.spec.ts ./checks/agent-entry.spec.ts ./checks/mcp-server.spec.ts ./checks/mcp-resources.spec.ts ./checks/mcp-launch.spec.ts && npm run test:resources",
     "typecheck": "tsc --noEmit",
     "resources": "node scripts/bundle.mjs",
     "build": "npm run typecheck && vite build && npm run resources",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:mcp": "node scripts/mcp-smoke.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
     "@nortuscc/agent": "0.1.0",
     "@nortuscc/machine": "0.1.0",
     "@nortuscc/profile-engine": "0.1.0",
