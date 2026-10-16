@@ -69,7 +69,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     const applied = (yield* recorded) ?? currentHead;
     const holds = choices?.holds ?? (yield* (yield* SyncStore).read);
     const overrides = choices?.overrides ?? (yield* (yield* OverridesStore).read);
-    const comparison = { repo, applied, head: currentHead, holds, overrides: overrides.value };
+    const comparison = { repo, profile: followed.profile, applied, head: currentHead, holds, overrides: overrides.value };
     const { changes, conflicts } = yield* incoming(comparison);
     const accepted = new Set(decisions.filter(d => d.setupId === LOCAL_SETUP && d.commit === currentHead && d.decision === 'accept').map(d => d.itemId));
     const appliedSnapshot = yield* snapshot(applied, holds, choices);

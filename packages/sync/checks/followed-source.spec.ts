@@ -5,15 +5,15 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Effect, Layer } from 'effect';
-import { nodeProcesses, Processes, type MachinePathsValue } from '@nortuscc/machine';
+import { nodeFs, nodeProcesses, Processes, type MachinePathsValue } from '@nortuscc/machine';
 import type { SyncRevision } from '@nortuscc/hosted-protocol';
 import * as sync from '../src/index.ts';
 import { tempRepo } from './support/repo.ts';
 
 const URL = 'https://github.com/example/followed.git';
 const docs = { 'claude/CLAUDE.md': '# first\n' };
-const fixture = () => {
-  const repo = tempRepo(docs);
+const fixture = (documents: Readonly<Record<string, string>> = docs) => {
+  const repo = tempRepo(documents);
   const origin = join(repo.root, 'origin.git');
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   repo.git('remote', 'add', 'origin', origin); repo.git('push', '-q', 'origin', 'main');
@@ -116,4 +116,32 @@ test('a migrated checkout baseline keeps undecided incoming items at their appli
     const accepted = yield* s.effective([{ setupId: 'local', itemId: 'file:claude:CLAUDE.md', revision: null, commit: next, decision: 'accept', decidedAt: '2026-10-15T00:00:00Z', machineId: null, source: 'local' }]);
     assert.equal(f.text(accepted.effective), '# incoming\n');
   }));
+});
+
+
+test("a followed profile's items drive incoming changes", async t => {
+  for (const changedProfile of ['personal', 'other']) {
+    await t.test(`a change only in ${changedProfile}`, async t => {
+      const f = fixture({
+        ...docs,
+        'profiles/default.json': '{}',
+        'profiles/personal.json': '{}',
+        'profiles/other.json': '{}',
+        'claude/personal.md': '# profile change\n',
+      });
+      t.after(() => rmSync(f.root, { recursive: true, force: true }));
+      const next = f.commit({ [`profiles/${changedProfile}.json`]: JSON.stringify({ files: { 'claude:CLAUDE.md': 'claude/personal.md' } }) });
+      f.git('push', '-q', 'origin', 'main');
+      await f.run(s => Effect.gen(function* () {
+        yield* s.fetch;
+        execFileSync('git', ['--git-dir', sync.followedClone(f.paths, URL), 'update-ref', 'refs/nortuscc/migration/applied', f.first]);
+        const observed = yield* sync.observeSyncSource(s, []).pipe(Effect.provide(nodeFs));
+        assert.deepEqual(observed.changes.map(change => change.itemId), changedProfile === 'personal' ? ['file:claude:CLAUDE.md'] : []);
+        const text = (snapshot: sync.Snapshot) => readFileSync(join(snapshot.repo, snapshot.desired.files.find(file => file.id === 'claude:CLAUDE.md')!.src), 'utf8');
+        assert.equal(text(observed.effective.effective), '# first\n', 'undecided profile changes retain the applied value');
+        const accepted = yield* s.effective([{ setupId: 'local', itemId: 'file:claude:CLAUDE.md', revision: null, commit: next, decision: 'accept', decidedAt: '2026-10-15T00:00:00Z', machineId: null, source: 'local' }]);
+        assert.equal(text(accepted.effective), changedProfile === 'personal' ? '# profile change\n' : '# first\n');
+      }), null, 'personal');
+    });
+  }
 });
