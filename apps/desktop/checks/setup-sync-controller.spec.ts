@@ -93,7 +93,7 @@ test('a setup Apply seen finishing before this Mac stops applying re-reads the r
   f.handlers.setupReview = () => review({ rows: [] });
   f.handlers.getRun = () => run({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
   f.emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
-  assert.equal(f.controller.state.run?.state, 'succeeded'); assert.equal(f.controller.state.review, null);
+  assert.equal(f.controller.state.run?.state, 'succeeded'); assert.equal(f.controller.snapshot().review, null);
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews);
   f.agent.applying = false; f.emit({ version: 3, event: 'status', status: status({ applying: false }) }); await flush();
   assert.equal(f.calls.filter(c => c.name === 'setupReview').length, reviews + 1);
