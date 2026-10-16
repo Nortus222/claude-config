@@ -279,10 +279,15 @@ export const SourceDecisionPreviewSchema = Schema.Struct({ ...previewFields, cha
 const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsChangeSchema,retention:BackupPrunePlanSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
+// Resolved items a draft changes, per profile; longer lists are cut and marked itemsTruncated.
+export const MAX_DRAFT_PREVIEW_ITEMS = 1000;
 export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: AuthorHeadSchema, digest: DigestSchema,
   diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String), truncated: Schema.optionalKey(Schema.Literal(true)) })),
   truncated: Schema.optionalKey(Schema.Literal(true)),
-  invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema) });
+  invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema),
+  items: Schema.Array(Schema.Struct({ profile: ProfileNameSchema, itemId: KeySchema, kind: Schema.Literals(['setting', 'file', 'skill', 'integration']),
+    change: Schema.Literals(['added', 'removed', 'changed']) })).check(Schema.isMaxLength(MAX_DRAFT_PREVIEW_ITEMS)),
+  itemsTruncated: Schema.optionalKey(Schema.Literal(true)) });
 const AuthorLocalPreviewSchema = Schema.Struct({ ...previewFields, skillAddition: Schema.optionalKey(Schema.Never), change: AuthorLocalChangeSchema,
   draftId: Schema.NullOr(DraftIdSchema), draft: Schema.NullOr(DraftPreviewSchema), actionEffects: Schema.Array(Text) });
 export const ChangePreviewSchema = Schema.Union([FollowPreviewSchema, AuthorLocalPreviewSchema, PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);

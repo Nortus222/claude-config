@@ -10,7 +10,7 @@ import { EnvNameSchema, MAX_ITEMS, RevisionItemSchema, RevisionPublicationSchema
 import { SessionError } from '../ipc/session.ts';
 import { RunStore } from '../run-store.ts';
 import type { RunLifecycle } from '../runs.ts';
-import { decodeOperationOutput, type OperationChange, type ParityAcceptance, type RunView } from '../operations/index.ts';
+import { decodeOperationOutput, MAX_DRAFT_PREVIEW_ITEMS, type OperationChange, type ParityAcceptance, type RunView } from '../operations/index.ts';
 import type { PreparedParityChange } from '../operations/parity.ts';
 import { DraftStore, type Draft } from './drafts.ts';
 import { AuthorWorkspace } from './workspace.ts';
@@ -22,11 +22,13 @@ export type DraftPreview = {
   diff: { path: string; before: string | null; after: string | null; truncated?: true }[];
   truncated?: true;
   invalid: { index: number | null; profile?: string; reason: string }[]; affectedProfiles: string[];
+  items: { profile: string; itemId: string; kind: RevisionItem['kind']; change: RevisionItem['change'] }[];
+  itemsTruncated?: true;
 };
 const DIFF_FILE_TEXT_BYTES = 16_384;
 const DIFF_PREVIEW_BYTES = 262_144;
 
-// Only display bytes are clipped. The digest and the files sent to Git cover the full diff.
+// Only display bytes and the item list are clipped. The digest and the files sent to Git cover the full diff.
 const boundedPreview = (preview: DraftPreview): DraftPreview => {
   const clip = (text: string | null) => text === null ? null : new TextDecoder('utf-8', { ignoreBOM: true })
     .decode(Buffer.from(text).subarray(0, DIFF_FILE_TEXT_BYTES), { stream: true });
@@ -40,7 +42,9 @@ const boundedPreview = (preview: DraftPreview): DraftPreview => {
     if (bytes + size > DIFF_PREVIEW_BYTES) { truncated = true; break; }
     diff.push(entry); bytes += size; truncated ||= clipped;
   }
-  return { ...preview, diff, ...(truncated ? { truncated: true } : {}) };
+  const items = preview.items.slice(0, MAX_DRAFT_PREVIEW_ITEMS);
+  return { ...preview, diff, ...(truncated ? { truncated: true } : {}), items,
+    ...(items.length < preview.items.length ? { itemsTruncated: true as const } : {}) };
 };
 type Publication = { -readonly [K in keyof NonNullable<RunView['publication']>]: NonNullable<RunView['publication']>[K] };
 type Acceptance = Extract<ParityAcceptance, { kind: 'publishDraft' | 'announcePublication' }>;
@@ -100,10 +104,12 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     const diff = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(path => before[path] === after[path] ? []
       : [{ path, before: before[path] ?? null, after: after[path] ?? null }]);
     const hosted = client ? yield* client.sync().pipe(Effect.catch(() => client.state), Effect.catch(() => Effect.succeed(undefined))) : undefined;
-    const affectedProfiles = [...new Set([...profiles(before), ...profiles(after)])].sort().filter(profile => changedItems(before, after, profile).length > 0);
+    const allProfiles = [...new Set([...profiles(before), ...profiles(after)])].sort();
+    const items = allProfiles.flatMap(profile => changedItems(before, after, profile).map(item => ({ profile, itemId: item.id, kind: item.kind, change: item.change })));
+    const affectedProfiles = [...new Set(items.map(item => item.profile))];
     const pendingProfiles: string[] = [];
     const announced = new Map<string, Documents>();
-    for (const profile of [...new Set([...profiles(before), ...profiles(after)])].sort()) {
+    for (const profile of allProfiles) {
       const setup = hosted?.accountId ? hosted.setups.find(setup => setup.owned && setup.profile === profile && normalizeRepoUrl(setup.repoUrl) === normalizeRepoUrl(draft.repoUrl)) : undefined;
       const latest = setup && client ? (yield* client.revisions(setup.setupId).pipe(Effect.catch(() => Effect.succeed([])))).at(-1) : undefined;
       let previous: Documents = {};
@@ -115,7 +121,7 @@ export const makeAuthorPublisher = (client: HostedClient | undefined, generation
     }
     const invalid = [...replayed.invalid, ...profiles(after).flatMap(profile => resolveNamedProfile({ documents: after, name: profile }).issues
       .map(issue => ({ index: null, profile, reason: `${profile}: ${issue.message}` })))];
-    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles, pendingProfiles };
+    return { draftId: draft.id, base: fresh.base, digest: digest(diff), diff, invalid, affectedProfiles, items, pendingProfiles };
   });
   const displayed = ({ pendingProfiles: _, ...result }: DraftPreview & { pendingProfiles: string[] }): DraftPreview => boundedPreview(result);
   const previewDraft = (id: string): Effect.Effect<DraftPreview, SessionError> => Effect.flatMap(readDraft(id), preview).pipe(
