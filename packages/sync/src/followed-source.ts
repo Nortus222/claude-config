@@ -7,9 +7,9 @@ import {
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import type { SyncRevision } from '@nortuscc/hosted-protocol';
-import { desiredFor } from './compose.ts';
+import { composeDocuments, desiredFor } from './compose.ts';
 import { commitDocuments, isAncestor, revParse } from './git.ts';
-import { followedClone, privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from './followed-repository.ts';
+import { followedClone, followedGit, privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from './followed-repository.ts';
 import type { FollowedProfile } from './followed.ts';
 import { hostedSetupSourceLayer } from './hosted-source.ts';
 import { desiredOfDocuments, hasProfile, worktreeDocuments, type Documents } from './documents.ts';
@@ -37,11 +37,29 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
   type Services = Fs | Processes | OverridesStore | SyncStore;
   const repo = followedClone(paths, followed.repoUrl);
   const repository = privateFollowedRepository(paths, followed);
+  // Holds keep their commit-only format. A private empty profile origin can hold an item absent
+  // before the first apply, without claiming that any upstream commit was applied to this machine.
+  const emptyRef = `refs/nortuscc/empty/${followed.profile}`;
+  const emptyOrigin = Effect.gen(function* () {
+    const existing = yield* revParse(repo, emptyRef);
+    if (existing) return existing;
+    const write = (args: readonly string[], input: string) => Processes.use(p => p.run({
+      cmd: 'git', cwd: repo, args, input, output: 'capture', stderr: 'capture',
+    })).pipe(Effect.flatMap(result => result.code === 0 ? Effect.succeed(result.stdout.trim()) : unavailable('HEAD', 'empty profile origin could not be created')));
+    const blob = yield* write(['hash-object', '-t', 'blob', '-w', '--stdin'], '{}\n');
+    const profiles = yield* write(['mktree'], `100644 blob ${blob}\t${followed.profile}.json\n`);
+    const tree = yield* write(['mktree'], `040000 tree ${profiles}\tprofiles\n`);
+    const commit = yield* write(['hash-object', '-t', 'commit', '-w', '--stdin'],
+      `tree ${tree}\nauthor nortuscc <nortuscc@localhost> 0 +0000\ncommitter nortuscc <nortuscc@localhost> 0 +0000\n\nEmpty profile origin\n`);
+    if ((yield* followedGit(paths, repo, ['update-ref', emptyRef, commit])).code !== 0) return yield* unavailable('HEAD', 'empty profile origin could not be retained');
+    return commit;
+  });
   const recorded = Effect.gen(function* () {
     const text = yield* (yield* Fs).readText(join(paths.stateRoot, 'state.json'));
     const state = text === undefined ? undefined : parseState(text);
     if (text !== undefined && state === undefined) return yield* unavailable('HEAD', 'applied state is invalid');
-    return state?.applied?.commit ?? (yield* revParse(repo, 'refs/nortuscc/migration/applied'));
+    if (state !== undefined) return state.applied?.commit ?? (yield* emptyOrigin);
+    return yield* revParse(repo, 'refs/nortuscc/migration/applied');
   });
   // A historical absence owns no items. Keep unmatched overrides on disk until their items are taken.
   const historicalSnapshot = (documents: Documents, overrides: Input<MachineOverrides>) => {
@@ -53,6 +71,9 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     const overrides = choices?.overrides ?? (yield* (yield* OverridesStore).read);
     const documents = yield* commitDocuments(repo, commit);
     if (historical && !hasProfile(documents, followed.profile)) return yield* historicalSnapshot({ [`profiles/${followed.profile}.json`]: '{}' }, overrides);
+    const empty = yield* revParse(repo, emptyRef);
+    if (empty && (commit === empty || Object.values(held).includes(empty))) return yield* historicalSnapshot(
+      yield* composeDocuments({ repo, head: { kind: 'commit', commit }, held, profile: followed.profile }), overrides);
     const snapshot = yield* desiredFor({ repo, profile: followed.profile, head: { kind: 'commit', commit }, held, overrides,
       into: join(paths.stateRoot, 'snapshots', createHash('sha256').update(JSON.stringify([followed, commit, held])).digest('hex').slice(0, 32)) });
     yield* (yield* Fs).writeTextAtomic(join(snapshot.repo, '.snapshot.json'), JSON.stringify({ usedAt: (options.now?.() ?? new Date()).toISOString() }) + '\n');
@@ -73,7 +94,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     const main = yield* head;
     const commit = yield* revParse(repo, revision);
     if (commit === undefined) return yield* unavailable(revision, 'commit is not in the private clone');
-    if (!(yield* isAncestor(repo, commit, main))) return yield* Effect.fail(new RevisionMismatch({ revision, reason: 'commit is not reachable from fetched main' }));
+    if (commit !== (yield* revParse(repo, emptyRef)) && !(yield* isAncestor(repo, commit, main))) return yield* Effect.fail(new RevisionMismatch({ revision, reason: 'commit is not reachable from fetched main' }));
     return yield* snapshot(commit, {}, undefined, commit !== main);
   });
   const effective = (decisions: readonly Decision[], choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {

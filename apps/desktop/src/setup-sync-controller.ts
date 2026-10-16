@@ -7,7 +7,7 @@ type Review = OperationOutput<'setupReview'>;
 type Source = OperationOutput<'inspectSetups'>['items'][number];
 export type SetupChoice = Extract<ChangePreview['change'], { kind: 'setupApply' }>['choices'][number];
 export type SetupSyncState = {
-  profiles: OperationOutput<'inspectProfiles'> | null;
+  profiles: OperationOutput<'inspectProfiles'> | null; profileNotice: string | null;
   native: boolean; connection: MachineController['state']['connection']; sources: readonly Source[]; source: Source | null;
   review: Review | null; choices: readonly SetupChoice[]; preview: ChangePreview | null; run: RunView | null;
   pending: boolean; pagePending: boolean; pageIndex: number; error: string | null; message: string;
@@ -38,7 +38,7 @@ export class SetupSyncController {
   private inMaintenance = false;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
-    this.state = { profiles: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
+    this.state = { profiles: null, profileNotice: null, native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
       pending: false, pagePending: false, pageIndex: 0, error: null, message: '', groupErrors: {},
       eligibility: { read: false, refetch: false, choose: false, preview: false, apply: false, cancel: false, browse: false } };
     let session = machine.state.session, connection = machine.state.connection;
@@ -129,17 +129,22 @@ export class SetupSyncController {
   private async load(refetch: boolean) {
     if (!this.state.eligibility.read) return;
     this.epoch++; this.issued.clear(); this.cursors = [undefined];
-    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, groupErrors: {} });
+    const mark = this.mark(); this.update({ pending: true, review: null, preview: null, choices: [], pageIndex: 0, error: null, profiles: null, profileNotice: null, groupErrors: {} });
     try {
-      const profiles = await this.call(mark, 'inspectProfiles', { scope: SCOPE });
-      if (!profiles) return;
+      let profiles: SetupSyncState['profiles'] = null;
+      try {
+        profiles = await this.call(mark, 'inspectProfiles', { scope: SCOPE }) ?? null;
+      } catch (error) {
+        if (this.current(mark)) this.update({ profileNotice: `Profiles could not be listed: ${message(error)}. Reload to retry.` });
+      }
+      if (!this.current(mark)) return;
       this.update({ profiles });
       const sources: Source[] = []; let cursor: string | undefined;
       do {
         const result = await this.call(mark, 'inspectSetups', { scope: SCOPE, limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
         if (!result) return; sources.push(...result.items); cursor = result.nextCursor ?? undefined;
       } while (cursor);
-      const source = sources.find(source => profiles.followed && source.setupId === (profiles.followed.setupId ?? 'local')) ?? sources.find(source => source.setupId === this.state.source?.setupId) ?? sources.find(source => source.trusted) ?? sources[0] ?? null;
+      const source = sources.find(source => profiles?.followed && source.setupId === (profiles.followed.setupId ?? 'local')) ?? sources.find(source => source.setupId === this.state.source?.setupId) ?? sources.find(source => source.trusted) ?? sources[0] ?? null;
       this.update({ sources, source });
       if (!source?.trusted) { this.update({ message: source ? 'Trust this repository in Settings before reviewing changes.' : 'No setup is available.' }); return; }
       const review = await this.call(mark, 'setupReview', { scope: SCOPE, setupId: source.setupId, limit: PAGE_SIZE, refetch });

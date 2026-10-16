@@ -14,6 +14,7 @@ function SourceSummary({ state, controller }: { state: SetupSyncState; controlle
   const followed = state.profiles?.followed;
   return <section className="card setup-sync-summary" aria-labelledby="setup-sync-source-h">
     <p className="eyebrow">SETUP REPOSITORY</p><h2 id="setup-sync-source-h">{followed ? `Following ${followed.profile} from ${followed.repoUrl}` : source?.repository ?? 'No setup selected'}</h2>
+    {state.profileNotice ? <p className="notice">{state.profileNotice}</p> : null}
     {followed ? <label>Switch profile <select aria-label="Switch profile" value={followed.profile} disabled={!state.eligibility.read} onChange={event => void controller.switchProfile(event.target.value)}>{state.profiles?.available.map(profile => <option key={profile.name} value={profile.name}>{profile.name}</option>)}</select></label> : null}
     <form onSubmit={event => { event.preventDefault(); void controller.followSharedLink(link); }}><label>Follow a shared link <input value={link} onChange={event => setLink(event.target.value)} disabled={!state.eligibility.read} placeholder="nortuscc://follow/… or setup ID" /></label><button disabled={!state.eligibility.read || !link.trim()}>Preview follow</button></form>
     {state.sources.length > 1 ? <label>Setup <select value={source?.setupId ?? ''} disabled={!state.eligibility.read}

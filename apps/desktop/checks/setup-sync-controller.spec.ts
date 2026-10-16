@@ -236,3 +236,21 @@ test('a readable profile follow can be applied when the previous repository is u
   await f.controller.followSharedLink('team');
   assert.equal(f.controller.state.eligibility.apply, true);
 });
+
+
+test('the Setup page loads its cached review when profile listing is unavailable', async t => {
+  const f = await setup(t);
+  f.handlers.inspectProfiles = () => { throw new Error('Profile clone unavailable'); };
+  const reviews = f.calls.filter(call => call.name === 'setupReview').length;
+  await f.controller.reload();
+  assert.equal(f.controller.state.review?.rows[0]?.after, 'new');
+  assert.equal(f.controller.state.source?.setupId, 'local');
+  assert.equal(f.controller.state.eligibility.choose, true);
+  assert.equal(f.calls.filter(call => call.name === 'setupReview').length, reviews + 1);
+  assert.equal(f.calls.filter(call => call.name === 'setupReview').at(-1)?.input.refetch, false);
+  assert.match(f.controller.state.profileNotice ?? '', /Profile clone unavailable/);
+  assert.equal(f.controller.state.profiles, null);
+  f.handlers.inspectProfiles = () => ({ followed: null, available: [{ name: 'default', extends: null }] });
+  await f.controller.reload();
+  assert.equal(f.controller.state.profileNotice, null);
+});

@@ -422,7 +422,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               const incomplete = evidence.remainingKeys.length > 0;
               const checkpoint = yield* Effect.exit(observer.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : signal.aborted ? 'partial' : incomplete ? 'needsInspection' : 'committed' }));
               yield* release;
-              const terminal = Exit.isFailure(exit) || Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
+              const terminal = Exit.isFailure(exit) ? { type: 'failed' as const, message: prepared.preview.change.kind === 'followProfile' ? describe(Cause.squash(exit.cause)) : 'Operation stopped; inspect before retrying' }
+                : Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
                 : signal.aborted ? { type: 'cancelled' as const, remaining: [...evidence.remainingKeys] }
                 : incomplete ? { type: 'failed' as const, message: 'Operation completion was not observed; inspect before retrying' }
                 : { type: 'done' as const, ok: evidence.committedKeys.length, failed: 0 };
@@ -653,7 +654,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       inspectSourceDiff: input => sourceRead('inspectSourceDiff',input),
       pinImpact: input => sourceRead('pinImpact',input),
       draftChangelog: input => sourceRead('draftChangelog',input),
-      inspectProfiles: input => handle.exclusive(readProfileOperation(handle, 'inspectProfiles', input).pipe(Effect.provideContext(context))),
+      inspectProfiles: input => readProfileOperation(handle, 'inspectProfiles', input).pipe(Effect.provideContext(context)),
       inspectShareLink: input => handle.exclusive(readProfileOperation(handle, 'inspectShareLink', input).pipe(Effect.provideContext(context))),
       inspectSetups: input => syncRead('inspectSetups', input),
       setupReview: input => handle.exclusive(Effect.gen(function* () {

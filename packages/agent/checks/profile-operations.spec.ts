@@ -2,10 +2,11 @@ import { HostedFailure, type HostedClient, type HostedState } from '@nortuscc/ho
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { nodeProcesses, Processes } from '@nortuscc/machine';
+import { nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
 import { FollowedStore, SyncStore, SetupSource, followedSetupSourceLayer } from '@nortuscc/sync';
 import { startAgent, makeSession, makeHostedRuntime } from '../src/index.ts';
 import { prepareProfileOperation, readProfileOperation } from '../src/operations/profiles.ts';
@@ -29,17 +30,19 @@ async function fixture(t: test.TestContext, denied = false) {
   const origin = join(m.root, 'origin.git');
   git(m.root, 'init', '-q', '--bare', '-b', 'main', origin);
   const calls: string[] = [];
+  const network = { offline: false };
   const hosted = { publicSetup: () => Effect.succeed(shared), subscribe: (id: string) => Effect.sync(() => { calls.push(`subscribe:${id}`); }), unsubscribe: (id: string) => Effect.sync(() => { calls.push(`unsubscribe:${id}`); }) };
   const processes = Layer.effect(Processes, Effect.gen(function* () {
     const real = yield* Processes;
     return { run: request => {
       if (request.args?.includes('ls-remote') && denied) return Effect.succeed({ code: 128, stdout: '', stderr: 'Permission denied' });
       const remoteRead = request.args.includes('fetch') || request.args.includes('ls-remote');
+      if (remoteRead && network.offline) return Effect.die(new Error('profile listing attempted network access'));
       if (remoteRead) git(m.paths.repo, 'push', '-q', origin, 'main', '--tags');
       return real.run({ ...request, args: request.args.map(arg => arg === url && remoteRead ? origin : arg) });
     } } satisfies Processes['Service'];
   })).pipe(Layer.provide(nodeProcesses()));
-  return { m, commit, calls, hosted, processes };
+  return { m, commit, calls, hosted, processes, network };
 }
 
 test('switching profile previews and then removes holds for items the new profile lacks', async t => {
@@ -156,6 +159,7 @@ test('profile inventory reads verified repository declarations independently of 
     const handle = yield* startAgent(() => f.m.domains, { deferStart: true });
     yield* (yield* FollowedStore).write({ repoUrl: url, profile: 'default', setupId: null });
     const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    yield* session.previewChange({ ...change, profile: 'default' });
     const profiles = yield* session.inspectProfiles({ scope });
     assert.deepEqual(profiles.available, [{ name: 'child', extends: 'default' }, { name: 'default', extends: null }, { name: 'small', extends: null }]);
     assert.equal(profiles.followed?.profile, 'default');
@@ -215,5 +219,146 @@ test('following another repository previews unresolvable holds for release', asy
     assert.ok('droppedChoices' in preview);
     assert.deepEqual(preview.droppedChoices.holds, ['setting:claude:settings.json#theme', 'skill:old/repo/gone']);
     assert.equal((yield* (yield* FollowedStore).read)?.repoUrl, 'https://github.com/old/setup.git');
+  })).pipe(Effect.provide(f.processes)));
+});
+
+
+test('listing profiles does not fetch', async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    const real = yield* startAgent(() => f.m.domains, { deferStart: true });
+    yield* prepareProfileOperation(real, change, 0);
+    yield* (yield* FollowedStore).write({ repoUrl: url, profile: 'default', setupId: null });
+    const handle = { ...real, exclusive: () => Effect.die(new Error('profile listing acquired the mutation lock')) };
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    f.network.offline = true;
+    const profiles = yield* session.inspectProfiles({ scope });
+    assert.deepEqual(profiles.available.map(profile => profile.name), ['default', 'small']);
+    assert.equal(profiles.followed?.profile, 'default');
+  })).pipe(Effect.provide(f.processes)));
+});
+
+test('following a different repository starts from no applied baseline and previews dropping its holds', async t => {
+  const f = await fixture(t);
+  const before = { version: 1, repo: '/previous', files: { 'claude:CLAUDE.md': { hash: 'keep', appliedAt: '2026-10-16T12:00:00Z' } }, applied: { commit: 'e'.repeat(40), at: '2026-10-16T12:00:00Z' }, mcpRouting: { keep: true } };
+  f.m.write(join(f.m.paths.stateRoot, 'state.json'), JSON.stringify(before));
+  f.m.write(join(f.m.paths.stateRoot, 'overrides.json'), '{"version":2,"settings":{"claude:settings.json":{"theme":"light"}}}');
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    yield* (yield* FollowedStore).write({ repoUrl: 'https://github.com/old/setup.git', profile: 'default', setupId: null });
+    // This commit is readable in both clones: repository identity, not reachability, invalidates the hold.
+    yield* (yield* SyncStore).write({ 'setting:claude:settings.json#theme': f.commit });
+    const handle = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange({ ...change, profile: 'default' });
+    assert.ok('droppedChoices' in preview);
+    assert.deepEqual(preview.droppedChoices.holds, ['setting:claude:settings.json#theme']);
+    assert.ok(preview.actionEffects.some(effect => /applied baseline/i.test(effect)));
+    assert.ok(preview.plan.steps.some(step => /baseline/.test(step.key)));
+    assert.equal((yield* (yield* StateStore).read).applied?.commit, before.applied.commit);
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'different-repository', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    const { applied: _applied, ...retained } = before;
+    assert.deepEqual(yield* (yield* StateStore).read, retained);
+    assert.deepEqual(yield* (yield* SyncStore).read, {});
+    const saved = readdirSync(f.m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile()).map(e => readFileSync(join(e.parentPath, e.name), 'utf8'));
+    assert.ok(saved.some(text => text === JSON.stringify(before)));
+    const review = yield* session.setupReview({ scope, setupId: 'local', refetch: true, limit: 100 });
+    assert.ok(review.rows.length > 0);
+    assert.ok(review.rows.every(row => row.change === 'added' && row.before === undefined));
+    const held = yield* session.previewChange({ kind: 'setupApply', setupId: 'local', revision: review.revision, choices: [{ itemId: 'setting:claude:settings.json#theme', action: 'hold' }] });
+    const holdRun = yield* session.runs.submit({ planId: held.planId, requestId: 'hold-new-repository', inputDigest: operationDigest(held.planId), actor: 'app' });
+    while (!(yield* session.runs.get(holdRun.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    assert.equal((yield* session.runs.get(holdRun.runId)).state, 'succeeded');
+    assert.equal(f.m.read(join(f.m.paths.claude, 'settings.json')), undefined);
+    const nextReview = yield* session.setupReview({ scope, setupId: 'local', refetch: true, limit: 100 });
+    assert.equal(nextReview.rows.find(row => row.itemId === 'setting:claude:settings.json#theme')?.held, true);
+  })).pipe(Effect.provide(f.processes)));
+});
+
+test('a same-repository profile switch preserves its applied baseline', async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    yield* (yield* FollowedStore).write({ repoUrl: url, profile: 'default', setupId: null });
+    const handle = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange(change);
+    assert.equal(preview.plan.steps.some(step => /baseline/.test(step.key)), false);
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'same-repository', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    assert.equal((yield* (yield* StateStore).read).applied?.commit, f.commit);
+  })).pipe(Effect.provide(f.processes)));
+});
+
+test('a failed inspection after following names the saved profile and the failing step', async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    const real = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const handle = { ...real, freshInspection: Effect.fail(new Error('disk full')) };
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange(change);
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'inspection-failed', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    const result = (yield* session.runs.get(run.runId)).result;
+    assert.ok(result && 'message' in result);
+    assert.match(result.message, /Now following small; checking for changes failed: disk full.*Reload to retry/);
+    assert.equal((yield* (yield* FollowedStore).read)?.profile, 'small');
+  })).pipe(Effect.provide(f.processes)));
+});
+
+test('a failed subscription after following names the saved profile and preserves the cause', async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    const real = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const handle = { ...real, profileHosted: { ...f.hosted, subscribe: () => Effect.fail(new HostedFailure({ code: 'network' })) } };
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange({ ...change, setupId: 'shared' });
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'subscribe-failed', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    const result = (yield* session.runs.get(run.runId)).result;
+    assert.ok(result && 'message' in result);
+    assert.match(result.message, /Now following small; subscribing.*failed: Hosted operation failed \(network\)/);
+  })).pipe(Effect.provide(f.processes)));
+});
+
+test('switching from a shared link previews stopping its updates before Apply', async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    yield* (yield* FollowedStore).write({ repoUrl: url, profile: 'default', setupId: 'previous' });
+    const real = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const handle = { ...real, profileHosted: f.hosted };
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    for (const setupId of [null, 'shared']) {
+      const preview = yield* session.previewChange({ ...change, setupId });
+      assert.ok('droppedChoices' in preview);
+      assert.ok(preview.plan.steps.some(step => step.key === 'profile:unsubscribe'));
+      assert.ok(preview.actionEffects.some(effect => /Stops following updates through the shared link/.test(effect)));
+    }
+    assert.deepEqual(f.calls, []);
+  })).pipe(Effect.provide(f.processes)));
+});
+
+
+test('following a different repository resets a previously used shared-link baseline after backing it up', async t => {
+  const f = await fixture(t);
+  const repoKey = createHash('sha256').update(JSON.stringify('github.com/example/profiles')).digest('hex');
+  const baselinePath = join(f.m.paths.stateRoot, 'agent', 'baselines', 'followed', repoKey, 'shared.json');
+  const baseline = { revisionApplied: 1, origins: { 'setting:claude:settings.json#theme': f.commit } };
+  f.m.write(baselinePath, JSON.stringify(baseline));
+  const source = followedSetupSourceLayer(f.m.paths, { repoUrl: url, profile: 'small', setupId: 'shared' }, { processes: f.processes });
+  assert.deepEqual(await f.m.run(SetupSource.use(source => source.baseline!), source), baseline);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    yield* (yield* FollowedStore).write({ repoUrl: 'https://github.com/old/setup.git', profile: 'default', setupId: null });
+    const real = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const handle = { ...real, profileHosted: f.hosted, freshInspection: Effect.succeed({ status: { at: '2026-10-16T12:00:00Z', policy: 'notify' as const, paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [] } }) };
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const preview = yield* session.previewChange({ ...change, setupId: 'shared' });
+    const run = yield* session.runs.submit({ planId: preview.planId, requestId: 'different-hosted-repository', inputDigest: operationDigest(preview.planId), actor: 'app' });
+    while (!(yield* session.runs.get(run.runId)).result || (yield* session.running)) yield* Effect.yieldNow;
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    assert.deepEqual(yield* SetupSource.use(source => source.baseline!).pipe(Effect.provide(source)), { revisionApplied: 0, origins: {} });
+    const saved = readdirSync(f.m.paths.backups, { recursive: true, withFileTypes: true }).filter(e => e.isFile()).map(e => readFileSync(join(e.parentPath, e.name), 'utf8'));
+    assert.ok(saved.includes(JSON.stringify(baseline)));
   })).pipe(Effect.provide(f.processes)));
 });

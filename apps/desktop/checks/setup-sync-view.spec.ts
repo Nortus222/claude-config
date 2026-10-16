@@ -41,3 +41,14 @@ test('profile controls show the followed identity and dropped choices before App
   assert.ok(html.indexOf('skill:owner/repo/old') < html.indexOf('>Apply reviewed choices<'));
   assert.match(html, /Override: <code>skills.old/);
 });
+
+
+test('profile listing failures appear inline while the cached review stays visible', async t => {
+  const f = await fixture();
+  f.handlers.inspectProfiles = () => { throw new Error('Profile clone unavailable'); };
+  const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
+  await c.reload();
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(html, /Profile clone unavailable/);
+  assert.match(html, /Current value of setting:a/);
+});
