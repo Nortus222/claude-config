@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
-import { fixture, review, run, flush, deferred, change } from './support/setup-sync.ts';
+import { fixture, review, run, flush, deferred, change, preview as changePreview } from './support/setup-sync.ts';
 
-async function setup(t: test.TestContext) {
-  const f = await fixture(); const controller = new SetupSyncController(f.bridge, f.machine);
+async function setup(t: test.TestContext, options: { maintenance?: () => boolean } = {}) {
+  const f = await fixture(); const controller = new SetupSyncController(f.bridge, f.machine, options);
   t.after(() => { controller.dispose(); f.machine.dispose(); });
   await controller.reload(); return { ...f, controller };
 }
@@ -15,6 +15,45 @@ test('Refetch shows incoming rows and offers no Apply until a choice is made', a
   await f.controller.preview(); await f.controller.apply();
   assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
   assert.equal(f.calls.filter(c => c.name === 'setupReview').at(-1)?.input.refetch, true);
+});
+test('an update phase change keeps the staged review and choices', async t => {
+  let phase = 'idle';
+  const f = await setup(t, { maintenance: () => ['waiting', 'installing', 'restarting'].includes(phase) });
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  const { review: stagedReview, choices, preview } = f.controller.state; const calls = f.calls.length;
+  for (phase of ['checking', 'idle', 'available', 'downloading', 'verified']) {
+    f.controller.refresh();
+    assert.equal(f.controller.state.review, stagedReview); assert.equal(f.controller.state.choices, choices);
+    assert.equal(f.controller.state.preview, preview); assert.equal(f.controller.state.eligibility.apply, true);
+  }
+  assert.equal(f.calls.length, calls);
+  const pending = deferred<unknown>(); f.handlers.setupReview = () => pending.promise;
+  const loading = f.controller.refetch(); await flush();
+  phase = 'checking'; f.controller.refresh(); phase = 'idle'; f.controller.refresh();
+  assert.equal(f.controller.state.pending, true);
+  pending.resolve(review({ generation: 2 })); await loading;
+  assert.equal(f.controller.state.review?.generation, 2); assert.equal(f.controller.state.pending, false);
+});
+test('entering maintenance discards the review and blocks Apply', async t => {
+  let phase = 'idle';
+  const f = await setup(t, { maintenance: () => ['waiting', 'installing', 'restarting'].includes(phase) });
+  f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
+  assert.equal(f.controller.state.eligibility.apply, true);
+  const pending = deferred<unknown>(); f.handlers.previewChange = () => pending.promise;
+  const preparing = f.controller.preview();
+  for (phase of ['waiting', 'installing', 'restarting']) {
+    f.controller.refresh();
+    assert.equal(f.controller.state.review, null); assert.deepEqual(f.controller.state.choices, []);
+    assert.equal(f.controller.state.preview, null); assert.equal(f.controller.state.pending, false);
+    assert.equal(f.controller.state.eligibility.apply, false); assert.equal(f.controller.state.eligibility.read, false);
+    await f.controller.apply();
+  }
+  pending.resolve(changePreview()); await preparing;
+  assert.equal(f.controller.state.preview, null);
+  assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
+  phase = 'idle'; f.controller.refresh();
+  assert.equal(f.controller.state.eligibility.read, true); assert.equal(f.controller.state.eligibility.apply, false);
+  await f.controller.reload(); assert.ok(f.controller.state.review);
 });
 test('Apply sends one setupApply with every staged choice', async t => {
   const f = await setup(t);
@@ -40,14 +79,16 @@ test('after reconnect the controller shows the run from getRun, not the old prev
   await f.reconnect(); assert.equal(f.controller.state.run?.state, 'interrupted'); assert.equal(f.controller.state.preview, null);
   assert.equal(f.calls.filter(c => c.name === 'getRun').at(-1)?.input.runId, 'setup-run');
 });
-test('an interrupted run can be re-previewed and abandoned without replaying its request', async t => {
+test('Abandon marks an interrupted run abandoned and prevents further Re-preview', async t => {
   const f = await setup(t); f.handlers.listRuns = () => ({ runs: [run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } })], nextBefore: null });
   f.handlers.getRun = () => run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
   f.controller.enter(); await flush(); assert.equal(f.controller.state.run?.state, 'interrupted');
   await f.controller.repreview(); assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, change);
   assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
   await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned'); assert.equal(f.controller.state.preview, null);
-  assert.equal(f.controller.state.eligibility.refetch, true);
+  const previews = f.calls.filter(c => c.name === 'previewChange').length;
+  await f.controller.repreview(); assert.equal(f.calls.filter(c => c.name === 'previewChange').length, previews);
+  assert.equal(f.controller.state.preview, null);
 });
 test('mixed pin-group refusal is shown next to the group', async t => {
   const f = await setup(t); f.handlers.setupReview = () => review({ pinGroups: [{ source: 'owner/repo', itemIds: ['setting:a', 'setting:b'] }] }); await f.controller.reload();

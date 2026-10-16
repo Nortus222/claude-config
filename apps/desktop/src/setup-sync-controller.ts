@@ -34,6 +34,7 @@ export class SetupSyncController {
   private bridge: Bridge | null;
   private machine: MachineController;
   private maintenance: () => boolean;
+  private inMaintenance = false;
   constructor(bridge: Bridge | null, machine: MachineController, options: { maintenance?: () => boolean } = {}) {
     this.bridge = bridge; this.machine = machine; this.maintenance = options.maintenance ?? (() => false);
     this.state = { native: !!bridge, connection: machine.state.connection, sources: [], source: null, review: null, choices: [], preview: null, run: null,
@@ -81,6 +82,11 @@ export class SetupSyncController {
   }
   enter() { this.visible = true; if (!this.state.run) void this.discoverRun(); if (!this.state.review) void this.reload(); }
   leave() { this.visible = false; }
+  refresh() {
+    const maintenance = this.maintenance(), entering = maintenance && !this.inMaintenance;
+    this.inMaintenance = maintenance;
+    if (entering) this.invalidate(); else this.update({});
+  }
   invalidate() { this.epoch++; this.issued.clear(); this.update({ review: null, preview: null, choices: [], pending: false, pagePending: false, groupErrors: {} }); }
   private async discoverRun() {
     if (!this.bridge || this.machine.state.connection !== 'connected') return;

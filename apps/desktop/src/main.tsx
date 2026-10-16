@@ -31,7 +31,7 @@ function App() {
   const updateState = useSyncExternalStore(updates.subscribe, updates.snapshot);
   const [screen, setScreen] = useState<Screen>('overview');
   useEffect(() => { if (screen === 'setup') setupSync.enter(); else setupSync.leave(); }, [screen, setupSync]);
-  useEffect(() => { setupSync.invalidate(); }, [setupSync, updateState.update?.phase]);
+  useEffect(() => { setupSync.refresh(); }, [setupSync, updateState.update?.phase]);
   const reviewTarget = useRef<HTMLHeadingElement>(null);
   const reviewSeen = useRef(0);
   const focusReview = useRef(false);
