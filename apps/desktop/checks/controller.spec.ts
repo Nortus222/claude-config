@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MachineController, advance, canCancel, type RunView } from '../src/controller.ts';
+import { MachineController, advance, type RunView } from '../src/controller.ts';
 import { skillRun } from './support/skill-run.ts';
 import { authorRun } from './support/author.ts';
 import type { Bridge, Command, HostEvent } from '../src/bridge.ts';
@@ -13,7 +13,6 @@ const inspection = (keys: string[]) => ({
   probeErrors: [],
   status: status(),
 });
-const plan = (keys: string[]) => ({ kind: 'apply', steps: keys.map(step), skipped: [] });
 const event = (runId: string, progress: unknown, generation = 1): HostEvent => ({ generation, version: 3, event: 'progress', runId, progress } as HostEvent);
 
 type Handler = (args?: Readonly<Record<string, unknown>>) => unknown;
@@ -54,34 +53,14 @@ test('a failed inspect keeps the app connected and shows why', async () => {
   assert.match(c.state.detail, /\/old/);
 });
 
-test('toggling excludes a key from the preview and clears a stale preview', async () => {
-  const f = fake({ inspect_machine: () => inspection(['config:a', 'config:b']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }) });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  assert.equal(c.state.preview?.planId, 'p1');
-  c.toggle('config:b');
-  assert.equal(c.state.preview, null);
-  await c.previewPlan();
-  assert.deepEqual(f.calls.filter(([n]) => n === 'preview_plan').map(([, a]) => a), [{ exclude: [] }, { exclude: ['config:b'] }]);
-});
-
-test('apply replays early events, tracks steps, and re-inspects when done', async () => {
+test('an agent run tracks its steps from progress events and re-inspects when done', async () => {
   let inspects = 0;
-  const f = fake({
-    inspect_machine: () => (++inspects, inspection(['config:a', 'config:b'])),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a', 'config:b']) }),
-    apply_plan: () => {
-      f.emit(event('r1', { type: 'started', index: 0, total: 2, step: step('config:a') }));
-      return { status: 'started', runId: 'r1' };
-    },
-  });
+  const f = fake({ inspect_machine: () => (++inspects, inspection(['config:a', 'config:b'])) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.deepEqual(f.calls.find(([n]) => n === 'apply_plan')?.[1], { planId: 'p1' });
-  assert.deepEqual(c.state.run?.steps.map((s) => s.status), ['running', 'pending']);
+  f.emit(event('r1', { type: 'started', index: 0, total: 2, step: step('config:a') }));
+  assert.deepEqual(c.state.run?.steps.map((s) => s.status), ['running']);
+  assert.equal(c.state.status?.applying, true);
   f.emit(event('other', { type: 'done', ok: 9, failed: 0 }));
   f.emit(event('r1', { type: 'done', ok: 9, failed: 0 }, 0));
   assert.equal(c.state.run?.outcome, 'running');
@@ -91,83 +70,35 @@ test('apply replays early events, tracks steps, and re-inspects when done', asyn
   f.emit(event('r1', { type: 'done', ok: 1, failed: 1, backups: '/b/nortuscc-1' }));
   assert.equal(c.state.run?.outcome, 'done');
   assert.equal(c.state.run?.backups, '/b/nortuscc-1');
+  assert.equal(c.state.run?.failed, 1);
   assert.deepEqual(c.state.run?.steps.map((s) => [s.status, s.note]), [['ok', ''], ['failed', 'disk full']]);
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(inspects, 2);
-  assert.equal(c.state.preview, null);
+  assert.notEqual(c.state.status?.applying, true);
 });
 
-test('a terminal event buffered during the apply request re-inspects exactly once', async () => {
-  let inspects = 0;
-  const f = fake({
-    inspect_machine: () => (++inspects, inspection(['config:a'])),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => {
-      f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
-      f.emit(event('r1', { type: 'finished', index: 0, total: 1, key: 'config:a', outcome: 'ok', note: '' }));
-      f.emit(event('r1', { type: 'done', ok: 1, failed: 0 }));
-      return { status: 'started', runId: 'r1' };
-    },
-  });
+test('a cancelled agent run reports how many steps did not start', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a', 'config:b']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(c.state.run?.outcome, 'done');
-  assert.equal(c.state.preview, null);
-  assert.equal(c.state.pending, false);
-  assert.equal(inspects, 2);
-});
-
-test('a stale apply replaces the preview and starts nothing', async () => {
-  const f = fake({
-    inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => ({ status: 'stale', planId: 'p2', plan: plan(['config:a', 'config:new']) }),
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.equal(c.state.run, null);
-  assert.equal(c.state.preview?.planId, 'p2');
-  assert.match(c.state.detail, /changed since this preview/);
-});
-
-test('cancel reaches the agent and a cancelled run keeps unstarted steps pending', async () => {
-  const f = fake({
-    inspect_machine: () => inspection(['config:a', 'config:b']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a', 'config:b']) }),
-    apply_plan: () => ({ status: 'started', runId: 'r1' }),
-    cancel_apply: () => ({ cancelled: true }),
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
   f.emit(event('r1', { type: 'started', index: 0, total: 2, step: step('config:a') }));
-  await c.cancel();
-  assert.ok(f.calls.some(([n]) => n === 'cancel_apply'));
   f.emit(event('r1', { type: 'finished', index: 0, total: 2, key: 'config:a', outcome: 'cancelled', note: 'cancelled' }));
   f.emit(event('r1', { type: 'cancelled', remaining: ['config:b'] }));
   assert.equal(c.state.run?.outcome, 'cancelled');
-  assert.deepEqual(c.state.run?.steps.map((s) => s.status), ['cancelled', 'pending']);
+  assert.equal(c.state.run?.summary, 'Cancelled; 1 not started');
+  assert.deepEqual(c.state.run?.steps.map((s) => s.status), ['cancelled']);
 });
 
 test('a disconnect fails the running run; restart clears it and ignores the old generation', async () => {
   let generation = 1;
   const f = fake({
     inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => ({ status: 'started', runId: 'r1' }),
     restart_agent: () => ((generation = 2), null),
   });
   const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
   const c = new MachineController(bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
+  f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
   f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' });
   assert.equal(c.state.connection, 'disconnected');
   assert.equal(c.state.run?.outcome, 'failed');
@@ -240,54 +171,27 @@ test('dispose while subscribe is pending unregisters and makes no request', asyn
   assert.deepEqual(invoked, []);
 });
 
-test('a superseded preview reply does not change state', async () => {
+test('a superseded inspection reply does not change state', async () => {
   let generation = 1;
   const slow = deferred<unknown>();
-  let previews = 0;
+  let inspects = 0;
   const f = fake({
-    inspect_machine: () => inspection(['config:a', 'config:b']),
-    preview_plan: () => (++previews === 1 ? slow.promise : { planId: 'p2', plan: plan(['config:a']) }),
+    inspect_machine: () => (++inspects === 2 ? slow.promise : inspection(['config:a'])),
     restart_agent: () => ((generation = 2), null),
   });
   // Replies carry the generation current when they return, so the late reply matches the new backend.
   const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
   const c = new MachineController(bridge);
   await c.connect();
-  const first = c.previewPlan();
+  const first = c.inspect();
+  await new Promise((r) => setTimeout(r, 0));
   f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' });
   await c.restart();
-  c.toggle('config:b');
-  await c.previewPlan();
   const before = c.state;
-  slow.resolve({ planId: 'p1', plan: plan(['config:a', 'config:b']) });
+  slow.resolve(inspection(['config:a', 'config:stale']));
   await first;
   assert.equal(c.state, before);
-  assert.equal(c.state.preview?.planId, 'p2');
-});
-
-test('a cancel rejection that arrives after a restart does not change state', async () => {
-  let generation = 1;
-  const cancelled = deferred<unknown>();
-  const f = fake({
-    inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => ({ status: 'started', runId: 'r1' }),
-    cancel_apply: () => cancelled.promise,
-    restart_agent: () => ((generation = 2), null),
-  });
-  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation }) };
-  const c = new MachineController(bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  const cancelling = c.cancel();
-  f.emit({ generation: 1, event: 'disconnected', detail: 'Backend exited; restart explicitly' });
-  await c.restart();
-  const before = c.state;
-  cancelled.reject(new Error('Backend exited; restart explicitly'));
-  await cancelling;
-  assert.equal(c.state, before);
-  assert.equal(c.state.connection, 'connected');
+  assert.deepEqual(c.state.inspection?.items.map((item) => item.key), ['config:a']);
 });
 
 test('advance ignores nothing it should not', () => {
@@ -333,18 +237,16 @@ test('early initial apply or failed status exposes real operation state while an
       agent_generation: () => { f.emit({ generation: 1, version: 3, event: 'status', status: status(fields) } as HostEvent); return null; },
       take_review_request: () => { called.resolve(); return held.promise; },
       agent_status: () => { throw new Error('NO_REPORT: obsolete response'); },
-      inspect_machine: () => inspection(['config:a']), cancel_apply: () => ({ cancelled: true }),
+      inspect_machine: () => inspection(['config:a']),
     });
     const c = new MachineController(f.bridge);
     const connecting = c.connect();
     await called.promise;
     const pending = c.state.initialReadPending;
-    if (fields.applying) await c.cancel();
     held.resolve(null); await connecting;
     assert.equal(pending, false, JSON.stringify(fields));
     assert.equal(c.state.waitingForReport, false);
     assert.doesNotMatch(c.state.detail, /obsolete response/);
-    if (fields.applying) assert.ok(f.calls.some(([name]) => name === 'cancel_apply'));
   }
 });
 test('terminal startup failures and disposal clear startup waiting instead of hiding recovery', async () => {
@@ -464,29 +366,13 @@ test('status events show pauses and errors and ignore old generations', async ()
   assert.match(c.state.detail, /disk full/);
 });
 
-test('a paused auto-apply still permits a person to apply, and PAUSED is visible', async () => {
-  const f = fake({
-    inspect_machine: () => ({ ...inspection(['config:a']), status: status({ policy: 'auto-apply', paused: { reason: 'failed', at: 'now' } }) }),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => { throw new Error('PAUSED: a person must review'); },
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.ok(f.calls.some(([name]) => name === 'apply_plan'));
-  assert.equal(c.state.connection, 'connected');
-  assert.match(c.state.detail, /PAUSED/);
-});
-
-test('live applying status prevents preview and restart until idle', async () => {
+test('live applying status prevents restart until idle', async () => {
   const f = fake({ inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
   f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
-  await c.previewPlan();
   await c.restart();
-  assert.equal(f.calls.some(([name]) => name === 'preview_plan' || name === 'restart_agent'), false);
+  assert.equal(f.calls.some(([name]) => name === 'restart_agent'), false);
 });
 
 test('UNAUTHORIZED makes the agent offline and explicit restart works', async () => {
@@ -529,25 +415,22 @@ test('a usable status arriving during startup NO_REPORT recovers after pending s
   assert.equal(c.snapshot().inspection?.items.length, 1);
 });
 
-test('status updates retain progress detail while a manual run is active', async () => {
-  const f = fake({ inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+test('status updates retain progress detail while a run is active', async () => {
+  const f = fake({ inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
   f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
   const detail = c.state.detail;
   f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
   assert.equal(c.state.detail, detail);
 });
 
-test('a manual terminal event re-inspects after status reported an active apply', async () => {
+test('a terminal event re-inspects after status reported an active apply', async () => {
   let inspects = 0;
-  const f = fake({ inspect_machine: () => (++inspects, inspection(['config:a'])), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+  const f = fake({ inspect_machine: () => (++inspects, inspection(['config:a'])) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
+  f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
   f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
   f.emit(event('r1', { type: 'done', ok: 1, failed: 0 }));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -605,92 +488,13 @@ test('a failed status refresh remains visible instead of using a cached idle sta
   assert.equal(c.state.pending, false);
 });
 
-test('a stale apply refreshes live activity and preserves its replacement preview for another apply', async () => {
-  let applies = 0;
-  const f = fake({
-    agent_status: () => status({ applying: false }),
-    inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => {
-      if (++applies > 1) return { status: 'started', runId: 'r2' };
-      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
-      return { status: 'stale', planId: 'p2', plan: plan(['config:a', 'config:new']) };
-    },
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.equal(c.state.status?.applying, false);
-  assert.equal(c.state.preview?.planId, 'p2');
-  assert.match(c.state.detail, /changed since this preview/);
-  await c.apply();
-  assert.deepEqual(f.calls.filter(([name]) => name === 'apply_plan').map(([, args]) => args), [{ planId: 'p1' }, { planId: 'p2' }]);
-  assert.equal(f.calls.filter(([name]) => name === 'preview_plan').length, 1);
-  assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 1);
-  assert.equal(c.state.run?.runId, 'r2');
-});
-
-test('an apply preparation refusal refreshes live activity without discarding the preview or refusal', async () => {
-  let applies = 0;
-  const f = fake({
-    agent_status: () => status({ applying: false }),
-    inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => {
-      if (++applies > 1) return { status: 'started', runId: 'r2' };
-      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
-      throw new Error('INSPECT_FAILED: preparation failed');
-    },
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.equal(c.state.status?.applying, false);
-  assert.equal(c.state.preview?.planId, 'p1');
-  assert.match(c.state.detail, /INSPECT_FAILED: preparation failed/);
-  await c.apply();
-  assert.equal(applies, 2);
-  assert.equal(c.state.run?.runId, 'r2');
-});
-
-for (const refusal of [false, true]) test(`apply settlement respects a live external lock after ${refusal ? 'refusal' : 'stale preview'}`, async () => {
-  let applying = false;
-  const f = fake({
-    agent_status: () => status({ applying }),
-    inspect_machine: () => inspection(['config:a']),
-    preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }),
-    apply_plan: () => {
-      applying = true;
-      f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
-      if (refusal) throw new Error('LOCKED: external process holds the apply lock');
-      return { status: 'stale', planId: 'p2', plan: plan(['config:new']) };
-    },
-  });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  await c.previewPlan();
-  await c.apply();
-  assert.equal(f.calls.filter(([name]) => name === 'agent_status').length, 2);
-  assert.equal(c.state.status?.applying, true);
-  assert.equal(c.state.preview?.planId, refusal ? 'p1' : 'p2');
-  await c.apply();
-  await c.previewPlan();
-  assert.equal(f.calls.filter(([name]) => name === 'apply_plan').length, 1);
-  assert.equal(f.calls.filter(([name]) => name === 'preview_plan').length, 1);
-});
-
-test('a fresh app cancels a surviving manual apply without inventing a local run', async () => {
+test('a surviving external apply stays external without inventing a local run', async () => {
   let applying = true;
-  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => ({ cancelled: true }), inspect_machine: () => inspection(['config:a']) });
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.cancel();
-  assert.deepEqual(f.calls.filter(([name]) => name === 'cancel_apply'), [['cancel_apply', undefined]]);
   assert.equal(c.state.run, null);
   assert.equal(c.state.status?.applying, true);
-  assert.match(c.state.detail, /requested|waiting/i);
   f.emit(event('surviving', { type: 'cancelled', remaining: [] }));
   assert.equal(c.state.run, null);
   assert.equal(c.state.status?.applying, true);
@@ -701,22 +505,18 @@ test('a fresh app cancels a surviving manual apply without inventing a local run
   assert.equal(c.state.pending, false);
 });
 
-test('a false cancel leaves external activity visible until authoritative idle status', async () => {
+test('external activity stays visible and blocks restart until authoritative idle status', async () => {
   let applying = false;
   let inspects = 0;
-  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => ({ cancelled: false }), inspect_machine: () => (++inspects, inspection(['config:a'])) });
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => (++inspects, inspection(['config:a'])) });
   const c = new MachineController(f.bridge);
   await c.connect();
   applying = true;
   f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: true }) } as HostEvent);
-  await c.cancel();
-  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
   assert.equal(c.state.status?.applying, true);
   assert.equal(c.state.run, null);
-  assert.doesNotMatch(c.state.detail, /cancelled/i);
-  await c.previewPlan();
   await c.restart();
-  assert.equal(f.calls.some(([name]) => name === 'preview_plan' || name === 'restart_agent'), false);
+  assert.equal(f.calls.some(([name]) => name === 'restart_agent'), false);
   f.emit({ generation: 0, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
   assert.equal(c.state.status?.applying, true);
   applying = false;
@@ -724,44 +524,6 @@ test('a false cancel leaves external activity visible until authoritative idle s
   await new Promise((done) => setTimeout(done, 0));
   assert.equal(inspects, 2, 'idle refreshes an inspection from before the external apply');
   assert.equal(c.state.status?.applying, undefined);
-});
-
-test('an external cancel reply cannot overwrite idle recovery that superseded it', async () => {
-  let applying = true;
-  const cancelled = deferred<unknown>();
-  const f = fake({ agent_status: () => status({ applying }), cancel_apply: () => cancelled.promise, inspect_machine: () => inspection(['config:a']) });
-  const c = new MachineController(f.bridge);
-  await c.connect();
-  const cancelling = c.cancel();
-  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
-  applying = false;
-  f.emit({ generation: 1, version: 3, event: 'status', status: status({ applying: false }) } as HostEvent);
-  await new Promise((done) => setTimeout(done, 0));
-  const before = c.state;
-  cancelled.resolve({ cancelled: true });
-  await cancelling;
-  assert.equal(c.state, before);
-});
-
-test('an external cancel reply from another generation is ignored', async () => {
-  const f = fake({ agent_status: () => status({ applying: true }), cancel_apply: () => ({ cancelled: true }) });
-  const bridge: Bridge = { ...f.bridge, invoke: async (command, args) => ({ ...(await f.bridge.invoke(command, args)), generation: command === 'cancel_apply' ? 0 : 1 }) };
-  const c = new MachineController(bridge);
-  await c.connect();
-  const before = c.state;
-  await c.cancel();
-  assert.equal(f.calls.filter(([name]) => name === 'cancel_apply').length, 1);
-  assert.equal(c.state, before);
-});
-
-test('the shared Cancel button gate enables connected external activity and refuses idle or offline state', () => {
-  const c = new MachineController(null);
-  for (const [connection, applying, expected] of [
-    ['connected', true, true], ['connected', false, false], ['connecting', true, false],
-    ['disconnected', true, false], ['browser', true, false],
-  ] as const) {
-    assert.equal(canCancel({ ...c.state, connection, status: { ...status({ applying }), policy: 'notify' }, run: null }), expected);
-  }
 });
 
 const review = (generation = 1): HostEvent => ({ generation, event: 'review-requested' } as HostEvent);
@@ -819,13 +581,12 @@ test('review during a pending refresh waits and then refreshes safely', async ()
   assert.equal(count, 3);
 });
 
-test('review during apply waits for idle without cancelling or replacing the run', async () => {
+test('review during a run waits for idle without replacing the run', async () => {
   let applying = false;
-  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }) });
+  const f = fake({ agent_status: () => status({ applying }), inspect_machine: () => inspection(['config:a']) });
   const c = new MachineController(f.bridge);
   await c.connect();
-  await c.previewPlan();
-  await c.apply();
+  f.emit(event('r1', { type: 'started', index: 0, total: 1, step: step('config:a') }));
   applying = true;
   f.emit(review());
   await settle();
@@ -836,7 +597,6 @@ test('review during apply waits for idle without cancelling or replacing the run
   f.emit(event('r1', { type: 'done', ok: 1, failed: 0 }));
   await settle();
   assert.equal(f.calls.filter(([name]) => name === 'inspect_machine').length, 2);
-  assert.equal(f.calls.some(([name]) => name === 'cancel_apply'), false);
 });
 
 test('a pending route reply from another generation cannot request review', async () => {
@@ -866,8 +626,7 @@ test('browser preview remains inert', async () => {
   const c = new MachineController(null);
   await c.connect();
   await c.inspect();
-  await c.previewPlan();
-  await c.apply();
+  await c.restart();
   assert.equal(c.state.connection, 'browser');
   assert.equal(c.state.reviewRequested, 0);
   assert.equal(c.state.inspection, null);
@@ -885,22 +644,18 @@ test('a review refresh refusal is visible and does not retry indefinitely', asyn
   assert.equal(c.state.connection, 'connected');
   assert.match(c.state.detail, /status unavailable/);
 });
-test('malformed inspection and plan replies never expose rejected values', async () => {
-  for (const command of ['inspect_machine', 'preview_plan', 'apply_plan'] as const) {
-    const f = fake({ inspect_machine: () => inspection(['config:a']), preview_plan: () => ({ planId: 'p1', plan: plan(['config:a']) }), apply_plan: () => ({ status: 'started', runId: 'r1' }), [command]: () => ({ token: 'DO-NOT-PRINT' }) });
-    const c = new MachineController(f.bridge);
-    await c.connect();
-    if (command !== 'inspect_machine') await c.previewPlan();
-    if (command === 'apply_plan') await c.apply();
-    assert.doesNotMatch(c.state.detail, /DO-NOT-PRINT|token/, command);
-    assert.match(c.state.detail, /incompatible agent response/, command);
-  }
+test('a malformed inspection reply never exposes rejected values', async () => {
+  const f = fake({ inspect_machine: () => ({ token: 'DO-NOT-PRINT' }) });
+  const c = new MachineController(f.bridge);
+  await c.connect();
+  assert.doesNotMatch(c.state.detail, /DO-NOT-PRINT|token/);
+  assert.match(c.state.detail, /incompatible agent response/);
 });
 
 test('a shared operation started by another client appears in app activity and refreshes on completion', async () => {
   const f = fake({inspect_machine: () => inspection(['config:a'])}); const c = new MachineController(f.bridge); await c.connect();
   f.emit(event('mcp-run', {type:'started',index:0,total:1,step:step('config:a')}));
-  assert.equal(c.state.run?.runId, 'mcp-run'); assert.equal(c.state.run?.steps[0]?.status, 'running'); assert.equal(canCancel(c.state), true);
+  assert.equal(c.state.run?.runId, 'mcp-run'); assert.equal(c.state.run?.steps[0]?.status, 'running'); assert.equal(c.state.status?.applying, true);
   f.emit(event('mcp-run', {type:'finished',index:0,total:1,key:'config:a',outcome:'ok',note:'applied'}));
   assert.equal(c.state.run?.steps[0]?.note, 'applied');
   f.emit(event('mcp-run', {type:'done',ok:1,failed:0})); await new Promise<void>(resolve => setImmediate(resolve));
@@ -1196,9 +951,6 @@ test('receipt invalidations refresh completed effects after a partial snapshot',
 });
 
 import { decodeRunView } from '@nortuscc/agent/operations';
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
-import { ReviewView } from '../src/review-view.tsx';
 
 const signInRun = (id = 'authorization', state: 'awaiting-user' | 'needsInspection' | 'expired' = 'awaiting-user', expiresAt = new Date(Date.now() + 60_000).toISOString()) => decodeRunView({
   runId: id, actor: 'mcp', state: 'succeeded', operation: 'applyChange', scope: { kind: 'machine' },
@@ -1208,7 +960,13 @@ const signInRun = (id = 'authorization', state: 'awaiting-user' | 'needsInspecti
   parity: { kind: 'signIn', state: 'committed', committedKeys: [], remainingKeys: [], backupIds: [],
     signIn: { kind: 'signIn', state, expiresAt, ...(state === 'awaiting-user' ? { userCode: 'ABCD-EFGH', verificationUri: 'https://github.com/login/device' } : {}) } },
 });
-const paintChallenge = (controller: MachineController) => renderToStaticMarkup(createElement(ReviewView, { controller, state: controller.state }));
+// The device code and link a view may show: only while the run's challenge is current and unexpired.
+const paintChallenge = (controller: MachineController) => {
+  const run = controller.state.run, parity = run?.receipt?.parity;
+  const signIn = parity?.kind === 'signIn' ? parity.signIn : undefined;
+  return run?.challengeCurrent !== false && signIn?.state === 'awaiting-user' && Date.parse(signIn.expiresAt) > Date.now()
+    ? `${signIn.verificationUri} ${signIn.userCode}` : '';
+};
 const settleReceipt = () => new Promise(resolve => setTimeout(resolve, 0));
 
 for (const prior of ['none', 'settled'] as const) test(`old receipt scrub cannot supersede pending running discovery with ${prior} prior view`, async t => {

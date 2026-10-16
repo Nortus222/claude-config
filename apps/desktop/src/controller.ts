@@ -1,6 +1,6 @@
 import {
-  decodeApplyResult, decodeInspectResult, decodePreviewResult, decodeHelloResult, decodeWireStatus,
-  type HelloResult, type InspectResult, type PreviewResult, type RunEvent, type RunProgress, type WireStatus,
+  decodeInspectResult, decodeHelloResult, decodeWireStatus,
+  type HelloResult, type InspectResult, type RunProgress, type WireStatus,
 } from '@nortuscc/agent/ipc/protocol';
 import { decodeRunView, decodeOperationOutput, type RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
@@ -23,8 +23,6 @@ export type ViewState = {
   readonly inspection: InspectResult | null;
   readonly status: WireStatus | null;
   readonly hello: HelloResult | null;
-  readonly excluded: ReadonlyArray<string>;
-  readonly preview: PreviewResult | null;
   readonly run: RunView | null;
   readonly pending: boolean;
   readonly initialReadPending: boolean;
@@ -35,17 +33,13 @@ export type ViewState = {
   readonly session: number;
 };
 
-// The agent can own a manual run that began before this window connected.
-export const canCancel = (state: ViewState) => state.connection === 'connected'
-  && (state.run?.outcome === 'running' || state.status?.applying === true);
-
-const MAX_EARLY_EVENTS = 10_000;
+// Terminal events remembered while a run discovery read is in flight.
+const MAX_TRACKED_TERMINALS = 10_000;
 // The author pages own drafts, gh sign-in and publication runs; they never become this machine's run.
 export const AUTHOR_RUN_KINDS: ReadonlySet<string> = new Set(['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication']);
 const machineRun = (run: OperationRunView) => !AUTHOR_RUN_KINDS.has(run.intent.change.kind);
 // Discovery reads a page of the newest runs and adopts the newest machine run among them.
 const DISCOVERY_PAGE = 50;
-const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
 const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
@@ -80,7 +74,7 @@ export function advance(run: RunView, progress: RunProgress): RunView {
 // Drives the narrow bridge: ignores events from old agent connections, old runs and superseded replies.
 export class MachineController {
   state: ViewState = {
-    connection: 'connecting', inspection: null, status: null, hello: null, excluded: [], preview: null, run: null, pending: false,
+    connection: 'connecting', inspection: null, status: null, hello: null, run: null, pending: false,
     initialReadPending: true, waitingForReport: false, initialReadError: null,
     detail: 'Connecting to the local agent', reviewRequested: 0, session: 0,
   };
@@ -90,8 +84,6 @@ export class MachineController {
   private unlisten?: () => void;
   private listeners = new Set<() => void>();
   private revision = 0;
-  private starting = false;
-  private early: RunEvent[] = [];
   private reviewRefresh = false;
   private earlyReviews = new Set<number>();
   private earlyStatuses = new Map<number, WireStatus>();
@@ -313,7 +305,7 @@ export class MachineController {
     this.earlyStatuses.clear();
     this.unlisten?.();
     this.update({ pending: true, initialReadPending: true, waitingForReport: false, initialReadError: null, connection: 'connecting',
-      session: this.state.session + 1, inspection: null, status: null, hello: null, preview: null, run: null, detail: 'Connecting to the local agent' });
+      session: this.state.session + 1, inspection: null, status: null, hello: null, run: null, detail: 'Connecting to the local agent' });
     try {
       const unlisten = await this.bridge.subscribe((event) => this.receive(event));
       if (!this.owns(revision)) {
@@ -397,13 +389,12 @@ export class MachineController {
       if (!this.current(revision, reply)) return;
       const inspection = checkedReply(decodeInspectResult, reply.data);
       const status = this.statusRevision !== statusRevision ? this.state.status : inspection.status ?? this.state.status;
-      const keys = new Set(inspection.items.map((item) => item.key));
       this.update({
-        inspection, status, initialReadError: null, preview: null, excluded: this.state.excluded.filter((key) => keys.has(key)),
+        inspection, status, initialReadError: null,
         detail: status?.error ? `${status.error}: ${status.detail ?? ''}` : `Inspected ${inspection.items.length} items`,
       });
     } catch (error) {
-      if (this.owns(revision)) this.refused(error, { inspection: null, preview: null, ...(initialRead ? { initialReadError: message(error) } : {}) });
+      if (this.owns(revision)) this.refused(error, { inspection: null, ...(initialRead ? { initialReadError: message(error) } : {}) });
     }
   }
 
@@ -418,93 +409,6 @@ export class MachineController {
     }
   }
 
-  toggle(key: string) {
-    if (!this.ready()) return;
-    const excluded = this.state.excluded.includes(key) ? this.state.excluded.filter((k) => k !== key) : [...this.state.excluded, key];
-    this.update({ excluded, preview: null });
-  }
-
-  async previewPlan() {
-    if (!this.ready() || !this.state.inspection) return;
-    const revision = ++this.revision;
-    this.update({ pending: true, detail: 'Planning' });
-    try {
-      const reply = await this.bridge!.invoke('preview_plan', { exclude: [...this.state.excluded] });
-      if (!this.current(revision, reply)) return;
-      const preview = checkedReply(decodePreviewResult, reply.data);
-      this.update({ preview, detail: `${preview.plan.steps.length} steps, ${preview.plan.skipped.length} skipped` });
-    } catch (error) {
-      if (this.owns(revision)) this.refused(error);
-    } finally {
-      if (this.owns(revision)) this.update({ pending: false });
-    }
-  }
-
-  // Refreshes activity after preparation ends without discarding the preview.
-  private async settlePreparation(revision: number, detail: string) {
-    if (await this.loadStatus(revision) && this.owns(revision) && !this.state.status?.error) this.update({ detail });
-  }
-
-  async apply() {
-    const preview = this.state.preview;
-    if (!this.ready() || !preview) return;
-    const revision = ++this.revision;
-    this.starting = true;
-    this.early = [];
-    this.update({ pending: true, detail: 'Re-inspecting before applying' });
-    let finished = false;
-    try {
-      const reply = await this.bridge!.invoke('apply_plan', { planId: preview.planId });
-      if (!this.current(revision, reply)) return;
-      const result = checkedReply(decodeApplyResult, reply.data);
-      if (result.status === 'stale') {
-        this.update({ preview: { planId: result.planId, plan: result.plan }, detail: STALE });
-        await this.settlePreparation(revision, STALE);
-        return;
-      }
-      const buffered = this.early.filter((event) => event.runId === result.runId);
-      this.starting = false;
-      this.early = [];
-      const initial: RunView = {
-        runId: result.runId, outcome: 'running', summary: 'Starting',
-        steps: preview.plan.steps.map((step) => ({ key: step.key, summary: step.summary, status: 'pending', note: '' })),
-      };
-      const run = buffered.reduce((view, event) => (view.outcome === 'running' ? advance(view, event.progress) : view), initial);
-      finished = run.outcome !== 'running';
-      this.update({ run, detail: run.summary, ...(finished ? { preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null } : {}) });
-    } catch (error) {
-      if (this.owns(revision)) {
-        this.refused(error);
-        if (this.state.connection === 'connected') await this.settlePreparation(revision, message(error));
-      }
-    } finally {
-      if (this.owns(revision)) {
-        this.starting = false;
-        this.early = [];
-        this.update({ pending: false });
-      }
-    }
-    // The run ended before this request returned: its terminal event was buffered, so look again here.
-    if (finished && this.owns(revision)) await this.inspect();
-  }
-
-  // Asks the agent to stop the run; a failure is shown unless a disconnect or restart superseded it.
-  async cancel() {
-    if (!this.bridge || !canCancel(this.state)) return;
-    const revision = this.revision;
-    try {
-      const reply = await this.bridge.invoke('cancel_apply');
-      if (!this.current(revision, reply)) return;
-      if (this.state.run?.outcome !== 'running') {
-        const cancelled = typeof reply.data === 'object' && reply.data !== null && 'cancelled' in reply.data
-          && reply.data.cancelled === true;
-        this.update({ detail: cancelled ? 'Cancellation requested; waiting for the agent' : 'No manual apply is available to cancel' });
-      }
-    } catch (error) {
-      if (this.owns(revision)) this.refused(error);
-    }
-  }
-
   async restart() {
     if (!this.bridge || this.state.pending || (this.state.connection === 'connected' && (this.state.run?.outcome === 'running' || this.state.status?.applying === true))) return;
     const revision = ++this.revision;
@@ -512,11 +416,9 @@ export class MachineController {
     this.runDiscovery = null;
     this.reviewRefresh = false;
     this.earlyReviews.clear();
-    this.starting = false;
-    this.early = [];
     this.earlyDisconnects.clear();
     this.earlyStatuses.clear();
-    this.update({ pending: true, initialReadPending: true, waitingForReport: false, initialReadError: null, connection: 'connecting', session: this.state.session + 1, run: null, preview: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
+    this.update({ pending: true, initialReadPending: true, waitingForReport: false, initialReadError: null, connection: 'connecting', session: this.state.session + 1, run: null, inspection: null, status: null, hello: null, detail: 'Restarting the local agent' });
     try {
       if (!this.establish(await this.bridge.invoke('restart_agent'), 'Agent connected', revision)) return;
       await this.takeReviewRequest(revision);
@@ -553,8 +455,6 @@ export class MachineController {
     if (event.generation !== this.generation) return;
     if (event.event === 'disconnected') {
       this.revision++;
-      this.starting = false;
-      this.early = [];
       const run = this.state.run?.outcome === 'running'
         ? { ...this.state.run, outcome: 'failed' as const, summary: 'Agent disconnected during the run' }
         : this.state.run;
@@ -578,14 +478,8 @@ export class MachineController {
       return;
     }
     if (event.event === 'operation-run') {
-      if (!this.starting) {
-        if (this.state.run?.runId === event.runId) void this.refreshRun(event.runId, true);
-        else void this.discoverRuns(true);
-      }
-      return;
-    }
-    if (this.starting) {
-      if (this.early.length < MAX_EARLY_EVENTS) this.early.push(event);
+      if (this.state.run?.runId === event.runId) void this.refreshRun(event.runId, true);
+      else void this.discoverRuns(true);
       return;
     }
     let run = this.state.run;
@@ -593,7 +487,7 @@ export class MachineController {
       && (event.progress.type === 'done' || event.progress.type === 'failed' || event.progress.type === 'cancelled')) {
       const discovery = this.runDiscovery;
       if (!discovery.overflow && !discovery.terminalRunIds.has(event.runId)) {
-        if (discovery.terminalRunIds.size === MAX_EARLY_EVENTS) {
+        if (discovery.terminalRunIds.size === MAX_TRACKED_TERMINALS) {
           discovery.overflow = true;
           discovery.terminalRunIds.clear();
         } else discovery.terminalRunIds.add(event.runId);
@@ -603,7 +497,7 @@ export class MachineController {
     const discoversRun = event.progress.type === 'started' && run?.outcome !== 'running';
     if (event.progress.type === 'started' && run?.outcome !== 'running') {
       run = { runId: event.runId, steps: [], outcome: 'running', summary: 'Applying machine changes' };
-      this.update({ preview: null, status: this.state.status ? { ...this.state.status, applying: true } : null });
+      this.update({ status: this.state.status ? { ...this.state.status, applying: true } : null });
     }
     if (!run || run.runId !== event.runId || run.outcome !== 'running') return;
     const next = advance(run, event.progress);
@@ -612,8 +506,8 @@ export class MachineController {
       if (discoversRun || event.progress.type === 'finished' && event.progress.key.startsWith('skill-intent:')) void this.refreshRun(event.runId);
       return;
     }
-    // The preview is spent and the machine has changed: look again.
-    this.update({ run: next, detail: next.summary, preview: null, status: this.state.status ? { ...this.state.status, applying: false } : null });
+    // The machine has changed: look again.
+    this.update({ run: next, detail: next.summary, status: this.state.status ? { ...this.state.status, applying: false } : null });
     void this.refreshRun(event.runId);
     void this.inspect();
   }

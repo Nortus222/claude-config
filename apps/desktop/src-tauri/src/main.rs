@@ -266,14 +266,6 @@ async fn inspect_machine(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, S
     dispatch(owner, Request::Inspect).await
 }
 #[tauri::command]
-async fn preview_plan(owner: tauri::State<'_, Arc<Owner>>, exclude: Vec<String>) -> Result<Value, String> { dispatch(owner, Request::Preview { exclude }).await }
-#[tauri::command]
-async fn apply_plan(owner: tauri::State<'_, Arc<Owner>>, plan_id: String) -> Result<Value, String> { dispatch(owner, Request::Apply { plan_id }).await }
-#[tauri::command]
-async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, Request::Cancel).await
-}
-#[tauri::command]
 async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
     let owner = owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;let updates=owner.startup.coordinator()?; restart_with_completion(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart), ||updates.recovered())}).await.map_err(|e| e.to_string())?
@@ -576,7 +568,7 @@ fn main() {
                 Ok(())
             })
         })
-        .invoke_handler(tauri::generate_handler![operation, get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login, open_github_link,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
+        .invoke_handler(tauri::generate_handler![operation, get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login, open_github_link,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run_return(|app, event| {
             if matches!(event,tauri::RunEvent::Ready) {startup_diagnostics::trace(Operation::AppStartup).record(Phase::RuntimeReady,startup_diagnostics::Status::Completed,None);}
