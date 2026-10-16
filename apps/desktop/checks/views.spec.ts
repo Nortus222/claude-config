@@ -110,6 +110,8 @@ test('an existing installation waiting for native setup does not flash first-run
   await check;
   try {
     assert.match(waiting, /Checking local setup/);
+    assert.match(waiting, /Opening Nortuscc/); assert.match(waiting, /NORTUSCC \/ THIS MAC/);
+    assert.doesNotMatch(waiting, /Claude Config|CLAUDE CONFIG/);
     assert.match(waiting, /aria-busy="true"/);
     assert.match(waiting, /role="status" aria-live="polite"/);
     assert.match(waiting, /aria-current="step"[^>]*>.*?Local setup/);
@@ -150,7 +152,7 @@ test('an early active apply leaves the startup boundary for the operational scre
   const markup = renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
     children: createElement('p', null, 'Operational view') }));
   routing.resolve(null); await check;
-  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN/);
+  assert.doesNotMatch(markup, /Opening Nortuscc|FIRST RUN/);
   assert.match(markup, /Operational view/);
   setup.dispose(); c.dispose();
 });
@@ -227,7 +229,7 @@ test('a failed initial inspection remains visible with a read-only retry after v
   assert.match(markup, /class="alert shell-banner" role="alert"><div><strong>This Mac couldn’t be inspected.<\/strong> <span>fixture read failed<\/span>/);
   assert.match(markup, />Check again<\/button>/);
   assert.match(markup, /Home body/);
-  assert.doesNotMatch(markup, /Opening Claude Config|FIRST RUN|INSPECT_FAILED|>Reconnect</);
+  assert.doesNotMatch(markup, /Opening Nortuscc|FIRST RUN|INSPECT_FAILED|>Reconnect</);
   fail = false;
   await c.inspect();
   const recovered = render();
@@ -241,6 +243,7 @@ test('first run displays fixed consent, all four choices and explicit Git instal
   const markup = renderToStaticMarkup(createElement(SetupView, { state, controller: setup }));
   for (const label of ['https://github.com/Nortus222/claude-config.git', 'Claude and Codex', 'Claude only', 'Codex only', 'Neither', 'Install Git', 'Recheck Git', 'Use this repository and set up']) assert.ok(markup.includes(label), label);
   assert.match(markup, /Apple/);
+  assert.match(markup, /NORTUSCC \/ FIRST RUN/); assert.doesNotMatch(markup, /Claude Config|CLAUDE CONFIG/);
   const browser = renderToStaticMarkup(createElement(SetupView, { state: setup.state, controller: setup }));
   assert.match(browser, /disabled=""/); assert.match(browser, /Native setup actions are disabled/);
 });

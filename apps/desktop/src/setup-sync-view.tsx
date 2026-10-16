@@ -78,8 +78,9 @@ function previewCopy(preview: ChangePreview, state: SetupSyncState): { title: st
   return { title: changeTitle(change.kind), apply: changeTitle(change.kind) };
 }
 
-// The page's only Apply: whatever was last previewed, from either section.
-function PreviewPanel({ state, controller }: Props) {
+// The page's only Apply: whatever was last previewed, from either section. The first-run profile choice
+// shows its follow preview here too.
+export function PreviewPanel({ state, controller }: { state: SetupSyncState; controller: Pick<Actions, 'apply' | 'cancelPreview'> }) {
   const preview = state.preview;
   if (!preview) return null;
   const change = preview.change, { title, apply } = previewCopy(preview, state);
@@ -102,7 +103,7 @@ function PreviewPanel({ state, controller }: Props) {
 }
 
 // One run: active, or started in this window. Interrupted and abandoned runs show as recovery instead.
-function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: Actions }) {
+export function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: Pick<Actions, 'cancel'> }) {
   if (run.state === 'interrupted' || run.state === 'abandoned') return null;
   const result = run.result, ok = run.steps.filter(step => step.outcome === 'ok').length, failed = run.steps.filter(step => step.outcome === 'failed').length;
   const outcome = !result ? (run.steps.length ? `${ok} of ${count(run.steps.length, 'step')} done${failed ? `, ${failed} failed` : ''}.` : 'Starting.')

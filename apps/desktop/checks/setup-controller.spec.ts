@@ -92,3 +92,19 @@ test('successful first-run bootstrap followed by a connection failure cannot off
   await f.controller.bootstrap();
   assert.equal(f.calls.filter(([command]) => command === 'setup_desktop').length, 1);
 });
+test('only a first-run bootstrap completed in this session marks the setup bootstrapped', async () => {
+  const existing = fixture((command) => command === 'desktop_setup_state' ? setup({ needsSetup: false, repo: '/existing' }) : null);
+  assert.equal(existing.controller.state.bootstrapped, false);
+  await existing.controller.check();
+  assert.equal(existing.controller.state.bootstrapped, false);
+  let attempts = 0;
+  const f = fixture((command) => command === 'desktop_setup_state' ? setup({ gitAvailable: true })
+    : command === 'setup_desktop' ? (++attempts === 1 ? Promise.reject(new Error('fixture')) : { hello }) : null);
+  await f.controller.check();
+  await f.controller.bootstrap();
+  assert.equal(f.controller.state.bootstrapped, false);
+  await f.controller.bootstrap();
+  assert.equal(f.controller.state.bootstrapped, true);
+  await f.controller.check();
+  assert.equal(f.controller.state.bootstrapped, true);
+});

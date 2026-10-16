@@ -92,7 +92,7 @@ export function ShellView({ screen, navigate, children, machine, onReconnect, on
 const picks = [['both', 'Claude and Codex'], ['claude', 'Claude only'], ['codex', 'Codex only'], ['neither', 'Neither']] as const;
 export function SetupView({ state, controller }: { state: SetupViewState; controller: SetupController }) {
   if (state.phase === 'checking' || state.phase === 'error') return <StartupCard
-    stage={0} title={state.phase === 'error' ? 'Local setup needs attention' : 'Opening Claude Config'}
+    stage={0} title={state.phase === 'error' ? 'Local setup needs attention' : 'Opening Nortuscc'}
     detail={state.detail} error={state.phase === 'error'}>
     {state.phase === 'error' ? <>
       <p className="muted">Your existing setup has been retained. Recheck it before continuing.</p>
@@ -103,7 +103,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
   const value = state.configTargets.length === 2 ? 'both' : state.configTargets[0] ?? 'neither';
   return (
     <main className="onboarding">
-      <p className="eyebrow">CLAUDE CONFIG / FIRST RUN</p>
+      <p className="eyebrow">NORTUSCC / FIRST RUN</p>
       <h1>Set up this Mac</h1>
       <p className="intro">Prepare the local setup and background agent. Review configuration changes before applying them.</p>
       <section className="form-section">
@@ -144,7 +144,7 @@ function StartupCard({ stage, title, detail, error = false, children }: {
   return <>
     {!error ? <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{`${title}. ${detail}`}</p> : null}
     <section className={`startup-card${error ? ' startup-attention' : ''}`} aria-busy={!error} aria-labelledby="startup-heading">
-    <div className="startup-brand"><span className="startup-mark" aria-hidden="true">C</span><p className="eyebrow">CLAUDE CONFIG / THIS MAC</p></div>
+    <div className="startup-brand"><span className="startup-mark" aria-hidden="true">N</span><p className="eyebrow">NORTUSCC / THIS MAC</p></div>
     <div className="startup-message">
       <span className={error ? 'startup-attention-mark' : 'startup-activity'} aria-hidden="true">{error ? '!' : null}</span>
       <div><h1 id="startup-heading">{title}</h1><p role={error ? 'alert' : undefined}>{detail}</p></div>
