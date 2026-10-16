@@ -478,7 +478,7 @@ export type SetupReview = typeof SetupReviewSchema.Type;
 export type SetupReviewRow = typeof SetupReviewRowSchema.Type;
 
 export const AuthorProfilesInputSchema = Schema.Struct({ scope });
-export const MachineFileInputSchema = Schema.Struct({ scope, fileId: Schema.String.check(Schema.makeFilter(value => FILES.some(file => file.id === value && file.capture))) });
+export const MachineFileInputSchema = Schema.Struct({ scope, profile: Schema.optionalKey(ProfileNameSchema), fileId: Schema.String.check(Schema.makeFilter(value => FILES.some(file => file.id === value && file.capture))) });
 export const MachineFileResultSchema = Schema.Struct({ fileId: Schema.String, exists: Schema.Boolean, text: Schema.String, truncated: Schema.Boolean });
 export const AuthorFileInputSchema = Schema.Struct({ scope, profile: ProfileNameSchema, fileId: KeySchema });
 export const UpstreamsInputSchema = Schema.Struct({ scope });

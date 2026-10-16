@@ -143,7 +143,7 @@ export class AuthorController {
     const profile = this.state.selectedProfile;
     await this.request(async mark => {
       this.update({ capture: null });
-      const file = await this.call(mark, 'machineFile', { scope: SCOPE, fileId });
+      const file = await this.call(mark, 'machineFile', { scope: SCOPE, fileId, profile });
       if (!file) return;
       if (!file.exists) throw new Error('This file is absent on this Mac. Nothing was captured.');
       if (file.truncated) throw new Error('This file exceeds the capture size limit. Partial text cannot be captured.');

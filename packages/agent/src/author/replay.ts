@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import { captureFileText } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, normalizeSkillSource, parseProfileDocument, profilesUsingPath, resolveNamedProfile, type ProfileDocument } from '@nortuscc/profile-engine';
 import { DocumentInvalid, editEntry, IGNORES_FILE, PINS_FILE } from '@nortuscc/source-watch';
 import type { Intent } from './intents.ts';
@@ -86,11 +87,13 @@ function apply(documents: Documents, intent: Intent): Record<string, string> {
       });
     case 'captureFile': {
       const target = captureTargets(documents, intent.profile, intent.fileId);
-      if (intent.choice.kind === 'updateShared') return { ...documents, [target.path]: intent.text };
+      const file = resolveNamedProfile({ documents, name: intent.profile }).files.find(file => file.id === intent.fileId)!;
+      const text = captureFileText(file, documents[target.path], intent.text);
+      if (intent.choice.kind === 'updateShared') return { ...documents, [target.path]: text };
       const path = intent.choice.repoPath;
       if (profilesUsingPath(documents, path).some(name => name !== intent.profile)) throw new Error(`Own copy '${path}' is used by another profile`);
       const next = editProfile(documents, intent.profile, document => { document.files = { ...document.files, [intent.fileId]: path }; });
-      return { ...next, [path]: intent.text };
+      return { ...next, [path]: text };
     }
   }
 }

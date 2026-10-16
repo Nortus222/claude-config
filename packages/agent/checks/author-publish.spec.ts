@@ -433,3 +433,13 @@ test('draft cleanup failure is a note on a successful published run', async t =>
   assert.deepEqual(result.publication?.pending, []); assert.match(result.result!.message, /draft cleanup/i);
   assert.ok(await f.run(f.drafts.read(draft.id))); assert.equal(f.revisions.length, 2);
 });
+
+
+test('publishing a settings capture keeps private machine keys out of Git', async t => {
+  const f = await fixture(t);
+  f.move('claude/settings.keys.json', '{"model":"old"}');
+  const draft = await f.save([{ kind: 'captureFile', profile: 'base', fileId: 'claude:settings.json', text: JSON.stringify({ model: 'new', permissions: {}, enabledPlugins: {}, env: { TOKEN: 'secret' }, hooks: { Stop: '/private/hook' } }), choice: { kind: 'updateShared' } }]);
+  const result = await publish(f, draft);
+  assert.equal(result.publication?.pushed, true);
+  assert.deepEqual(JSON.parse(f.git(f.origin, 'show', 'main:claude/settings.keys.json')), { model: 'new' });
+});

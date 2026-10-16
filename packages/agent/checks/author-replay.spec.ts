@@ -188,3 +188,24 @@ test('source policy intents preserve existing source identities outside GitHub',
     documents: { 'skill-pins.json': json({ version: 1, pins: { 'https://git.example.com/team/skills.git': 'c'.repeat(40) } }) }, invalid: [],
   });
 });
+
+
+test('capturing settings publishes only owned keys', () => {
+  const documents = { ...shared, 'claude/settings.keys.json': json({ model: 'old', alwaysThinkingEnabled: false }) };
+  const text = json({ model: 'new', permissions: { allow: ['Bash(*)'] }, enabledPlugins: { private: true }, env: { TOKEN: 'secret' }, hooks: { Stop: '/Users/private/hook' } });
+  for (const choice of [{ kind: 'updateShared' as const }, { kind: 'ownCopy' as const, repoPath: 'claude/personal-settings.json' }]) {
+    const result = replay(documents, [{ kind: 'captureFile', profile: 'personal', fileId: 'claude:settings.json', text, choice }]);
+    assert.deepEqual(result.invalid, []);
+    assert.deepEqual(JSON.parse(result.documents[choice.kind === 'updateShared' ? 'claude/settings.keys.json' : choice.repoPath]!), { model: 'new', alwaysThinkingEnabled: false });
+    assert.equal(result.documents['claude/CLAUDE.md'], shared['claude/CLAUDE.md']);
+  }
+});
+
+test('settings capture refuses invalid local JSON and secrets inside an owned key', () => {
+  const documents = { ...shared, 'claude/settings.keys.json': json({ model: 'old' }) };
+  for (const text of ['{', '[]', json({ model: { apiKey: 'secret' } })]) {
+    const result = replay(documents, [{ kind: 'captureFile', profile: 'personal', fileId: 'claude:settings.json', text, choice: { kind: 'updateShared' } }]);
+    assert.equal(result.invalid.length, 1);
+    assert.deepEqual(result.documents, documents);
+  }
+});

@@ -467,3 +467,36 @@ test('author operations ask to follow a setup when no repository origin exists',
     assert.equal((error as any).message, 'Follow your setup repository first');
   }));
 });
+
+
+test('machineFile never returns non-owned settings keys', async t => {
+  const f = await fixture(t);
+  f.git('-C', f.m.paths.repo, 'pull', '--ff-only', f.origin, 'main');
+  f.m.write(join(f.m.paths.repo, 'claude/settings.keys.json'), '{"model":"old","alwaysThinkingEnabled":false}');
+  f.git('-C', f.m.paths.repo, 'add', '.');
+  f.git('-C', f.m.paths.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'owned settings');
+  f.git('-C', f.m.paths.repo, 'push', f.origin, 'main');
+  f.m.write(join(f.m.paths.claude, 'settings.json'), JSON.stringify({ model: 'new', alwaysThinkingEnabled: true, permissions: { allow: ['Bash(*)'] }, enabledPlugins: { private: true }, env: { TOKEN: 'secret' }, hooks: { Stop: '/Users/private/hook' } }));
+  await f.within(s => Effect.gen(function* () {
+    const file = (yield* read(s, 'machineFile', { fileId: 'claude:settings.json' })) as any;
+    assert.equal(file.exists, true);
+    assert.deepEqual(JSON.parse(file.text), { model: 'new', alwaysThinkingEnabled: true });
+    assert.equal(file.truncated, false);
+  }));
+});
+
+
+test('machine settings capture uses the selected profile allowlist', async t => {
+  const f = await fixture(t);
+  f.m.write(join(f.m.paths.repo, 'claude/settings.keys.json'), '{"model":"old"}');
+  f.m.write(join(f.m.paths.repo, 'profiles/personal.json'), '{"extends":"base","files":{"claude:settings.json":"claude/personal-settings.json"}}');
+  f.m.write(join(f.m.paths.repo, 'claude/personal-settings.json'), '{"alwaysThinkingEnabled":false}');
+  f.git('-C', f.m.paths.repo, 'add', '.');
+  f.git('-C', f.m.paths.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'profile settings');
+  f.git('-C', f.m.paths.repo, 'push', f.origin, 'main');
+  f.m.write(join(f.m.paths.claude, 'settings.json'), '{"model":"new","alwaysThinkingEnabled":true,"env":{"TOKEN":"secret"}}');
+  await f.within(s => Effect.gen(function* () {
+    const file = (yield* read(s, 'machineFile', { fileId: 'claude:settings.json', profile: 'personal' })) as any;
+    assert.deepEqual(JSON.parse(file.text), { alwaysThinkingEnabled: true });
+  }));
+});
