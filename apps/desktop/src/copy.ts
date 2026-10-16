@@ -103,7 +103,8 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
   UNAUTHORIZED: 'Access was refused. Check your permissions, then retry.',
   NO_REPORT: 'Waiting for the agent’s first inspection.',
   MALFORMED: OFFLINE,
-  OVERSIZED: OFFLINE,
+  // An operation refused a result over its size bound; the connection is fine.
+  OVERSIZED: 'Too much to show at once. Select fewer items.',
 };
 // The host prefixes the agent's refusal with its error code.
 const CODE_PREFIX = /^([A-Z][A-Z0-9_]*): /;

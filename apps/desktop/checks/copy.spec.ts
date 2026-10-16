@@ -64,7 +64,8 @@ test('errorText picks text by code for codes the app special-cases', () => {
   assert.equal(errorText(coded('UNAUTHORIZED')), 'Access was refused. Check your permissions, then retry.');
   assert.equal(errorText(coded('NO_REPORT')), 'Waiting for the agent’s first inspection.');
   assert.equal(errorText(coded('MALFORMED')), 'Lost the connection to the agent. Reconnect the agent.');
-  assert.equal(errorText(coded('OVERSIZED')), 'Lost the connection to the agent. Reconnect the agent.');
+  assert.equal(errorText(coded('OVERSIZED')), 'Too much to show at once. Select fewer items.');
+  assert.equal(errorText('OVERSIZED: Setup preview exceeds supported limits'), 'Too much to show at once. Select fewer items.');
   assert.equal(errorText('UNAUTHORIZED: refused'), 'Access was refused. Check your permissions, then retry.');
 });
 
