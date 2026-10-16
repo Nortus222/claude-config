@@ -30,7 +30,7 @@ export function applyConfig(opened: Opened, input: { targets: Target[]; takeRepo
     }
     const planned = plan('apply', report, { ...selectAll, targets: input.targets, force: input.takeRepo }, [config]);
     // A clean machine runs nothing, so state.json and the backups folder stay untouched.
-    const ran = planned.steps.length > 0 ? yield* runPlan(planned, report, [config], { signal: input.signal }) : undefined;
+    const ran = planned.steps.length > 0 ? yield* runPlan(planned, report, [config], { signal: input.signal, preflight: opened.preflight }) : undefined;
 
     const lines: string[] = [];
     let refused = 0;

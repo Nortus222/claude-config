@@ -43,7 +43,7 @@ const uninstall = (force: boolean, signal: AbortSignal) =>
 
       const lines: string[] = [];
       const run = { complete: true };
-      yield* Stream.runForEach(execute(planned, report, [configDomain], { signal }), (event) => Effect.sync(() => {
+      yield* Stream.runForEach(execute(planned, report, [configDomain], { signal, preflight: opened.preflight }), (event) => Effect.sync(() => {
         if (event.type === 'cancelled') run.complete = false;
         if (event.type !== 'finished') return;
         if (event.outcome !== 'ok') {

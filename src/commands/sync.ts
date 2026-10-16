@@ -16,7 +16,7 @@ import {
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
 import { restartAfterPull } from '../agent-service.ts';
 import { runGit } from '../git.ts';
-import { CHECKOUT, cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
+import { CHECKOUT, cliLayer, openDesired, withCheckoutFence, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
 import { parseConfigMode } from '../config-mode.ts';
 import { parseInstallFlags } from '../install.ts';
 import { formatRow, labelWidth, section, short } from '../report.ts';
@@ -413,6 +413,7 @@ export async function run(args: string[] = [], deps: SyncDeps = { select: realSe
       env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
     });
     const layer = Layer.mergeAll(syncStore, decisionsStore, historyStore()).pipe(Layer.provideMerge(cliLayer(paths)));
+    yield* withCheckoutFence(paths, Effect.void).pipe(Effect.provide(layer));
     return yield* syncMachine(paths, target, flags, deps).pipe(Effect.provide(layer));
   }));
 }

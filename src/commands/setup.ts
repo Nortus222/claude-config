@@ -7,7 +7,7 @@ import { isGitCheckout, OverridesStore, StateStore } from '@nortuscc/machine';
 import { parseConfigMode, persisted, resolveConfigMode } from '../config-mode.ts';
 import { runGit } from '../git.ts';
 import { parseInstallFlags, runInstall } from '../install.ts';
-import { cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, resolvePaths, runCommand } from '../machine.ts';
+import { cliLayer, openDesired, withCheckoutFence, refuseInvalidOverrides, reportOverrideIssues, resolvePaths, runCommand } from '../machine.ts';
 import { setupPrerequisites, type PrerequisiteDeps } from '../prerequisites.ts';
 import { confirm as realConfirm } from '../prompt.ts';
 import { select as realSelect, type Choice } from '../select.ts';
@@ -85,6 +85,7 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
     // setup repairs a stale record itself, so the "re-run setup" warning would prescribe this very run.
     const paths = yield* resolvePaths();
     const layer = cliLayer(paths);
+    if (dir === null || existsSync(dir)) yield* withCheckoutFence({ ...paths, repo: dir ?? paths.repo }, Effect.void).pipe(Effect.provide(layer));
     const overrides = yield* Effect.provide(Effect.gen(function* () { return yield* (yield* OverridesStore).read; }), layer);
     reportOverrideIssues(overrides);
     if (refuseInvalidOverrides(overrides)) return 1;
@@ -149,10 +150,10 @@ export async function run(args: string[] = [], deps: SetupDeps = {}): Promise<nu
       ? { ...overrides.value, manageConfig: picked.manageConfig, configTargets: picked.configTargets }
       : persisted(mode, overrides.value);
     if (signal.aborted) return cancelled();
-    yield* Effect.provide(Effect.gen(function* () {
+    yield* Effect.provide(withCheckoutFence({ ...paths, repo: root }, Effect.gen(function* () {
       yield* (yield* StateStore).update((state) => ({ ...state, repo: root }));
       if (next !== undefined) yield* (yield* OverridesStore).write(next);
-    }), layer);
+    })), layer);
 
     const opened = yield* openDesired({ mode, paths: { ...paths, repo: root } });
     return yield* Effect.gen(function* () {
