@@ -52,7 +52,7 @@ const inputs = (handle: AgentHandle, setupId: string, refetch = true) => Effect.
   if (overrides.issues.length) return yield* Effect.fail(new SessionError('PROFILE_INVALID', 'Repair machine overrides before reviewing setup changes'));
   const holds = yield* (yield* SyncStore).read, decisions = yield* (yield* DecisionsStore).read;
   const inspection = yield* handle.inspection;
-  const identity = digest({ account: selected.accountId, repository: selected.repository });
+  const identity = digest({ account: selected.accountId, repository: selected.repository, profile: selected.source.profile });
   const cached = reviewedHeads.get(handle)?.get(setupId);
   const revision = cached?.identity === identity && cached.inspection === inspection ? cached.revision
     : inspection?.revision && revisionSetupId(inspection.revision) === setupId ? inspection.revision : undefined;

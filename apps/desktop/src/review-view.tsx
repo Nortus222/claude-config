@@ -44,6 +44,7 @@ const domainText = {
   capture: ['Capture configuration', 'Writes selected author documents. Commit and publication remain explicit CLI actions.'],
   uninstallConfig: ['Restore recorded configuration', 'Restores recorded documents through their owner; general backup restoration is unavailable.'],
   update: ['Update selected skills', 'Addition repair requires the verified addition workflow. Author manifest edits are separately selected.'],
+  followProfile: ['Follow profile', 'Back up dropped choices and refetch for inspection only.'],
   setupApply: ['Apply incoming setup choices', 'Saves every reviewed choice and applies the selected machine plan in one run.'],
   syncDecision: ['Incoming configuration decision', 'Accepting may permit existing policy scheduling. Repository trust requires the app consent action.'],
   sourceDecision: ['Author source decision', 'Source-wide pins affect all declared skills. Author edits are separate from machine policy; ignore suppresses notifications.'],

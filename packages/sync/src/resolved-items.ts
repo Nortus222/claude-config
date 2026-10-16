@@ -45,3 +45,14 @@ export const droppedOnSwitch = (input: { holds: Holds; overrides: MachineOverrid
     if (!ids.has(`integration:${id}`)) overrides.push(`integrations.${id}`);
   return { holds: Object.keys(input.holds).filter(id => !ids.has(id) || input.staleHolds?.includes(id)).sort(), overrides: overrides.sort() };
 };
+
+// Drop by the reported paths without splitting IDs, which may themselves contain dots.
+export const retainedOverrides = (value: MachineOverrides, dropped: readonly string[]): MachineOverrides => ({
+  ...value,
+  ...(value.settings ? { settings: Object.fromEntries(Object.entries(value.settings).flatMap(([id, settings]) => {
+    const kept = Object.fromEntries(Object.entries(settings).filter(([key]) => !dropped.includes(`settings.${id}.${key}`)));
+    return Object.keys(kept).length ? [[id, kept]] : [];
+  })) } : {}),
+  ...(value.skills ? { skills: Object.fromEntries(Object.entries(value.skills).filter(([name]) => !dropped.includes(`skills.${name}`))) } : {}),
+  ...(value.integrations ? { integrations: Object.fromEntries(Object.entries(value.integrations).filter(([id]) => !dropped.includes(`integrations.${id}`))) } : {}),
+});

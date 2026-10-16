@@ -1,5 +1,5 @@
 import { parsePins, PINS_SOURCE } from '@nortuscc/profile-engine';
-import { desiredOfDocuments, PROFILE_DOCUMENTS, type Documents } from './documents.ts';
+import { desiredOfDocuments, hasProfile, PROFILE_DOCUMENTS, type Documents } from './documents.ts';
 import { itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
 import type { SyncDecisionChange } from './decisions.ts';
@@ -37,7 +37,7 @@ export const composeSetupChoices = (input: {
   const ids = [...new Set([...itemValues(input.current, input.profile).keys(), ...itemValues(input.offered, input.profile).keys(), ...Object.keys(input.holds)])].sort();
   const pins = new Map<string, string | null>(), hooks = new Map<string, string>();
   const selections = ids.map(id => {
-    const documents = accepted.has(id) ? input.offered : input.current;
+    const documents = accepted.has(id) ? input.offered : hasProfile(input.current, input.profile) ? input.current : { [`profiles/${input.profile}.json`]: '{}' };
     const value = itemValues(documents, input.profile).get(id), ref = parseItemId(id);
     if (ref?.kind === 'skill' && (value !== undefined || Object.hasOwn(input.holds, id))) {
       const pin = pinAt(documents, ref.source);

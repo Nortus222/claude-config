@@ -72,9 +72,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     if (cached.length !== offered.latestRevision || cached.some((r, i) => r.number !== i + 1)) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
     return cached;
   });
-  const followedSource = Effect.gen(function* () {
-    const followed = yield* followedStore.read;
-    if (!followed) return undefined;
+  const sourceForProfile = (followed: import('@nortuscc/sync').FollowedProfile) => Effect.gen(function* () {
     const metadata = Effect.gen(function* () {
       const offered = yield* client.publicSetup(followed.setupId!);
       if (normalizeRepoUrl(offered.repoUrl) !== normalizeRepoUrl(followed.repoUrl) || offered.profile !== followed.profile) {
@@ -82,10 +80,11 @@ export const makeHostedRuntime = (client: HostedClient, input: {
       }
       const revisions = yield* client.listRevisions(followed.setupId!);
       if (revisions.length !== offered.latestRevision) return yield* Effect.fail(new HostedFailure({ code: 'invalid_response' }));
-      return revisions;
+      return revisions.map(({ setupId, number, commitSha, tag, changelog, items, requiredEnv }) => ({ setupId, number, commitSha, tag, changelog, items, requiredEnv }));
     });
     return yield* SetupSource.pipe(Effect.provide(followedSetupSourceLayer(paths, followed, { processes, records: metadata })));
   });
+  const followedSource = Effect.flatMap(followedStore.read, followed => followed ? sourceForProfile(followed) : Effect.succeed(undefined));
   type Selected = { source: SetupSource['Service']; records: ReadonlyArray<SyncRevision>; scope: string };
   const select = Effect.gen(function* () {
     const current = yield* client.state;
@@ -193,8 +192,12 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     return current;
   }));
   return {
+    profileHosted: { publicSetup: client.publicSetup, subscribe: client.subscribe, unsubscribe: client.unsubscribe },
+    followedSource,
     selectOperationSetup: (setupId: string) => Effect.gen(function* () {
       const current = yield* client.state;
+      const followed = yield* followedStore.read;
+      if (followed?.setupId === setupId) return { setupId, accountId: current.accountId, repository: normalizeRepoUrl(followed.repoUrl), trusted: true, source: yield* sourceForProfile(followed) };
       const offered = current.setups.find(s => s.setupId === setupId);
       if (!offered || !current.accountId) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
       const selection = yield* select;

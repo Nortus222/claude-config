@@ -5,13 +5,17 @@ import {
   Fs, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
+import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import type { SyncRevision } from '@nortuscc/hosted-protocol';
 import { desiredFor } from './compose.ts';
-import { isAncestor, revParse } from './git.ts';
+import { commitDocuments, isAncestor, revParse } from './git.ts';
 import { followedClone, privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from './followed-repository.ts';
 import type { FollowedProfile } from './followed.ts';
 import { hostedSetupSourceLayer } from './hosted-source.ts';
-import { pruneSnapshots } from './snapshots.ts';
+import { desiredOfDocuments, hasProfile, worktreeDocuments, type Documents } from './documents.ts';
+import { composeSetupChoices } from './setup-choices.ts';
+import { pruneSnapshots, snapshotFromDocuments } from './snapshots.ts';
+import { droppedOnSwitch, retainedOverrides } from './resolved-items.ts';
 import { incoming, nextHolds } from './plan.ts';
 import { LOCAL_SETUP, RevisionMismatch, RevisionUnavailable, SetupSource, type Revision } from './source.ts';
 import { SyncStore, syncStore, type Holds } from './store.ts';
@@ -39,8 +43,16 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     if (text !== undefined && state === undefined) return yield* unavailable('HEAD', 'applied state is invalid');
     return state?.applied?.commit ?? (yield* revParse(repo, 'refs/nortuscc/migration/applied'));
   });
-  const snapshot = (commit: string, held: Holds, choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
+  // A historical absence owns no items. Keep unmatched overrides on disk until their items are taken.
+  const historicalSnapshot = (documents: Documents, overrides: Input<MachineOverrides>) => {
+    const dropped = droppedOnSwitch({ holds: {}, overrides: overrides.value, to: desiredOfDocuments(documents, undefined, followed.profile) });
+    return snapshotFromDocuments({ documents, repoUrl: followed.repoUrl, profile: followed.profile, stateRoot: paths.stateRoot,
+      overrides: { ...overrides, value: retainedOverrides(overrides.value, dropped.overrides) }, now: options.now?.() ?? new Date() });
+  };
+  const snapshot = (commit: string, held: Holds, choices?: Parameters<SetupSource['Service']['effective']>[1], historical = false) => Effect.gen(function* () {
     const overrides = choices?.overrides ?? (yield* (yield* OverridesStore).read);
+    const documents = yield* commitDocuments(repo, commit);
+    if (historical && !hasProfile(documents, followed.profile)) return yield* historicalSnapshot({ [`profiles/${followed.profile}.json`]: '{}' }, overrides);
     const snapshot = yield* desiredFor({ repo, profile: followed.profile, head: { kind: 'commit', commit }, held, overrides,
       into: join(paths.stateRoot, 'snapshots', createHash('sha256').update(JSON.stringify([followed, commit, held])).digest('hex').slice(0, 32)) });
     yield* (yield* Fs).writeTextAtomic(join(snapshot.repo, '.snapshot.json'), JSON.stringify({ usedAt: (options.now?.() ?? new Date()).toISOString() }) + '\n');
@@ -62,7 +74,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     const commit = yield* revParse(repo, revision);
     if (commit === undefined) return yield* unavailable(revision, 'commit is not in the private clone');
     if (!(yield* isAncestor(repo, commit, main))) return yield* Effect.fail(new RevisionMismatch({ revision, reason: 'commit is not reachable from fetched main' }));
-    return yield* snapshot(commit, {});
+    return yield* snapshot(commit, {}, undefined, commit !== main);
   });
   const effective = (decisions: readonly Decision[], choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
     const currentHead = yield* head;
@@ -72,8 +84,11 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
     const comparison = { repo, profile: followed.profile, applied, head: currentHead, holds, overrides: overrides.value };
     const { changes, conflicts } = yield* incoming(comparison);
     const accepted = new Set(decisions.filter(d => d.setupId === LOCAL_SETUP && d.commit === currentHead && d.decision === 'accept').map(d => d.itemId));
-    const appliedSnapshot = yield* snapshot(applied, holds, choices);
-    const effectiveSnapshot = yield* snapshot(currentHead, nextHolds({ holds, changes, accepted, applied }), choices);
+    const appliedSnapshot = yield* snapshot(applied, holds, choices, applied !== currentHead);
+    const appliedDocuments = yield* commitDocuments(repo, applied);
+    const effectiveSnapshot = hasProfile(appliedDocuments, followed.profile)
+      ? yield* snapshot(currentHead, nextHolds({ holds, changes, accepted, applied }), choices)
+      : yield* historicalSnapshot(composeSetupChoices({ current: yield* worktreeDocuments(appliedSnapshot.repo), offered: yield* commitDocuments(repo, currentHead), accepted: [...accepted], holds, profile: followed.profile }), overrides);
     yield* pruneSnapshots(paths.stateRoot, [appliedSnapshot.repo, effectiveSnapshot.repo], options.now?.() ?? new Date());
     return { applied: { ...appliedSnapshot, revision: applied },
       effective: effectiveSnapshot,
@@ -81,7 +96,7 @@ export const followedSetupSourceLayer = (paths: MachinePathsValue, followed: Fol
   });
   const current = Effect.gen(function* () {
     const commit = (yield* recorded) ?? (yield* head);
-    const result = yield* snapshot(commit, yield* (yield* SyncStore).read);
+    const result = yield* snapshot(commit, yield* (yield* SyncStore).read, undefined, commit !== (yield* head));
     yield* pruneSnapshots(paths.stateRoot, [result.repo], options.now?.() ?? new Date());
     return result;
   });

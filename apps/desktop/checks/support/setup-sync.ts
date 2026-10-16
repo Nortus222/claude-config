@@ -21,6 +21,7 @@ export async function fixture() {
   const listeners = new Set<(event: HostEvent) => void>();
   const calls: { name: string; input: any }[] = [];
   const handlers: Record<string, (input: any) => unknown> = {
+    inspectProfiles: () => ({ followed: null, available: [{ name: 'default', extends: null }] }),
     inspectSetups: () => ({ generation: '1', items: [{ setupId: 'local', trusted: true, repository: '/repo', accountId: null }], nextCursor: null }),
     setupReview: () => review(), previewChange: input => preview({ change: input.change }),
     applyChange: () => ({ status: 'started', run: run() }), getRun: () => run(), listRuns: () => ({ runs: [], nextBefore: null }),

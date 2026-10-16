@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
+  InspectProfilesInputSchema, InspectProfilesResultSchema, InspectShareLinkInputSchema, InspectShareLinkResultSchema,
   ListBackupsInputSchema, ListBackupsResultSchema, AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
   WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
   SetupReviewInputSchema, SetupReviewSchema, InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
@@ -20,6 +21,8 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  inspectProfiles: define('inspectProfiles',InspectProfilesInputSchema,InspectProfilesResultSchema),
+  inspectShareLink: define('inspectShareLink',InspectShareLinkInputSchema,InspectShareLinkResultSchema),
   listBackups: define('listBackups',ListBackupsInputSchema,ListBackupsResultSchema),
   agentStatus: define('agentStatus',AgentStatusInputSchema,AgentStatusResultSchema),
   accountState: define('accountState',AccountStateInputSchema,AccountStateResultSchema),
