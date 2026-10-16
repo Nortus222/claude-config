@@ -9,17 +9,21 @@ import { createServer, type Socket } from 'node:net';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
-import { before, after, test } from 'node:test';
+import { before, after, test as nodeTest } from 'node:test';
 import { build } from 'esbuild';
 import { Deferred, Effect, Exit, Scope, Layer } from 'effect';
 import { AgentStateStore, makeSession, serveIpc, startAgent, SetupSource, type AgentDomain } from '@nortuscc/agent';
 import { configDomain, DecisionsStore, integrationsDomain, Processes, skillsDomain, OverridesStore, Fs, FsFailed } from '@nortuscc/machine';
-import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
+import { decodeOperationOutput, operationDefinitions, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { toolNames } from '../mcp/server.ts';
+import { operation } from '../src/operations.ts';
 import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
 
+// The app MCP entry refuses to start off macOS, so every case that launches it runs on macOS only.
+const test = process.platform === 'darwin' ? nodeTest : nodeTest.skip;
 const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
 const bundle = join(fixtureRoot, 'Test.app/Contents/Resources/agent-runtime');
 const expectedApp = join(fixtureRoot, 'Test.app/Contents/MacOS/Test');
@@ -38,7 +42,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -105,7 +109,7 @@ function fixtureProcesses(delegate: Processes['Service'], root: string, sourceUr
     return delegate.run({...command,args,envAllow:[],env:{...command.env,PATH:process.env.PATH!,HOME:root,USERPROFILE:root,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_ALLOW_PROTOCOL:'file'}});
   })};
 }
-test('MCP fixture refuses unfaked installers and non-fixture Git before the real process owner',async()=>{
+nodeTest('MCP fixture refuses unfaked installers and non-fixture Git before the real process owner',async()=>{
   let launches=0;
   const guard=fixtureProcesses({run:()=>{launches++;return Effect.succeed({code:0,stdout:''});}},'/tmp/owned-fixture');
   for(const command of [{cmd:'npx',args:['--yes','skills@1.7.2','add','owner/repo'],output:'capture' as const,cwd:'/tmp/owned-fixture'},
@@ -704,6 +708,17 @@ test('authenticated MCP sync hold retains one decision run after a lost reply', 
  assert.equal(JSON.parse(s.m.read(join(s.m.paths.stateRoot,'sync.json'))!).held[EFFORT],'a'.repeat(40));
  const choices=await s.m.run(DecisionsStore.use(store=>store.read));assert.equal(choices.find(d=>d.itemId===EFFORT)?.decision,'skip');
  const held=output('incomingChanges',await next.call('incomingChanges',{setupId:'local'}));assert.equal(held.items.find((i:any)=>i.itemId===EFFORT).held,true);
+});
+
+test('every operation definition is an MCP tool and callable through the desktop adapter', async t => {
+  const desktopAcceptsEveryOperation: OperationName extends Parameters<typeof operation>[1] ? true : false = true;
+  assert.equal(desktopAcceptsEveryOperation, true);
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close);
+  const listed = await client.initialize();
+  const operationsByTool = new Map<string, string>(Object.entries(toolNames).map(([name, tool]) => [tool, name]));
+  const mcpOperations = listed.result.tools.map((tool: { name: string }) => operationsByTool.get(tool.name));
+  assert.deepEqual(new Set(Object.keys(operationDefinitions)), new Set(mcpOperations));
 });
 
 test('MCP descriptions explain semantic effects and recovery', async t => {

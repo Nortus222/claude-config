@@ -285,6 +285,10 @@ fn native_args<T: serde::de::DeserializeOwned>(request: tauri::ipc::Request<'_>)
     }
 }
 #[tauri::command]
+async fn operation(owner: tauri::State<'_, Arc<Owner>>, name: String, input: Value) -> Result<Value, String> {
+    dispatch(owner, Request::Operation { name, input }).await
+}
+#[tauri::command]
 async fn get_operation_run(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let args: host::OperationRunArgs = native_args(request)?;
     dispatch(owner, Request::GetOperationRun { run_id: args.run_id }).await
@@ -567,7 +571,7 @@ fn main() {
                 Ok(())
             })
         })
-        .invoke_handler(tauri::generate_handler![get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
+        .invoke_handler(tauri::generate_handler![operation, get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run_return(|app, event| {
             if matches!(event,tauri::RunEvent::Ready) {startup_diagnostics::trace(Operation::AppStartup).record(Phase::RuntimeReady,startup_diagnostics::Status::Completed,None);}

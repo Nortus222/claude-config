@@ -180,6 +180,7 @@ export function runInstall(opened: Opened, input: {
 
     const ran = yield* runPlan(planned, report, domains, {
       signal,
+      preflight: opened.preflight,
       onStarted: (step) => {
         if (step.key.startsWith(SKILL_STEP.install)) process.stdout.write(`\n${step.summary}\n`);
       },

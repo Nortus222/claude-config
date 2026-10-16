@@ -5,7 +5,7 @@ import { constants, homedir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
-  acquireApplyLock, Backups, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, StateStore,
+  acquireApplyLock, Backups, DecisionsStore, decisionsStore, HistoryStore, historyStore, OverridesStore, pathsFromEnvironment, peekMachineState, StateStore,
   withApplied, type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { MachineOverrides } from '@nortuscc/profile-engine';
@@ -16,7 +16,7 @@ import {
 import { installRuntime, RUNTIME_INSTALL } from '../../bin/launcher.mjs';
 import { restartAfterPull } from '../agent-service.ts';
 import { runGit } from '../git.ts';
-import { CHECKOUT, cliLayer, openDesired, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
+import { CHECKOUT, cliLayer, openDesired, withCheckoutFence, refuseInvalidOverrides, reportOverrideIssues, runCommand } from '../machine.ts';
 import { parseConfigMode } from '../config-mode.ts';
 import { parseInstallFlags } from '../install.ts';
 import { formatRow, labelWidth, section, short } from '../report.ts';
@@ -260,7 +260,7 @@ const record = (input: {
 const reportIntegrations = (target: TargetChoice, rest: ReadonlyArray<string>) =>
   Effect.scoped(Effect.gen(function* () {
     if (rest.includes('--install')) return 0;
-    const opened = yield* openDesired();
+    const opened = yield* openDesired({ readOnly: true });
     const { manifestErrors, planned } = yield* inspectIntegrations(opened, selectedTargets(target)).pipe(Effect.provide(opened.layer));
     if (manifestErrors.length) {
       process.stdout.write('\n' + section('integrations', manifestErrors.map((m) => formatRow('manifest', 'invalid', m))));
@@ -329,7 +329,7 @@ const syncMachine = (paths: MachinePathsValue, target: TargetChoice, flags: Sync
     const head = behind ? fetched : before;
 
     // 3. What changed since the applied commit, measured from this machine's holds.
-    const recorded = (yield* (yield* StateStore).read).applied?.commit;
+    const recorded = (flags.check ? yield* peekMachineState : yield* (yield* StateStore).read).applied?.commit;
     const known = recorded === undefined ? undefined : yield* revParse(repo, recorded);
     if (recorded !== undefined && known === undefined) {
       console.error(`nortuscc: the applied commit ${short(recorded)} is not in this checkout; measuring from ${short(before)}`);
@@ -413,6 +413,7 @@ export async function run(args: string[] = [], deps: SyncDeps = { select: realSe
       env: process.env, home: homedir(), platform: process.platform, fallbackRepo: CHECKOUT, warn: (m) => console.error(m),
     });
     const layer = Layer.mergeAll(syncStore, decisionsStore, historyStore()).pipe(Layer.provideMerge(cliLayer(paths)));
+    if (!flags.check) yield* withCheckoutFence(paths, Effect.void).pipe(Effect.provide(layer));
     return yield* syncMachine(paths, target, flags, deps).pipe(Effect.provide(layer));
   }));
 }

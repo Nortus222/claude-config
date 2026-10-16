@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Decision, type MachinePathsValue } from '@nortuscc/machine';
@@ -170,6 +170,18 @@ test('new private clone starts empty; selected positive evidence advances only a
   result = await s.source((source) => source.effective([accept(EFFORT, 2)]));
   if (result._tag === 'Success') assert.deepEqual(result.success.conflicts, [EFFORT]);
   fails(await s.source((source) => source.recordApplied!({ revision: r2, decisions: [accept(EFFORT, 2)], observed: [EFFORT], released: [] })), 'RevisionMismatch');
+});
+
+test('repeated hosted observations keep the baseline and its backups unchanged', async (t) => {
+  const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  const revision = s.publish(); s.trust(null);
+  const evidence = { revision, decisions: [accept(EFFORT)], observed: [EFFORT], released: [] };
+  assert.equal((await s.source(source => source.recordApplied!(evidence)))._tag, 'Success');
+  const before = await s.source(source => source.baseline!);
+  const backups = readdirSync(s.paths.backups, { recursive: true });
+  assert.equal((await s.source(source => source.recordApplied!(evidence)))._tag, 'Success');
+  assert.deepEqual(await s.source(source => source.baseline!), before);
+  assert.deepEqual(readdirSync(s.paths.backups, { recursive: true }), backups);
 });
 
 test('removal requires explicit release evidence; absent observations never advance it', async (t) => {

@@ -323,3 +323,17 @@ test('intent preview preserves safe selected and sibling identities exactly', as
     assert.equal(f.m.read(f.overridePath), bytes); assert.equal(f.m.read(f.statePath), undefined);
   }));
 });
+
+test('skill rows show the machine choice and the profile default separately', async () => {
+  const f = intentFixture();
+  f.m.write(join(f.setup.dirs['b'.repeat(40)]!, 'skills-manifest.txt'), '[a/b]\ninherited\noff\n[a/b] optional\noptional\non\n');
+  f.m.write(f.overridePath, JSON.stringify({ version: 2, skills: { off: false, on: true } }));
+  await f.within(session => Effect.gen(function* () {
+    const page = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'skills' }));
+    const rows = page.items.filter(i => i.kind === 'skill');
+    assert.deepEqual(rows.map(i => [i.name, i.choice, i.defaultEnabled, i.enabled]), [
+      ['inherited', null, true, true], ['off', false, true, false],
+      ['optional', null, false, false], ['on', true, false, true],
+    ]);
+  }));
+});

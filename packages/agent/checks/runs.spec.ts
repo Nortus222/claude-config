@@ -5,7 +5,7 @@ import { Deferred, Effect, Fiber } from 'effect';
 import { configDomain, DecisionsStore } from '@nortuscc/machine';
 import { makeSession, startAgent, type AgentDomain, type AgentServices, type AgentSession } from '../src/index.ts';
 import { decodeRunView } from '../src/operations/index.ts';
-import { operationDigest, RunError } from '../src/runs.ts';
+import { makeAgentRuns, operationDigest, RunError, type AgentRuns } from '../src/runs.ts';
 import { RunStore, RunStoreError, type RunReceipt } from '../src/run-store.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from './support/setup-fixture.ts';
@@ -49,6 +49,76 @@ const preview = (session: AgentSession) => Effect.gen(function* () {
 const terminal = (session: AgentSession, runId: string) => Effect.callback<void>(resume => {
   const unsubscribe = session.runs.subscribe(runId, run => { if (run.result !== null) resume(Effect.void); });
   return Effect.sync(unsubscribe);
+});
+
+const interruptedReceipt = (): RunReceipt => ({
+  version: 1, sequence: 1, actor: 'mcp', inFlight: 'skill:c/d',
+  view: decodeRunView({
+    runId: 'interrupted-run', state: 'interrupted', operation: 'applyChange', scope: { kind: 'machine' },
+    intent: { requestId: 'lost-reply', planId: 'interrupted-plan', inputDigest: operationDigest('interrupted-plan'), change: { kind: 'reconcile', only: ['skill:a/b', 'skill:c/d'] },
+      parity: { kind: 'reconcile', generation: '1', baselineDigest: 'a'.repeat(64), planDigest: 'b'.repeat(64), plannedKeys: ['skill:a/b', 'skill:c/d'] } },
+    intentSaved: false, steps: [{ key: 'skill:a/b', outcome: 'ok', note: 'Installed' }],
+    parity: { kind: 'reconcile', state: 'needsInspection', committedKeys: ['skill:a/b'], remainingKeys: ['skill:c/d'], backupIds: ['backup-1'] },
+    result: { status: 'interrupted', message: 'Agent stopped during skill:c/d' },
+  }),
+});
+const receiptRuns = (m: ReturnType<typeof agentMachine>) => <A, E>(body: (runs: AgentRuns) => Effect.Effect<A, E>) =>
+  m.run(Effect.scoped(Effect.gen(function* () {
+    const runs = yield* makeAgentRuns({ start: () => Effect.die('must not replay'), cancel: () => Effect.die('must not cancel') });
+    return yield* body(runs);
+  })));
+
+test('abandoning an interrupted run keeps its evidence and is terminal', async () => {
+  const m = agentMachine(), receipt = interruptedReceipt(), within = receiptRuns(m);
+  await m.run(RunStore.use(store => store.write(receipt)));
+  const abandoned = await within(runs => Effect.gen(function* () {
+    const view = yield* runs.abandon(receipt.view.runId);
+    assert.equal(view.state, 'abandoned');
+    assert.ok(view.abandonedAt);
+    assert.equal(new Date(view.abandonedAt).toISOString(), view.abandonedAt);
+    assert.deepEqual(view.steps, receipt.view.steps);
+    assert.deepEqual(view.parity, receipt.view.parity);
+    assert.deepEqual(view.result, receipt.view.result);
+    return view;
+  }));
+  await within(runs => Effect.gen(function* () {
+    assert.deepEqual(yield* runs.get(abandoned.runId), abandoned);
+    assert.deepEqual(yield* runs.cancel(abandoned.runId), abandoned);
+    assert.deepEqual(yield* runs.submit(inputFor('interrupted-plan')), abandoned);
+  }));
+});
+
+test('abandoning a running or succeeded run is refused', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session), run = yield* session.runs.submit(inputFor(planned.planId));
+    yield* Deferred.await(f.started);
+    assert.equal((yield* session.runs.get(run.runId)).state, 'running');
+    const running = yield* Effect.flip(session.runs.abandon(run.runId));
+    assert.ok(running instanceof RunError);
+    assert.equal(running.message, 'Run is not interrupted');
+    yield* Deferred.succeed(f.release, undefined);
+    yield* terminal(session, run.runId);
+    assert.equal((yield* session.runs.get(run.runId)).state, 'succeeded');
+    const succeeded = yield* Effect.flip(session.runs.abandon(run.runId));
+    assert.ok(succeeded instanceof RunError);
+    assert.equal(succeeded.message, 'Run is not interrupted');
+  }).pipe(Effect.ensuring(Deferred.succeed(f.release, undefined))));
+});
+
+test('abandoning twice returns the same view', async () => {
+  const m = agentMachine(), receipt = interruptedReceipt();
+  await m.run(RunStore.use(store => store.write(receipt)));
+  await receiptRuns(m)(runs => Effect.gen(function* () {
+    let notifications = 0;
+    const off = runs.onChange(() => { notifications++; });
+    const views = yield* Effect.all([runs.abandon(receipt.view.runId), runs.abandon(receipt.view.runId)], { concurrency: 'unbounded' });
+    assert.equal(views[0]!.state, 'abandoned');
+    assert.deepEqual(views[1], views[0]);
+    assert.deepEqual(yield* runs.abandon(receipt.view.runId), views[0]);
+    assert.equal(notifications, 1);
+    off();
+  }));
 });
 
 test('disconnect and a lost acceptance reply retain one run and one invocation per step', async () => {

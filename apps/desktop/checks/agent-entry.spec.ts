@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
@@ -11,6 +12,7 @@ import { AgentError, connectAgent, type AgentConnection } from '../../../src/age
 import { runDesktopEntry } from '../agent/main.ts';
 import { STARTUP_PREFIX } from '../agent/startup-diagnostics.ts';
 import { probeLoginEnvironment } from '../agent/login-environment.ts';
+import { assertExited, assertReaped } from './support/processes.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
   const home = mkdtempSync(join(tmpdir(), 'nae-'));
@@ -139,9 +141,23 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
   const shell = join(f.home, 'slow-login-shell');
   writeFileSync(shell, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(shell, 0o755);
   const controller = new AbortController(); t.after(() => controller.abort());
+  let now = 0;
+  const originalNow = performance.now;
+  t.after(() => { performance.now = originalNow; });
+  performance.now = () => now;
+  let expire: (() => void) | undefined;
+  let deadlineCleared = false;
   const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
     env: { ...f.input.env, SHELL: shell, API_TOKEN: 'secret-never-in-trace' },
-    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100 }) });
+    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100,
+      scheduleTimeout: (callback, ms) => {
+        assert.equal(ms, 100); expire = callback;
+        return () => { deadlineCleared = true; };
+      },
+      onProgress: (phase, status) => {
+        input.onProgress?.(phase, status);
+        if (phase === 'shell_ready' && status === 'started') { now = 100; expire!(); }
+      } }) });
   let conn: AgentConnection | undefined;
   try {
     const until = Date.now() + 3000;
@@ -152,7 +168,9 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
     assert.ok(conn, f.stderr.join(''));
     const ready = startupRecords(f.stderr);
     assert.ok(ready.some(r => r.phase === 'shell_ready' && r.status === 'timed_out'));
-    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs >= 80));
+    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs === 100));
+    assert.equal(deadlineCleared, true);
+    assert.ok(ready.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
     assert.ok(ready.some(r => r.phase === 'ipc' && r.status === 'completed'));
     assert.equal(f.stderr.join('').includes('secret-never-in-trace'), false);
     await conn.request({ command: 'shutdown' });
@@ -475,7 +493,8 @@ test('startup cancellation joins a real held login capture before returning with
     pids.push(Number(readFileSync(shellPid, 'utf8')), Number(readFileSync(runtimePid, 'utf8')));
     controller.abort();
     assert.equal(await running, 1);
-    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} must be joined before helper return`);
+    assertReaped(pids[0]!, 'the login shell must be reaped before helper return');
+    assertExited(pids[1]!, 'the capture runtime must exit before helper return');
     assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
     const records = startupRecords(f.stderr);
     assert.ok(records.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));

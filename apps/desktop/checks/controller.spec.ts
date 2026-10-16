@@ -995,14 +995,14 @@ for (const entry of ['connect', 'restart'] as const) for (const outcome of ['ver
       : { type: 'failed', message: 'Inspect retained installation' }));
     list.resolve({ runs: [initial], nextBefore: null });
     await connecting; await settle();
-    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : outcome === 'needsInspection' ? 'interrupted' : 'failed');
     assert.equal(c.state.run?.receipt?.installation?.state, outcome);
     assert.equal(c.state.run?.receipt?.installation?.nextActions.length, outcome === 'verified' ? 2 : 0);
     assert.deepEqual(c.state.run?.receipt?.intent.skillAddition?.declaration, completed.intent.skillAddition?.declaration);
     assert.deepEqual(f.calls.filter(([command]) => command === 'get_operation_run').map(([, args]) => args), [{ runId: initial.runId }]);
     discovering = false;
     f.emit({ generation: 1, version: 3, event: 'status', status: { ...status({ applying: false }), policy: 'notify' } }); await settle();
-    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+    assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : outcome === 'needsInspection' ? 'interrupted' : 'failed');
     assert.equal(c.state.pending, false); assert.equal(c.state.inspection?.items.length, 0);
     c.dispose();
   });
@@ -1080,7 +1080,7 @@ for (const entry of ['connect', 'restart'] as const) for (const order of ['A the
       list.resolve({ runs: [skillRun({ state: 'running', result: null, installation: undefined })], nextBefore: null });
       await connecting;
       assert.equal(c.state.run?.runId, 'addition-run');
-      assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : 'failed');
+      assert.equal(c.state.run?.outcome, outcome === 'verified' ? 'done' : outcome === 'needsInspection' ? 'interrupted' : 'failed');
       assert.equal(c.state.run?.receipt?.installation?.state, outcome);
       assert.equal(c.state.run?.receipt?.installation?.nextActions.length, outcome === 'verified' ? 2 : 0);
       assert.deepEqual(f.calls.filter(([command]) => command === 'get_operation_run').map(([, args]) => args), [{ runId: 'addition-run' }]);
@@ -1404,4 +1404,27 @@ test('initial listing cannot overwrite newer same-run terminal progress and targ
   assert.equal(c.state.run?.outcome, 'done');
   initial.resolve({ runs: [skillRun({ runId: 'same', state: 'running', result: null })], nextBefore: null }); await connecting;
   assert.equal(c.state.run?.outcome, 'done'); assert.equal(c.state.run?.receipt?.state, 'succeeded');
+});
+
+for (const state of ['interrupted', 'abandoned'] as const) {
+  test(`durable ${state} runs keep their own outcome instead of appearing failed`, async () => {
+    const run = skillRun({ state, result: { status: 'interrupted', message: 'Inspect retained effects' } });
+    const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ({ runs: [run], nextBefore: null }), inspect_machine: () => inspection([]) });
+    const c = new MachineController(f.bridge);
+    try { await c.connect(); assert.equal(c.state.run?.outcome, state); }
+    finally { c.dispose(); }
+  });
+}
+
+test('only a matching status cause refreshes the current shared run', async () => {
+  let run = skillRun({ state: 'running', result: null });
+  const f = fake({ agent_generation: () => operationHello, list_operation_runs: () => ({ runs: [run], nextBefore: null }), get_operation_run: () => run, inspect_machine: () => inspection([]) });
+  const c = new MachineController(f.bridge);
+  try {
+    await c.connect(); run = skillRun();
+    f.emit({ generation: 1, version: 3, event: 'status', runId: 'other', status: status({ applying: false }) }); await settleReceipt();
+    assert.equal(c.state.run?.outcome, 'running'); assert.equal(f.calls.some(([command]) => command === 'get_operation_run'), false);
+    f.emit({ generation: 1, version: 3, event: 'status', runId: 'addition-run', status: status({ applying: false }) }); await settleReceipt();
+    assert.equal(c.state.run?.outcome, 'done');
+  } finally { c.dispose(); }
 });

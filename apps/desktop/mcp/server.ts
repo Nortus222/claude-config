@@ -7,13 +7,14 @@ export const toolNames = {
   listBackups: 'nortuscc_list_backups',
   agentStatus: 'nortuscc_agent_status', accountState: 'nortuscc_account_state',
   watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',
+  setupReview: 'nortuscc_setup_review',
   inspectSetups: 'nortuscc_inspect_setups', incomingChanges: 'nortuscc_incoming_changes', prepareTrustRequest: 'nortuscc_prepare_trust_request',
   inspectUpdates: 'nortuscc_inspect_updates',
   inspectIntent: 'nortuscc_inspect_intent',
   resolveSkillCandidate: 'nortuscc_resolve_skill_candidate',
   getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change',
   applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs',
-  cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
+  cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history',
 } as const satisfies Record<OperationName, string>;
 const descriptions: Record<OperationName, string> = {
   listBackups: 'List validated generated backup folder IDs, creation dates and latest History reference with observation-bound pagination. No content browsing or general restore.',
@@ -24,6 +25,7 @@ const descriptions: Record<OperationName, string> = {
   pinImpact: 'Read source-wide pin impact for every declared skill and the resolved target revision. This read changes no pin.',
   draftChangelog: 'Draft a bounded changelog for up to eight accepted source revision pairs with report-validated ignored and added selections. No publication or intent writes.',
 
+  setupReview: 'Review incoming setup values, holds, conflicts and source pin groups without scheduling or changing machine state.',
   inspectSetups: 'Read known setup identities and local trust without granting consent.',
   incomingChanges: 'Read verified exact setup revisions and incoming item identities without repository contents.',
   prepareTrustRequest: 'Prepare the existing app-local repository trust action. This read grants no trust and writes no consent.',
@@ -37,6 +39,7 @@ const descriptions: Record<OperationName, string> = {
   getRun: 'Read a durable operation run after reconnecting. Inspect committed and remaining effects, uncertain outcomes, backups and the configured author destination. Partial results require inspection before another preview. Saved machine intent is separate from installation. Only after installation is verified, ask: Do you want to share it with your other machines? Also mention promotion to an owned profile. Follow nextActions readiness, destination and prerequisite reasons. Never share or promote without a user request. Failed, cancelled or incomplete installation offers neither. Claude catalog discovery does not attest selected source or invocation authorization.',
   listRuns: 'List durable operation runs with bounded pagination.',
   cancelRun: 'Request cancellation of a machine operation run and read its settled receipt.',
+  abandonRun: 'Mark an interrupted run abandoned while retaining its steps, committed and remaining keys, backups and result. Interrupted runs never block new applies or app updates.',
   history: 'Read bounded safe History details for decisions, setups, revisions, policy, pause and backup retention, with shared actor and durable operation attribution. Unknown historical events use a constant fallback.',
 };
 

@@ -89,6 +89,7 @@ export const execute = <const D extends ReadonlyArray<Domain<any>>, E = never, R
   domains: D,
   options: {
     readonly signal?: AbortSignal; readonly lockHeld?: boolean;
+    readonly preflight?: Effect.Effect<void, E, R>;
     // Awaited before the side effect and after its outcome, before starting another step.
     readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E, R>;
   } = {},
@@ -96,6 +97,7 @@ export const execute = <const D extends ReadonlyArray<Domain<any>>, E = never, R
   Stream.callback<Progress, LockHeld | MaintenancePending | E, DomainServices<D> | MachinePaths | Backups | R>((queue) =>
     Effect.gen(function* () {
       if (!options.lockHeld) yield* acquireApplyLock;
+      yield* options.preflight ?? Effect.void;
       const backups = yield* Backups;
       const signal = options.signal ?? new AbortController().signal;
       const total = plan.steps.length;

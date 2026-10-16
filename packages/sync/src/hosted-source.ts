@@ -5,7 +5,7 @@ import {
   decodeHosted, IdSchema, normalizeRepoUrl, RepoUrlSchema, SyncRevisionSchema, type SyncRevision,
 } from '@nortuscc/hosted-protocol';
 import {
-  canonical, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
+  Backups, backupsForRun, canonical, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
@@ -46,7 +46,8 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     ? options.repoUrl : `https://${options.repoUrl}`;
   const repoKey = hash(repoIdentity);
   const scope = hash([options.accountId, options.setupId, repoIdentity]);
-  const baselinePath = join(paths.stateRoot, 'agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
+  const baselineRelative = join('agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
+  const baselinePath = join(paths.stateRoot, baselineRelative);
   const clone = join(paths.stateRoot, 'agent', 'checkouts', options.accountId, repoKey, options.setupId);
   const snapshotsRoot = join(paths.stateRoot, 'agent', 'hosted', options.accountId, repoKey, options.setupId);
   const git = (repo: string, args: ReadonlyArray<string>) => Processes.use((p) => p.run({ cmd: 'git', args, cwd: repo, output: 'capture', stderr: 'capture' }));
@@ -277,6 +278,10 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     for (const id of new Set([...materialized.keys(), ...prior.keys(), ...selected])) {
       if (materialized.get(id) !== (selected.has(id) ? values.get(id) : prior.get(id))) return yield* mismatch(evidence.revision, 'selected origins cannot preserve the confirmed values independently');
     }
+    if (canonical(next) === canonical(composed.baseline)) return;
+    yield* consent;
+    yield* Backups.use(backups => backups.preserve(baselinePath, baselineRelative, undefined, { private: true }))
+      .pipe(Effect.provide(backupsForRun(now()).pipe(Layer.provide(machinePaths(paths)))));
     yield* consent;
     yield* (yield* Fs).writeTextAtomic(baselinePath, JSON.stringify(next, null, 2) + '\n');
   });

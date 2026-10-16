@@ -6,7 +6,7 @@ import {
   configFileId, Fs, hookCommand, inspect, knownMarketplaces, parseState, probeUndeclared, readCodexState, readExposure, SKILL_AGENTS,
   skillExposure, userScopeInstalls, type InstalledIntegrations, type Observed, type Processes,
 } from '@nortuscc/machine';
-import { incoming, revParse } from '@nortuscc/sync';
+import { incoming, readCheckoutCoherence, revParse, type CheckoutRelation } from '@nortuscc/sync';
 import { cliVersion, type CliVersion } from '../cli-version.ts';
 import { parseConfigMode, resolveConfigMode, SKIPPED_LABEL, SKIPPED_NOTE, SKIPPED_STATE } from '../config-mode.ts';
 import { CHECKOUT, domainsFor, forTargets, openDesired, runCommand, type CliServices, type CodexStateRead, type Opened } from '../machine.ts';
@@ -112,20 +112,30 @@ const waitingItems = (opened: Opened) =>
     return changes.length;
   });
 
-// The sync section: held items, and items waiting for `nortuscc sync`. Holds alone are not drift.
-function syncSection(opened: Opened): Effect.Effect<{ lines: string[]; waiting: number }, never, Fs | Processes> {
+// The sync section reports checkout coherence, held items and items waiting for `nortuscc sync`.
+function syncSection(opened: Opened): Effect.Effect<{ lines: string[]; waiting: number; checkout: CheckoutRelation }, never, Fs | Processes> {
   return Effect.gen(function* () {
     const lines: string[] = [];
     const held = Object.keys(opened.held).sort();
     if (held.length > 0) lines.push(formatRow('held', String(held.length), held.join(', ')));
+    const checkout = yield* readCheckoutCoherence({ ...opened.paths, repo: opened.checkout }).pipe(
+      Effect.catch(() => Effect.succeed('unavailable' as const)),
+    );
+    if (checkout !== 'compatible') {
+      const note = checkout === 'unavailable'
+        ? 'could not verify the applied setup commit; check state.json and the author checkout'
+        : 'HEAD does not contain the applied setup commit; update the author checkout before changing this machine';
+      lines.push(formatRow('checkout', checkout, note));
+      return { lines, waiting: 0, checkout };
+    }
     const found = yield* Effect.result(waitingItems(opened));
     if (found._tag === 'Failure') {
       lines.push(formatRow('waiting', 'unknown', found.failure.message));
-      return { lines, waiting: 0 };
+      return { lines, waiting: 0, checkout };
     }
     const waiting = found.success;
     if (waiting > 0) lines.push(`  ${waiting} item${waiting === 1 ? ' waits' : 's wait'} for you: run nortuscc sync`);
-    return { lines, waiting };
+    return { lines, waiting, checkout };
   });
 }
 
@@ -161,7 +171,7 @@ function report(opened: Opened, input: {
       }
     }
 
-    // sync: held items and items waiting for a sync; printed only when there is something to say.
+    // sync: checkout coherence, held items and items waiting for a sync.
     const sync = yield* syncSection(opened);
     if (sync.lines.length > 0) process.stdout.write('\n' + section('sync', sync.lines));
 
@@ -314,6 +324,7 @@ function report(opened: Opened, input: {
     const cliBehind = cli.state === 'behind';
     // An undeclared item alone is informational; --strict is what makes it actionable.
     const otherDirty = cliBehind
+      || sync.checkout !== 'compatible'
       || sync.waiting > 0
       || actionable.length > 0
       || configErrors.length > 0
@@ -355,7 +366,7 @@ export async function run(args: string[] = [], deps: StatusDeps = {}): Promise<n
     return 2;
   }
   return runCommand(() => Effect.scoped(Effect.gen(function* () {
-    const opened = yield* openDesired({ mode });
+    const opened = yield* openDesired({ mode, readOnly: true });
     return yield* report(opened, { target, rest, mode, deps }).pipe(Effect.provide(opened.layer));
   })));
 }

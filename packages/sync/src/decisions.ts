@@ -16,7 +16,7 @@ import { INTEGRATIONS_SOURCE, type DesiredConfig, type MachineOverrides } from '
 import { desiredOfDocuments, worktreeDocuments } from './documents.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { withoutOverride } from './plan.ts';
-import { LOCAL_SETUP, type SetupSource } from './source.ts';
+import { LOCAL_SETUP, type SetupSource, type Revision } from './source.ts';
 import { SyncStore, type Holds } from './store.ts';
 export type SyncDecisionChange = {
   readonly kind: 'syncDecision';
@@ -29,6 +29,8 @@ export type SyncDecisionChange = {
 };
 export type SyncDecisionInput = {
   source: SetupSource['Service'];
+  // The batch owner validates the complete composition after preparing every independent decision.
+  deferComposition?: boolean;
   // Legacy CLI applies valid independent domains and reports the refused integrations manifest separately.
   validation?: 'cli-independent-integrations';
   change: SyncDecisionChange;
@@ -65,10 +67,10 @@ const digest = (value: unknown) => createHash('sha256').update(canonical(value))
 const invalidProfile = (desired: DesiredConfig, independentIntegrations = false) =>
   desired.issues.some(issue => !(independentIntegrations && issue.layer === 'base' && issue.source === INTEGRATIONS_SOURCE));
 // Verify the source's exact offer before reading snapshots. Values remain inside the owner.
-export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[], independentIntegrations = false) =>
+export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[], independentIntegrations = false, knownHead?: Revision) =>
   Effect.gen(function* () {
     if (source.trusted && !(yield* source.trusted)) return yield* Effect.fail(refused());
-    const { head } = yield* source.fetch;
+    const head = knownHead ?? (yield* source.fetch).head;
     const offered = yield* source.load(head);
     const effective = yield* source.effective(decisions);
     const before = yield* worktreeDocuments(effective.applied.repo),
@@ -82,7 +84,7 @@ export const observeSyncSource = (source: SetupSource['Service'], decisions: rea
           itemId,
           revision: head,
         }));
-    if (canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
+    if (knownHead === undefined && canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
     return { head, offered, effective, before, after, changes, offers };
   });
 export const prepareSyncDecision = (
@@ -127,7 +129,8 @@ export const prepareSyncDecision = (
     if (
       !unchanged &&
       !observed.changes.some((c) => c.itemId === change.itemId) &&
-      !(change.action === 'release' && held)
+      !(change.action === 'release' && held) &&
+      !(input.deferComposition && (itemValues(observed.before).has(change.itemId) || itemValues(observed.after).has(change.itemId)))
     )
       return yield* Effect.fail(refused());
     if (unchanged && !itemValues(observed.before).has(change.itemId) && !itemValues(observed.after).has(change.itemId))
@@ -172,7 +175,7 @@ export const prepareSyncDecision = (
     );
     // Composition owns source-wide pin validity. An individual hold must not create incompatible source pins.
     let nextDesired = observed.effective.effective.desired;
-    if (!unchanged) {
+    if (!unchanged && !input.deferComposition) {
       const overrides = {
         value: nextOverrides,
         issues: [],

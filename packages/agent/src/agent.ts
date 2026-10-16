@@ -14,7 +14,7 @@ import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from '
 import { makeNotifier } from './notifier.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
-import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
+import { makeScheduler, timerLoop, type Trigger, type TriggerCause } from './scheduler.ts';
 import { SetupSource, SetupsStore, ownSetup, originUrl, normalizeRepoUrl } from '@nortuscc/sync';
 import { configuredHostedRuntime, type HostedRuntime, type HostedOptions } from './hosted.ts';
 import { HostedFailure, type SignInStarted } from '@nortuscc/hosted-client';
@@ -43,6 +43,7 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly operationDomains?: AgentDomains;
   readonly signInFlow?: HostedRuntime['signInFlow'];
   readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
   readonly operationSetupIds?: Effect.Effect<readonly string[],unknown>;
@@ -63,7 +64,7 @@ export type AgentHandle = {
     readonly machine: (patch: Parameters<HostedRuntime['machine']>[0], actor: Actor) => Effect.Effect<void, unknown>;
   };
   readonly inspection: Effect.Effect<JobInspection | undefined>;
-  readonly request: (trigger: Trigger) => Effect.Effect<AgentStatus>;
+  readonly request: (trigger: Trigger, cause?: TriggerCause) => Effect.Effect<AgentStatus>;
   readonly decide: (decision: Decision, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid | HostedFailure | SessionError>;
   // Records each decision in turn, then runs one job for them all.
   readonly decideAll: (decisions: ReadonlyArray<Decision>, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid | HostedFailure | SessionError>;
@@ -71,7 +72,8 @@ export type AgentHandle = {
   readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | HostedFailure | SessionError>;
   // Calls `listener` with each job's status once it is the latest; answers the unsubscribe. It runs
   // before the job's requests are answered, so it is not ordered relative to their replies.
-  readonly onStatus: (listener: (status: AgentStatus) => void) => () => void;
+  // The cause identifies the latest caused request in that job's batch, if any.
+  readonly onStatus: (listener: (status: AgentStatus, cause?: TriggerCause) => void) => () => void;
   // Runs `effect` while no scheduled job runs, holding the next one back until it ends, so a job
   // run outside the scheduler never overlaps one.
   readonly exclusive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
@@ -86,18 +88,18 @@ const describe = (cause: Cause.Cause<unknown>): string => {
 // changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
 // `onStatus` is awaited after listeners and cannot fail a job; defer startup until IPC is attached.
-export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly deferStart?: boolean; readonly hosted?: HostedRuntime; readonly onStatus?: (status: AgentStatus) => Effect.Effect<void> } = {}) =>
+export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly deferStart?: boolean; readonly hosted?: HostedRuntime; readonly onStatus?: (status: AgentStatus, cause?: TriggerCause) => Effect.Effect<void> } = {}) =>
   Effect.gen(function* () {
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
     const inspection = yield* Ref.make<JobInspection | undefined>(undefined);
-    const listeners = new Set<(status: AgentStatus) => void>();
+    const listeners = new Set<(status: AgentStatus, cause?: TriggerCause) => void>();
     const shutdown = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, shutdown.signal]) : shutdown.signal;
     // One job at a time, scheduled or not. A scheduled auto-apply that finds apply.lock held skips
     // rather than waits, so a holder of apply.lock may wait here without a cycle.
     const jobs = yield* Semaphore.make(1);
-    const job = (_triggers: ReadonlyArray<Trigger>) =>
+    const job = (_triggers: ReadonlyArray<Trigger>, cause?: TriggerCause) =>
       jobs.withPermit((options.hosted?.runJobs ?? runJob(domains, { signal })).pipe(
         // A failed job is reported, never fatal: the loop must survive failures and defects alike.
         Effect.catchCause((cause) =>
@@ -111,11 +113,11 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         Effect.tap((result) => Effect.sync(() => {
           for (const listener of listeners) {
             try {
-              listener(result.status);
+              listener(result.status, cause);
             } catch {}
           }
         })),
-        Effect.tap((result) => options.onStatus === undefined ? Effect.void : Effect.suspend(() => options.onStatus!(result.status)).pipe(Effect.catchCause(() => Effect.void))),
+        Effect.tap((result) => options.onStatus === undefined ? Effect.void : Effect.suspend(() => options.onStatus!(result.status, cause)).pipe(Effect.catchCause(() => Effect.void))),
         Effect.map((result) => result.status),
       ));
     const scheduler = yield* makeScheduler(job);
@@ -171,7 +173,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       ...(hosted ? { hosted: { signIn: hosted.signIn, signOut: hosted.signOut, sync: () => hosted.sync, machine: hosted.machine } } : {}),
     };
     const handle: AgentHandle = {
-      mutationBodies, withJobMutation, selectOperationSetup,
+      operationDomains: domains, mutationBodies, withJobMutation, selectOperationSetup,
       operationSetupIds: hosted ? Effect.map(hosted.state,state=>['local',...state.setups.map(s=>s.setupId)]) : Effect.succeed(['local']),
       status: Ref.get(latest),
       inspection: Ref.get(inspection),

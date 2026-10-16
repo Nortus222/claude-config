@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, bundledScripts, compareInstall, execute, machinePaths, nodeFs, nodeProcesses, pinnedTrees, plan, selectAll, skillsDomain,
+  backupsForRun, bundledScripts, compareInstall, execute, machinePaths, nodeFs, nodeFileIntegrity, nodeProcesses, pinnedTrees, plan, selectAll, skillsDomain,
   type MachineReport, type Observed, type Plan, type Progress, type TreeEntry,
 } from '../src/index.ts';
 import { fakeInstaller, readLock, skillSource } from './support/skills-source.ts';
@@ -71,7 +71,7 @@ test('pinnedTrees lists a folder at a fetched commit, and is null for a commit t
   const src = skillSource(m.home);
   const first = src.commit({ 'skills/tdd/SKILL.md': 'one', 'skills/tdd/scripts/run.sh': { text: 'x', mode: 0o755 }, 'other/x': 'x' });
   src.commit({ 'skills/tdd/SKILL.md': 'two' });
-  const layer = Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeProcesses());
+  const layer = Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, nodeProcesses());
   const run = <A>(e: Effect.Effect<A, never, any>) => Effect.runPromise(e.pipe(Effect.provide(layer)) as Effect.Effect<A>);
   const trees = (await run(pinnedTrees(src.url, first, ['skills/tdd', '.'])))!;
   assert.deepEqual(trees.get('skills/tdd')!.map((e) => [e.mode, e.path]), [['100644', 'SKILL.md'], ['100755', 'scripts/run.sh']]);
@@ -92,7 +92,7 @@ const item = (name: string, state: string): Observed =>
 
 const runPinned = async (m: ReturnType<typeof machine>, src: ReturnType<typeof skillSource>, sha: string, state = 'missing') => {
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const r: MachineReport = { desired: desiredWith([skill('tdd', sha)]), items: [item('tdd', state)], probeErrors: [] };
   const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
   const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
@@ -143,7 +143,7 @@ test('a verified re-expose still names the scripts it bundles', async () => {
   mkdirSync(join(m.paths.agentsSkills, '..'), { recursive: true });
   writeFileSync(join(m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({ skills: { tdd: { source: 'o/r', ref: sha } } }));
   const installer = fakeInstaller(m.paths, src);
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const r: MachineReport = { desired: desiredWith([skill('tdd', sha)]), items: [{ ...item('stale', 'outdated'), group: 'x/y' }], probeErrors: [] };
   const p = plan('update', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]);
   const expose: Plan = { kind: 'update', steps: p.steps.filter((s) => s.key === 'skills:expose').map((s) => ({ ...s, touches: [] })), skipped: [] };
@@ -167,7 +167,7 @@ test('an installer that fails midway still has what it wrote verified, and a mis
   const at = (n: string) => ({ source: 'o/r', sourceUrl: src.url, skillPath: `skills/${n}/SKILL.md`, ref: old });
   writeFileSync(join(m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({ skills: { tdd: at('tdd'), keep: at('keep') } }));
   const installer = fakeInstaller(m.paths, src, { exit: 1, writes: ['tdd'] });
-  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, installer.layer)));
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
   const r: MachineReport = {
     desired: desiredWith([skill('keep', sha), skill('tdd', sha)]), items: [item('keep', 'off-pin'), item('tdd', 'off-pin')], probeErrors: [],
   };
