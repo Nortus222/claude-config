@@ -128,10 +128,10 @@ export function resolveNamedProfile(input: {
   return resolveProfile({ base, layers, declaredSources, pins, overrides });
 }
 
-// Lists users of a shared path, including inherited references and excluding disabled files.
+// Lists users of a shared path despite resolution issues, excluding disabled files.
 export function profilesUsingPath(documents: Readonly<Record<string, string>>, path: string): readonly string[] {
   return (profileNames(documents) ?? ['default']).filter(name => {
     const config = resolveNamedProfile({ documents, name });
-    return !config.issues.length && config.files.some(file => file.managed && file.src === path);
+    return config.files.some(file => file.managed && file.src === path);
   });
 }

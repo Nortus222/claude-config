@@ -107,6 +107,26 @@ test('profilesUsingPath lists every profile that resolves a file to that path', 
   assert.deepEqual(profilesUsingPath(root, 'codex/AGENTS.md'), ['default']);
 });
 
+test('profilesUsingPath retains profiles with unrelated skill pin issues', () => {
+  const documents = { ...root,
+    'profiles/base.json': doc({ files: { 'claude:CLAUDE.md': 'claude/shared.md' } }),
+    'profiles/personal.json': '{"extends":"base"}',
+    'profiles/team.json': doc({ extends: 'base', files: { 'claude:CLAUDE.md': null } }),
+    'skill-pins.json': '{',
+  };
+  assert.ok(resolveNamedProfile({ documents, name: 'personal' }).issues.some(issue => issue.source === 'skill-pins.json'));
+  assert.deepEqual(profilesUsingPath(documents, 'claude/shared.md'), ['base', 'personal']);
+  assert.deepEqual(profilesUsingPath({ ...root, 'skill-pins.json': '{' }, 'codex/AGENTS.md'), ['default']);
+});
+
+test('profilesUsingPath includes root file references returned for unresolved chains', () => {
+  const documents = { ...root,
+    'profiles/cycle.json': '{"extends":"cycle"}',
+    'profiles/orphan.json': '{"extends":"missing"}',
+  };
+  assert.deepEqual(profilesUsingPath(documents, 'codex/AGENTS.md'), ['cycle', 'orphan']);
+});
+
 test('profile-declared values carry the profile file as their origin', () => {
   const config = resolve({
     'profiles/personal.json': doc({
