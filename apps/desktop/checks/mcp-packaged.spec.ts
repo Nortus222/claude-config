@@ -44,8 +44,8 @@ test('installed MCP reconciles inert files and recovers durable outcomes after d
   }
 });
 
-test('native launch and finished-app inventories independently name all 22 shipped tools', async () => {
-  const expected = ['get_context','inspect','inspect_intent','inspect_updates','resolve_skill_candidate','inspect_setups','incoming_changes','prepare_trust_request','watch_sources','inspect_source_diff','pin_impact','draft_changelog','agent_status','account_state','list_backups','preview_change','apply_change','get_run','list_runs','cancel_run','abandon_run','history'].map(name => `nortuscc_${name}`).sort();
+test('native launch and finished-app inventories independently name all 23 shipped tools', async () => {
+  const expected = ['get_context','inspect','inspect_intent','inspect_updates','resolve_skill_candidate','setup_review','inspect_setups','incoming_changes','prepare_trust_request','watch_sources','inspect_source_diff','pin_impact','draft_changelog','agent_status','account_state','list_backups','preview_change','apply_change','get_run','list_runs','cancel_run','abandon_run','history'].map(name => `nortuscc_${name}`).sort();
   for (const path of ['./mcp-launch.spec.ts', '../scripts/mcp-smoke.mjs']) {
     const source = await readFile(new URL(path, import.meta.url), 'utf8');
     const start = source.indexOf('.tools.map(');
