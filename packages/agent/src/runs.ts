@@ -17,6 +17,7 @@ export type AgentRuns = {
   readonly get: (runId: string) => Effect.Effect<RunView, RunError>;
   readonly list: (input: { readonly before?: string; readonly limit: number }) => Effect.Effect<{ readonly runs: readonly RunView[]; readonly nextBefore: string | null }, RunError>;
   readonly cancel: (runId: string) => Effect.Effect<RunView, RunError>;
+  readonly abandon: (runId: string) => Effect.Effect<RunView, RunError>;
   readonly onChange: (listener: (runId: string) => void) => () => void;
   readonly subscribe: (runId: string, listener: (run: RunView) => void) => () => void;
 };
@@ -270,6 +271,14 @@ export const makeAgentRuns = (driver: {
       if (receipt.view.result === null) yield* driver.cancel(runId);
       return yield* get(runId);
     }),
+    abandon: runId => Effect.gen(function* () {
+      const receipt = yield* find(runId);
+      if (receipt.view.state === 'abandoned') return yield* get(runId);
+      if (receipt.view.state !== 'interrupted') return yield* Effect.fail(new RunError('RUN_FAILED', 'Run is not interrupted'));
+      const view = decodeRunView({ ...receipt.view, state: 'abandoned', abandonedAt: (yield* now).toISOString() });
+      yield* save({ ...receipt, view });
+      return yield* get(runId);
+    }).pipe(gate.withPermit),
     onChange: listener => { changes.add(listener); return () => { changes.delete(listener); }; },
     subscribe: (runId, listener) => {
       const set = listeners.get(runId) ?? new Set();

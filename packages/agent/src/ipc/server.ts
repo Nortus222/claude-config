@@ -290,7 +290,7 @@ export const serveIpc = (input: {
         account: hosted?.enabled ? hosted.auth === 'signed-in' && hosted.accountId ? {state:'signed-in',accountId:hosted.accountId} : {state:hosted.auth === 'unauthenticated' ? 'unauthenticated' : 'signed-out'} : {state:'unavailable',reason:'Hosted mode is not configured.'},
         policy:state.policy, paused:state.paused === null ? null : {reason:state.paused.reason,at:state.paused.at},
         scopes:{machine:operations,user:{available:false,reason:'User mutations are not supported.'},profile:{available:false,reason:'Profile mutations are not supported.'}},
-        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name === 'applyChange' || name === 'cancelRun' ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
+        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
       });
     });
     // Until the start job finishes there is no status; answering at once beats making a client wait for a job.
@@ -369,12 +369,13 @@ export const serveIpc = (input: {
             }
             case 'getRun': result = yield* session.runs.get(request.input.runId); break;
             case 'listRuns': result = yield* session.runs.list(request.input); break;
-            case 'cancelRun': {
+            case 'cancelRun':
+            case 'abandonRun': {
               const fs = yield* Fs;
               const path = join(input.paths.stateRoot, 'agent/pending-update.json');
               const pending = yield* fs.readText(path).pipe(Effect.mapError(() => new SessionError('LOCKED', 'Desktop maintenance state is unavailable; open or repair the app.')));
               if (pending !== undefined || (yield* fs.exists(path))) return yield* Effect.fail(new SessionError('LOCKED', 'Desktop update recovery is pending; open the app before changing the machine.'));
-              result = yield* session.runs.cancel(request.input.runId); break;
+              result = yield* (request.operation === 'cancelRun' ? session.runs.cancel(request.input.runId) : session.runs.abandon(request.input.runId)); break;
             }
             case 'history': {
               const history = request.input;

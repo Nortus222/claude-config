@@ -40,6 +40,7 @@ export const operationDefinitions = {
   getRun: define('getRun', GetRunInputSchema, RunViewSchema),
   listRuns: define('listRuns', ListRunsInputSchema, RunListResultSchema),
   cancelRun: define('cancelRun', CancelRunInputSchema, RunViewSchema, true),
+  abandonRun: define('abandonRun', GetRunInputSchema, RunViewSchema, true),
   history: define('history', HistoryInputSchema, OperationHistoryResultSchema),
 } as const;
 export type OperationName = keyof typeof operationDefinitions;

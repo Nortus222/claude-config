@@ -13,7 +13,7 @@ export const toolNames = {
   resolveSkillCandidate: 'nortuscc_resolve_skill_candidate',
   getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change',
   applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs',
-  cancelRun: 'nortuscc_cancel_run', history: 'nortuscc_history',
+  cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history',
 } as const satisfies Record<OperationName, string>;
 const descriptions: Record<OperationName, string> = {
   listBackups: 'List validated generated backup folder IDs, creation dates and latest History reference with observation-bound pagination. No content browsing or general restore.',
@@ -37,6 +37,7 @@ const descriptions: Record<OperationName, string> = {
   getRun: 'Read a durable operation run after reconnecting. Inspect committed and remaining effects, uncertain outcomes, backups and the configured author destination. Partial results require inspection before another preview. Saved machine intent is separate from installation. Only after installation is verified, ask: Do you want to share it with your other machines? Also mention promotion to an owned profile. Follow nextActions readiness, destination and prerequisite reasons. Never share or promote without a user request. Failed, cancelled or incomplete installation offers neither. Claude catalog discovery does not attest selected source or invocation authorization.',
   listRuns: 'List durable operation runs with bounded pagination.',
   cancelRun: 'Request cancellation of a machine operation run and read its settled receipt.',
+  abandonRun: 'Mark an interrupted run abandoned while retaining its steps, committed and remaining keys, backups and result. Interrupted runs never block new applies or app updates.',
   history: 'Read bounded safe History details for decisions, setups, revisions, policy, pause and backup retention, with shared actor and durable operation attribution. Unknown historical events use a constant fallback.',
 };
 
