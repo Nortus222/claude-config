@@ -21,6 +21,7 @@ export const engineCapabilityCoverage = {
   skillRepair: available('machine/skills/domain.ts', ['previewChange', 'applyChange'], 'Repair declared missing/off-pin skills and links using existing pinned verification. No new unpinned content or selected-agent isolation guarantee.', ['reconcile']),
   undeclaredInspection: available('machine/undeclared/probe.ts', ['inspect'], 'Report undeclared content and declaration defects; no arbitrary adoption/removal.'),
   durableRunRead: available('agent/run-store.ts and agent/runs.ts', ['getRun', 'listRuns'], 'Accepted/running/terminal receipts survive client disconnect and agent restart recovery.'),
+  interruptedRunAbandon: available('agent/runs.ts', ['abandonRun'], 'Mark an interrupted run abandoned while retaining its steps, committed and remaining keys, backups and result. Interrupted runs never block applies or app updates.'),
   cancellation: available('agent/ipc/session.ts', ['cancelRun'], 'Cancel a retained authorized machine run at existing safe boundaries.'),
   history: available('machine/history.ts', ['history'], 'Bounded pagination and MCP actor, operation, scope, request and run attribution.'),
   targetCategoryForceSelection: available('operations/actions.ts and machine/model.ts Selection', ['previewChange', 'applyChange'], 'Typed selected reconciliation retains target/category/force rules and owner guards.', ['reconcile']),

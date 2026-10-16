@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { agentLayer, DEFAULT_STATE, renderLaunchAgent, unitPath } from '@nortuscc/agent';
+import { decodeRunView } from '@nortuscc/agent/operations';
+import { RunStore } from '../../../packages/agent/src/run-store.ts';
 import { backupsForRun, FileIntegrity, FsFailed, nodeFileIntegrity, Processes, liveLockHolder, type MachinePathsValue } from '@nortuscc/machine';
 import { AgentUnavailable, type AgentConnection } from '../../../src/agent-client.ts';
 import { resourceProgram, ensureAgent } from '../agent/lifecycle.ts';
@@ -76,6 +78,32 @@ test('prepare holds both fences through durable installing acknowledgement and c
   assert.equal(readFileSync(join(f.paths.stateRoot, 'agent/agent.json'), 'utf8'), before);
   assert.equal(liveLockHolder(join(f.paths.stateRoot, 'apply.lock')), undefined);
   await assert.rejects(f.run(ensureAgent(f.input, { connect: f.connect })), /pending|recovery/);
+});
+
+test('app update preparation proceeds while a run is interrupted', async t => {
+  const f = fixture(t);
+  const requestId = 'interrupted-request';
+  await f.run(RunStore.use(store => store.write({ version: 1, sequence: 1, actor: 'app', inFlight: 'skill:a/b',
+    view: decodeRunView({ runId: 'interrupted-run', state: 'interrupted', operation: 'applyChange', scope: { kind: 'machine' },
+      intent: { requestId, planId: 'old-plan', inputDigest: 'a'.repeat(64), change: { kind: 'reconcile', only: ['skill:a/b'] } },
+      intentSaved: false, steps: [], result: { status: 'interrupted', message: 'Agent stopped' } }),
+  })));
+  const receiptPath = join(f.paths.stateRoot, 'agent/runs', `${createHash('sha256').update(requestId).digest('hex')}.json`);
+  const before = readFileSync(receiptPath, 'utf8');
+  let backedUp = false;
+  const result = await f.run(maintenance.prepareUpdate(f.input, {
+    stdin: records({ fromVersion: '1.0.0', toVersion: '1.1.0' }, { action: 'begin-install', installerPid: 777777 }, { action: 'commit' }),
+    stdout: value => {
+      const ready = value as { ready?: boolean; backupPath?: string };
+      if (ready.ready) {
+        assert.equal(readFileSync(join(ready.backupPath!, 'Contents/MacOS/Nortuscc'), 'utf8'), 'old executable');
+        backedUp = true;
+      }
+    }, connect: f.connect, pollMs: 1, timeoutMs: transitionTimeoutMs,
+  }));
+  assert.deepEqual(result, { committed: true });
+  assert.equal(backedUp, true);
+  assert.equal(readFileSync(receiptPath, 'utf8'), before);
 });
 
 test('EOF after begin-install never restarts an old service or removes pending', async t => {

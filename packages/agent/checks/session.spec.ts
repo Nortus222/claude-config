@@ -2,13 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Deferred, Effect, Fiber, Layer } from 'effect';
+import { Deferred, Effect, Fiber, Layer, type Scope } from 'effect';
 import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
 import {
-  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, makeNotifier, SessionError, SetupSource, startAgent,
+  AgentStateStore, decodeInspectResult, decodePreviewResult, makeSession, makeNotifier, serveIpc, SessionError, SetupSource, startAgent,
   type AgentStatus, type Notification, type AgentDomain, type AgentDomains, type AgentHandle, type AgentServices, type AgentSession, type RunProgress,
 } from '../src/index.ts';
 import { operationDigest } from '../src/runs.ts';
+import { RunStore, type RunReceipt } from '../src/run-store.ts';
+import { decodeRunView, operationDefinitions, type OperationOutput, type RunView } from '../src/operations/index.ts';
+import { connectAgent } from '../../../src/agent-client.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture, type FixtureOptions } from './support/setup-fixture.ts';
 
@@ -20,6 +23,7 @@ const EFFORT_KEY = 'config:claude:settings.json#effortLevel';
 const MODEL_KEY = 'config:claude:settings.json#model';
 
 type Options = {
+  readonly base?: string;
   readonly onStatus?: (status: AgentStatus) => Effect.Effect<void>;
   readonly paused?: boolean;
   readonly fixture?: FixtureOptions;
@@ -32,7 +36,7 @@ type Options = {
 // A trusted machine whose head adds two accepted settings keys, effortLevel and model. No key has a
 // baseline yet, so a run has three config steps: theme, effortLevel and model. Each test runs inside one agent scope with a session over it.
 const sessionMachine = async (options: Options = {}) => {
-  const m = agentMachine();
+  const m = agentMachine(options.base);
   const fixture = setupFixture(join(m.root, 'setup'), {
     headFiles: { 'claude/settings.keys.json': JSON.stringify({ theme: 'dark', effortLevel: 'high', model: 'opus' }) + '\n' },
     ...options.fixture,
@@ -46,7 +50,7 @@ const sessionMachine = async (options: Options = {}) => {
   const domains: AgentDomains = (paths) => [options.config ?? configDomain, integrationsDomain({ paths, env: {} })];
   const shutdown = new AbortController();
   const source = options.source ? Layer.succeed(SetupSource, options.source(fixture.service)) : fixture.source;
-  const within = <A, E>(body: (session: AgentSession, agent: AgentHandle) => Effect.Effect<A, E, AgentServices>) =>
+  const within = <A, E>(body: (session: AgentSession, agent: AgentHandle) => Effect.Effect<A, E, AgentServices | Scope.Scope>) =>
     m.run(Effect.scoped(Effect.gen(function* () {
       const agent = yield* startAgent(domains, { onStatus: options.onStatus });
       const session = yield* makeSession(agent, { signal: shutdown.signal, domains });
@@ -163,6 +167,61 @@ test('status published after a policy run carries its run id', async t => {
     assert.equal(event.runId, run.runId);
     assert.equal(event.policy, 'manual');
   })));
+});
+
+const seedInterruptedRun = (runId = 'interrupted-run'): RunReceipt => ({
+  version: 1, sequence: 1, actor: 'app', inFlight: null,
+  view: decodeRunView({ runId, state: 'interrupted', operation: 'applyChange', scope: { kind: 'machine' },
+    intent: { requestId: runId, inputDigest: operationDigest('old-plan'), planId: 'old-plan', change: { kind: 'reconcile', only: [] } },
+    intentSaved: false, steps: [], result: { status: 'interrupted', message: 'Agent stopped' } }),
+});
+
+test('an interrupted run does not block a new apply', async () => {
+  const f = await sessionMachine({ base: '/tmp' });
+  await f.m.run(RunStore.use(store => store.write(seedInterruptedRun())));
+  await f.within((session, agent) => Effect.gen(function* () {
+    assert.equal((yield* session.runs.get('interrupted-run')).state, 'interrupted');
+    const preview = yield* session.preview(yield* configOnly(session));
+    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => {} });
+    const result = yield* Effect.promise(async () => {
+      const connection = await connectAgent(f.m.paths, { client: 'app' });
+      try {
+        return await connection.request<OperationOutput<'applyChange'>>({ command: 'operation', operation: 'applyChange',
+          input: { scope: { kind: 'machine' }, planId: preview.planId, requestId: 'fresh-apply' } });
+      } finally { connection.close(); }
+    });
+    assert.equal(result.status, 'started');
+    assert.ok(result.status === 'started');
+    const ended = Deferred.makeUnsafe<void>();
+    const off = session.runs.subscribe(result.run.runId, run => { if (run.result) Deferred.doneUnsafe(ended, Effect.void); });
+    yield* Deferred.await(ended);
+    off();
+    assert.equal((yield* session.runs.get('interrupted-run')).state, 'interrupted');
+  }));
+});
+
+test('abandonRun is exposed to the app and mcp clients', async () => {
+  const f = await sessionMachine({ base: '/tmp' });
+  const agentVersion = '9.9.9', appPath = '/tmp/Test.app/Contents/MacOS/Test';
+  const metadataPath = join(f.m.paths.stateRoot, 'agent/runtime.json');
+  f.m.write(metadataPath, JSON.stringify({ agentVersion, appVersion: '0.1.6', target: 'darwin-arm64' }));
+  await f.m.run(AgentStateStore.use(store => store.update(state => ({ ...state, installedBy: 'app', agentVersion, appPath }))));
+  for (const client of ['app', 'mcp']) await f.m.run(RunStore.use(store => store.write({ ...seedInterruptedRun(client), sequence: client === 'app' ? 1 : 2 })));
+  await f.within((session, agent) => Effect.gen(function* () {
+    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion,
+      appRuntime: { version: '0.1.6', runtimeId: agentVersion, appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath }, onShutdown: () => {} });
+    yield* Effect.promise(async () => {
+      for (const client of ['app', 'mcp'] as const) {
+        const connection = await connectAgent(f.m.paths, { client, runtimeId: agentVersion });
+        try {
+          const run = await connection.request<RunView>({ command: 'operation', operation: 'abandonRun', input: { scope: { kind: 'machine' }, runId: client } });
+          assert.equal(run.state, 'abandoned');
+          assert.deepEqual(run, await connection.request({ command: 'operation', operation: 'getRun', input: { scope: { kind: 'machine' }, runId: client } }));
+        } finally { connection.close(); }
+      }
+    });
+    assert.equal(operationDefinitions.abandonRun.mutation, true);
+  }));
 });
 
 test('inspect answers the profile, items and status; preview plans every item not excluded', async () => {
