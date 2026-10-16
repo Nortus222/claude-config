@@ -124,7 +124,7 @@ export function composeHeld(input: { checkout: string; held: Holds; overrides?: 
         remove();
       }),
     );
-    return yield* desiredFor({
+    return yield* desiredFor({ profile: 'default',
       repo: checkout, head: { kind: 'worktree' }, held, into: join(dir.made, 'repo'),
       ...(input.overrides ? { overrides: input.overrides } : {}),
     }).pipe(

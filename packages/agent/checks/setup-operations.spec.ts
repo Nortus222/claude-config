@@ -373,7 +373,7 @@ test('hook body-only changes appear in review with both executable bodies', asyn
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
 
-test('an omitted hook refuses settlement when hold replay would replace its retained body', async () => {
+test('an omitted hook keeps its held body while an independent item settles', async () => {
   const m = agentMachine();
   const { HEAD_FILES } = await import('./support/setup-fixture.ts');
   const setup = setupFixture(join(m.root, 'snapshots'), { composeStateRoot: m.paths.stateRoot,
@@ -385,10 +385,12 @@ test('an omitted hook refuses settlement when hold replay would replace its reta
       const handle = yield* startAgent(() => m.domains, { deferStart: true });
       const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
       const before = durableFiles(m.paths.stateRoot);
-      const error = yield* Effect.flip(session.previewChange(change([{ itemId: EFFORT, action: 'accept' }])));
-      assert.equal(error.code, 'INVALID_REQUEST');
-      assert.match(error.message, /hook bytes cannot be retained/);
+      const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
       assert.deepEqual(durableFiles(m.paths.stateRoot), before);
+      assert.equal((yield* finish(session, preview.planId)).state, 'succeeded');
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held[HOOK], APPLIED);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, HEAD);
+      assert.equal(readFileSync(join(m.root, 'snapshots/composed/claude/hooks/session.mjs'), 'utf8'), 'old hook\n');
     })), setup.source);
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
@@ -446,4 +448,22 @@ test('review without refetch keeps the latest refetched revision instead of an o
     assert.deepEqual(read.revision, fresh.revision);
     assert.deepEqual(read.revision, { kind: 'local', commit: next });
   }));
+});
+
+test('setup review shows a profile file exclusion instead of unchanged file text', async () => {
+  const m = agentMachine();
+  const { SetupSource } = await import('@nortuscc/sync');
+  const files = { 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# same rules\n' };
+  const setup = setupFixture(join(m.root, 'snapshots'), { appliedFiles: files, headFiles: { ...files, 'profiles/child.json': json({ files: { 'claude:CLAUDE.md': null } }) } });
+  await m.trust();
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true, limit: 100 }));
+      const row = review.rows.find(row => row.itemId === 'file:claude:CLAUDE.md')!;
+      assert.equal(row.before, '# same rules\n');
+      assert.deepEqual(JSON.parse(row.after!), { managed: false });
+    })), Layer.succeed(SetupSource, { ...setup.service, profile: 'child' }));
+  } finally { rmSync(m.root, { recursive: true, force: true }); }
 });

@@ -48,7 +48,7 @@ test(`pruning keeps the ${SNAPSHOTS_KEPT} most recently used, the ones in use, a
 test('the snapshot key covers the composition format, so a new format never reuses old folders', async () => {
   const repo = tempRepo();
   const stateRoot = join(repo.root, 'state');
-  const key = { commit: repo.first, held: {} };
+  const key = { commit: repo.first, held: {}, repoUrl: repo.dir, profile: 'default' };
   const snapshot = await runSync(snapshotFor({ ...key, repo: repo.dir, stateRoot, overrides: NONE, now: new Date() }));
   assert.equal(snapshot.repo, join(stateRoot, 'snapshots', snapshotKey(key)));
   assert.notEqual(snapshotKey(key, SNAPSHOT_FORMAT + 1), snapshotKey(key));
@@ -59,7 +59,7 @@ test('pruning removes only a staging folder older than the stale age, never a fr
   const stateRoot = join(repo.root, 'state');
   const root = join(stateRoot, 'snapshots');
   const now = new Date('2026-10-07T12:00:00.000Z');
-  const key = snapshotKey({ commit: repo.first, held: {} });
+  const key = snapshotKey({ commit: repo.first, held: {}, repoUrl: repo.dir, profile: 'default' });
   const fresh = `.staging-${key}-${now.getTime()}-${randomUUID()}`;
   const old = `.staging-${key}-${now.getTime() - 2 * 60 * 60 * 1000}-${randomUUID()}`;
   const legacy = `.staging-${key}-${randomUUID()}`;

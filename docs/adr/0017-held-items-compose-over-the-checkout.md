@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by 0037
 ---
 
 # A machine's desired setup is the checkout with held items patched in from git

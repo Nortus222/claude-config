@@ -3,12 +3,15 @@
 Machine sync (#43): keeps a machine on the shared setup item by item without losing its overrides.
 Decisions: [ADR 0017](../../docs/adr/0017-held-items-compose-over-the-checkout.md) (held items) and
 [ADR 0016](../../docs/adr/0016-agent-applies-from-a-verified-snapshot.md) (the agent's snapshots).
+[ADR 0037](../../docs/adr/0037-resolved-item-comparison.md) supersedes the comparison clause of ADR 0017.
 
-- **Items.** `itemValues(documents)` maps every setup item (`setting:`, `file:`, `skill:`, `integration:`)
-  to a comparable value, from the documents alone; `diffItems(from, to)` lists what differs.
+- **Items.** `itemValues(documents, profile?)` maps every setup item (`setting:`, `file:`, `skill:`, `integration:`)
+  to a comparable resolved value before machine overrides, including enablement and referenced bytes.
+  `resolvedItemValues(desired, documents)` accepts an already resolved profile; `diffItems` lists changes.
 - **Holds.** `<stateRoot>/sync.json` maps a skipped item to the commit whose value it keeps.
 - **Composition.** `desiredFor` reads the documents at head (the working tree for the CLI, git objects
-  for the agent), patches every held item from its held commit, and resolves them with `loadProfile`.
+  for the agent), resolves every held item under the required `profile` at its held commit, and applies machine overrides.
+  `droppedOnSwitch` lists missing hold IDs and override paths without changing either store.
 - **Incoming.** `incoming` lists what moved upstream since the applied commit, from this machine's held
   values, and the overrides those items conflict with.
 - **The agent's source.** `setupSourceLayer(paths)` implements `SetupSource` over the own checkout:

@@ -75,17 +75,19 @@ export const observeSyncSource = (source: SetupSource['Service'], decisions: rea
     const effective = yield* source.effective(decisions);
     const before = yield* worktreeDocuments(effective.applied.repo),
       after = yield* worktreeDocuments(offered.repo);
-    if (invalidProfile(desiredOfDocuments(before), independentIntegrations) || invalidProfile(desiredOfDocuments(after), independentIntegrations))
+    const profile = source.profile;
+    const beforeValues = itemValues(before, profile), afterValues = itemValues(after, profile);
+    if (invalidProfile(desiredOfDocuments(before, undefined, profile), independentIntegrations) || invalidProfile(desiredOfDocuments(after, undefined, profile), independentIntegrations))
       return yield* Effect.fail(refused());
-    const changes = diffItems(itemValues(before), itemValues(after));
+    const changes = diffItems(beforeValues, afterValues);
     const offers = source.offeredItems
       ? yield* source.offeredItems
-      : [...new Set([...itemValues(before).keys(), ...itemValues(after).keys()])].map((itemId) => ({
+      : [...new Set([...beforeValues.keys(), ...afterValues.keys()])].map((itemId) => ({
           itemId,
           revision: head,
         }));
     if (knownHead === undefined && canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
-    return { head, offered, effective, before, after, changes, offers };
+    return { head, offered, effective, before, after, beforeValues, afterValues, profile, changes, offers };
   });
 export const prepareSyncDecision = (
   input: SyncDecisionInput,
@@ -130,10 +132,10 @@ export const prepareSyncDecision = (
       !unchanged &&
       !observed.changes.some((c) => c.itemId === change.itemId) &&
       !(change.action === 'release' && held) &&
-      !(input.deferComposition && (itemValues(observed.before).has(change.itemId) || itemValues(observed.after).has(change.itemId)))
+      !(input.deferComposition && (observed.beforeValues.has(change.itemId) || observed.afterValues.has(change.itemId)))
     )
       return yield* Effect.fail(refused());
-    if (unchanged && !itemValues(observed.before).has(change.itemId) && !itemValues(observed.after).has(change.itemId))
+    if (unchanged && !observed.beforeValues.has(change.itemId) && !observed.afterValues.has(change.itemId))
       return yield* Effect.fail(refused());
     if (!local && !head.items.some((c) => c.id === change.itemId)) return yield* Effect.fail(refused());
     const nextOverrides =
