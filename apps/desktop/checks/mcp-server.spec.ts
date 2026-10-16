@@ -14,8 +14,10 @@ import { build } from 'esbuild';
 import { Deferred, Effect, Exit, Scope, Layer } from 'effect';
 import { AgentStateStore, makeSession, serveIpc, startAgent, SetupSource, type AgentDomain } from '@nortuscc/agent';
 import { configDomain, DecisionsStore, integrationsDomain, Processes, skillsDomain, OverridesStore, Fs, FsFailed } from '@nortuscc/machine';
-import { decodeOperationOutput, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
+import { decodeOperationOutput, operationDefinitions, operationJsonSchemas, type OperationName } from '@nortuscc/agent/operations';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { toolNames } from '../mcp/server.ts';
+import { operation } from '../src/operations.ts';
 import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
@@ -704,6 +706,17 @@ test('authenticated MCP sync hold retains one decision run after a lost reply', 
  assert.equal(JSON.parse(s.m.read(join(s.m.paths.stateRoot,'sync.json'))!).held[EFFORT],'a'.repeat(40));
  const choices=await s.m.run(DecisionsStore.use(store=>store.read));assert.equal(choices.find(d=>d.itemId===EFFORT)?.decision,'skip');
  const held=output('incomingChanges',await next.call('incomingChanges',{setupId:'local'}));assert.equal(held.items.find((i:any)=>i.itemId===EFFORT).held,true);
+});
+
+test('every operation definition is an MCP tool and callable through the desktop adapter', async t => {
+  const desktopAcceptsEveryOperation: OperationName extends Parameters<typeof operation>[1] ? true : false = true;
+  assert.equal(desktopAcceptsEveryOperation, true);
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close);
+  const listed = await client.initialize();
+  const operationsByTool = new Map<string, string>(Object.entries(toolNames).map(([name, tool]) => [tool, name]));
+  const mcpOperations = listed.result.tools.map((tool: { name: string }) => operationsByTool.get(tool.name));
+  assert.deepEqual(new Set(Object.keys(operationDefinitions)), new Set(mcpOperations));
 });
 
 test('MCP descriptions explain semantic effects and recovery', async t => {
