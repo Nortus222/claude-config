@@ -140,6 +140,7 @@ test('setup review includes held items even when both revisions omit the item', 
     m.write(join(m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held: { [absent]: APPLIED } }));
     const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true, limit: 100 }));
     assert.ok(review.rows.some(row => row.itemId === absent && row.held));
+    assert.equal(review.rows.find(row => row.itemId === absent)?.change, 'unchanged');
     const preview = yield* s.previewChange(change([{ itemId: absent, action: 'release' }]));
     assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
     assert.deepEqual(JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held, { [EFFORT]: APPLIED, [HOOK]: APPLIED });
@@ -285,9 +286,28 @@ test('an unchanged incoming item can resolve its override independently of accep
     m.write(join(m.paths.stateRoot, 'overrides.json'), '{"version":2,"settings":{"claude:settings.json":{"theme":"light"}}}');
     const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: false, limit: 100 }));
     assert.ok(review.rows.some(row => row.itemId === theme && row.conflict));
+    assert.equal(review.rows.find(row => row.itemId === theme)?.change, 'unchanged');
     const preview = yield* s.previewChange(change([{ itemId: theme, action: 'takeTheirs' }]));
     assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
     assert.equal(JSON.parse(m.read(join(m.paths.claude, 'settings.json'))!).theme, 'dark');
+  }));
+});
+
+test('applying without naming an override-only item creates no hold or decision for it', async () => {
+  await withSetup((m, _setup, s) => Effect.gen(function* () {
+    const theme = 'setting:claude:settings.json#theme';
+    const overrides = '{"version":2,"settings":{"claude:settings.json":{"theme":"light"}}}';
+    m.write(join(m.paths.stateRoot, 'overrides.json'), overrides);
+    const preview = yield* s.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
+    const holds = JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held;
+    assert.equal(Object.hasOwn(holds, theme), false);
+    assert.equal(holds[HOOK], APPLIED);
+    const decisions = yield* (yield* DecisionsStore).read;
+    assert.equal(decisions.some(d => d.itemId === theme), false);
+    assert.equal(decisions.find(d => d.itemId === EFFORT)?.decision, 'accept');
+    assert.equal(m.read(join(m.paths.stateRoot, 'overrides.json')), overrides);
+    assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, HEAD);
   }));
 });
 

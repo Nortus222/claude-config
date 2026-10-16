@@ -395,7 +395,7 @@ export const SETUP_TEXT_MAX_BYTES = 65_536;
 const SetupTextSchema = Schema.String.check(Schema.isMaxCodePoints(SETUP_TEXT_MAX_BYTES), Schema.makeFilter(value => utf8ByteLength(value) <= SETUP_TEXT_MAX_BYTES));
 export const SetupReviewInputSchema = Schema.Struct({ ...syncPage, setupId: IdSchema, refetch: Schema.Boolean });
 export const SetupReviewRowSchema = Schema.Struct({ ...incomingItemFields,
-  change: Schema.Literals(['added', 'changed', 'removed']), held: Schema.Boolean,
+  change: Schema.Literals(['added', 'changed', 'removed', 'unchanged']), held: Schema.Boolean,
   before: Schema.optionalKey(SetupTextSchema), after: Schema.optionalKey(SetupTextSchema), mine: Schema.optionalKey(SetupTextSchema),
   truncated: Schema.optionalKey(Schema.Literal(true)) });
 export const SetupReviewSchema = Schema.Struct({ generation: CountSchema, setupId: IdSchema, revision: SyncRevisionIdentitySchema,

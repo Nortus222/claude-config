@@ -70,15 +70,25 @@ const textOf = (documents: Documents, id: string, value: string | undefined) => 
   return declaration?.type === 'hook' && typeof declaration.file === 'string'
     ? `${value}\n\n${declaration.file}\n${documents[declaration.file] ?? ''}` : value;
 };
-// Apply defaults cover the same inventory as review, including hook-only changes and pin siblings.
-const reviewItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
-  const { observed, holds, overrides } = input;
+// Incoming choices include hook-only changes and siblings sharing an incoming item's source pin.
+const incomingItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
+  const { observed, holds } = input;
   const before = itemValues(observed.before), after = itemValues(observed.after);
   const inventory = [...new Set([...before.keys(), ...after.keys()])];
-  const ids = new Set([...observed.changes.map(c => c.itemId), ...Object.keys(holds),
-    ...inventory.filter(id => overrideOf(id, overrides.value) !== undefined
-      || textOf(observed.before, id, before.get(id)) !== textOf(observed.after, id, after.get(id)))]);
+  const ids = new Set([...observed.changes.map(c => c.itemId),
+    ...inventory.filter(id => textOf(observed.before, id, before.get(id)) !== textOf(observed.after, id, after.get(id)))]);
   for (const group of setupPinGroups(observed.before, observed.after, Object.keys(holds)))
+    if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
+  return [...ids].sort();
+};
+// Existing holds and overrides remain reviewable without becoming default hold choices.
+const reviewItemIds = (input: Effect.Success<ReturnType<typeof inputs>>) => {
+  const ids = new Set([
+    ...incomingItemIds(input), ...Object.keys(input.holds),
+    ...[...itemValues(input.observed.before).keys(), ...itemValues(input.observed.after).keys()]
+      .filter(id => overrideOf(id, input.overrides.value) !== undefined),
+  ]);
+  for (const group of setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds)))
     if (group.itemIds.some(id => ids.has(id))) for (const id of group.itemIds) ids.add(id);
   return [...ids].sort();
 };
@@ -104,7 +114,8 @@ export const readSetupReview = (handle: AgentHandle, input: OperationInput<'setu
       }));
       const offer = observed.offers.find(item => item.itemId === change.itemId);
       return { itemId: change.itemId, kind: change.kind,
-        change: change.before === undefined ? 'added' as const : change.after === undefined ? 'removed' as const : 'changed' as const,
+        change: change.before === change.after && values.before === values.after ? 'unchanged' as const
+          : change.before === undefined ? 'added' as const : change.after === undefined ? 'removed' as const : 'changed' as const,
         held: Object.hasOwn(holds, change.itemId) || decisions.some(d => d.setupId === input.setupId && d.itemId === change.itemId && d.decision === 'skip' && d.revision === (typeof offer?.revision === 'object' ? offer.revision.number : -1)),
         conflict: overrideOf(change.itemId, overrides.value) !== undefined, ...bounded, ...(truncated ? { truncated: true as const } : {}) };
     });
@@ -141,7 +152,7 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
       }
       yield* Effect.try({ try: () => validateSetupPinChoices(setupPinGroups(input.observed.before, input.observed.after, Object.keys(input.holds)), change.choices),
         catch: error => new SessionError('INVALID_REQUEST', (error as Error).message) });
-      const choices = [...change.choices, ...reviewItemIds(input)
+      const choices = [...change.choices, ...incomingItemIds(input)
         .filter(id => !seen.has(id) && input.observed.offers.some(offer => offer.itemId === id))
         .map(itemId => ({ itemId, action: 'hold' as const }))];
       const prepared = [];
@@ -199,13 +210,13 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
     const keys = [...(canonical(first.nextOverrides) !== canonical(first.input.overrides.value) ? ['sync:override'] : []),
       ...(canonical(first.nextHolds) !== canonical(first.input.holds) ? ['sync:hold'] : []), ...(writes.length ? ['sync:decision'] : [])];
     const publicPlan: OperationPlan = { kind: 'operation' as const, steps: [
-      ...keys.map(key => ({ key, domain: 'sync' as const, action: 'save-decision' as const, summary: 'Back up and save choices; unchosen review rows stay held', touches: first.prepared.map(p => p.change.itemId), interruptible: false })),
+      ...keys.map(key => ({ key, domain: 'sync' as const, action: 'save-decision' as const, summary: 'Back up and save choices; unchosen incoming rows stay held', touches: first.prepared.map(p => p.change.itemId), interruptible: false })),
       ...first.planned.steps.map(step => ({ ...step, summary: 'Apply the selected setup item using its existing owner' })),
       ...(settles ? [{ key: 'sync:applied', domain: 'sync' as const, action: 'save-decision' as const, summary: 'Record the applied setup baseline after the machine plan succeeds', touches: change.choices.filter(c => c.action !== 'hold').map(c => c.itemId), interruptible: false }] : []),
     ], skipped: first.planned.skipped };
     const acceptance = { kind: 'setupApply' as const, generation: String(generation), baselineDigest: first.binding, planDigest: digest(publicPlan), plannedKeys: publicPlan.steps.map(s => s.key) };
     const preview = yield* Effect.try({ try: () => decodeOperationOutput('previewChange', { planId: randomUUID(), scope: { kind: 'machine' }, generation: String(generation), change, plan: publicPlan, nextActions: [],
-      actionEffects: ['Save reviewed choices, hold every unchosen review row, and apply the selected machine plan in this run', 'Machine overrides stay unless takeTheirs explicitly resets that item after a backup',
+      actionEffects: ['Save reviewed choices, hold every unchosen incoming row, and apply the selected machine plan in this run', 'Machine overrides stay unless takeTheirs explicitly resets that item after a backup',
         settles ? 'Settle the applied baseline only after the machine plan succeeds' : 'This hosted source has no applied observation owner; its baseline stays unchanged'] }), catch: () => new SessionError('OVERSIZED', 'Setup preview exceeds supported limits') });
     if (Buffer.byteLength(JSON.stringify(preview)) > SETUP_PREVIEW_MAX_BYTES) return yield* Effect.fail(new SessionError('OVERSIZED', 'Setup preview exceeds supported limits'));
     return { preview, acceptance,
