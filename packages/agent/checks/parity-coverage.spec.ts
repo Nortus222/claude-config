@@ -5,6 +5,8 @@ import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/opera
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
 const reads = ['getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
+// Publication receipts are decodable before author IPC handlers are installed.
+const authorReceiptChanges = ['publishDraft', 'announcePublication'];
 const changes = ['reconcile', 'machineIntent', 'capture', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'sourceDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {
@@ -14,7 +16,7 @@ test('original owner inventory maps dedicated reads and every supported change t
   for (const name of reads) assert.ok(mapped.has(name as keyof typeof operationDefinitions), name);
   assert.deepEqual([...new Set(available.flatMap(row => 'changes' in row ? row.changes as string[] : []))].sort(), changes.sort());
   const changeSchema = operationJsonSchemas.previewChange.input as { properties: { change: { anyOf: { properties: {kind: {enum: string[]}} }[] } } };
-  assert.deepEqual([...new Set(changeSchema.properties.change.anyOf.flatMap(change => change.properties.kind.enum))].sort(), changes.sort());
+  assert.deepEqual([...new Set(changeSchema.properties.change.anyOf.flatMap(change => change.properties.kind.enum))].sort(), [...changes, ...authorReceiptChanges].sort());
   const server = readFileSync(new URL('../src/ipc/server.ts', import.meta.url), 'utf8');
   for (const name of Object.keys(operationDefinitions)) assert.ok(server.includes(`case '${name}':`), name);
   assert.ok(rows.some(row => row.state !== 'available' && /user.*pause/i.test(row.reason)));

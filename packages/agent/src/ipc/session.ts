@@ -327,6 +327,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         if (active) return yield* Effect.fail(busy);
         return yield* skillOperations.previewAddSkill({ scope: input.scope, candidateId: input.change.candidateId, targets: input.change.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
       }
+      if (input.change.kind === 'publishDraft' || input.change.kind === 'announcePublication') return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Author operations are not configured'));
       if (active) return yield* Effect.fail(busy);
       const inspection = yield* handle.inspection;
       if (!inspection) return yield* Effect.fail(new SessionError('NO_REPORT', 'Inspect the machine before previewing'));

@@ -39,6 +39,8 @@ function SkillAdditionResult({ run }: { run: OperationRunView }) {
 }
 
 const domainText = {
+  publishDraft: ['Publish draft', 'Push the previewed draft to main and announce changed profiles.'],
+  announcePublication: ['Announce publication', 'Retry announcements for the published commit.'],
   reconcile: ['Reconcile selected items', 'Existing owner guards and selected targets apply.'],
   machineIntent: ['Machine intent', 'Reset reveals inherited intent. Disabling or removing a declaration does not physically remove content.'],
   capture: ['Capture configuration', 'Writes selected author documents. Commit and publication remain explicit CLI actions.'],

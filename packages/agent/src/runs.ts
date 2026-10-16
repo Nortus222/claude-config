@@ -34,6 +34,8 @@ export type RunLifecycle = {
   readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition'], parity?: ParityAcceptance) => Effect.Effect<void, RunError>;
   readonly bindSignInFlow: (flow: string) => Effect.Effect<void, RunError>;
   readonly parity: (update: ParityRunEvidence) => Effect.Effect<void, RunError>;
+  readonly publication: (update: NonNullable<RunView['publication']>) => Effect.Effect<void, RunError>;
+  readonly publicationResult: (result: typeof import('./operations/schemas.ts').PublicationResultSchema.Type) => Effect.Effect<void, RunError>;
   readonly addition: (update: Pick<RunView, 'intentSaved' | 'intentState' | 'installation'>) => Effect.Effect<void, RunError>;
   readonly progress: (progress: Progress) => Effect.Effect<void, RunError>;
   readonly finished: (progress: { readonly type: 'failed'; readonly message: string } | Extract<Progress, { type: 'done' | 'cancelled' }>) => Effect.Effect<void, RunError>;
@@ -203,6 +205,19 @@ export const makeAgentRuns = (driver: {
           receipts.set(runId, copy(updated)); publish(updated);
           yield* save(updated);
         }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        publication: update => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, publication: copy(update) }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication evidence') });
+          if (receipt.view.publication?.commit && receipt.view.publication.commit !== update.commit) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Publication commit cannot change'));
+          const updated = { ...receipt, view };
+          receipts.set(runId, copy(updated)); publish(updated);
+          yield* save(updated);
+        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        publicationResult: result => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, state: result.status === 'succeeded' ? 'succeeded' : 'failed', result }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication result') });
+          yield* save({ ...receipt, view, inFlight: null });
+        }),
         addition: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
           const updated = { ...receipt, view: { ...receipt.view, ...copy(update) } };
@@ -223,6 +238,8 @@ export const makeAgentRuns = (driver: {
         }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
         finished: progress => Effect.gen(function* () {
           const receipt = yield* find(runId);
+          if (!durabilityFailed && receipt.view.publication && receipt.view.result !== null
+            && (receipt.view.result.status !== 'succeeded' || progress.type === 'done')) return;
           const result: NonNullable<RunView['result']> = durabilityFailed ? { status: 'interrupted', message: 'Run receipt could not be saved; inspect the machine before trying again' } : progress.type === 'failed' ? { status: 'failed', message: bounded(progress.message) }
             : progress.type === 'cancelled' ? { status: 'cancelled', remaining: [...progress.remaining] }
             : { status: 'done', ok: progress.ok, failed: progress.failed };

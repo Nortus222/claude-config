@@ -1,4 +1,4 @@
-import { utf8ByteLength, MachinePatchSchema, DisplayNameSchema, DeviceStartResponseSchema, SyncMachineSchema, SyncSetupSchema } from '@nortuscc/hosted-protocol';
+import { utf8ByteLength, MachinePatchSchema, DisplayNameSchema, DeviceStartResponseSchema, SyncMachineSchema, SyncSetupSchema, RepoUrlSchema, ProfileNameSchema } from '@nortuscc/hosted-protocol';
 import { Effect, Schema, SchemaGetter } from 'effect';
 import { intentValueProblem } from '@nortuscc/profile-engine/intent-value';
 import { POLICIES } from '../policy-values.ts';
@@ -73,7 +73,9 @@ export const SyncAccountChangeSchema = Schema.Struct({ kind: Schema.Literal('syn
 export const PatchMachineMetadataChangeSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), patch: MachinePatchSchema });
 export const AccountChangeSchema = Schema.Union([SetPolicyChangeSchema, ResumeChangeSchema, SignInChangeSchema, SignOutChangeSchema, SyncAccountChangeSchema, PatchMachineMetadataChangeSchema]);
 export const PruneBackupsChangeSchema = Schema.Struct({kind: Schema.Literal('pruneBackups')});
-export const ChangeSchema = Schema.Union([PruneBackupsChangeSchema, ...AccountChangeSchema.members, ...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, SetupApplyChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
+export const PublishDraftChangeSchema = Schema.Struct({ kind: Schema.Literal('publishDraft'), draftId: IdSchema, digest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)) });
+export const AnnouncePublicationChangeSchema = Schema.Struct({ kind: Schema.Literal('announcePublication'), runId: IdSchema });
+export const ChangeSchema = Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema, PruneBackupsChangeSchema, ...AccountChangeSchema.members, ...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, SetupApplyChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
 export const SkillCandidateSchema = Schema.Struct({ candidateId: IdSchema, source: SkillSourceSchema, revision: SkillRevisionSchema,
   sourceDir: KeySchema, selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
   description: Schema.String.check(Schema.isMaxCodePoints(500)), internal: Schema.Boolean });
@@ -121,6 +123,7 @@ export const ContextResultSchema = Schema.Struct({
 const semanticFields = { key: KeySchema, summary: Text, touches: list(KeySchema), interruptible: Schema.Boolean };
 export const OperationStepSchema = Schema.Union([
   StepSchema,
+  Schema.Struct({ ...semanticFields, domain: Schema.Literal('author'), action: Schema.Literals(['publish-draft', 'announce-publication']) }),
   Schema.Struct({ ...semanticFields, domain: Schema.Literal('intent'), action: Schema.Literal('save-intent') }),
   Schema.Struct({ ...semanticFields, domain: Schema.Literal('sync'), action: Schema.Literal('save-decision') }),
   Schema.Struct({ ...semanticFields, domain: Schema.Literal('sources'), action: Schema.Literal('edit-source') }),
@@ -155,7 +158,10 @@ const SignInAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('signIn'), .
 const SignOutAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('signOut'), ...parityAcceptanceFields });
 const SyncAccountAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('syncAccount'), ...parityAcceptanceFields });
 const PatchMachineMetadataAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), ...parityAcceptanceFields });
-export const ParityAcceptanceSchema = Schema.Union([PruneAcceptanceSchema, SetPolicyAcceptanceSchema, ResumeAcceptanceSchema, SignInAcceptanceSchema, SignOutAcceptanceSchema, SyncAccountAcceptanceSchema, PatchMachineMetadataAcceptanceSchema, SourceAcceptanceSchema, SyncAcceptanceSchema, SetupAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema]);
+export const PublicationTargetSchema = Schema.Struct({ repoUrl: RepoUrlSchema, base: AuthorHeadSchema, draftId: IdSchema, draftDigest: DigestSchema, profiles: Schema.Array(ProfileNameSchema), accountId: Schema.NullOr(IdSchema) });
+const PublishAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('publishDraft'), ...parityAcceptanceFields, publication: PublicationTargetSchema });
+const AnnounceAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('announcePublication'), ...parityAcceptanceFields, publication: PublicationTargetSchema, commit: AuthorHeadSchema });
+export const ParityAcceptanceSchema = Schema.Union([PublishAcceptanceSchema, AnnounceAcceptanceSchema, PruneAcceptanceSchema, SetPolicyAcceptanceSchema, ResumeAcceptanceSchema, SignInAcceptanceSchema, SignOutAcceptanceSchema, SyncAccountAcceptanceSchema, PatchMachineMetadataAcceptanceSchema, SourceAcceptanceSchema, SyncAcceptanceSchema, SetupAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema]);
 const parityEvidenceFields = { state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']), committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) };
 const PruneEvidenceSchema = Schema.Struct({kind:Schema.Literal('pruneBackups'),...parityEvidenceFields});
 const ReconcileEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityEvidenceFields });
@@ -181,7 +187,9 @@ const SignInEvidenceSchema = Schema.Struct({ kind: Schema.Literal('signIn'), ...
 const SignOutEvidenceSchema = Schema.Struct({ kind: Schema.Literal('signOut'), ...parityEvidenceFields });
 const SyncAccountEvidenceSchema = Schema.Struct({ kind: Schema.Literal('syncAccount'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
 const PatchMachineMetadataEvidenceSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
-export const ParityRunEvidenceSchema = Schema.Union([PruneEvidenceSchema, SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, SetupEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
+const PublishEvidenceSchema = Schema.Struct({ kind: Schema.Literal('publishDraft'), ...parityEvidenceFields });
+const AnnounceEvidenceSchema = Schema.Struct({ kind: Schema.Literal('announcePublication'), ...parityEvidenceFields });
+export const ParityRunEvidenceSchema = Schema.Union([PublishEvidenceSchema, AnnounceEvidenceSchema, PruneEvidenceSchema, SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, SetupEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
 const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId });
 const IntentTargets = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2));
 export const IntentItemSchema = Schema.Union([
@@ -228,9 +236,12 @@ export const SourceDecisionPreviewSchema = Schema.Struct({ ...previewFields, cha
 });
 const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsChangeSchema,retention:BackupPrunePlanSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
-export const ChangePreviewSchema = Schema.Union([PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
+const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
+export const ChangePreviewSchema = Schema.Union([PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
+export const PublicationResultSchema = Schema.Struct({ status: Schema.Literals(['succeeded', 'needs-preview']), message: Text });
 export const RunTerminalResultSchema = Schema.Union([
+  PublicationResultSchema,
   Schema.Struct({ status: Schema.Literal('done'), ok: CountSchema, failed: CountSchema }),
   Schema.Struct({ status: Schema.Literal('cancelled'), remaining: list(KeySchema) }),
   Schema.Struct({ status: Schema.Literals(['failed', 'interrupted']), message: Text }),
@@ -259,7 +270,9 @@ export const SkillInstallationSchema = Schema.Struct({
   nextActions: Schema.Array(NextActionSchema).check(Schema.isMaxLength(2)),
 });
 const intentFields = { requestId: IdSchema, inputDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u)), planId: IdSchema };
+export const PublicationSchema = Schema.Struct({ commit: Schema.NullOr(AuthorHeadSchema), pushed: Schema.Boolean, tagged: Schema.Boolean, announced: Schema.Array(ProfileNameSchema), pending: Schema.Array(ProfileNameSchema) });
 const runFields = {
+  publication: Schema.optionalKey(PublicationSchema),
   actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted', 'abandoned']),
   abandonedAt: Schema.optionalKey(OperationTimeSchema),
@@ -268,6 +281,8 @@ const runFields = {
   installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
 };
 export const RunViewSchema = Schema.Union([
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: PublishDraftChangeSchema, parity: PublishAcceptanceSchema, skillAddition: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(PublishEvidenceSchema) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AnnouncePublicationChangeSchema, parity: AnnounceAcceptanceSchema, skillAddition: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(AnnounceEvidenceSchema) }),
   Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:PruneBackupsChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:PruneAcceptanceSchema}),parity:Schema.optionalKey(PruneEvidenceSchema)}),
   Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:SetPolicyChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:SetPolicyAcceptanceSchema}),parity:Schema.optionalKey(SetPolicyEvidenceSchema)}),
   Schema.Struct({...runFields,intent:Schema.Struct({...intentFields,change:ResumeChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),parity:ResumeAcceptanceSchema}),parity:Schema.optionalKey(ResumeEvidenceSchema)}),
