@@ -413,3 +413,23 @@ test('a linked hosted baseline ignores holds from before its followed profile ex
   assert.equal(result._tag, 'Success');
   if (result._tag === 'Success') assert.equal(s.textAt(result.success.applied.repo, 'claude/CLAUDE.md'), '# current\n');
 });
+
+for (const profile of ['default', 'child']) test(`historical ${profile} snapshots retain unmatched machine overrides on disk`, async t => {
+  const s = fixture({ ...initial, 'profiles/default.json': '{}', 'profiles/child.json': '{}' }, profile);
+  t.after(() => rmSync(s.root, { recursive: true, force: true }));
+  s.publish(); s.trust(null);
+  const overrides = json({ version: 2, settings: { 'claude:settings.json': { effortLevel: 'low' } } });
+  const path = join(s.paths.stateRoot, 'overrides.json'); s.write(path, overrides);
+  const result = await s.source(source => Effect.gen(function* () {
+    const offered = yield* source.load((yield* source.fetch).head);
+    assert.equal(offered.desired.files.find(file => file.id === 'claude:settings.json')?.keys?.effortLevel?.value, 'low');
+    const baseline = yield* source.current;
+    assert.deepEqual(baseline.desired.issues, []);
+    const effective = yield* source.effective([]);
+    assert.deepEqual(effective.applied.desired.issues, []);
+    assert.deepEqual(effective.effective.desired.issues, []);
+    assert.equal(effective.applied.desired.files.find(file => file.id === 'claude:settings.json')?.keys?.effortLevel, undefined);
+  }));
+  assert.equal(result._tag, 'Success');
+  assert.equal(readFileSync(path, 'utf8'), overrides);
+});

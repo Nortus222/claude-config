@@ -7,7 +7,7 @@ import { rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { FsFailed, nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
-import { FollowedStore, SyncStore, SetupSource, followedSetupSourceLayer } from '@nortuscc/sync';
+import { FollowedStore, SyncStore, SetupSource, SetupsStore, followedSetupSourceLayer } from '@nortuscc/sync';
 import { startAgent, makeSession, makeHostedRuntime } from '../src/index.ts';
 import { prepareProfileOperation, readProfileOperation } from '../src/operations/profiles.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -394,4 +394,22 @@ test('a failure after clearing the baseline but before saving the follow can be 
       ? Effect.fail(new FsFailed({ op: 'write', path: join(f.m.paths.stateRoot, 'agent/followed.json'), reason: 'disk full' }))
       : store.write(next)) }));
   })).pipe(Effect.provide(f.processes)));
+});
+
+test('a trusted profile setup resolves its profile, not the root', async t => {
+  const f = await fixture(t); git(f.m.paths.repo, 'tag', 'v1');
+  git(f.m.paths.repo, 'remote', 'set-url', 'origin', url);
+  const offered = { ...shared, latestRevision: 1, owned: true };
+  const state: HostedState = { accountId: 'account', login: 'owner', machineId: 'machine', auth: 'signed-in', setups: [offered], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
+  const revision = { setupId: 'shared', number: 1, commitSha: f.commit, tag: 'v1', changelog: '', requiredEnv: [], items: [] };
+  await f.m.run(Effect.gen(function* () {
+    yield* (yield* SetupsStore).write([{ setupId: 'shared', accountId: 'account', repoUrl: url, checkout: f.m.paths.repo, trustedAt: '2026-10-16T12:00:00Z' }]);
+    const client = { state: Effect.succeed(state), recover: () => Effect.succeed(state), revisions: () => Effect.succeed([revision]), reportStatus: () => Effect.void } as unknown as HostedClient;
+    const runtime = yield* makeHostedRuntime(client, { domains: () => f.m.domains, os: 'macos' });
+    yield* runtime.runJobs;
+    const selected = yield* runtime.selectOperationSetup('shared');
+    assert.equal(selected.source?.profile, 'small');
+    const snapshot = yield* selected.source!.load(revision);
+    assert.equal(snapshot.desired.files.find(file => file.id === 'claude:settings.json')?.managed, false);
+  }).pipe(Effect.provide(f.processes)));
 });

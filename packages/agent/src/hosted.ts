@@ -102,7 +102,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
       if (!offered || normalizeRepoUrl(offered.repoUrl) !== normalizeRepoUrl(entry.repoUrl!) || selected.some((s) => s.source.setupId === entry.setupId)) { complete = false; if (!followed && entry.checkout === paths.repo) primaryUnavailable = true; continue; }
       const source = followed?.setupId === offered.setupId ? primary : yield* SetupSource.pipe(Effect.provide(hostedSetupSourceLayer(paths, {
         accountId: current.accountId!, currentAccountId: Effect.map(client.state, (s) => s.accountId), setupId: offered.setupId,
-        repoUrl: offered.repoUrl, records: records(offered.setupId, current.accountId!), processes,
+        repoUrl: offered.repoUrl, profile: offered.profile, records: records(offered.setupId, current.accountId!), processes,
       })));
       const cached = yield* records(offered.setupId, current.accountId!).pipe(Effect.catch(() => Effect.succeed(undefined)));
       if (cached === undefined) { complete = false; if (!followed && entry.checkout === paths.repo) primaryUnavailable = true; continue; }

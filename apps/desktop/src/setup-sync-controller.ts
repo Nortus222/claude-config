@@ -81,7 +81,7 @@ export class SetupSyncController {
     const reply = await operation(this.bridge!, name, input);
     return this.current(mark) && this.machine.ownsSession(mark.token, reply) ? reply.data : undefined;
   }
-  enter() { this.visible = true; if (!this.state.run) void this.discoverRun(); if (!this.state.review) void this.reload(); }
+  enter() { this.visible = true; if (!this.state.run && !this.state.preview) void this.discoverRun(); if (!this.state.review && !this.state.preview) void this.reload(); }
   leave() { this.visible = false; }
   refresh() {
     const maintenance = this.maintenance(), entering = maintenance && !this.inMaintenance;
