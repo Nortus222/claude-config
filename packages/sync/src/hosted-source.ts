@@ -30,6 +30,9 @@ const mismatch = (revision: Revision, reason: string) => Effect.fail(new Revisio
 const hash = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
+export const hostedBaselineRelative = (accountId: string, repoUrl: string, setupId: string): string =>
+  join('agent', 'baselines', accountId, hash(normalizeRepoUrl(repoUrl)), `${setupId}.json`);
+
 // HTTP records are untrusted metadata. Only explicit local account/repository consent followed
 // by exact remote tag and recomputed item verification authorizes these snapshots.
 export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
@@ -55,7 +58,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     ? options.repoUrl : `https://${options.repoUrl}`;
   const repoKey = hash(repoIdentity);
   const scope = hash([options.accountId, options.setupId, repoIdentity]);
-  const baselineRelative = join('agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
+  const baselineRelative = hostedBaselineRelative(options.accountId, options.repoUrl, options.setupId);
   const baselinePath = join(paths.stateRoot, baselineRelative);
   const clone = join(paths.stateRoot, 'agent', 'checkouts', options.accountId, repoKey, options.setupId);
   const hooks = join(paths.stateRoot, 'agent', 'empty-hooks');

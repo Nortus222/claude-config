@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/operations/coverage.ts';
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
-const reads = ['getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
-const changes = ['reconcile', 'machineIntent', 'capture', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'sourceDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
+const reads = ['inspectProfiles','inspectShareLink','getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
+const changes = ['followProfile','reconcile', 'machineIntent', 'capture', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'sourceDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {
   const rows = Object.values(engineCapabilityCoverage);

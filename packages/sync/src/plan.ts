@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 import { INTEGRATIONS_SOURCE, type MachineOverrides, type ProfileInvalid } from '@nortuscc/profile-engine';
 import type { Fs, FsFailed, LaunchFailed, Processes } from '@nortuscc/machine';
-import { desiredOfDocuments } from './documents.ts';
+import { desiredOfDocuments, hasProfile } from './documents.ts';
 import { composeDocumentsWithStaleHolds } from './compose.ts';
 import { commitDocuments } from './git.ts';
 import { diffItems, itemValues, parseItemId, type ItemChange, type ItemValues } from './items.ts';
@@ -102,7 +102,9 @@ export const incoming = (input: {
   Effect.gen(function* () {
     if (input.applied === input.head && Object.keys(input.holds).length === 0) return { changes: [], conflicts: [], staleHolds: [] };
     const appliedDocuments = yield* commitDocuments(input.repo, input.applied);
-    const { documents: currentDocuments, staleHolds } = yield* composeDocumentsWithStaleHolds({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds, profile: input.profile });
+    const { documents: currentDocuments, staleHolds } = hasProfile(appliedDocuments, input.profile)
+      ? yield* composeDocumentsWithStaleHolds({ repo: input.repo, head: { kind: 'commit', commit: input.applied }, held: input.holds, profile: input.profile })
+      : { documents: appliedDocuments, staleHolds: (yield* composeDocumentsWithStaleHolds({ repo: input.repo, head: { kind: 'commit', commit: input.head }, held: input.holds, profile: input.profile })).staleHolds };
     const headDocuments = yield* commitDocuments(input.repo, input.head);
     // Invalid integration declarations are unavailable, not evidence that every integration was removed.
     const unavailableIntegrations = input.validation === 'cli-independent-integrations'

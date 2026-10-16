@@ -28,3 +28,27 @@ test('the preview lists each staged action before Apply', async t => {
   assert.match(html, /aria-label="Reviewed choices"[\s\S]*setting:a[\s\S]*Use the setup value/);
   assert.match(html, />Apply reviewed choices</);
 });
+
+test('profile controls show the followed identity and dropped choices before Apply', async t => {
+  const f = await fixture();
+  f.handlers.inspectProfiles = () => ({ followed: { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null }, available: [{ name: 'default', extends: null }, { name: 'small', extends: 'default' }] });
+  f.handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [], droppedChoices: { holds: ['skill:owner/repo/old'], overrides: ['skills.old'] }, actionEffects: ['Inspect only'] });
+  const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
+  await c.reload(); await c.switchProfile('small');
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(html, /Following default from https:\/\/github.com\/example\/profiles.git/);
+  assert.match(html, /Switch profile/); assert.match(html, /Follow a shared link/);
+  assert.ok(html.indexOf('skill:owner/repo/old') < html.indexOf('>Apply reviewed choices<'));
+  assert.match(html, /Override: <code>skills.old/);
+});
+
+
+test('profile listing failures appear inline while the cached review stays visible', async t => {
+  const f = await fixture();
+  f.handlers.inspectProfiles = () => { throw new Error('Profile clone unavailable'); };
+  const c = new SetupSyncController(f.bridge, f.machine); t.after(() => { c.dispose(); f.machine.dispose(); });
+  await c.reload();
+  const html = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
+  assert.match(html, /Profile clone unavailable/);
+  assert.match(html, /Current value of setting:a/);
+});

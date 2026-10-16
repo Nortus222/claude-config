@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -104,12 +104,14 @@ test('proveReadAccess reports denial distinctly from network failure', async () 
   }
 });
 
-test('a migrated checkout baseline keeps undecided incoming items at their applied values', async t => {
+test('a migrated machine without an applied commit keeps its migration baseline', async t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const next = f.commit({ 'claude/CLAUDE.md': '# incoming\n' }); f.git('push', '-q', 'origin', 'main');
   await f.run(s => Effect.gen(function* () {
     yield* s.fetch;
     execFileSync('git', ['--git-dir', sync.followedClone(f.paths, URL), 'update-ref', 'refs/nortuscc/migration/applied', f.first]);
+    mkdirSync(f.paths.stateRoot, { recursive: true });
+    writeFileSync(join(f.paths.stateRoot, 'state.json'), JSON.stringify({ version: 1, repo: '/previous-checkout', files: { 'claude:CLAUDE.md': { hash: 'previous', appliedAt: '2026-10-15T00:00:00Z' } } }));
     const result = yield* s.effective([]);
     assert.equal(result.applied.revision, f.first);
     assert.equal(f.text(result.effective), '# first\n');
@@ -142,6 +144,36 @@ test("a followed profile's items drive incoming changes", async t => {
         const accepted = yield* s.effective([{ setupId: 'local', itemId: 'file:claude:CLAUDE.md', revision: null, commit: next, decision: 'accept', decidedAt: '2026-10-15T00:00:00Z', machineId: null, source: 'local' }]);
         assert.equal(text(accepted.effective), changedProfile === 'personal' ? '# profile change\n' : '# first\n');
       }), null, 'personal');
+    });
+  }
+});
+
+
+test('an explicitly cleared applied baseline offers every item as added and does not reuse a migration baseline', async t => {
+  for (const profile of ['default', 'personal']) {
+    await t.test(profile, async t => {
+      const f = fixture({ ...docs, [`profiles/${profile}.json`]: '{}' });
+      t.after(() => rmSync(f.root, { recursive: true, force: true }));
+      await f.run(s => Effect.gen(function* () {
+        yield* s.fetch;
+        execFileSync('git', ['--git-dir', sync.followedClone(f.paths, URL), 'update-ref', 'refs/nortuscc/migration/applied', f.first]);
+        mkdirSync(f.paths.stateRoot, { recursive: true });
+        const statePath = join(f.paths.stateRoot, 'state.json');
+        writeFileSync(statePath, '{"version":1,"repo":null,"files":{}}');
+        yield* sync.markFollowedBaselineEmpty(f.paths, { repoUrl: URL, profile: 'default', setupId: null }).pipe(Effect.provide(nodeProcesses()));
+        const observed = yield* sync.observeSyncSource(s, []).pipe(Effect.provide(nodeFs));
+        assert.deepEqual(observed.changes.map(({ itemId, kind, before }) => ({ itemId, kind, before })), [{ itemId: 'file:claude:CLAUDE.md', kind: 'file', before: undefined }]);
+        assert.equal(f.text(observed.offered), '# first\n');
+        assert.equal(observed.effective.applied.desired.issues.length, 0);
+        assert.equal(existsSync(join(observed.effective.effective.repo, 'claude/CLAUDE.md')), false);
+        const accepted = yield* s.effective([{ setupId: 'local', itemId: 'file:claude:CLAUDE.md', revision: null, commit: f.first, decision: 'accept', decidedAt: '2026-10-16T12:00:00Z', machineId: null, source: 'local' }]);
+        assert.equal(f.text(accepted.effective), '# first\n');
+        assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).applied, undefined);
+        writeFileSync(statePath, JSON.stringify({ version: 1, repo: null, files: {}, applied: { commit: f.first, at: '2026-10-16T12:00:00Z' } }));
+        const applied = yield* sync.observeSyncSource(s, []).pipe(Effect.provide(nodeFs));
+        assert.deepEqual(applied.changes, []);
+        assert.equal(applied.effective.applied.revision, f.first);
+      }), null, profile);
     });
   }
 });

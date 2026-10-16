@@ -78,14 +78,20 @@ export function refuseInvalidOverrides(overrides: Input<MachineOverrides>): bool
   return true;
 }
 
+const requireRootSetup = (paths: MachinePathsValue, layer: Layer.Layer<CliServices>) => Effect.gen(function* () {
+  if (yield* Fs.use(fs => fs.exists(join(paths.repo, 'profiles'))).pipe(Effect.provide(layer)))
+    return yield* Effect.fail(new Error('This setup uses profiles; use the desktop app.'));
+});
+
 // Builds this machine's paths (unless given) and services, reads its overrides and loads the desired
 // configuration. With `mode`, the profile is loaded with the run's config-mode choice applied.
 // Override issues are reported to stderr and the run continues; commands that change anything then
 // refuse through refuseInvalidOverrides.
-export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}): Effect.Effect<Opened, RepoNotFound | ReadFailed | FsFailed> {
+export function openMachine(options: { mode?: ConfigMode; paths?: MachinePathsValue } = {}): Effect.Effect<Opened, RepoNotFound | ReadFailed | FsFailed | Error> {
   return Effect.gen(function* () {
     const paths = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
     const layer = cliLayer(paths);
+    yield* requireRootSetup(paths, layer);
     const overrides = yield* Effect.gen(function* () {
       return yield* (yield* OverridesStore).read;
     }).pipe(Effect.provide(layer));
@@ -150,6 +156,7 @@ export function openDesired(options: { mode?: ConfigMode; paths?: MachinePathsVa
   return Effect.gen(function* () {
     const original = options.paths ?? (yield* resolvePaths((m) => console.error(m)));
     const layer = cliLayer(original);
+    yield* requireRootSetup(original, layer);
     const preflight = options.readOnly ? undefined : yield* checkoutPreflight(original).pipe(Effect.provide(layer));
     if (!options.readOnly) yield* withCheckoutFence(original, Effect.void).pipe(Effect.provide(layer));
     const opened = { ...(yield* openMachine({ ...options, paths: original })), preflight };

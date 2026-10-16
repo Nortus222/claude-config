@@ -22,3 +22,5 @@ export * from './setup-choices.ts';
 export * from './resolved-items.ts';
 export * from './followed.ts';
 export * from './followed-source.ts';
+
+export { privateFollowedRepository, fetchFollowedMain, FOLLOWED_MAIN } from './followed-repository.ts';
