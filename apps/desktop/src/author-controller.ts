@@ -1,6 +1,6 @@
 import type { ChangePreview, OperationChange, OperationInput, OperationName, OperationOutput, RunView } from '@nortuscc/agent/operations';
 import type { Bridge, HostEvent } from './bridge.ts';
-import type { MachineController } from './controller.ts';
+import { AUTHOR_RUN_KINDS, type MachineController } from './controller.ts';
 import { operation } from './operations.ts';
 
 export type AuthorIntent = Extract<OperationChange, { kind: 'editDraft' }>['intent'];
@@ -21,7 +21,7 @@ const RUN_LIMIT = 100;
 const RUN_PAGES = 5;
 const active = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const publication = (run: RunView) => run.intent.change.kind === 'publishDraft' || run.intent.change.kind === 'announcePublication';
-const author = (run: RunView) => publication(run) || ['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin'].includes(run.intent.change.kind);
+const author = (run: RunView) => AUTHOR_RUN_KINDS.has(run.intent.change.kind);
 
 // Draft plans belong to one agent session. Only matching durable receipts confirm writes or publication.
 export class AuthorController {

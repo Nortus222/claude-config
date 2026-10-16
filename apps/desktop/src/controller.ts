@@ -38,6 +38,11 @@ export const canCancel = (state: ViewState) => state.connection === 'connected'
   && (state.run?.outcome === 'running' || state.status?.applying === true);
 
 const MAX_EARLY_EVENTS = 10_000;
+// The author pages own drafts, gh sign-in and publication runs; they never become this machine's run.
+export const AUTHOR_RUN_KINDS: ReadonlySet<string> = new Set(['editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication']);
+const machineRun = (run: OperationRunView) => !AUTHOR_RUN_KINDS.has(run.intent.change.kind);
+// Discovery reads a page of the newest runs and adopts the newest machine run among them.
+const DISCOVERY_PAGE = 50;
 const STALE = 'The machine changed since this preview. Review the updated plan, then apply again.';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const backups = (path: string | undefined) => (path ? { backups: path } : {});
@@ -250,7 +255,7 @@ export class MachineController {
     if (discovery) this.runDiscovery = discovery;
     try {
       const reply = runId ? await this.bridge.invoke('get_operation_run', { runId })
-        : await this.bridge.invoke('list_operation_runs', { limit: 1 });
+        : await this.bridge.invoke('list_operation_runs', { limit: DISCOVERY_PAGE });
       if (!this.ownsSession(token, reply) || (runId ? targetedRead !== this.latestRunRead : this.runDiscovery !== discovery)) return;
       if (!runId && this.discoveryFlight?.dirty) return;
       if (discovery?.overflow) {
@@ -261,8 +266,8 @@ export class MachineController {
         return;
       }
       const receipt = runId ? checkedReply(decodeRunView, reply.data)
-        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs[0];
-      if (!receipt || runId && receipt.runId !== runId) return;
+        : checkedReply(value => decodeOperationOutput('listRuns', value), reply.data).runs.find(machineRun);
+      if (!receipt || runId && receipt.runId !== runId || !machineRun(receipt)) return;
       const current = this.state.run;
       if (current && current.runId !== receipt.runId && current.outcome === 'running') return;
       if (!runId && current?.runId === receipt.runId && targetedAtStart !== this.latestRunRead) return;
