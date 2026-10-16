@@ -1,6 +1,8 @@
 export * from './model.ts';
 export { ProfileInvalid, ReadFailed } from './errors.ts';
-export { ProfileFiles, loadProfile, memoryFiles, nodeFiles, requireValid } from './load.ts';
+export { ProfileFiles, loadProfile, loadNamedProfile, listProfiles, memoryFiles, nodeFiles, requireValid } from './load.ts';
+export { parseProfileDocument, isProfileName, type ProfileDocument } from './profile-document.ts';
+export { resolveNamedProfile, profilesUsingPath, PROFILE_MAX_DEPTH } from './profile-chain.ts';
 export { buildBaseProfile } from './base.ts';
 export type { BaseTexts } from './base.ts';
 export { resolveProfile } from './resolve.ts';

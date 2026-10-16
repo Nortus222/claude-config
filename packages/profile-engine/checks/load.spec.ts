@@ -48,6 +48,7 @@ test('a read failure is ReadFailed, not an absent file', async () => {
   const failing = Layer.succeed(ProfileFiles, {
     readText: (path: string) => Effect.fail(new ReadFailed({ path, reason: 'denied' })),
     exists: () => Effect.succeed(false),
+    list: () => Effect.succeed(undefined),
   });
   const error = await run(Effect.flip(loadProfile('/repo')), failing);
   assert.equal(error._tag, 'ReadFailed');

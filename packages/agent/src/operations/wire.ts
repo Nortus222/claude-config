@@ -24,7 +24,7 @@ export const HistoryCursorSchema = Schema.Struct({
 export const WirePausedSchema = Schema.NullOr(Schema.Struct({ reason: Schema.String, at: Schema.String }));
 
 const Domain = Schema.Literals(['config', 'integrations', 'skills']);
-const Origin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String });
+const Origin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: Schema.String });
 
 export const ObservedSchema = Schema.Struct({
   key: Schema.String,
@@ -38,7 +38,7 @@ export const ObservedSchema = Schema.Struct({
   note: Schema.optionalKey(Schema.String),
   from: Schema.optionalKey(Origin),
 });
-export const IssueSchema = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: Schema.String, path: Schema.String, message: Schema.String });
+export const IssueSchema = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: Schema.String, path: Schema.String, message: Schema.String });
 export const ProfileSchema = Schema.Struct({ repo: Schema.String, revision: Schema.NullOr(Schema.String), overrides: Schema.String, issues: Schema.Array(IssueSchema) });
 
 export const StepSchema = Schema.Struct({

@@ -166,3 +166,23 @@ test('names that match Object.prototype members get no inherited override or pin
   assert.equal(integration.enabled, true);
   assert.equal(integration.from.layer, 'base');
 });
+
+test('profile layer origins survive pins and yield to machine choices', () => {
+  const from = { layer: 'profile', source: 'profiles/personal.json' } as const;
+  const config = resolveProfile({
+    base,
+    layers: {
+      files: new Map([['claude:settings.json', { from, managed: true }]]),
+      skills: new Map([['a/core/tdd', { from, install: false }]]),
+      integrations: new Map([['sp-claude', from]]),
+    },
+    pins: pinned({ 'a/core': 'abc123', 'b/team': 'def456' }),
+    declaredSources: ['b/team'],
+    overrides: machine({ skills: { tdd: true } }),
+  });
+  assert.deepEqual(config.issues, []);
+  assert.deepEqual(config.files.find(f => f.id === 'claude:settings.json')!.keys!.theme!.from, from);
+  assert.deepEqual(config.integrations[0]!.from, from);
+  assert.deepEqual(config.skills.find(s => s.source === 'a/core' && s.name === 'tdd')!.from, M);
+  assert.equal(config.skills.find(s => s.source === 'a/core')!.pin!.ref, 'abc123');
+});

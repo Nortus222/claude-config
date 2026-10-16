@@ -138,6 +138,7 @@ export const makeSkillOperations = (options: {
   const profileFiles = Layer.succeed(ProfileFiles, {
     readText: path => fs.readText(path).pipe(Effect.mapError(e => new ReadFailed({ path, reason: e.message }))),
     exists: fs.exists,
+    list: path => fs.list(path).pipe(Effect.mapError(e => new ReadFailed({ path, reason: e.message }))),
   });
   const previewSkillChange = (input: OperationInput<'previewChange'>) => bounded(Effect.gen(function* () {
     const args = yield* Effect.try({ try: () => decodeOperationInput('previewChange', input), catch: () => new SkillOperationError('INVALID_REQUEST', 'Invalid skill addition') });

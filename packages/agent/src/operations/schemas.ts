@@ -182,7 +182,7 @@ const SignOutEvidenceSchema = Schema.Struct({ kind: Schema.Literal('signOut'), .
 const SyncAccountEvidenceSchema = Schema.Struct({ kind: Schema.Literal('syncAccount'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
 const PatchMachineMetadataEvidenceSchema = Schema.Struct({ kind: Schema.Literal('patchMachineMetadata'), ...parityEvidenceFields, metadata: Schema.optionalKey(Schema.Literal('locally-queued')) });
 export const ParityRunEvidenceSchema = Schema.Union([PruneEvidenceSchema, SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, SetupEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
-const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId });
+const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId });
 const IntentTargets = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2));
 export const IntentItemSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('manageConfig'), value: Schema.Boolean, from: IntentOrigin }),
@@ -192,7 +192,7 @@ export const IntentItemSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, choice: Schema.NullOr(Schema.Boolean), defaultEnabled: Schema.Boolean, enabled: Schema.Boolean, from: IntentOrigin, declaredFrom: IntentOrigin, targets: IntentTargets,
     policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']), revision: Schema.optionalKey(SkillRevisionSchema) }),
   Schema.Struct({ kind: Schema.Literal('integration'), id: PatchId, type: Schema.Literals(['hook', 'mcp', 'plugin', 'marketplace', 'unknown']), target: Schema.optionalKey(Schema.Literals(['claude', 'codex'])), enabled: Schema.Boolean, from: IntentOrigin, prerequisites: Schema.Array(Text).check(Schema.isMaxLength(4)) }),
-  Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine']), source: PatchId, message: Schema.Literal('Configuration input is invalid; inspect the owning document in the app') }),
+  Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId, message: Schema.Literal('Configuration input is invalid; inspect the owning document in the app') }),
 ]);
 export const IntentInspectionResultSchema = Schema.Struct({ generation: IdSchema, items: Schema.Array(IntentItemSchema).check(Schema.isMaxLength(100)), nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(512))), limitReason: Schema.optionalKey(Schema.Literals(['record-bytes', 'result-bytes', 'value-limit', 'unsafe-value', 'identity-limit'])) });
 export const MachineIntentDetailsSchema = Schema.Struct({
