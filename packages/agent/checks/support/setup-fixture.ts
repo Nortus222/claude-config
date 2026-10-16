@@ -1,9 +1,9 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import type { Decision } from '@nortuscc/machine';
-import { revisionCommit, type Revision } from '@nortuscc/sync';
+import { desiredOfDocuments, patchItem, revisionCommit, type Revision } from '@nortuscc/sync';
 import { RevisionMismatch, RevisionUnavailable, SetupSource, type Snapshot } from '../../src/index.ts';
 
 export const APPLIED = 'a'.repeat(40);
@@ -31,20 +31,20 @@ export const accept = (itemId: string, commit = HEAD): Decision => ({
 
 export type SourceCall = 'fetch' | 'load' | 'effective' | 'current';
 export type FixtureOptions = {
+  readonly appliedFiles?: Readonly<Record<string, string>>;
   readonly headFiles?: Readonly<Record<string, string>>;
   readonly rejectHead?: boolean;
+  readonly composeStateRoot?: string;
   // Calls that fail with RevisionUnavailable; the returned `unavailable` set can change between jobs.
   readonly unavailable?: ReadonlyArray<SourceCall>;
 };
 
-// Two commits of a setup repo as directories, and a fake #43 SetupSource over them. Until #43
-// composes effective configurations item by item, the fake takes the whole head commit once any
-// of its items is accepted; sort.spec covers per-item skipping. The checkout's HEAD (`current`) is
-// the head commit. `calls` lists every call the job made, in order.
+// Two setup snapshots with recorded calls. composeStateRoot enables per-item composition using
+// real profile documents and the fixture machine's current overrides and holds.
 export const setupFixture = (root: string, options: FixtureOptions = {}) => {
   const dirs: Readonly<Record<string, string>> = { [APPLIED]: join(root, 'applied'), [HEAD]: join(root, 'head') };
   const files: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-    [APPLIED]: APPLIED_FILES,
+    [APPLIED]: { ...APPLIED_FILES, ...options.appliedFiles },
     [HEAD]: { ...HEAD_FILES, ...options.headFiles },
   };
   for (const revision of [APPLIED, HEAD]) {
@@ -75,11 +75,34 @@ export const setupFixture = (root: string, options: FixtureOptions = {}) => {
         if (dirs[revisionCommit(revision)] === undefined) return yield* Effect.fail(new RevisionUnavailable({ revision, reason: 'unknown commit' }));
         return yield* snapshot(revisionCommit(revision));
       }),
-    effective: (decisions) =>
+    effective: (decisions, choices) =>
       Effect.gen(function* () {
         yield* called('effective');
         if (unavailable.has('effective')) return yield* down('effective', HEAD);
         const applied = yield* snapshot(APPLIED);
+        if (options.composeStateRoot) {
+          const read = (name: string) => {
+            const path = join(options.composeStateRoot!, name);
+            return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
+          };
+          const holds = choices?.holds ?? read('sync.json').held ?? {};
+          const overrides = choices?.overrides.value ?? (() => { const { version, ...value } = read('overrides.json'); return value; })();
+          let documents = files[APPLIED]!;
+          for (const id of Object.keys(holds).sort()) documents = patchItem(documents, id, files[holds[id]] ?? {});
+          const current = documents;
+          for (const decision of decisions) {
+            if (decision.commit === HEAD && decision.decision === 'accept' && !Object.hasOwn(holds, decision.itemId)) {
+              documents = patchItem(documents, decision.itemId, files[HEAD]!);
+            }
+          }
+          const repo = join(root, 'composed');
+          for (const [path, text] of Object.entries(documents)) {
+            mkdirSync(dirname(join(repo, path)), { recursive: true });
+            writeFileSync(join(repo, path), text);
+          }
+          return { applied: { desired: desiredOfDocuments(current), repo: applied.repo, revision: APPLIED },
+            effective: { desired: desiredOfDocuments(documents, { value: overrides, issues: [], source: 'fixture' }), repo }, conflicts: [] };
+        }
         const accepted = decisions.some((d) => d.commit === HEAD && d.decision === 'accept');
         return { applied: { ...applied, revision: APPLIED }, effective: accepted ? yield* snapshot(HEAD) : applied, conflicts: [] };
       }),

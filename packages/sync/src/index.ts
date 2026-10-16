@@ -17,3 +17,4 @@ export * from './hosted-source.ts';
 
 export * from './decisions.ts';
 export * from './checkout-coherence.ts';
+export * from './setup-choices.ts';

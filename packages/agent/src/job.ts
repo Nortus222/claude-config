@@ -4,7 +4,7 @@ import {
   type HistoryEvent, type ItemReason, type MachinePathsValue, type MachineReport,
 } from '@nortuscc/machine';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
-import { LOCAL_SETUP, ownSetup, revisionIdentity, revisionSetupId, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
+import { observeSyncSource, LOCAL_SETUP, ownSetup, revisionIdentity, revisionSetupId, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain, AgentDomains } from './layer.ts';
@@ -180,3 +180,9 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
       return yield* finish({ ...base, pending: sorted.pending, drift: sorted.drift, ...(applied ? { autoApply: applied } : {}) }, inspection);
     }).pipe(Effect.provide(at(resolved.effective.repo)));
   });
+
+// Setup review bypasses policy, migrations, pause recovery, History and the scheduler entirely.
+export const inspectSetupSource = (
+  source: SetupSource['Service'], decisions: readonly import('@nortuscc/machine').Decision[],
+  options: { refetch: boolean; revision?: Revision } = { refetch: true },
+) => observeSyncSource(source, decisions, false, options.refetch ? undefined : options.revision);

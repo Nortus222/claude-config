@@ -17,6 +17,7 @@ import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { acceptedSkillTuple, additionRunPlan, makeAdditionDriver, type AdditionInvocation } from '../skill-addition.ts';
 import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } from '../skill-operations.ts';
+import { readSetupReview, prepareSetupApply } from '../operations/setup.ts';
 import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
 import { prepareCaptureChange } from '../operations/capture.ts';
@@ -57,6 +58,7 @@ export type AgentSession = {
   readonly pinImpact: (input: OperationInput<'pinImpact'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'pinImpact'>, SessionError>;
   readonly draftChangelog: (input: OperationInput<'draftChangelog'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftChangelog'>, SessionError>;
   readonly inspectSetups: (input: OperationInput<'inspectSetups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSetups'>, SessionError>;
+  readonly setupReview: (input: OperationInput<'setupReview'>) => Effect.Effect<import('../operations/index.ts').SetupReview, SessionError>;
   readonly incomingChanges: (input: OperationInput<'incomingChanges'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'incomingChanges'>, SessionError>;
   readonly prepareTrustRequest: (input: OperationInput<'prepareTrustRequest'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'prepareTrustRequest'>, SessionError>;
   readonly inspectUpdates: (input: OperationInput<'inspectUpdates'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectUpdates'>, SessionError>;
@@ -306,12 +308,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return yield* retainParityChange(prepared);
         }));
       }
-      if (input.change.kind === 'syncDecision') {
+      if (input.change.kind === 'syncDecision' || input.change.kind === 'setupApply') {
         if (active) return yield* Effect.fail(busy);
         const change = input.change;
         return yield* handle.exclusive(Effect.gen(function* () {
           const generation = yield* (handle.generation ?? Effect.succeed(0));
-          const prepared = yield* prepareSyncOperation(handle, change, generation).pipe(Effect.provideContext(context));
+          const prepared = yield* (change.kind === 'setupApply' ? prepareSetupApply(handle, change, generation) : prepareSyncOperation(handle, change, generation)).pipe(Effect.provideContext(context));
           if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation)
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed'));
           return yield* retainParityChange(prepared);
@@ -390,6 +392,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             }), false));
             if (Exit.isFailure(validation)) {
               const error = Cause.squash(validation.cause);
+              if (prepared.preview.change.kind === 'setupApply' && error instanceof SessionError && error.code === 'UNKNOWN_PLAN') {
+                const input = prepared.preview.change;
+                const review = yield* readSetupReview(handle, { scope: { kind: 'machine' }, setupId: input.setupId, refetch: true, limit: 100 }, yield* (handle.generation ?? Effect.succeed(0))).pipe(Effect.provideContext(context));
+                const replacement = yield* retainPrepared(yield* prepareSetupApply(handle, { ...input, revision: review.revision }, yield* (handle.generation ?? Effect.succeed(0))).pipe(Effect.provideContext(context)), true);
+                return { status: 'stale' as const, planId: replacement.planId, plan: replacement.plan as WirePlan, preview: replacement };
+              }
               if (prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0)))
                 || prepared.preview.change.kind !== 'reconcile' || !(error instanceof SessionError) || error.code !== 'UNKNOWN_PLAN')
                 return yield* Effect.failCause(validation.cause);
@@ -643,6 +651,15 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       pinImpact: input => sourceRead('pinImpact',input),
       draftChangelog: input => sourceRead('draftChangelog',input),
       inspectSetups: input => syncRead('inspectSetups', input),
+      setupReview: input => handle.exclusive(Effect.gen(function* () {
+        const args = yield* Effect.try({ try: () => decodeOperationInput('setupReview', input), catch: () => new SessionError('INVALID_REQUEST', 'Invalid setup review') });
+        if (args.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'Setup supports machine scope only'));
+        const generation = yield* (handle.generation ?? Effect.succeed(0));
+        const inspection = yield* handle.inspection;
+        const review = yield* readSetupReview(handle, args, generation).pipe(Effect.provideContext(context));
+        if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Setup observation changed'));
+        return review;
+      })),
       incomingChanges: input => syncRead('incomingChanges', input),
       prepareTrustRequest: input => syncRead('prepareTrustRequest', input),
       runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
