@@ -40,8 +40,8 @@ const fixture = async (t: import('node:test').TestContext, intercept?: (command:
       const response = intercept?.(c); if (response) return response;
       if (c.cmd === 'gh') return Effect.succeed({ code: 0, stdout: c.args[0] === 'api' ? '{"login":"fixture","id":42}' : '' });
       assert.equal(c.cmd, 'git');
-      if (c.args.includes('get-url')) return Effect.succeed({ code: 0, stdout: repoUrl });
-      return processes.run({ ...c, args: c.args.map(a => a === repoUrl ? origin : a) });
+      const transport = c.args.some(a => ['clone', 'fetch', 'push', 'ls-remote'].includes(a));
+      return processes.run({ ...c, args: transport ? ['-c', `url.${origin}.insteadOf=${repoUrl}`, ...c.args] : c.args });
     } }), Effect.provideService(RunStore, { ...runStore, write: receipt => failChallenge && receipt.view.ghCode ? Effect.fail(new RunStoreError('Challenge storage failed')) : runStore.write(receipt) }));
   })), setup.source);
   return { m, within, git, origin, commands };
@@ -427,5 +427,43 @@ test('oversized machine file is reported truncated and cannot be captured', asyn
     const value = (yield* read(s, 'machineFile', { fileId: 'claude:CLAUDE.md' })) as { text: string; truncated: boolean };
     assert.equal(value.truncated, true); assert.equal(Buffer.byteLength(value.text), 262_144);
     assert.throws(() => decodeOperationInput('previewChange', { change: { kind: 'editDraft', draftId: null, intent: { kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'x'.repeat(262_145), choice: {kind:'updateShared'} } } }));
+  }));
+});
+
+
+test('author operations use the migrated followed repository through a real agent session', async t => {
+  const f = await fixture(t);
+  f.m.write(join(f.m.paths.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed: { repoUrl, profile: 'personal', setupId: 'hosted-setup' } }));
+  f.git('-C', f.m.paths.repo, 'remote', 'set-url', 'origin', 'https://github.com/unrelated/checkout');
+  await f.within(s => Effect.gen(function* () {
+    const profiles = (yield* read(s, 'authorProfiles')) as any;
+    assert.equal(profiles.repoUrl, repoUrl);
+    assert.deepEqual(profiles.profiles.map((p: any) => p.name), ['base', 'personal', 'team']);
+    assert.deepEqual(yield* read(s, 'upstreams'), { sources: [] });
+    const preview = yield* s.previewChange({ kind: 'editDraft', draftId: null, intent: { kind: 'createProfile', profile: 'new', extends: 'base' } } as any);
+    assert.equal((yield* apply(s, preview.planId, 'followed-edit')).state, 'succeeded');
+    assert.equal(((yield* read(s, 'drafts')) as any).drafts[0].repoUrl, repoUrl);
+  }));
+});
+
+test('author repository credentials are removed before drafts and receipts are stored', async t => {
+  const f = await fixture(t);
+  f.git('-C', f.m.paths.repo, 'remote', 'set-url', 'origin', 'https://user:secret@github.com/example/setup.git');
+  await f.within(s => Effect.gen(function* () {
+    const preview = yield* s.previewChange({ kind: 'editDraft', draftId: null, intent: { kind: 'createProfile', profile: 'new', extends: 'base' } } as any);
+    const run = yield* apply(s, preview.planId, 'credential-free-edit');
+    assert.equal(run.state, 'succeeded');
+    const drafts = (yield* read(s, 'drafts')) as any;
+    assert.equal(drafts.drafts[0].repoUrl, repoUrl);
+    assert.ok(!JSON.stringify(run).includes('secret'));
+  }));
+});
+
+test('author operations ask to follow a setup when no repository origin exists', async t => {
+  const f = await fixture(t);
+  f.git('-C', f.m.paths.repo, 'remote', 'remove', 'origin');
+  await f.within(s => Effect.gen(function* () {
+    const error = yield* Effect.flip(read(s, 'authorProfiles'));
+    assert.equal((error as any).message, 'Follow your setup repository first');
   }));
 });

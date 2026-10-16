@@ -4,7 +4,7 @@ import { basename, join } from 'node:path';
 import { Effect, Layer, Schema, Semaphore } from 'effect';
 import { Backups, Fs, MachinePaths, Processes, homeDir, backupsForRun, canonical } from '@nortuscc/machine';
 import { listProfiles, memoryFiles, parseProfileDocument, resolveNamedProfile } from '@nortuscc/profile-engine';
-import { AccessDenied, readDocuments } from '@nortuscc/sync';
+import { AccessDenied, FollowedStore, originUrl, readDocuments } from '@nortuscc/sync';
 import { Git, IGNORES_FILE, discoverSkills, machineGit, readSkillContents } from '@nortuscc/source-watch';
 import { DraftStore, draftStore, type Draft } from '../author/drafts.ts';
 import { CAPTURE_MAX_BYTES } from '../author/intents.ts';
@@ -32,6 +32,7 @@ const stale = () => new SessionError('UNKNOWN_PLAN', 'Draft or author repository
 // Capture the machine services once; all author writes are local drafts or the private clone.
 export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function* () {
   const paths = yield* MachinePaths; const fs = yield* Fs; const processes = yield* Processes;
+  const followed = yield* FollowedStore;
   const runs = yield* RunStore; const clock = yield* AgentClock; const environment = yield* AgentSourceEnvironment;
   const env = environment.env ?? {};
   const base = Layer.mergeAll(Layer.succeed(MachinePaths, paths), Layer.succeed(Fs, fs), Layer.succeed(Processes, processes), Layer.succeed(RunStore, runs));
@@ -54,9 +55,13 @@ export const makeAuthorOperations = (handle: AgentHandle) => Effect.gen(function
     }).pipe(gate.withPermit);
     const sourcesPath = join(paths.stateRoot, 'agent', 'author', 'sources.json');
     const repo = Effect.gen(function* () {
-      const setup = handle.selectOperationSetup ? yield* handle.selectOperationSetup('local') : undefined;
-      if (!setup?.trusted || !setup.repository) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Trust the configured author repository in the app'));
-      return (yield* git.run(['remote', 'get-url', 'origin'], { cwd: setup.repository })).trim();
+      const selection = yield* followed.read;
+      const url = selection?.repoUrl ?? (yield* originUrl(paths.repo));
+      if (!url) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Follow your setup repository first'));
+      // HTTPS credentials must never enter drafts, run receipts or hosted metadata.
+      if (!url.includes('://')) return url;
+      const clean = new URL(url); clean.username = ''; clean.password = '';
+      return clean.toString();
     });
     const failure = (error: unknown): Effect.Effect<never, SessionError> => Effect.gen(function* () {
       if (error instanceof SessionError) return yield* Effect.fail(error);
