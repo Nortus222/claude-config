@@ -1,0 +1,20 @@
+/* Changes: the preview panel, run card, On this Mac and Details. Shared setup-sync rules live in style.css. */
+.changes-preview { border: 1px solid #3d5a48; background: #151c18; border-radius: 10px; }
+.changes-preview .primary { min-width: 0; }
+.changes-preview .notice { margin-bottom: 0; }
+.changes-run { border: 1px solid #2c3440; border-radius: 10px; }
+.changes-run p { margin: 0; }
+.changes-label { min-width: 0; overflow-wrap: anywhere; }
+.changes-label strong { font-weight: 600; color: #e3e9ef; }
+.changes-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.changes-list li, .changes-local .setup-sync-choice span { display: grid; gap: 2px; min-width: 0; }
+.changes-list small, .changes-local .setup-sync-choice small { color: #909ba9; font-size: 11px; }
+.changes-local-group { display: grid; gap: 6px; padding-top: 6px; border-top: 1px solid #262e38; }
+.changes-local-group button { justify-self: start; }
+.changes-details { margin: 0 0 14px; padding: 12px 20px; border: 1px solid #2c3440; border-radius: 10px; display: grid; gap: 10px; min-width: 0; }
+.changes-details > summary { cursor: pointer; color: #c3ccd6; font-weight: 600; }
+.changes-details :is(td, li, dd) { overflow-wrap: anywhere; }
+.changes-details td small { display: block; color: #909ba9; font-size: 11px; }
+.changes-details h3 { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
+.run-details > summary { cursor: pointer; color: #909ba9; font-size: 12px; }
+.run-details ul { margin: 0; padding-left: 16px; }

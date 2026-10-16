@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { skillRun } from './support/skill-run.ts';
-import { SetupSyncController } from '../src/setup-sync-controller.ts';
-import { fixture, review, run, flush, deferred, change, preview as changePreview } from './support/setup-sync.ts';
+import { SetupSyncController, selectedLocal } from '../src/setup-sync-controller.ts';
+import { fixture, review, run, flush, deferred, change, preview as changePreview, localItems, localChange, localRun } from './support/setup-sync.ts';
 
 async function setup(t: test.TestContext, options: { maintenance?: () => boolean } = {}) {
   const f = await fixture(); const controller = new SetupSyncController(f.bridge, f.machine, options);
@@ -168,13 +168,91 @@ test('late review replies after disconnect or disposal cannot restore a preview'
   await f.reconnect(); const next = deferred<unknown>(); f.handlers.setupReview = () => next.promise;
   const reload = f.controller.reload(); f.controller.dispose(); const state = f.controller.state; next.resolve(review()); await reload; assert.equal(f.controller.state, state);
 });
-test('a stale Apply requires another explicit preview and lost Apply is never repeated', async t => {
+test('a stale Apply shows the replacement preview and lost Apply is never repeated', async t => {
   const f = await setup(t); f.controller.choose({ itemId: 'setting:a', action: 'accept' }); await f.controller.preview();
   const freshPreview = { ...f.controller.state.preview!, planId: 'fresh' };
   f.handlers.applyChange = () => ({ status: 'stale', preview: freshPreview });
-  await f.controller.apply(); assert.equal(f.controller.state.preview, null); assert.match(f.controller.state.message, /Preview again/); await f.controller.apply(); assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 1);
-  await f.controller.preview(); f.handlers.applyChange = () => { throw new Error('Reply lost'); }; await f.controller.apply(); await f.controller.apply();
-  assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 2); assert.match(f.controller.state.error ?? '', /Reply lost/);
+  await f.controller.apply();
+  assert.equal(f.controller.state.preview?.planId, 'fresh'); assert.equal(f.controller.state.previewNotice, 'This Mac changed. Review the updated plan.');
+  assert.equal(f.controller.state.run, null); assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 1);
+  f.handlers.applyChange = () => { throw new Error('Reply lost'); }; await f.controller.apply(); await f.controller.apply();
+  const applies = f.calls.filter(c => c.name === 'applyChange');
+  assert.equal(applies.length, 2); assert.equal(applies[1]?.input.planId, 'fresh');
+  assert.match(f.controller.state.error ?? '', /Reply lost/); assert.equal(f.controller.state.previewNotice, null);
+});
+test('On this Mac previews a reconcile of the included items and never the legacy preview', async t => {
+  const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();
+  assert.equal(f.controller.state.inspection?.items.length, 5);
+  assert.deepEqual(selectedLocal(f.controller.state), localChange.only);
+  f.controller.toggleLocal('skill:tdd'); f.controller.toggleLocal('config:claude:CLAUDE.md');
+  assert.deepEqual(f.controller.state.excluded, ['skill:tdd']);
+  await f.controller.previewLocal();
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'reconcile', only: ['config:claude:settings.json#model'] });
+  assert.equal(f.controller.state.preview?.change.kind, 'reconcile'); assert.equal(f.controller.state.eligibility.apply, true);
+  f.handlers.applyChange = () => ({ status: 'started', run: localRun() }); f.handlers.getRun = () => localRun();
+  await f.controller.apply();
+  assert.equal(f.controller.state.run?.runId, 'local-run');
+  assert.deepEqual(f.commands.filter(command => ['preview_plan', 'apply_plan', 'cancel_apply'].includes(command)), []);
+  f.handlers.getRun = () => localRun({ state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } });
+  f.emit({ version: 3, event: 'operation-run', runId: 'local-run' }); await flush();
+  assert.equal(f.controller.state.run?.state, 'succeeded');
+});
+test('nothing to include offers no local Preview, and a refusal is shown beside it', async t => {
+  const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();
+  f.controller.toggleLocal('skill:tdd'); f.controller.toggleLocal('config:claude:settings.json#model');
+  assert.equal(f.controller.state.eligibility.previewLocal, false);
+  await f.controller.previewLocal(); assert.equal(f.calls.some(c => c.name === 'previewChange'), false);
+  f.controller.toggleLocal('skill:tdd');
+  f.handlers.previewChange = () => { throw 'UNKNOWN_KEY: \'skill:tdd\' is not an item of the last inspection; inspect again'; };
+  await f.controller.previewLocal();
+  assert.equal(f.controller.state.error, null); assert.match(f.controller.state.localError ?? '', /^'skill:tdd' is not an item/);
+});
+test('an interrupted reconcile is offered for Re-preview of what remains, and for Abandon', async t => {
+  const f = await setup(t); f.report.items = localItems(); await f.machine.inspect();
+  const interrupted = localRun({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
+  f.handlers.listRuns = () => ({ runs: [skillRun({ runId: 'newer-skill-run' }), interrupted], nextBefore: null });
+  f.handlers.getRun = () => interrupted;
+  f.controller.enter(); await flush();
+  assert.equal(f.controller.state.run?.runId, 'local-run'); assert.equal(f.controller.state.run?.state, 'interrupted');
+  f.report.items = localItems().filter(item => item.key !== 'skill:tdd'); await f.machine.inspect();
+  await f.controller.repreview();
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'reconcile', only: ['config:claude:settings.json#model'] });
+  f.handlers.abandonRun = () => localRun({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } });
+  await f.controller.abandon(); assert.equal(f.controller.state.run?.state, 'abandoned');
+});
+test('discovery adopts an active run of any machine kind but never a finished one', async t => {
+  const f = await setup(t);
+  f.handlers.listRuns = () => ({ runs: [skillRun({ runId: 'finished-skill-run' }), run({ runId: 'finished-setup', state: 'succeeded', result: { status: 'done', ok: 1, failed: 0 } })], nextBefore: null });
+  f.controller.enter(); await flush();
+  assert.equal(f.controller.snapshot().run, null);
+  const adding = skillRun({ runId: 'adding', state: 'running', result: null });
+  f.handlers.listRuns = () => ({ runs: [adding], nextBefore: null }); f.handlers.getRun = () => adding;
+  f.emit({ version: 3, event: 'operation-run', runId: 'adding' }); await flush();
+  assert.equal(f.controller.state.run?.runId, 'adding'); assert.equal(f.controller.state.eligibility.read, false);
+});
+test('a follow requested from Settings survives entering Changes and the review loads beside it', async t => {
+  const f = await fixture(); const controller = new SetupSyncController(f.bridge, f.machine);
+  t.after(() => { controller.dispose(); f.machine.dispose(); });
+  f.handlers.inspectShareLink = input => ({ setupId: input.setupId, name: 'Team', repoUrl: 'https://github.com/example/profiles.git', profile: 'team', latestRevision: 1, access: 'readable' });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  const following = controller.followSharedLink('team'); controller.enter(); await following; await flush();
+  assert.equal(controller.state.preview?.change.kind, 'followProfile'); assert.ok(controller.state.review);
+  await controller.reload();
+  assert.equal(controller.state.preview?.change.kind, 'followProfile'); assert.equal(controller.state.eligibility.apply, true);
+});
+test('followRepository previews a Git follow, switchProfile goes through it, and Cancel discards the preview', async t => {
+  const f = await setup(t);
+  f.handlers.inspectProfiles = () => ({ followed: { repoUrl: 'https://github.com/example/profiles.git', profile: 'default', setupId: null }, available: [{ name: 'default', extends: null }, { name: 'team', extends: null }] });
+  f.handlers.previewChange = input => changePreview({ change: input.change, droppedChoices: { holds: [], overrides: [] } });
+  await f.controller.reload();
+  await f.controller.followRepository('https://github.com/other/profiles.git', 'work');
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'followProfile', repoUrl: 'https://github.com/other/profiles.git', profile: 'work', setupId: null });
+  await f.controller.switchProfile('team');
+  assert.deepEqual(f.calls.filter(c => c.name === 'previewChange').at(-1)?.input.change, { kind: 'followProfile', repoUrl: 'https://github.com/example/profiles.git', profile: 'team', setupId: null });
+  assert.equal(f.controller.state.switchTarget, 'team');
+  f.controller.cancelPreview();
+  assert.equal(f.controller.state.preview, null); assert.equal(f.controller.state.switchTarget, null);
+  await f.controller.apply(); assert.equal(f.calls.some(c => c.name === 'applyChange'), false);
 });
 
 test('reconnect recovery can prepare a fresh Apply without an earlier review', async t => {
