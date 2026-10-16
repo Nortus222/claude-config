@@ -49,8 +49,13 @@ export const readProfileOperation = <N extends 'inspectProfiles' | 'inspectShare
   let documents;
   if (followed) {
     const repo = followedClone(paths, followed.repoUrl);
-    const head = yield* revParse(repo, FOLLOWED_MAIN);
-    if (!head) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'No fetched profile inventory is available; refetch to retry'));
+    let head = (yield* (yield* Fs).exists(repo)) ? yield* revParse(repo, FOLLOWED_MAIN) : undefined;
+    // Listing reads the fetched inventory. A Mac that has never fetched it (first run) fetches it once.
+    if (!head) {
+      yield* privateFollowedRepository(paths, followed, { proveAccess: false });
+      if (yield* fetchFollowedMain(paths, repo, followed.repoUrl)) head = yield* revParse(repo, FOLLOWED_MAIN);
+    }
+    if (!head) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'The followed repository could not be fetched; check network access and reload'));
     documents = yield* commitDocuments(repo, head);
   } else documents = yield* worktreeDocuments(paths.repo);
   const names = yield* listProfiles('/profile').pipe(Effect.provide(memoryFiles(Object.fromEntries(Object.entries(documents).map(([path, text]) => [join('/profile', path), text])))));
