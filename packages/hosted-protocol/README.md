@@ -77,7 +77,7 @@ subscription; publishing remains owner-only.
 | `DevicePollPendingSchema` | `{ interval }` | `202`, authorization pending or slow down |
 | `DevicePollSuccessSchema` | `{ accountId, login, machineId, token, defaultPolicy }` | `200`, signed in |
 | `SetupRegistrationSchema` | `{ name, repoUrl, profile }` | Request to `POST /setups` |
-| `SetupRecordSchema` | `{ setupId, name, repoUrl, profile, latestRevision, createdAt }` | `201`, successful setup registration |
+| `SetupRecordSchema` | `{ setupId, name, repoUrl, profile, latestRevision, createdAt }` | `201` for creation, `200` for an existing owned repository/profile |
 | `PublicSetupSchema` | `{ setupId, name, repoUrl, profile, latestRevision }` | `200` from `GET /setups/:id/public` |
 | `SetupsResponseSchema` | `{ setups: SetupRecord[] }` | `200` from `GET /setups` |
 | `RevisionPublicationSchema` | `{ number, commitSha, tag, changelog, items, requiredEnv }` | Request to `POST /setups/:id/revisions` |
@@ -252,6 +252,11 @@ this authoritative ordering. A partial processing failure leaves an unprocessed
 suffix so retry cannot move an older decision after a later successful one.
 
 ## Profile setups and subscriptions
+
+Setup registration is idempotent per owner, normalized repository URL and profile.
+A retry returns the existing record with `200`, retaining its name, repository reference,
+creation time and revision head. Concurrent retries and incomplete materialization reuse
+the same reservation, including when the setup budget is full.
 
 Profile names match `^[a-z0-9][a-z0-9-]{0,62}$`. A setup ID identifies one profile;
 revision and decision bodies do not repeat its name. Legacy stored setups and cached

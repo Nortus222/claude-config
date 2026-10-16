@@ -108,9 +108,10 @@ test('subscription limits share the owned setup budget and concurrent retries ar
   try {
     const both = await Promise.all([1, 2].map(() => f.call('PUT', `/v1/subscriptions/${s.setupId}`, undefined, follower.token)));
     assert.deepEqual(both.map(r => r.status), [204, 204]);
-    for (let i = 0; i < 9; i++) assert.equal((await f.call('POST', '/v1/setups', { name:`Owned ${i}`, repoUrl:s.repoUrl, profile:'team' }, follower.token)).status, 201);
+    for (let i = 0; i < 9; i++) assert.equal((await f.call('POST', '/v1/setups', { name:`Owned ${i}`, repoUrl:s.repoUrl, profile:`team-${i}` }, follower.token)).status, 201);
     assert.equal((await f.call('POST', '/v1/setups', { name:'Too many', repoUrl:s.repoUrl, profile:'team' }, follower.token)).status, 409);
-    const other = await setup(f, owner.token);
+    const otherResponse = await f.call('POST', '/v1/setups', { name:'Other', repoUrl:s.repoUrl, profile:'other' }, owner.token);
+    assert.equal(otherResponse.status, 201); const other = await otherResponse.json();
     assert.equal((await f.call('PUT', `/v1/subscriptions/${other.setupId}`, undefined, follower.token)).status, 409);
     assert.equal((await f.call('PUT', '/v1/subscriptions/unknown', undefined, follower.token)).status, 404);
   } finally { await f.close(); }

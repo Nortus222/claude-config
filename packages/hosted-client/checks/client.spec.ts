@@ -822,3 +822,18 @@ test('metadata methods reject invalid input and mismatched response identities',
   f.actions.push(() => Effect.succeed({ status:200, body:{ revisions:[record], nextAfter:1 } }));
   await assert.rejects(run(f.client.listRevisions('setup1')), /invalid_response/);
 });
+
+test('registration retries accept the existing normalized repository and profile identity', async t => {
+  const f = await fixture(t); await f.signIn();
+  const registration = { name:'Retry', repoUrl:'git@github.com:example/config.git', profile:'team' };
+  const existing = { name:'Original', repoUrl:'https://github.com/Example/config.git', profile:'team', setupId:'setup1', latestRevision:3, createdAt:'2026-10-07T00:00:00Z' };
+  f.actions.push(request => { assert.equal(request.path, '/setups'); assert.deepEqual(request.body, registration); return Effect.succeed({ status:200, body:existing }); });
+  assert.deepEqual(await run(f.client.registerSetup(registration)), existing);
+});
+for (const mismatch of ['repoUrl', 'profile'] as const) test(`registration retries reject an existing setup with another ${mismatch}`, async t => {
+  const f = await fixture(t); await f.signIn();
+  const registration = { name:'Team', repoUrl:'https://github.com/example/config.git', profile:'team' };
+  const other = { ...registration, [mismatch]: mismatch === 'profile' ? 'personal' : 'https://github.com/other/config.git', setupId:'setup1', latestRevision:0, createdAt:'2026-10-07T00:00:00Z' };
+  f.actions.push(() => Effect.succeed({ status:200, body:other }));
+  await assert.rejects(run(f.client.registerSetup(registration)), /invalid_response/);
+});
