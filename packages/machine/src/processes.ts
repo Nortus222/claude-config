@@ -20,6 +20,8 @@ export type Command = {
   readonly stderr?: 'capture';
   // Opt-in raw byte bounds. Overflow stops the group, with a two-second cleanup deadline.
   readonly captureLimit?: { readonly stdout?: number; readonly stderr?: number };
+  // Observes decoded captured chunks while the child runs, within the same byte limits. Exceptions are ignored.
+  readonly onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
   // Trusted local observer of bounded forced shutdown, including interruption. Exceptions are ignored.
   readonly onCleanup?: (outcome: { readonly joined: boolean }) => void;
 };
@@ -86,6 +88,13 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         // Decoded as one stream each, so a character split across chunks is not mangled.
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
+        const deliver = (stream: 'stdout' | 'stderr', chunk: string) => {
+          if (stream === 'stdout') stdout += chunk;
+          else stderr += chunk;
+          if (chunk) {
+            try { command.onOutput?.(stream, chunk); } catch { /* Observers cannot change capture or cleanup. */ }
+          }
+        };
         const capture = (stream: 'stdout' | 'stderr', decoder: StringDecoder) => {
           let bytes = 0;
           return (chunk: Buffer) => {
@@ -100,8 +109,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
                 reason: joined ? 'capture byte limit exceeded' : 'capture cleanup deadline exceeded' }))));
               return;
             }
-            if (stream === 'stdout') stdout += decoder.write(chunk);
-            else stderr += decoder.write(chunk);
+            deliver(stream, decoder.write(chunk));
           };
         };
         child.stdout?.on('data', capture('stdout', stdoutDecoder));
@@ -115,7 +123,7 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         child.on('close', (code, signal) => {
           closed = true;
           if (exceeded) return;
-          stdout += stdoutDecoder.end(); stderr += stderrDecoder.end();
+          deliver('stdout', stdoutDecoder.end()); deliver('stderr', stderrDecoder.end());
           const exit = code ?? (signal ? 128 : 1);
           resume(Effect.succeed(captureStderr ? { code: exit, stdout, stderr } : { code: exit, stdout }));
         });
