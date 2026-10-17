@@ -190,8 +190,13 @@ export function causeText(message: string | undefined): string {
   return CAUSES[text] ?? sentence(text);
 }
 
+// A pattern for `name` as a whole item name or key, so "Skill tdd" or "skill:a/tdd" is not found inside "…tdd-pro".
+const wholeName = (name: string, flags = '') => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`, flags);
+// Whether `text` names `name` as a whole item name or key.
+export const namesWhole = (text: string, name: string) => wholeName(name).test(text);
+
 // Why a run stopped, in the agent's words: its result's reason, then what the skill installer reported.
-// Item keys the run touched read as item names where `label` knows them.
+// Whole item keys the run touched read as item names where `label` knows them.
 export function runCauses(run: Pick<RunView, 'result' | 'installation'> & Partial<Pick<RunView, 'steps' | 'parity'>>,
   label: (key: string) => ItemLabel = itemLabel): string[] {
   const result = run.result;
@@ -199,7 +204,7 @@ export function runCauses(run: Pick<RunView, 'result' | 'installation'> & Partia
   const installer = run.installation && run.installation.state !== 'verified' ? causeText(run.installation.message) : '';
   const keys = [...new Set([...run.steps?.map(step => step.key) ?? [], ...run.parity?.remainingKeys ?? [], ...run.parity?.committedKeys ?? []])]
     .sort((a, b) => b.length - a.length);
-  const named = (text: string) => keys.reduce((line, key) => { const name = label(key).text; return name === 'Item' ? line : line.split(key).join(name); }, text);
+  const named = (text: string) => keys.reduce((line, key) => { const name = label(key).text; return name === 'Item' ? line : line.replace(wholeName(key, 'g'), () => name); }, text);
   return [...new Set([reason, installer].filter(Boolean).map(named))];
 }
 
