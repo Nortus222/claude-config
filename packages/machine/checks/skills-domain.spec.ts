@@ -236,7 +236,7 @@ const readLock = (paths: MachinePathsValue): Record<string, Record<string, unkno
 
 // A `Processes` that records every Command and simulates `npx -y skills <verb> …` on the temp store,
 // lock and ~/.claude/skills. `behaviour.fail` names a verb that exits 1 instead of doing anything.
-const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'add' | 'update' | 'remove'; readonly gone?: ReadonlyArray<string> } = {}) => {
   const commands: Command[] = [];
   const layer = Layer.succeed(Processes, {
     run: (command: Command) => Effect.sync(() => {
@@ -263,6 +263,9 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
       } else if (verb === 'add') {
         const [source] = positional;
         const agents = valuesOf('--agent');
+        // Like the real installer, one name the source lacks rejects the whole batch.
+        const absent = valuesOf('--skill').filter((n) => behaviour.gone?.includes(n));
+        if (absent.length) return { code: 1, stdout: `\x1b[31m■\x1b[39m  No matching skills found for: ${absent.join(', ')}\n●  Available skills:\n│    - want\n` };
         for (const n of valuesOf('--skill')) {
           mkdirSync(join(paths.agentsSkills, n), { recursive: true });
           lock[n] = { source };
@@ -279,7 +282,7 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
   return { commands, layer };
 };
 
-const runMachine = (behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+const runMachine = (behaviour: { readonly fail?: 'add' | 'update' | 'remove'; readonly gone?: ReadonlyArray<string> } = {}) => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
   const installer = fakeInstaller(m.paths, behaviour);
@@ -354,6 +357,21 @@ test('--target claude installs for claude-code only', async () => {
   const events = await m.go(p, r);
   assert.equal(finished(events, 'skills:install:o/r')!.outcome, 'ok');
   assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill want --agent claude-code --global --yes']);
+});
+
+test('a skill gone from its source fails by name while the rest of the batch installs', async () => {
+  const m = runMachine({ gone: ['resolving-merge-conflicts'] });
+  const r = report([item('want', 'missing', 'apply', 'mattpocock/skills'), item('resolving-merge-conflicts', 'missing', 'apply', 'mattpocock/skills')],
+    [skill('want', 'mattpocock/skills'), skill('resolving-merge-conflicts', 'mattpocock/skills')]);
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), [
+    'npx -y skills add mattpocock/skills --skill resolving-merge-conflicts want --agent claude-code --global --yes',
+    'npx -y skills add mattpocock/skills --skill want --agent claude-code --global --yes',
+  ]);
+  const step = finished(events, 'skills:install:mattpocock/skills')!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again. Installed 1 other skill(s).");
+  assert.ok(existsSync(join(m.paths.agentsSkills, 'want')));
 });
 
 // Issue #104: an off-pin skill whose pin was removed is reinstalled by a ref-less `add`, which replaces its folder.

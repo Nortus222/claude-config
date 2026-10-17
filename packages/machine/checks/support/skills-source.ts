@@ -73,6 +73,9 @@ export const fakeInstaller = (
       const ref = hash < 0 ? 'HEAD' : arg!.slice(hash + 1);
       let rev = ref;
       try { rev = git(source.dir, 'rev-parse', '--verify', '-q', `refs/heads/${ref}`); } catch { /* not a branch */ }
+      // Like the real installer, one name the source lacks rejects the whole batch.
+      const absent = valuesOf('--skill').filter((n) => { try { git(source.dir, 'cat-file', '-e', `${rev}:skills/${n}`); return false; } catch { return true; } });
+      if (absent.length) return { code: 1, stdout: `\x1b[31m■\x1b[39m  No matching skills found for: ${absent.join(', ')}\n●  Available skills:\n│    - a\n` };
       for (const n of valuesOf('--skill')) {
         if (partial?.writes && !partial.writes.includes(n)) continue;
         const out = mkdtempSync(join(tmpdir(), 'fake-installer-'));

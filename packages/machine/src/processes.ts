@@ -15,7 +15,8 @@ export type Command = {
   readonly envAllow?: ReadonlyArray<string>;
   // Sent only through the child's stdin pipe, which is closed after the input.
   readonly input?: string;
-  readonly output: 'inherit' | 'capture';
+  // 'tee' shows output where 'inherit' would and also captures the tail of both streams.
+  readonly output: 'inherit' | 'capture' | 'tee';
   // With `output: 'capture'`, also captures stderr into Completed.stderr instead of inheriting it.
   readonly stderr?: 'capture';
   // Opt-in raw byte bounds. Overflow stops the group, with a two-second cleanup deadline.
@@ -25,7 +26,7 @@ export type Command = {
   // Trusted local observer of bounded forced shutdown, including interruption. Exceptions are ignored.
   readonly onCleanup?: (outcome: { readonly joined: boolean }) => void;
 };
-// `stderr` is present only when the command asked to capture it.
+// `stderr` is present only when the command asked to capture it, or teed its output.
 export type Completed = { readonly code: number; readonly stdout: string; readonly stderr?: string };
 
 export type ProcessesOptions = {
@@ -37,6 +38,9 @@ export type ProcessesOptions = {
   // and gives the child no inherited stdin. Explicit Command.input still uses its own pipe.
   readonly inherit?: 'stdio' | 'stderr';
 };
+
+// How much of each teed stream a run keeps: enough for an installer's closing error.
+const TEE_TAIL = 64 * 1024;
 
 export class Processes extends Context.Service<
   Processes,
@@ -55,7 +59,8 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           return;
         }
         const { file, args, env, windowsVerbatimArguments } = invocation;
-        const captureStderr = command.output === 'capture' && command.stderr === 'capture';
+        const tee = command.output === 'tee';
+        const captureStderr = tee || command.output === 'capture' && command.stderr === 'capture';
         if (command.captureLimit !== undefined && (command.output !== 'capture'
           || Object.values(command.captureLimit).some(n => !Number.isSafeInteger(n) || n < 0)
           || (command.captureLimit.stderr !== undefined && !captureStderr))) {
@@ -69,7 +74,8 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
           windowsVerbatimArguments,
           // Its own process group, so cancelling reaches the installer's own children too.
           detached: process.platform !== 'win32',
-          stdio: command.output === 'capture' ? [command.input === undefined ? 'ignore' : 'pipe', 'pipe', captureStderr ? 'pipe' : 'inherit']
+          stdio: tee ? [command.input === undefined ? options.inherit === 'stderr' ? 'ignore' : 'inherit' : 'pipe', 'pipe', 'pipe']
+            : command.output === 'capture' ? [command.input === undefined ? 'ignore' : 'pipe', 'pipe', captureStderr ? 'pipe' : 'inherit']
             : options.inherit === 'stderr' ? [command.input === undefined ? 'ignore' : 'pipe', 2, 2]
             : command.input === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
         });
@@ -89,8 +95,8 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
         const stdoutDecoder = new StringDecoder('utf8');
         const stderrDecoder = new StringDecoder('utf8');
         const deliver = (stream: 'stdout' | 'stderr', chunk: string) => {
-          if (stream === 'stdout') stdout += chunk;
-          else stderr += chunk;
+          if (stream === 'stdout') stdout = tee ? (stdout + chunk).slice(-TEE_TAIL) : stdout + chunk;
+          else stderr = tee ? (stderr + chunk).slice(-TEE_TAIL) : stderr + chunk;
           if (chunk) {
             try { command.onOutput?.(stream, chunk); } catch { /* Observers cannot change capture or cleanup. */ }
           }
@@ -108,6 +114,9 @@ export const nodeProcesses = (options: ProcessesOptions = {}) =>
               void cleanup.then(joined => resume(Effect.fail(new LaunchFailed({ cmd: command.cmd,
                 reason: joined ? 'capture byte limit exceeded' : 'capture cleanup deadline exceeded' }))));
               return;
+            }
+            if (tee) {
+              try { (stream === 'stdout' && options.inherit !== 'stderr' ? process.stdout : process.stderr).write(chunk); } catch { /* Showing output cannot stop the child. */ }
             }
             deliver(stream, decoder.write(chunk));
           };

@@ -47,9 +47,33 @@ export const updateCommand = (names: ReadonlyArray<string>): Command =>
 export const removeCommand = (names: ReadonlyArray<string>, targets?: ReadonlyArray<Target>): Command =>
   ({ cmd: 'npx', args: ['-y', 'skills', 'remove', ...names, ...(targets ? ['--agent', ...targets.map(t => SKILL_AGENTS[t])] : []), '--global', '--yes'], output: 'inherit' });
 
-// The installer's own output is inherited, so a failure explains itself there; the note only names the exit.
-export const runInstaller = (command: Command): Effect.Effect<StepResult, LaunchFailed, Processes> =>
+// The installer's output, without colour codes, box drawing or status glyphs, as trimmed non-empty lines.
+const outputLines = (text: string): string[] => text
+  .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b[@-_]/g, '')
+  .replace(/[\u2190-\u21ff\u2500-\u27bf]/g, ' ')
+  .split(/\r?\n|\r/).map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+const ERROR_LINE = /\b(error|err!|fail(ed|ure)?|fatal|denied|not found|no matching|unable|cannot|could not|invalid|enoent|eacces|eperm|etimedout|enotfound|econn\w*)\b/i;
+
+// Why an installer exited non-zero, in words. "No matching skills found for: a, b" names the skills its
+// source no longer has; otherwise the last error-looking line, else the last line, with the exit code.
+export const installerFailure = (code: number, output: string, source?: string): { readonly note: string; readonly missing: readonly string[] } => {
+  const lines = outputLines(output);
+  for (const line of lines) {
+    const match = /no matching skills? found for:?\s*(.+)$/i.exec(line);
+    const missing = match ? [...new Set(match[1]!.split(/[,\s]+/).map(n => n.replace(/^['"`]+|['"`.]+$/g, '')).filter(Boolean))] : [];
+    if (missing.length) return { missing, note: `${source ?? 'The source'} no longer has ${missing.join(', ')}. Remove ${missing.length > 1 ? 'them' : 'it'} from your profile's skills, then apply again.` };
+  }
+  const line = [...lines].reverse().find(l => ERROR_LINE.test(l)) ?? lines.at(-1);
+  const reason = line === undefined ? '' : [...line].length > 300 ? `${[...line].slice(0, 299).join('')}…` : line;
+  return { missing: [], note: reason ? `${reason} (npx exited with ${code})` : `npx exited with ${code}` };
+};
+
+// Shows the installer's output where `inherit` would and keeps its tail, so a failed note says why.
+// `source` names the skills' source in a note about skills it no longer has; `missing` lists them.
+export const runInstaller = (command: Command, source?: string): Effect.Effect<StepResult & { readonly missing?: readonly string[] }, LaunchFailed, Processes> =>
   Effect.gen(function* () {
-    const { code } = yield* (yield* Processes).run(command);
-    return code === 0 ? { ok: true, note: '' } : { ok: false, note: `npx exited with ${code}` };
+    const { code, stdout, stderr } = yield* (yield* Processes).run({ ...command, output: 'tee' });
+    if (code === 0) return { ok: true, note: '' };
+    const failure = installerFailure(code, `${stdout}\n${stderr ?? ''}`, source);
+    return { ok: false, note: failure.note, ...(failure.missing.length ? { missing: failure.missing } : {}) };
   });

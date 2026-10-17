@@ -187,6 +187,27 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
   assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
 });
 
+test('a skill gone from its pinned source fails by name while the rest of the batch installs and verifies', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
+  const r = report([item('a', 'missing', 'apply'), item('gone', 'missing', 'apply')], [skill('a', 'o/r', pin(sha)), skill('gone', 'o/r', pin(sha))]);
+  const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')), [
+    `npx -y skills add o/r#${sha} --skill a gone --agent claude-code codex --global --yes`,
+    `npx -y skills add o/r#${sha} --skill a --agent claude-code codex --global --yes`,
+  ]);
+  const step = events.find((e): e is Extract<Progress, { type: 'finished' }> => e.type === 'finished' && e.key === `skills:install:o/r#${sha}`)!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, `o/r no longer has gone. Remove it from your profile's skills, then apply again. Verified 1 other skill(s) at ${sha.slice(0, 7)}.`);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
+  assert.equal(readLock(m.paths).a!.ref, sha);
+});
+
 test('update re-exposes a pinned skill lacking an agent link at its pin, never at upstream HEAD', async () => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
