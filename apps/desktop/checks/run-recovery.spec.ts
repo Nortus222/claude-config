@@ -16,6 +16,16 @@ test('an interrupted run names its change, counts its evidence and offers Re-pre
   assert.doesNotMatch(summary(html), /setup-run|setting:a|setting:b|backup-1/);
   for (const text of ['setup-run', 'setting:a', 'setting:b', 'backup-1']) assert.ok(html.includes(text), text);
 });
+test('an interrupted run says why above its counts and keeps where to look under Details', () => {
+  const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Agent stopped while applying Claude setting model; inspect before trying again' } });
+  const html = renderToStaticMarkup(createElement(RunRecovery, { run: interrupted, onRepreview: () => {}, onAbandon: () => {}, ...ask, report: 'report text' }));
+  assert.match(html, /<p class="run-cause">Agent stopped while applying Claude setting model\.<\/p><p class="muted">1 change was written/);
+  assert.doesNotMatch(summary(html), /inspect/i);
+  assert.match(html, />Copy details<\/button>/);
+  assert.match(html, /<details class="run-details">[\s\S]*Agent log[\s\S]*~\/\.config\/nortuscc\/agent\/agent\.log[\s\S]*~\/\.config\/nortuscc\/backups\/backup-1/);
+  const abandoned = renderToStaticMarkup(createElement(RunRecovery, { run: run({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } }), onRepreview: () => {}, onAbandon: () => {}, ...ask }));
+  assert.doesNotMatch(abandoned, /run-cause/);
+});
 test('abandoned receipts keep their counts and offer no recovery actions', () => {
   const html = renderToStaticMarkup(createElement(RunRecovery, { run: run({ state: 'abandoned', result: { status: 'interrupted', message: 'Abandoned' } }), onRepreview: () => {}, onAbandon: () => {}, ...ask }));
   assert.match(html, /Apply incoming changes was abandoned/); assert.match(html, /1 change was written and 1 was not/); assert.doesNotMatch(html, /<button/);

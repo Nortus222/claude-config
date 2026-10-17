@@ -2,6 +2,7 @@ import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/op
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 import type { MachineController, ViewState } from './controller.ts';
 import { operation } from './operations.ts';
+import { changeTitle, runCauses } from './copy.ts';
 
 export type SkillChoice = 'on' | 'off' | 'inherit';
 export type SkillRow = Extract<OperationOutput<'inspectIntent'>['items'][number], { kind: 'skill' }>;
@@ -32,6 +33,8 @@ const text = (error: unknown) => (error instanceof Error ? error.message : Strin
 const live = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const sameSkill = (a: { source: string; name: string }, b: { source: string; name: string }) => a.source === b.source && a.name === b.name;
 const label = { on: 'On', off: 'Off', inherit: 'Default' } as const;
+// How a run that did not succeed ended, in words.
+const ENDED: Partial<Readonly<Record<RunView['state'], string>>> = { failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted', abandoned: 'was abandoned' };
 export const effectiveChoice = (row: SkillRow) => row.choice ?? row.defaultEnabled;
 
 // Only checked, enabled declarations with an existing update route may be selected.
@@ -220,12 +223,13 @@ export class SkillsController {
         this.update({ run: reply.data });
         if (live(reply.data)) continue;
         if (reply.data.state !== 'succeeded') {
-          this.update({ saving: null, stale: `Run ${reply.data.state}. Reload Skills to confirm the saved choice and machine state.`, check: null, selected: [], detail: `Skills run ${reply.data.state}.` });
+          const ended = `${changeTitle(reply.data.intent.change.kind)} ${ENDED[reply.data.state] ?? 'stopped'}.`, [cause] = runCauses(reply.data);
+          this.update({ saving: null, stale: `${ended}${cause ? ` ${cause}` : ''} Reload Skills to see the saved choice and what is on this Mac.`, check: null, selected: [], detail: ended });
         } else if (this.settledRun !== runId || this.pendingInventory) {
           const firstConfirmation = this.settledRun !== runId;
           this.settledRun = runId;
           const saving = this.state.saving;
-          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Apply on Changes makes installation changes.` : 'Skill update succeeded. Reload Skills to inspect installation state.';
+          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Apply on Changes makes installation changes.` : 'Skill update succeeded. Reload Skills to see what is installed.';
           this.pendingInventory = true;
           this.update({ saving: null, check: null, selected: [], detail });
           try {
@@ -237,7 +241,7 @@ export class SkillsController {
         }
       } while (flight.dirty && current());
     })().catch(error => {
-      if (current() && this.state.run?.runId === runId) this.update({ error: `Could not read the Skills run: ${text(error)}`, detail: 'Run completion is unconfirmed. Reconnect or reload to inspect the run.' });
+      if (current() && this.state.run?.runId === runId) this.update({ error: `Could not read the Skills run: ${text(error)}`, detail: 'It is not known whether the change finished. Reload Skills to see where it stands, or reconnect the agent in Settings.' });
     }).finally(() => { if (this.refreshFlight === flight) this.refreshFlight = null; });
     this.refreshFlight = flight;
     return flight.promise;

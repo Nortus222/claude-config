@@ -62,7 +62,7 @@ test('a refused read shows one sentence without its error code', async t => {
   const f = await setup(t);
   f.handlers.listRuns = () => { throw new Error('UNAUTHORIZED: refused'); };
   await f.controller.refresh();
-  assert.equal(f.controller.state.error, 'Access was refused. Check your permissions, then retry.');
+  assert.equal(f.controller.state.error, 'Refused. Check that your GitHub account can push to it, then try again.');
   assert.equal(f.controller.state.drafts?.length, 1);
 });
 

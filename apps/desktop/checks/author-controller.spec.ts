@@ -59,7 +59,7 @@ test('a lost Apply reply blocks further writes until runs are inspected', async 
   await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
   await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);
   assert.equal(f.calls.filter(c => c.name === 'applyChange').length, 1);
-  assert.match(f.controller.state.error ?? '', /unconfirmed/);
+  assert.match(f.controller.state.error ?? '', /not known whether it finished/);
 });
 test('draft selection waits for profiles when independent reads finish out of order', async t => {
   const f = await authorFixture(t); await f.controller.includeSkill('team', 'owner/repo', 'tdd', true);

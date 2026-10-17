@@ -262,7 +262,7 @@ export class AuthorController {
       if (this.current(mark)) {
         this.uncertain = true;
         this.fail(error, action);
-        this.update({ message: '', error: `${this.state.error}. Completion is unconfirmed. Reload to inspect runs before another action.` });
+        this.update({ message: '', error: `${this.state.error}. It is not known whether it finished. Reload to see where it stands before another action.` });
       }
       return;
     }

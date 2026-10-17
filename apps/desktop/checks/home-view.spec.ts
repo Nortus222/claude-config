@@ -63,6 +63,15 @@ test('an interrupted setup apply is named in words with Review and Abandon', asy
   assert.match(html, /Apply incoming changes was interrupted[\s\S]*>Review<\/button>[\s\S]*>Abandon<\/button>/);
 });
 
+test('an interrupted run on Home says why, without the agent\'s inspect advice', async t => {
+  const h = await home(t);
+  h.f.handlers.listRuns = () => ({ runs: [run({ state: 'interrupted', result: { status: 'interrupted', message: 'Agent stopped before the run finished; inspect before trying again' } })], nextBefore: null });
+  await h.controller.refresh();
+  const html = h.render();
+  assert.match(html, /Apply incoming changes was interrupted\. <span class="row-sub">Agent stopped before the run finished\.<\/span>/);
+  assert.doesNotMatch(html, /inspect/i);
+});
+
 test('Abandon asks for confirmation naming its effect before calling abandonRun', async t => {
   const h = await home(t);
   h.controller.confirmAbandon('setup-run');

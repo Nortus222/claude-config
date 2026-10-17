@@ -112,7 +112,7 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
         {active ? <button onClick={() => void controller.cancel()}>Cancel</button> : null}</div>
       </section> : null}
       {view ? <>
-        {view.limitReason ? <p className="notice" role="status">Skills inventory is incomplete: {view.limitReason}. Inspect the owning configuration before changing it.</p> : null}
+        {view.limitReason ? <p className="notice" role="status">Skills inventory is incomplete: {view.limitReason}. Check the configuration it comes from before changing it.</p> : null}
         <section className="card"><div className="card-head"><div><h2>Skill updates for this Mac</h2><p>Nothing installs until you preview and apply. Pins keep their existing policy.</p></div>
           <button disabled={blocked !== null} title={blocked ?? undefined} onClick={() => void controller.check()}>Check upstream</button></div>
           {check?.unavailable ? <p className="muted" role="status">Upstream checks are unavailable for this machine.</p> : null}

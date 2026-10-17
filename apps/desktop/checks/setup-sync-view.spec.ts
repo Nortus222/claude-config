@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SetupSyncView, SetupProfiles, IncomingRow, PinGroupRow, Segmented, incomingEntries, pinMove } from '../src/setup-sync-view.tsx';
+import { SetupSyncView, SetupProfiles, IncomingRow, PinGroupRow, Segmented, NameList, RunCard, incomingEntries, pinMove } from '../src/setup-sync-view.tsx';
+import { CopyDetails, RunPlaces } from '../src/run-recovery.tsx';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
-import { fixture, review, run, localItems, localRun, flush } from './support/setup-sync.ts';
+import { fixture, review, run, localItems, localRun, localChange, flush } from './support/setup-sync.ts';
 
 async function page(t: test.TestContext, prepare: (f: Awaited<ReturnType<typeof fixture>>) => void = () => {}) {
   const f = await fixture(); prepare(f);
@@ -65,8 +66,13 @@ test('an incoming row hides its values behind Details until it is opened', async
   const open = renderToStaticMarkup(createElement(IncomingRow, { ...props, open: true }));
   const controls = /aria-expanded="true" aria-controls="([^"]+)"/.exec(open)?.[1];
   assert.ok(controls); assert.match(open, new RegExp(`id="${controls}"`));
-  assert.match(open, /aria-label="Current value of Item"><code>old</); assert.match(open, /aria-label="Offered value of Item"><code>new</);
-  assert.match(open, /aria-label="This Mac&#x27;s value of Item"><code>mine</);
+  // Short values read on one line; a long or multi-line value keeps every value in its own box.
+  assert.match(open, /<dl class="incoming-values">/);
+  assert.match(open, /<dt>Current<\/dt><dd><code aria-label="Current value of Item">old<\/code>/); assert.match(open, /aria-label="Offered value of Item">new</);
+  assert.match(open, /aria-label="This Mac&#x27;s value of Item">mine</);
+  const long = renderToStaticMarkup(createElement(IncomingRow, { ...props, row: { ...props.row, after: '{\n  "a": 1\n}' }, open: true }));
+  assert.doesNotMatch(long, /incoming-values/);
+  assert.match(long, /aria-label="Current value of Item"><code>old</); assert.match(long, /aria-label="Offered value of Item"><code>\{\n  &quot;a&quot;: 1\n\}</);
 });
 
 test('an undecided row has no selected segment, and a choice selects exactly its segment', async t => {
@@ -173,9 +179,45 @@ test('the incoming preview sits at the top, lists each staged action and holds t
   const { c, html } = await page(t); c.choose({ itemId: 'setting:a', action: 'takeTheirs' }); c.choose({ itemId: 'setting:b', action: 'hold' }); await c.preview();
   const text = html(), top = panel(text);
   assert.ok(text.indexOf('changes-preview') < text.indexOf('setup-sync-summary'));
-  assert.match(top, /aria-label="Reviewed choices"[\s\S]*Use your profile/);
+  assert.match(plainText(top), /Replace mine 1 · backed up firstItem[\s\S]*Hold 1Item/);
   assert.match(top, /Items you don&#x27;t choose will be held/);
-  assert.deepEqual(applyButtons(text), ['Apply 1 incoming change']); assert.match(top, />Cancel<\/button>/);
+  // Apply and Cancel sit in the panel's head, before anything it lists.
+  assert.deepEqual(applyButtons(text), ['Apply 1 incoming change']);
+  assert.match(top, /<div class="card-head">[\s\S]*>Apply 1 incoming change<\/button><button>Cancel<\/button><\/div><\/div><div class="preview-lines">/);
+});
+
+test('an incoming preview groups its choices by action, one line each, with steps and left-out items folded away', async t => {
+  const names = ['model', 'theme', 'tui', 'env.A', 'env.B', 'env.C', 'env.D', 'env.E', 'env.F', 'env.G'];
+  const action = (index: number) => index < 3 ? 'accept' as const : index === 3 ? 'takeTheirs' as const : index === 4 ? 'release' as const : 'hold' as const;
+  const choices = names.map((name, index) => ({ itemId: `setting:claude:settings.json#${name}`, action: action(index) }));
+  const { c, html, handlers } = await page(t);
+  handlers.previewChange = () => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: { kind: 'setupApply', setupId: 'local', revision: { kind: 'local', commit: 'b'.repeat(40) }, choices },
+    plan: { kind: 'apply', steps: [{ key: 'config:claude:settings.json#model', summary: 'Write Claude setting model', domain: 'config', action: 'merge-keys', touches: [], interruptible: true }],
+      skipped: [{ key: 'config:claude:settings.json#tui', reason: 'Already matches your profile' }] }, nextActions: [], actionEffects: ['Save reviewed choices'] });
+  c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview();
+  const top = panel(html()), seen = plainText(top.replace(/<details[\s\S]*?<\/details>/g, ''));
+  assert.match(seen, /Take 3Claude setting modelClaude setting themeClaude setting tuiEnd/);
+  assert.match(seen, /End hold and take 1Claude setting env\.B/);
+  assert.match(seen, /Replace mine 1 · backed up firstClaude setting env\.A/);
+  assert.match(seen, /Hold 5Claude setting env\.CClaude setting env\.D/);
+  // No per-item sentence, no repeated steps and no agent fine print outside the folds.
+  assert.doesNotMatch(seen, /your profile&#x27;s value|Write Claude setting model|Save reviewed choices|Already matches/);
+  assert.match(top, /<details class="preview-more"><summary>Steps \(1\)<\/summary>[\s\S]*Write Claude setting model[\s\S]*Save reviewed choices/);
+  assert.match(top, /<details class="preview-more"><summary>1 left out<\/summary>[\s\S]*Already matches your profile/);
+  assert.equal(top.match(/class="muted[^"]*"/g)?.length, 1);
+});
+
+test('a preview of many changes to this Mac shows the first names inline and the rest behind +N more', async t => {
+  const keys = Array.from({ length: 40 }, (_, i) => `config:claude:settings.json#key${i}`);
+  const { c, html, handlers } = await page(t, f => { f.report.items = keys.map(key => ({ key, domain: 'config', target: 'claude', label: key, group: 'claude', state: 'repo-ahead', disposition: 'apply', from: { layer: 'profile', source: 'personal' } })); });
+  handlers.previewChange = input => ({ planId: 'plan', scope: { kind: 'machine' }, generation: '1', change: input.change, plan: { kind: 'operation', steps: [], skipped: [] }, nextActions: [] });
+  await c.previewLocal();
+  const top = panel(html());
+  assert.match(top, /Apply 40 changes to this Mac/);
+  assert.equal(top.match(/Claude setting <strong>key\d+<\/strong>/g)?.length, 12);
+  assert.match(top, /<li class="name-more"><button type="button" class="link" aria-expanded="false">\+28 more<\/button><\/li>/);
+  const list = renderToStaticMarkup(createElement(NameList, { label: 'Names', labels: keys.slice(0, 12).map(key => ({ lead: '', name: key, tail: '', text: key })) }));
+  assert.doesNotMatch(list, /more/);
 });
 
 test('a switch preview sits at the top with one Switch to team, keeps the select on team, no hold notice and no empty dropped lists', async t => {
@@ -196,8 +238,9 @@ test('a switch preview names the dropped holds and overrides before its Apply', 
   const text = html();
   assert.match(text, /Following default from example\/profiles/);
   assert.match(text, /Profile/); assert.match(text, /Follow a shared link/);
-  assert.ok(text.indexOf('Skill <strong>old</strong> from owner/repo') < text.indexOf('>Switch to team<'));
-  assert.match(panel(text), /Overrides removed[\s\S]*Skill old/);
+  const visible = plainText(panel(text).replace(/<details[\s\S]*?<\/details>/g, ''));
+  assert.match(visible, /Holds that end 1Skill old from owner\/repo/);
+  assert.match(visible, /Overrides removed 1Skill old/);
 });
 
 test('a stale reconcile shows the updated plan with its notice', async t => {
@@ -270,7 +313,7 @@ test('the Changes run card counts failed steps while running and when done', asy
   const { c, html, handlers, emit } = await page(t);
   handlers.getRun = () => run({ steps });
   c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview(); await c.apply(); await flush();
-  const card = () => /<section class="card changes-run"[\s\S]*?<\/section>/.exec(html())?.[0] ?? '';
+  const card = () => /<section class="card changes-run[^"]*"[\s\S]*?<\/section>/.exec(html())?.[0] ?? '';
   assert.match(card(), /1 of 2 steps done, 1 failed\./);
   handlers.getRun = () => run({ state: 'failed', steps, result: { status: 'done', ok: 1, failed: 1 } });
   emit({ version: 3, event: 'operation-run', runId: 'setup-run' }); await flush();
@@ -308,6 +351,53 @@ test('the Changes heading counts incoming rows like Home and the badge: not unch
   for (const hidden of [/>Preview<\/button>/, /will be held/, /Take all incoming/, /choices? made/]) assert.doesNotMatch(section, hidden);
 });
 
+test('a failed run says why, lists its failed steps and counts, offers next steps, and names where to look', async t => {
+  const cause = "Couldn't write Claude setting model: EACCES: permission denied";
+  const steps = [{ key: 'skill:tdd', outcome: 'ok' as const, note: 'Installed' }, { key: 'config:claude:settings.json#model', outcome: 'failed' as const, note: 'EACCES: permission denied' }];
+  const { c, html, handlers, emit, bridge, calls } = await page(t, f => { f.report.items = localItems(); });
+  const invoked: { command: string; args: unknown }[] = [], invoke = bridge.invoke;
+  bridge.invoke = async (command, args) => { invoked.push({ command, args }); if (command === 'reveal_place') throw new Error('There are no backups on this Mac yet.'); return invoke(command, args); };
+  handlers.applyChange = () => ({ status: 'started', run: localRun() }); handlers.getRun = () => localRun();
+  await c.previewLocal(); await c.apply(); await flush();
+  handlers.getRun = () => localRun({ state: 'failed', steps, result: { status: 'failed', message: cause } });
+  emit({ version: 3, event: 'operation-run', runId: 'local-run' }); await flush();
+  const text = html(), card = /<section class="card changes-run run-failure"[\s\S]*?<\/section>/.exec(text)?.[0] ?? '';
+  assert.match(card, /<span class="pill pill-danger">Failed<\/span>/);
+  assert.match(card, /class="alert run-cause" role="status">Couldn&#x27;t write Claude setting model: EACCES: permission denied\.</);
+  assert.match(card, /aria-label="Failed steps"><li><span class="changes-label">Claude setting <strong>model<\/strong><\/span><small>EACCES: permission denied\.<\/small>/);
+  assert.match(card, /1 change written · 1 not written\. Backups of what it replaced are kept\. Nothing is rolled back automatically\./);
+  assert.deepEqual(buttons(card).filter(label => ['Check again', 'Re-preview', 'Copy details'].includes(label)), ['Check again', 'Re-preview', 'Copy details']);
+  assert.doesNotMatch(card, /inspect/i);
+  // Where to look: the agent log and the run's backups, each with Show in Finder, the run and its keys.
+  const inside = /<details class="run-details">[\s\S]*<\/details>/.exec(card)?.[0] ?? '';
+  assert.match(inside, /<dt>Agent log<\/dt><dd><code>~\/\.config\/nortuscc\/agent\/agent\.log<\/code> <button class="link" aria-label="Show the agent log in Finder">Show in Finder<\/button>/);
+  assert.match(inside, /<code>~\/\.config\/nortuscc\/backups\/backup-1<\/code>[\s\S]*aria-label="Show the backups folder in Finder"/);
+  assert.match(inside, /<code>local-run<\/code>/); assert.match(inside, /<code>config:claude:settings\.json#model<\/code> EACCES/);
+  assert.doesNotMatch(outsideDetails(text), /local-run|backup-1|config:|skill:tdd/);
+
+  // Copy details carries the plain-text account; Show in Finder names a place, never a path, and reports a refusal.
+  const failure = RunCard({ run: c.state.run!, state: c.state, controller: c })!;
+  const tree = (failure.type as (props: unknown) => ReactElement)(failure.props);
+  assert.match(find(tree, element => element.type === CopyDetails)!.props.text, /^Apply changes to this Mac: Failed\nCause: Couldn't write Claude setting model[\s\S]*- Claude setting model \(config:claude:settings\.json#model\): EACCES: permission denied\nWritten: 1, not written: 1\nRun ID: local-run\nBackups: ~\/\.config\/nortuscc\/backups\/backup-1\nAgent log: ~\/\.config\/nortuscc\/agent\/agent\.log$/);
+  const places = find(tree, element => element.type === RunPlaces)!;
+  assert.equal(await places.props.onReveal('backups'), 'There are no backups on this Mac yet.');
+  assert.deepEqual(invoked.filter(call => call.command === 'reveal_place'), [{ command: 'reveal_place', args: { place: 'backups' } }]);
+
+  // Re-preview prepares a fresh plan for what is still waiting.
+  await c.repreview();
+  assert.deepEqual(calls.filter(call => call.name === 'previewChange').at(-1)?.input.change, localChange);
+});
+
+test('a run that finished with failed steps leads with its counts, and one with no reason says so plainly', async t => {
+  const { c } = await page(t);
+  const render = (fields: Partial<ReturnType<typeof run>>) => renderToStaticMarkup(createElement(RunCard, { run: run(fields), state: c.state, controller: c }));
+  assert.match(render({ state: 'failed', steps: [{ key: 'setting:a', outcome: 'failed', note: 'Permission denied' }], result: { status: 'done', ok: 0, failed: 1 } }), /run-cause" role="status">0 changes applied, 1 failed\./);
+  const legacy = render({ state: 'failed', result: { status: 'failed', message: 'Operation stopped; inspect before retrying' } });
+  assert.match(legacy, /run-cause" role="status">It stopped before finishing, and the agent didn’t record why\.</); assert.doesNotMatch(legacy, /inspect/i);
+  // A run that succeeded keeps its one quiet line.
+  assert.doesNotMatch(render({ state: 'succeeded', result: { status: 'done', ok: 2, failed: 0 } }), /run-failure|Copy details/);
+});
+
 test('Abandon on Changes asks once and names the run', async t => {
   const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
   const { c, html } = await page(t, f => { f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; });
@@ -340,7 +430,7 @@ test('while this Mac is busy, Changes shows its progress in place of the review 
   const busy = { kind: 'reconcile', description: 'Applying changes on this Mac', done: 12, total: 30, step: 'Install skill tdd from mattpocock/skills', runId: null };
   const html = renderToStaticMarkup(createElement(SetupSyncView, { state: { ...c.state, busy }, controller: c }));
   assert.match(html, /aria-label="This Mac is busy"[\s\S]*Applying changes on this Mac[\s\S]*12 of 30[\s\S]*Install skill tdd from mattpocock\/skills/);
-  assert.doesNotMatch(html, /changes-incoming-h|changes-local-h|hasn(&#x27;|')t been inspected/);
+  assert.doesNotMatch(html, /changes-incoming-h|changes-local-h|hasn(&#x27;|')t been checked/);
   const free = renderToStaticMarkup(createElement(SetupSyncView, { state: c.state, controller: c }));
   assert.match(free, /changes-incoming-h/); assert.match(free, /changes-local-h/); assert.doesNotMatch(free, /This Mac is busy/);
 });
