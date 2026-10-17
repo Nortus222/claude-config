@@ -74,10 +74,12 @@ export const fakeInstaller = (
       const ref = hash < 0 ? 'HEAD' : arg!.slice(hash + 1);
       let rev = ref;
       try { rev = git(source.dir, 'rev-parse', '--verify', '-q', `refs/heads/${ref}`); } catch { /* not a branch */ }
-      // Like the real installer (skills 1.5–1.7): when no requested name matches it exits 1 naming them all;
-      // otherwise it installs the matches, skips the rest and exits 0. Every add stamps the lock entry.
+      // Like the real installer (skills 1.5–1.7): it matches requested names case-insensitively and records each
+      // skill under its own name. When no requested name matches it exits 1 naming them all; otherwise it installs
+      // the matches, skips the rest and exits 0. Every add stamps the lock entry.
       const requested = valuesOf('--skill');
-      const matching = requested.filter((n) => { try { git(source.dir, 'cat-file', '-e', `${rev}:skills/${n}`); return true; } catch { return false; } });
+      const own = git(source.dir, 'ls-tree', '--name-only', `${rev}:skills`).split('\n').filter(Boolean);
+      const matching = requested.flatMap((n) => own.filter((o) => o.toLowerCase() === n.toLowerCase()));
       if (!matching.length) return { code: 1, stdout: `\x1b[31m■\x1b[39m  No matching skills found for: ${requested.join(', ')}\n●  Available skills:\n│    - a\n` };
       for (const n of matching) {
         if (partial?.writes && !partial.writes.includes(n)) continue;
