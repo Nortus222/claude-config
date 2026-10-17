@@ -40,7 +40,7 @@
 .preview-line > .name-list:only-child {
   grid-column: 1 / -1;
 }
-/* Item names inline, comma-separated; "+N more" follows the last shown name. */
+/* Item names inline, grouped by kind; "+N more" follows the last shown name. */
 .name-list {
   margin: 0;
   padding: 0;
@@ -51,8 +51,11 @@
 .name-list > li {
   display: inline;
 }
-.name-list > li:has(+ li:not(.name-more))::after {
-  content: ', ';
+.name-group-head {
+  color: var(--text-secondary);
+}
+.name-sep {
+  color: var(--text-secondary);
 }
 .name-more {
   margin-left: var(--space-2);

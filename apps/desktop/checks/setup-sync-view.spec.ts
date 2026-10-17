@@ -4,6 +4,7 @@ import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { SetupSyncView, SetupProfiles, IncomingRow, PinGroupRow, Segmented, NameList, RunCard, incomingEntries, pinMove } from '../src/setup-sync-view.tsx';
 import { CopyDetails, RunPlaces } from '../src/run-recovery.tsx';
+import { groupLabels, itemLabel } from '../src/copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { SetupSyncController } from '../src/setup-sync-controller.ts';
 import { fixture, review, run, localItems, localRun, localChange, flush } from './support/setup-sync.ts';
@@ -196,10 +197,12 @@ test('an incoming preview groups its choices by action, one line each, with step
       skipped: [{ key: 'config:claude:settings.json#tui', reason: 'Already matches your profile' }] }, nextActions: [], actionEffects: ['Save reviewed choices'] });
   c.choose({ itemId: 'setting:a', action: 'accept' }); await c.preview();
   const top = panel(html()), seen = plainText(top.replace(/<details[\s\S]*?<\/details>/g, ''));
-  assert.match(seen, /Take 3Claude setting modelClaude setting themeClaude setting tuiEnd/);
-  assert.match(seen, /End hold and take 1Claude setting env\.B/);
-  assert.match(seen, /Replace mine 1 · backed up firstClaude setting env\.A/);
-  assert.match(seen, /Hold 5Claude setting env\.CClaude setting env\.D/);
+  // Each line names its kind once; a single item reads as its whole label.
+  assert.match(seen, /Take 3Claude settings: model, theme, tuiEnd/);
+  assert.match(seen, /End hold and take 1Claude setting env\.BReplace/);
+  assert.match(seen, /Replace mine 1 · backed up firstClaude setting env\.AHold/);
+  assert.match(seen, /Hold 5Claude settings: env\.C, env\.D, env\.E, env\.F, env\.GItems/);
+  assert.match(top, /<span class="name-group-head">Claude settings: <\/span><strong>model<\/strong>, <strong>theme<\/strong>/);
   // No per-item sentence, no repeated steps and no agent fine print outside the folds.
   assert.doesNotMatch(seen, /your profile&#x27;s value|Write Claude setting model|Save reviewed choices|Already matches/);
   assert.match(top, /<details class="preview-more"><summary>Steps \(1\)<\/summary>[\s\S]*Write Claude setting model[\s\S]*Save reviewed choices/);
@@ -214,10 +217,19 @@ test('a preview of many changes to this Mac shows the first names inline and the
   await c.previewLocal();
   const top = panel(html());
   assert.match(top, /Apply 40 changes to this Mac/);
-  assert.equal(top.match(/Claude setting <strong>key\d+<\/strong>/g)?.length, 12);
-  assert.match(top, /<li class="name-more"><button type="button" class="link" aria-expanded="false">\+28 more<\/button><\/li>/);
+  // Twelve names under one "Claude settings", then +28 more.
+  assert.equal(top.match(/<strong>key\d+<\/strong>/g)?.length, 12); assert.equal(top.match(/Claude settings: /g)?.length, 1);
+  assert.match(top, /<strong>key11<\/strong><\/span><\/li><li class="name-more"><button type="button" class="link" aria-expanded="false">\+28 more<\/button><\/li>/);
   const list = renderToStaticMarkup(createElement(NameList, { label: 'Names', labels: keys.slice(0, 12).map(key => ({ lead: '', name: key, tail: '', text: key })) }));
   assert.doesNotMatch(list, /more/);
+});
+
+test('a name list groups items by kind in order of first appearance, with the kind once and in the plural', () => {
+  const labels = ['setting:claude:settings.json#model', 'skill:mattpocock/skills/tdd', 'setting:claude:settings.json#theme', 'skill:mattpocock/skills/grill-me',
+    'file:claude:CLAUDE.md', 'integration:browser', 'integration:github', 'skill:other/repo/x'].map(itemLabel);
+  const text = plainText(renderToStaticMarkup(createElement(NameList, { label: 'Names', labels })));
+  assert.equal(text, 'Claude settings: model, theme · Skills from mattpocock/skills: tdd, grill-me · Claude instructions (CLAUDE.md) · Integrations: browser, github · Skill x from other/repo');
+  assert.deepEqual(groupLabels(['file:claude:a.json', 'file:claude:b.json'].map(itemLabel)).map(group => [group.heading, group.items.map(item => item.name)]), [['Claude files', ['a.json', 'b.json']]]);
 });
 
 test('a switch preview sits at the top with one Switch to team, keeps the select on team, no hold notice and no empty dropped lists', async t => {
@@ -353,7 +365,9 @@ test('the Changes heading counts incoming rows like Home and the badge: not unch
 
 test('a failed run says why, lists its failed steps and counts, offers next steps, and names where to look', async t => {
   const cause = "Couldn't write Claude setting model: EACCES: permission denied";
-  const steps = [{ key: 'skill:tdd', outcome: 'ok' as const, note: 'Installed' }, { key: 'config:claude:settings.json#model', outcome: 'failed' as const, note: 'EACCES: permission denied' }];
+  // The cause names the model step; grill failed on its own; CLAUDE.md never ran.
+  const steps = [{ key: 'skill:tdd', outcome: 'ok' as const, note: 'Installed' }, { key: 'config:claude:settings.json#model', outcome: 'failed' as const, note: 'EACCES: permission denied' },
+    { key: 'skill:grill', outcome: 'failed' as const, note: 'Download timed out' }, { key: 'config:claude:CLAUDE.md', outcome: 'failed' as const, note: 'Not written because an earlier step failed' }];
   const { c, html, handlers, emit, bridge, calls } = await page(t, f => { f.report.items = localItems(); });
   const invoked: { command: string; args: unknown }[] = [], invoke = bridge.invoke;
   bridge.invoke = async (command, args) => { invoked.push({ command, args }); if (command === 'reveal_place') throw new Error('There are no backups on this Mac yet.'); return invoke(command, args); };
@@ -364,7 +378,9 @@ test('a failed run says why, lists its failed steps and counts, offers next step
   const text = html(), card = /<section class="card changes-run run-failure"[\s\S]*?<\/section>/.exec(text)?.[0] ?? '';
   assert.match(card, /<span class="pill pill-danger">Failed<\/span>/);
   assert.match(card, /class="alert run-cause" role="status">Couldn&#x27;t write Claude setting model: EACCES: permission denied\.</);
-  assert.match(card, /aria-label="Failed steps"><li><span class="changes-label">Claude setting <strong>model<\/strong><\/span><small>EACCES: permission denied\.<\/small>/);
+  // Only the failure the cause doesn't name is listed; a step that never ran is not a failure.
+  assert.match(card, /<ul class="changes-list run-failed" aria-label="Failed steps"><li><span class="changes-label">Skill <strong>grill<\/strong> from mattpocock\/skills<\/span><small>Download timed out\.<\/small><\/li><\/ul>/);
+  assert.doesNotMatch(card.replace(/<details[\s\S]*<\/details>/, ''), /EACCES: permission denied\.<\/small>|CLAUDE\.md|earlier step/);
   assert.match(card, /1 change written · 1 not written\. Backups of what it replaced are kept\. Nothing is rolled back automatically\./);
   assert.deepEqual(buttons(card).filter(label => ['Check again', 'Re-preview', 'Copy details'].includes(label)), ['Check again', 'Re-preview', 'Copy details']);
   assert.doesNotMatch(card, /inspect/i);
@@ -372,13 +388,15 @@ test('a failed run says why, lists its failed steps and counts, offers next step
   const inside = /<details class="run-details">[\s\S]*<\/details>/.exec(card)?.[0] ?? '';
   assert.match(inside, /<dt>Agent log<\/dt><dd><code>~\/\.config\/nortuscc\/agent\/agent\.log<\/code> <button class="link" aria-label="Show the agent log in Finder">Show in Finder<\/button>/);
   assert.match(inside, /<code>~\/\.config\/nortuscc\/backups\/backup-1<\/code>[\s\S]*aria-label="Show the backups folder in Finder"/);
-  assert.match(inside, /<code>local-run<\/code>/); assert.match(inside, /<code>config:claude:settings\.json#model<\/code> EACCES/);
+  assert.match(inside, /<code>local-run<\/code>/);
+  assert.match(inside, /<dt>Failed<\/dt><dd><ul><li><code>config:claude:settings\.json#model<\/code> EACCES: permission denied<\/li><li><code>skill:grill<\/code> Download timed out<\/li><\/ul>/);
+  assert.match(inside, /<dt>Not written<\/dt><dd><ul><li><code>config:claude:settings\.json#model<\/code><\/li><li><code>config:claude:CLAUDE\.md<\/code><\/li><\/ul>/);
   assert.doesNotMatch(outsideDetails(text), /local-run|backup-1|config:|skill:tdd/);
 
   // Copy details carries the plain-text account; Show in Finder names a place, never a path, and reports a refusal.
   const failure = RunCard({ run: c.state.run!, state: c.state, controller: c })!;
   const tree = (failure.type as (props: unknown) => ReactElement)(failure.props);
-  assert.match(find(tree, element => element.type === CopyDetails)!.props.text, /^Apply changes to this Mac: Failed\nCause: Couldn't write Claude setting model[\s\S]*- Claude setting model \(config:claude:settings\.json#model\): EACCES: permission denied\nWritten: 1, not written: 1\nRun ID: local-run\nBackups: ~\/\.config\/nortuscc\/backups\/backup-1\nAgent log: ~\/\.config\/nortuscc\/agent\/agent\.log$/);
+  assert.match(find(tree, element => element.type === CopyDetails)!.props.text, /^Apply changes to this Mac: Failed\nCause: Couldn't write Claude setting model[\s\S]*- Claude setting model \(config:claude:settings\.json#model\): EACCES: permission denied\n- Skill grill from mattpocock\/skills \(skill:grill\): Download timed out\nWritten: 1, not written: 1\nRun ID: local-run\nBackups: ~\/\.config\/nortuscc\/backups\/backup-1\nAgent log: ~\/\.config\/nortuscc\/agent\/agent\.log$/);
   const places = find(tree, element => element.type === RunPlaces)!;
   assert.equal(await places.props.onReveal('backups'), 'There are no backups on this Mac yet.');
   assert.deepEqual(invoked.filter(call => call.command === 'reveal_place'), [{ command: 'reveal_place', args: { place: 'backups' } }]);

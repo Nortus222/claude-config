@@ -50,6 +50,31 @@ export function itemLabel(key: string): ItemLabel {
   return UNKNOWN;
 }
 
+// Plurals of the leads `itemLabel` gives, for a group of items of one kind. A lead not listed reads the same
+// for several items ("Claude instructions").
+const PLURAL_LEADS: Readonly<Record<string, string>> = {
+  'Claude setting': 'Claude settings', 'Codex setting': 'Codex settings', Setting: 'Settings',
+  'Claude file': 'Claude files', 'Codex file': 'Codex files', File: 'Files', Skill: 'Skills', Integration: 'Integrations',
+};
+export type LabelGroup = { readonly heading: string | null; readonly items: readonly ItemLabel[] };
+// Labels grouped by kind, in order of first appearance, so a kind's words appear once: "Claude settings" with
+// names model and theme, "Skills from owner/repo" with tdd. A group of one, or a label with no name, has no
+// heading and reads as its whole label.
+export function groupLabels(labels: readonly ItemLabel[]): LabelGroup[] {
+  const groups = new Map<string, ItemLabel[]>();
+  labels.forEach((label, index) => {
+    const key = label.name ? `${label.lead}\u0000${label.tail}` : `\u0001${index}`;
+    groups.set(key, [...groups.get(key) ?? [], label]);
+  });
+  return [...groups.values()].map(items => {
+    if (items.length === 1) return { heading: null, items };
+    const { lead, tail } = items[0]!;
+    // A file lead names its file in brackets ("Claude file (x)"); its group drops them.
+    const kind = lead.replace(/\s*\(?\s*$/, '');
+    return { heading: `${PLURAL_LEADS[kind] ?? kind}${tail.startsWith(')') ? tail.slice(1) : tail}`, items };
+  });
+}
+
 const CHANGE_TITLES = {
   setupApply: 'Apply incoming changes',
   followProfile: 'Follow profile',
