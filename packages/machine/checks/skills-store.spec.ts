@@ -132,6 +132,15 @@ test('installerFailure names skills a source no longer has, from styled installe
     note: "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again." });
   assert.deepEqual(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').missing, ['a', 'b']);
   assert.match(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').note, /^o\/r no longer has a, b\. Remove them /);
+  // Names split on commas and whitespace alike, as they are requested; quotes and a closing stop are dropped.
+  assert.deepEqual(installerFailure(1, "No matching skills found for: 'a',b  c.\n", 'o/r').missing, ['a', 'b', 'c']);
+  assert.equal(installerFailure(1, '■  No matching skills found for: gone\n', 'o/r', 'c'.repeat(40)).note,
+    "o/r at ccccccc doesn't have gone. Move the pin to a commit that has it, or remove it from your profile's skills, then apply again.");
+});
+
+test('addCommand refuses a skill name the installer would split, join ambiguously or read as a flag', () => {
+  for (const name of ['two words', 'a,b', '-x', '--skill', 'tab\there', ''])
+    assert.throws(() => addCommand({ source: 'o/r', skills: ['ok', name], targets: ['claude'] }), /can't be installed/);
 });
 
 test('installerFailure otherwise keeps the last error line, bounded, with the exit code', () => {

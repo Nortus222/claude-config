@@ -8,7 +8,7 @@ import { FileIntegrity } from '../file-integrity.ts';
 import { checkSkillOwnership, disableOwnedSkill } from './ownership.ts';
 import { MachinePaths } from '../paths.ts';
 import type { Processes } from '../processes.ts';
-import { SKILL_AGENTS, addCommand, removeCommand, runInstaller, updateCommand } from './installer.ts';
+import { SKILL_AGENTS, addCommand, missingSkillsNote, removeCommand, runInstaller, updateCommand } from './installer.ts';
 import { MANIFEST_FILE, emitManifest, groupsOf, manifestOutcome, sourceOf, updateManifestGroups } from './manifest.ts';
 import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
 import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, readSkillLockEvidence, skillLockPath, skillExposure } from './store.ts';
@@ -199,30 +199,32 @@ const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
   }
 });
 
+// Adds `names` from `installSource` and says which the add wrote (`landed`) and which `source` lacks (`missing`).
+// The installer exits 1 naming every requested skill only when none match; when some match it exits 0 and skips
+// the rest. So after a successful add, a requested skill whose lock entry the add did not write is one the source
+// lacks. A successful add that wrote no requested entry leaves the lock without evidence: then all count as landed.
+const addSkills = (source: string, installSource: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>, pin?: string) =>
+  Effect.gen(function* () {
+    const before = (yield* readSkillLock).skills;
+    const ran = yield* runInstaller(addCommand({ source: installSource, skills: names, targets }), source, pin);
+    if (!ran.ok) return { ok: false, note: ran.note ?? '', landed: [] as string[], missing: names.filter((n) => ran.missing?.includes(n)) };
+    const after = (yield* readSkillLock).skills;
+    const landed = names.filter((n) => after[n] !== undefined && JSON.stringify(after[n]) !== JSON.stringify(before[n]));
+    if (!landed.length) return { ok: true, note: ran.note ?? '', landed: [...names], missing: [] as string[] };
+    return { ok: true, note: ran.note ?? '', landed, missing: names.filter((n) => !landed.includes(n)) };
+  });
+
 // Installs at a pin, then verifies the install against the commit: the installer may resolve the sha as a
 // branch or tag of that name. A mismatch is removed again; the backup taken first keeps the previous version.
 // `review` names the bundled scripts of a verified install. When the installer fails, the skills whose lock now
 // records the sha are still verified (it may have written them) and a mismatch removed; the rest are left alone.
-// The installer rejects a whole batch when its source lacks one requested skill. Then the rest are added again
-// without it: `gone` says which skills the source no longer has, `requested` what the final add asked for.
-const addAvailable = (source: string, installSource: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
-  Effect.gen(function* () {
-    const first = yield* runInstaller(addCommand({ source: installSource, skills: names, targets }), source);
-    const missing = names.filter((n) => first.missing?.includes(n));
-    if (first.ok || !missing.length) return { ok: first.ok, note: first.note ?? '', gone: '', requested: names };
-    const rest = names.filter((n) => !missing.includes(n));
-    if (!rest.length) return { ok: false, note: '', gone: first.note ?? '', requested: rest };
-    const second = yield* runInstaller(addCommand({ source: installSource, skills: rest, targets }), source);
-    return { ok: second.ok, note: second.note ?? '', gone: first.note ?? '', requested: rest };
-  });
-
+// A skill the pinned commit lacks fails the step by name and is never verified; the others still install.
 const installPinned = (source: string, sha: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>, scopedRemoval = false) =>
   Effect.gen(function* () {
     yield* preserveAll(names);
-    const added = yield* addAvailable(source, pinnedSource(source, sha), names, targets);
-    const installed = { ok: added.ok, note: [added.gone, added.note].filter(Boolean).join(' ') };
+    const added = yield* addSkills(source, pinnedSource(source, sha), names, targets, sha);
     const lock = yield* readSkillLock;
-    const written = added.ok ? added.requested : added.requested.filter((n) => lockRef(lock.skills[n]) === sha);
+    const written = added.ok ? added.landed : names.filter((n) => !added.missing.includes(n) && lockRef(lock.skills[n]) === sha);
     const { failed, scripts } = yield* verifyPinned({ source, sha, names: written });
     let removal = '';
     if (failed.size > 0) {
@@ -231,26 +233,25 @@ const installPinned = (source: string, sha: string, names: ReadonlyArray<string>
       const problems = bad.map((n) => failed.get(n)![0]).join('; ');
       removal = `${removed.ok ? 'removed' : 'could not remove'} ${bad.join(', ')}: does not match ${short(sha)} (${problems})`;
     }
-    if (!installed.ok) return { ok: false, note: removal ? `${installed.note}; ${removal}` : installed.note };
-    if (removal) return { ok: false, note: added.gone ? `${added.gone} ${removal}` : removal };
+    if (!added.ok) return { ok: false, note: removal ? `${added.note}; ${removal}` : added.note };
+    const gone = added.missing.length ? missingSkillsNote(source, added.missing, sha) : '';
+    if (removal) return { ok: false, note: gone ? `${gone} ${removal}` : removal };
     const review = scripts.size > 0
       ? `bundles scripts, review: ${sortedUnique(scripts.keys()).map((n) => `${n} (${scripts.get(n)!.join(', ')})`).join('; ')}`
       : '';
-    // A skill the source no longer has fails the step; the others it verified stay installed.
-    if (added.gone) return { ok: false, note: `${added.gone} Verified ${added.requested.length} other skill(s) at ${short(sha)}.${review ? ` Review: ${review}` : ''}`, review };
+    if (gone) return { ok: false, note: `${gone} Verified ${written.length} other skill(s) at ${short(sha)}.${review ? ` Review: ${review}` : ''}`, review };
     const verified = `verified ${names.length} skill(s) at ${short(sha)}`;
     return { ok: true, note: review ? `${verified}; ${review}` : verified, review };
   });
 
 // Adds skills at their source's upstream latest. The add replaces any installed folder, so each is backed up
-// first, as installPinned does for a pinned add.
+// first, as installPinned does for a pinned add. A skill the source no longer has fails the step by name.
 const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: ReadonlyArray<Target>) =>
   Effect.gen(function* () {
     yield* preserveAll(skills);
-    const added = yield* addAvailable(source, source, skills, targets);
-    if (!added.gone) return { ok: added.ok, note: added.note };
-    // A skill the source no longer has fails the step; the others still install.
-    return { ok: false, note: added.ok ? `${added.gone} Installed ${added.requested.length} other skill(s).` : [added.gone, added.note].filter(Boolean).join(' ') };
+    const added = yield* addSkills(source, source, skills, targets);
+    if (!added.ok || !added.missing.length) return { ok: added.ok, note: added.note };
+    return { ok: false, note: `${missingSkillsNote(source, added.missing)} Installed ${added.landed.length} other skill(s).` };
   });
 
 // Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
