@@ -267,7 +267,7 @@ mod tests {
   fn new(body:&str)->Self {
    let root=crate::host::fixtures::scratch();
    fs::write(root.join("agent.mjs"), "test only").unwrap();
-   let script=format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/args'\necho $$ > '{}/pid'\n{}\n",root.display(),root.display(),body);
+   let script=format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/args'\necho $$ > '{}/pid.tmp' && mv '{}/pid.tmp' '{}/pid'\n{}\n",root.display(),root.display(),root.display(),root.display(),body);
    fs::write(root.join("bun"),script).unwrap();fs::set_permissions(root.join("bun"),fs::Permissions::from_mode(0o700)).unwrap();Self {root}
   }
   fn helper(&self)->NativeHelper {NativeHelper::new(self.root.clone())}
