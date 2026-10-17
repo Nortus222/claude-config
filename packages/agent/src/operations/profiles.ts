@@ -133,7 +133,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
         const observed = yield* parityObserver(lifecycle, acceptance), backups = yield* Backups;
         for (const [index, key] of keys.entries()) {
           step = ({ 'profile:follow': 'saving the followed profile', 'profile:baseline': 'clearing the applied baseline', 'profile:holds': 'removing the listed holds', 'profile:overrides': 'removing the listed overrides', 'profile:subscribe': 'subscribing to the shared setup', 'profile:unsubscribe': 'stopping updates through the previous shared link', 'profile:inspect': 'checking for changes' } as Record<string, string>)[key]!;
-          if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Profile switch cancelled; inspect the saved run'));
+          if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Profile switch cancelled'));
           yield* observed.observer.pending(key);
           yield* lifecycle.progress({ type: 'started', index, total: keys.length, step: plan.steps[index]! });
           if (key === 'profile:follow') { yield* backups.preserve(join(paths.stateRoot, 'agent/followed.json'), 'agent/followed.json', undefined, { private: true }); yield* store.write(target); saved = true; }

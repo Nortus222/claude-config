@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { configDomain, integrationsDomain, DecisionsStore, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
+import { configDomain, integrationsDomain, DecisionsStore, Fs, FsFailed, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
 import { decodeOperationInput } from '../src/operations/index.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -68,6 +68,22 @@ test('setup apply persists every choice and applies them in one run', async () =
     assert.equal(settings.hooks, undefined);
     assert.ok(run.parity?.committedKeys.includes('sync:decision'));
     assert.equal(run.parity?.remainingKeys.length, 0);
+  }));
+});
+
+test('a failed setup machine step reports its own cause in the run and its step note', async () => {
+  await withSetup((m, _setup, _s, handle) => Effect.gen(function* () {
+    const fs = yield* Fs; const settings = join(m.paths.claude, 'settings.json');
+    const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(Effect.provideService(Fs, {
+      ...fs, writeTextAtomic: (path, text) => path === settings ? Effect.fail(new FsFailed({ op: 'write', path, reason: 'EACCES: permission denied' })) : fs.writeTextAtomic(path, text),
+    }));
+    const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    const run = yield* finish(session, preview.planId);
+    assert.equal(run.state, 'failed');
+    const key = 'config:claude:settings.json#effortLevel';
+    assert.deepEqual(run.result, { status: 'failed', message: `Couldn't apply ${key}: write ${settings}: EACCES: permission denied` });
+    assert.deepEqual(run.steps.find(step => step.key === key), { key, outcome: 'failed', note: `write ${settings}: EACCES: permission denied` });
+    assert.ok(run.parity?.remainingKeys.includes(key));
   }));
 });
 

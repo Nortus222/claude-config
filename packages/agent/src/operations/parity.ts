@@ -4,6 +4,7 @@ import { RunError, type RunLifecycle } from '../runs.ts';
 import type { SessionError } from '../ipc/session.ts';
 import type { Trigger } from '../scheduler.ts';
 import type { ChangePreview, ParityAcceptance, ParityRunEvidence } from './model.ts';
+import { describe, safeMessage } from './safety.ts';
 
 // Validated owners capture their services here; callbacks never come from wire input.
 export type PreparedParityChange = {
@@ -34,7 +35,8 @@ export const parityObserver = (lifecycle: RunLifecycle, acceptance: ParityAccept
     if (Exit.isFailure(receipt) || Exit.isFailure(record)) {
       evidence = { ...evidence, state: 'needsInspection' };
       yield* lifecycle.parity(evidence).pipe(Effect.ignore);
-      return yield* Effect.fail(new RunError('RUN_FAILED', 'Operation progress could not be saved; inspect before retrying'));
+      const why = Exit.isFailure(receipt) ? receipt.cause : (record as Exit.Failure<unknown, unknown>).cause;
+      return yield* Effect.fail(new RunError('RUN_FAILED', safeMessage(`Couldn't save run progress: ${describe(Cause.squash(why))}`)));
     }
   });
   const observer: MutationObserver = {

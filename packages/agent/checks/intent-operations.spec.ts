@@ -177,7 +177,9 @@ for (const failure of ['receipt', 'history', 'both'] as const) test(`saved inten
       const done = yield* f.apply(session, { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'claude:settings.json', key: 'theme', action: 'set', value: 'light' } });
       assert.equal(done.state, failure === 'history' ? 'failed' : 'interrupted'); assert.equal(done.intentSaved, true); assert.equal(done.intentState, 'saved'); assert.equal(done.parity?.state, 'needsInspection'); assert.deepEqual(done.parity?.committedKeys, ['intent:overrides']); assert.ok(done.parity!.backupIds.length > 0); assert.equal(writes, 1);
     }), { receipt: failure !== 'history' ? r => r.view.intentSaved : undefined, history: failure !== 'receipt', overrides: real => ({ ...real, write: (...args) => { writes++; return real.write(...args); } }) });
-    assert.deepEqual(stderr, []);
+    // One agent.log line names the run, its kind and the redacted cause.
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, failure === 'history' ? /^apply run [0-9a-f-]+ \(machineIntent\) failed: .*injected failure\n$/ : /^apply run [0-9a-f-]+ \(machineIntent\) interrupted: Couldn't save the .*injected receipt failure.*\n$/);
   } finally { process.stderr.write = previous; }
 });
 test('stale overrides or malformed known documents refuse before writing', async () => {
