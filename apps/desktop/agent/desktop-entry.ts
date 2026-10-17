@@ -11,7 +11,7 @@ import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts
 import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
 import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
 import { ensureAgent } from './lifecycle.ts';
-import { probeLoginEnvironment } from './login-environment.ts';
+import { MACOS_TOOL_DIRECTORIES, probeLoginEnvironment, withToolDirectories } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
 import { desktopHostedUrl } from './public-config.ts';
 import { decodeRecoverUpdate } from '../shared/maintenance-protocol.ts';
@@ -27,6 +27,8 @@ export type DesktopEntryInput = {
   readonly user?: string;
   readonly processes?: Layer.Layer<Processes>;
   readonly probe?: typeof probeLoginEnvironment;
+  // Appended to the login PATH on macOS; defaults to Homebrew's prefixes.
+  readonly toolDirectories?: ReadonlyArray<string>;
   readonly signal?: AbortSignal;
   readonly bootstrapTimeoutMs?: number;
   readonly stdin?: AsyncIterable<string | Uint8Array>;
@@ -51,7 +53,8 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, onProgress: trace.record, signal });
       signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
-      return result;
+      // Every helper, the registered service's PATH and the agent's tools (git, npx, gh) see Homebrew.
+      return (input.platform ?? process.platform) === 'darwin' ? { ...result, env: withToolDirectories(result.env, input.toolDirectories ?? MACOS_TOOL_DIRECTORIES) } : result;
     } catch (error) { trace.record('login_probe', signal.aborted ? 'cancelled' : 'failed'); throw error; }
   }, catch: error => error }).pipe(Effect.uninterruptible);
   trace.record('entry', 'started');

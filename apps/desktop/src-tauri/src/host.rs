@@ -826,22 +826,56 @@ pub fn github_link_command(link: GitHubLink) -> Command {
 }
 pub fn device_login_command() -> Command { github_link_command(GitHubLink::DeviceLogin) }
 pub fn open_device_login() -> Result<Value, String> {
-    run_browser(device_login_command(), Duration::from_secs(5))
+    run_browser(device_login_command(), Duration::from_secs(5), "GitHub")
 }
 pub fn open_github_link(link: GitHubLink) -> Result<Value, String> {
-    run_browser(github_link_command(link), Duration::from_secs(5))
+    run_browser(github_link_command(link), Duration::from_secs(5), "GitHub")
 }
-fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String> {
-    wait_browser(command.spawn().map_err(|_| "Unable to open GitHub")?, timeout)
+/// The places on disk the renderer may show in Finder. It names a place; it never supplies a path.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RevealPlace { AgentLog, Backups }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealArgs { pub place: RevealPlace }
+/// Where a place lives under the agent's state root (`~/.config/nortuscc` by default).
+pub fn reveal_path(state_root: &Path, place: RevealPlace) -> PathBuf {
+    match place { RevealPlace::AgentLog => state_root.join("agent").join("agent.log"), RevealPlace::Backups => state_root.join("backups") }
 }
-fn wait_browser(mut child: std::process::Child, timeout: Duration) -> Result<Value, String> {
+pub fn reveal_command(path: &Path) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command.arg("-R").arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+}
+/// Selects the place in a Finder window. Off macOS it is refused before `state_root` is looked up; a place
+/// that does not exist yet is refused with what that means.
+pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    reveal_place_on(cfg!(target_os = "macos"), state_root, place)
+}
+fn reveal_place_on(macos: bool, state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    if !macos { return Err("Show in Finder works only on macOS.".into()); }
+    let path = reveal_path(&state_root()?, place);
+    if !path.exists() {
+        return Err(match place {
+            RevealPlace::AgentLog => "The agent log doesn't exist yet. The agent writes it once it has run on this Mac.",
+            RevealPlace::Backups => "There are no backups on this Mac yet.",
+        }.into());
+    }
+    run_browser(reveal_command(&path), Duration::from_secs(5), "Finder")
+}
+fn run_browser(mut command: Command, timeout: Duration, what: &str) -> Result<Value, String> {
+    wait_browser(command.spawn().map_err(|_| format!("Unable to open {what}"))?, timeout, what)
+}
+fn wait_browser(mut child: std::process::Child, timeout: Duration, what: &str) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     let result = (|| {
         loop {
-            if let Some(status) = child.try_wait().map_err(|_| "Unable to open GitHub")? {
-                return if status.success() { Ok(json!({"opened":true})) } else { Err("Unable to open GitHub".into()) };
+            if let Some(status) = child.try_wait().map_err(|_| format!("Unable to open {what}"))? {
+                return if status.success() { Ok(json!({"opened":true})) } else { Err(format!("Unable to open {what}")) };
             }
-            if Instant::now() >= deadline { return Err("Opening GitHub timed out".into()); }
+            if Instant::now() >= deadline { return Err(format!("Opening {what} timed out")); }
             thread::sleep(Duration::from_millis(10));
         }
     })();
@@ -1708,7 +1742,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         let child = command.spawn().unwrap();
         // A valid timeout may expire before the fake program's first instruction.
         let pid = child.id() as i32;
-        assert!(wait_browser(child,Duration::from_millis(100)).unwrap_err().contains("timed out"));
+        assert!(wait_browser(child,Duration::from_millis(100),"GitHub").unwrap_err().contains("timed out"));
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1913,6 +1947,27 @@ mod onboarding_bridge_tests {
         }
         for bad in [json!({"link":"https://evil.invalid"}), json!({"link":"deviceLogin","url":"https://evil.invalid"}), json!({"url":"https://github.com/login/device"}), json!({})] {
             assert!(decode_args::<GitHubLinkArgs>(bad).is_err());
+        }
+    }
+    #[test]
+    fn reveal_names_a_place_under_the_state_root_and_never_takes_a_path() {
+        let root = Path::new("/state");
+        for (args, path) in [(json!({"place":"agentLog"}), "/state/agent/agent.log"), (json!({"place":"backups"}), "/state/backups")] {
+            let args: RevealArgs = decode_args(args).unwrap();
+            assert_eq!(reveal_path(root, args.place), PathBuf::from(path));
+            let command = reveal_command(&reveal_path(root, args.place));
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), vec![std::ffi::OsStr::new("-R"), std::ffi::OsStr::new(path)]);
+        }
+        for bad in [json!({"place":"/etc/passwd"}), json!({"place":"agentLog","path":"/etc"}), json!({"path":"/state"}), json!({})] {
+            assert!(decode_args::<RevealArgs>(bad).is_err());
+        }
+        let missing = std::env::temp_dir().join(format!("nortuscc-reveal-{}", std::process::id()));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::AgentLog).unwrap_err().contains("doesn't exist yet"));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::Backups).unwrap_err().contains("no backups"));
+        // Off macOS the refusal comes first: the state root is never looked up, and a missing place is not reported.
+        for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
+            assert_eq!(reveal_place_on(false, || panic!("looked up the state root"), place).unwrap_err(), "Show in Finder works only on macOS.");
         }
     }
 }

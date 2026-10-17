@@ -62,6 +62,8 @@ test('editDraft creates a draft and previewChange shows the replayed diff', asyn
   await f.within(s => Effect.gen(function* () {
     const p = yield* s.previewChange({ kind: 'editDraft', draftId: null, intent: { kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'new\n', choice: { kind: 'updateShared' } } } as any);
     assert.ok('draft' in p); assert.deepEqual((p as any).draft.affectedProfiles, ['base', 'personal', 'team']);
+    assert.deepEqual((p as any).draft.items.map((item: any) => [item.profile, item.itemId, item.change]),
+      [['base', 'file:claude:CLAUDE.md', 'changed'], ['personal', 'file:claude:CLAUDE.md', 'changed'], ['team', 'file:claude:CLAUDE.md', 'changed']]);
     assert.ok((p as any).draft.diff.some((d: any) => d.path === 'claude/CLAUDE.md' && d.after === 'new\n'));
     assert.equal(((yield* read(s, 'drafts')) as any).drafts.length, 0);
     const run = yield* apply(s, p.planId, 'save-draft'); assert.equal(run.state, 'succeeded');

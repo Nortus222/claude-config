@@ -241,7 +241,7 @@ export const IntentItemSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('skill'), source: SkillSourceSchema, name: SkillNameSchema, choice: Schema.NullOr(Schema.Boolean), defaultEnabled: Schema.Boolean, enabled: Schema.Boolean, from: IntentOrigin, declaredFrom: IntentOrigin, targets: IntentTargets,
     policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']), revision: Schema.optionalKey(SkillRevisionSchema) }),
   Schema.Struct({ kind: Schema.Literal('integration'), id: PatchId, type: Schema.Literals(['hook', 'mcp', 'plugin', 'marketplace', 'unknown']), target: Schema.optionalKey(Schema.Literals(['claude', 'codex'])), enabled: Schema.Boolean, from: IntentOrigin, prerequisites: Schema.Array(Text).check(Schema.isMaxLength(4)) }),
-  Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId, message: Schema.Literal('Configuration input is invalid; inspect the owning document in the app') }),
+  Schema.Struct({ kind: Schema.Literal('issue'), layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId, message: Schema.Literal('Configuration input is invalid; fix the owning document and reload') }),
 ]);
 export const IntentInspectionResultSchema = Schema.Struct({ generation: IdSchema, items: Schema.Array(IntentItemSchema).check(Schema.isMaxLength(100)), nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(512))), limitReason: Schema.optionalKey(Schema.Literals(['record-bytes', 'result-bytes', 'value-limit', 'unsafe-value', 'identity-limit'])) });
 export const MachineIntentDetailsSchema = Schema.Struct({
@@ -279,10 +279,15 @@ export const SourceDecisionPreviewSchema = Schema.Struct({ ...previewFields, cha
 const AccountPreviewSchema = Schema.Struct({...previewFields,change:AccountChangeSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PrunePreviewSchema = Schema.Struct({...previewFields,change:PruneBackupsChangeSchema,retention:BackupPrunePlanSchema,skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
 const PublicationPreviewSchema = Schema.Struct({ ...previewFields, change: Schema.Union([PublishDraftChangeSchema, AnnouncePublicationChangeSchema]), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)), skillAddition: Schema.optionalKey(Schema.Never) });
+// Resolved items a draft changes, per profile; lists over this count or the preview's byte budget are cut and marked itemsTruncated.
+export const MAX_DRAFT_PREVIEW_ITEMS = 1000;
 export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: AuthorHeadSchema, digest: DigestSchema,
   diff: Schema.Array(Schema.Struct({ path: Schema.String, before: Schema.NullOr(Schema.String), after: Schema.NullOr(Schema.String), truncated: Schema.optionalKey(Schema.Literal(true)) })),
   truncated: Schema.optionalKey(Schema.Literal(true)),
-  invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema) });
+  invalid: Schema.Array(Schema.Struct({ index: Schema.NullOr(CountSchema), profile: Schema.optionalKey(ProfileNameSchema), reason: Schema.String })), affectedProfiles: Schema.Array(ProfileNameSchema),
+  items: Schema.Array(Schema.Struct({ profile: ProfileNameSchema, itemId: KeySchema, kind: Schema.Literals(['setting', 'file', 'skill', 'integration']),
+    change: Schema.Literals(['added', 'removed', 'changed']) })).check(Schema.isMaxLength(MAX_DRAFT_PREVIEW_ITEMS)),
+  itemsTruncated: Schema.optionalKey(Schema.Literal(true)) });
 const AuthorLocalPreviewSchema = Schema.Struct({ ...previewFields, skillAddition: Schema.optionalKey(Schema.Never), change: AuthorLocalChangeSchema,
   draftId: Schema.NullOr(DraftIdSchema), draft: Schema.NullOr(DraftPreviewSchema), actionEffects: Schema.Array(Text) });
 export const ChangePreviewSchema = Schema.Union([FollowPreviewSchema, AuthorLocalPreviewSchema, PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
@@ -331,6 +336,8 @@ const runFields = {
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
   intentSaved: Schema.Boolean, intentState: Schema.optionalKey(Schema.Literals(['pending', 'saved', 'needsInspection'])),
   installation: Schema.optionalKey(SkillInstallationSchema), steps: list(StepOutcomeSchema), result: Schema.NullOr(RunTerminalResultSchema),
+  // The planned step in flight while the run is running.
+  current: Schema.optionalKey(Schema.Struct({ key: KeySchema, summary: Text })),
 };
 export const RunViewSchema = Schema.Union([
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AuthorLocalChangeSchema.members[0], parity: AuthorLocalAcceptanceSchema.members[0], skillAddition: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(AuthorLocalEvidenceSchema.members[0]) }),

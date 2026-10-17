@@ -49,8 +49,13 @@ export const readProfileOperation = <N extends 'inspectProfiles' | 'inspectShare
   let documents;
   if (followed) {
     const repo = followedClone(paths, followed.repoUrl);
-    const head = yield* revParse(repo, FOLLOWED_MAIN);
-    if (!head) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'No fetched profile inventory is available; refetch to retry'));
+    let head = (yield* (yield* Fs).exists(repo)) ? yield* revParse(repo, FOLLOWED_MAIN) : undefined;
+    // Listing reads the fetched inventory. A Mac that has never fetched it (first run) fetches it once.
+    if (!head) {
+      yield* privateFollowedRepository(paths, followed, { proveAccess: false });
+      if (yield* fetchFollowedMain(paths, repo, followed.repoUrl)) head = yield* revParse(repo, FOLLOWED_MAIN);
+    }
+    if (!head) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'The followed repository could not be fetched; check network access and reload'));
     documents = yield* commitDocuments(repo, head);
   } else documents = yield* worktreeDocuments(paths.repo);
   const names = yield* listProfiles('/profile').pipe(Effect.provide(memoryFiles(Object.fromEntries(Object.entries(documents).map(([path, text]) => [join('/profile', path), text])))));
@@ -128,7 +133,7 @@ export const prepareProfileOperation = (handle: AgentHandle, change: Extract<Ope
         const observed = yield* parityObserver(lifecycle, acceptance), backups = yield* Backups;
         for (const [index, key] of keys.entries()) {
           step = ({ 'profile:follow': 'saving the followed profile', 'profile:baseline': 'clearing the applied baseline', 'profile:holds': 'removing the listed holds', 'profile:overrides': 'removing the listed overrides', 'profile:subscribe': 'subscribing to the shared setup', 'profile:unsubscribe': 'stopping updates through the previous shared link', 'profile:inspect': 'checking for changes' } as Record<string, string>)[key]!;
-          if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Profile switch cancelled; inspect the saved run'));
+          if (signal.aborted) return yield* Effect.fail(new SessionError('INTERNAL', 'Profile switch cancelled'));
           yield* observed.observer.pending(key);
           yield* lifecycle.progress({ type: 'started', index, total: keys.length, step: plan.steps[index]! });
           if (key === 'profile:follow') { yield* backups.preserve(join(paths.stateRoot, 'agent/followed.json'), 'agent/followed.json', undefined, { private: true }); yield* store.write(target); saved = true; }

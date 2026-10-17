@@ -43,6 +43,8 @@ const fixture = (t: { after: (f: () => void) => void }) => {
     args: ['--ensure', '--app', join(home, 'Nortuscc.app/Contents/MacOS/Nortuscc')], resources,
     env: { HOME: home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
     platform: 'darwin' as const, uid: 501, user: 'fixture', processes,
+    // Stand-ins for Homebrew's prefixes, so a host's real tools there (CI runners carry git) stay out of fake Processes.
+    toolDirectories: [join(home, 'homebrew/bin'), join(home, 'local/bin')],
     hostedDependencies: { keychain: { read: () => Effect.succeed(undefined), write: () => Effect.void, remove: () => Effect.void },
       transport: Layer.succeed(HostedTransport, { request: () => Effect.fail(new HostedFailure({ code: 'network' })) }) },
     probe: async () => { probes++; return { env: { HOME: home, PATH: '/login/bin', NORTUSCC_STATE_DIR: stateRoot } }; },
@@ -72,13 +74,15 @@ test('paths helper emits safe phase timings while keeping its one-record stdout 
 
 test('the ensure helper resolves recorded checkout from login environment and prints exactly one result', async (t) => {
   const f = fixture(t);
-  assert.equal(await runDesktopEntry(f.input), 0);
+  // The shipped tool directories; this helper never probes Git, so the host's tools there cannot reach fake Processes.
+  assert.equal(await runDesktopEntry({ ...f.input, toolDirectories: undefined }), 0);
   assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
   assert.deepEqual(f.stderr.filter(line => !line.startsWith(STARTUP_PREFIX)), []);
   assert.equal(f.probes(), 1);
   assert.ok(f.commands.some((c) => c.cmd === 'launchctl'));
   assert.equal(JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8')).agentVersion, 'bundle-hash');
-  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('/login/bin'));
+  // Homebrew's prefixes follow the login PATH, so a service finds gh and other tools a terminal would.
+  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('<string>/login/bin:/opt/homebrew/bin:/usr/local/bin</string>'));
 });
 
 test('missing recorded checkout refuses helper install instead of using bundled resource directory', async (t) => {
@@ -320,6 +324,23 @@ test('setup helpers are available before a checkout or runtime metadata and boot
   assert.equal(await runDesktopEntry({ ...f.input, args: ['--install-git'] }), 0);
   assert.deepEqual(JSON.parse(f.stdout.at(-1)!), { requested: true });
   assert.ok(f.commands.at(-1)?.args.includes('--install'));
+});
+
+test('setup state finds Git in a Homebrew directory the login PATH lacks', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.stateRoot, 'state.json'));
+  const brew = join(f.home, 'brew-bin');
+  mkdirSync(brew);
+  writeFileSync(join(brew, 'git'), '#!/bin/sh\n');
+  chmodSync(join(brew, 'git'), 0o755);
+  const ran: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    ran.push(command);
+    return { code: 0, stdout: 'git version 2.50.0', stderr: '' };
+  }) });
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--setup-state'], processes, toolDirectories: [brew] }), 0);
+  assert.equal(JSON.parse(f.stdout.at(-1)!).gitAvailable, true);
+  assert.deepEqual(ran.map((command) => command.cmd), [realpathSync(join(brew, 'git'))]);
 });
 
 test('a completed first-run clone survives failed service registration and retries without cloning or changing choices', async (t) => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
@@ -235,9 +235,12 @@ const readLock = (paths: MachinePathsValue): Record<string, Record<string, unkno
   existsSync(lockFile(paths)) ? JSON.parse(readFileSync(lockFile(paths), 'utf8')).skills : {};
 
 // A `Processes` that records every Command and simulates `npx -y skills <verb> …` on the temp store,
-// lock and ~/.claude/skills. `behaviour.fail` names a verb that exits 1 instead of doing anything.
-const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+// lock and ~/.claude/skills. `behaviour.fail` names a verb that exits 1 instead of doing anything; `behaviour.named`
+// gives the source's own spelling of a skill, which `add` matches case-insensitively and records, as the real one does.
+type Behaviour = { readonly fail?: 'add' | 'update' | 'remove'; readonly gone?: ReadonlyArray<string>; readonly named?: ReadonlyArray<string> };
+const fakeInstaller = (paths: MachinePathsValue, behaviour: Behaviour = {}) => {
   const commands: Command[] = [];
+  let stamp = 0;
   const layer = Layer.succeed(Processes, {
     run: (command: Command) => Effect.sync(() => {
       commands.push(command);
@@ -263,9 +266,15 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
       } else if (verb === 'add') {
         const [source] = positional;
         const agents = valuesOf('--agent');
-        for (const n of valuesOf('--skill')) {
+        // Like the real installer (skills 1.5–1.7): when no requested name matches it exits 1 naming them all;
+        // otherwise it installs the matches, skips the rest and exits 0. Every add stamps the lock entry.
+        const requested = valuesOf('--skill');
+        const matching = requested.filter((n) => !behaviour.gone?.includes(n))
+          .map((n) => behaviour.named?.find((own) => own.toLowerCase() === n.toLowerCase()) ?? n);
+        if (!matching.length) return { code: 1, stdout: `\x1b[31m■\x1b[39m  No matching skills found for: ${requested.join(', ')}\n●  Available skills:\n│    - want\n` };
+        for (const n of matching) {
           mkdirSync(join(paths.agentsSkills, n), { recursive: true });
-          lock[n] = { source };
+          lock[n] = { source, updatedAt: `t${++stamp}` };
           if (agents.includes('claude-code')) mkdirSync(join(paths.claude, 'skills', n), { recursive: true });
         }
       } else {
@@ -279,7 +288,7 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
   return { commands, layer };
 };
 
-const runMachine = (behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+const runMachine = (behaviour: Behaviour = {}) => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
   const installer = fakeInstaller(m.paths, behaviour);
@@ -354,6 +363,53 @@ test('--target claude installs for claude-code only', async () => {
   const events = await m.go(p, r);
   assert.equal(finished(events, 'skills:install:o/r')!.outcome, 'ok');
   assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill want --agent claude-code --global --yes']);
+});
+
+// The installer exits 0 and skips the names it lacks; the step reads which ones the add wrote.
+test('a skill gone from its source fails by name while the rest of the batch installs', async () => {
+  const m = runMachine({ gone: ['resolving-merge-conflicts', 'zoom-out'] });
+  const r = report(['want', 'resolving-merge-conflicts', 'zoom-out'].map((n) => item(n, 'missing', 'apply', 'mattpocock/skills')),
+    ['want', 'resolving-merge-conflicts', 'zoom-out'].map((n) => skill(n, 'mattpocock/skills')));
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add mattpocock/skills --skill resolving-merge-conflicts want zoom-out --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:mattpocock/skills')!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, "mattpocock/skills no longer has resolving-merge-conflicts, zoom-out. Remove them from your profile's skills, then apply again. Installed 1 other skill(s).");
+  assert.ok(existsSync(join(m.paths.agentsSkills, 'want')));
+});
+
+// The owner's incident: the only requested skill was deleted upstream, so the installer exited 1 naming it.
+test('a step whose every skill is gone from its source names them from the installer\'s exit-1 output', async () => {
+  const m = runMachine({ gone: ['resolving-merge-conflicts'] });
+  const r = report([item('resolving-merge-conflicts', 'missing', 'apply', 'mattpocock/skills')], [skill('resolving-merge-conflicts', 'mattpocock/skills')]);
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add mattpocock/skills --skill resolving-merge-conflicts --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:mattpocock/skills')!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again.");
+});
+
+// The installer matches `--skill TDD` to the source's `tdd` and records `tdd`; that is an install, not a gap.
+test('a profile name that differs in case from the installed skill installs, and its folder is backed up first', async () => {
+  const m = runMachine({ named: ['tdd'] });
+  m.install('tdd');
+  const r = report([item('TDD', 'missing', 'apply'), item('want', 'missing', 'apply')], [skill('TDD', 'o/r'), skill('want', 'o/r')]);
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill TDD want --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:o/r')!;
+  assert.deepEqual([step.outcome, step.note], ['ok', '']);
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.deepEqual(readdirSync(join(done.backups!, 'skills')), ['tdd']);
+  assert.deepEqual(Object.keys(readLock(m.paths)).sort(), ['tdd', 'want']);
+});
+
+test('a skill name the installer would split or read as a flag fails the step before it runs', async () => {
+  const m = runMachine();
+  const r = report([item('two words', 'missing', 'apply')], [skill('two words', 'o/r')]);
+  const step = finished(await m.go(plan('apply', r, selectAll, [skillsDomain]), r), 'skills:install:o/r')!;
+  assert.equal(step.outcome, 'failed');
+  assert.match(step.note, /Skill name "two words" can't be installed: skill names have no spaces/);
+  assert.deepEqual(m.argv(), []);
 });
 
 // Issue #104: an off-pin skill whose pin was removed is reinstalled by a ref-less `add`, which replaces its folder.

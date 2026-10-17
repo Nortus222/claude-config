@@ -36,7 +36,7 @@ test('including a skill by URL matches the manifest\'s owner/repo group', () => 
   };
   const intent = Schema.decodeUnknownSync(IntentSchema)({ kind: 'includeSkill', profile: 'personal', source: 'https://github.com/obra/superpowers', name: 'tdd' });
   const result = replay(before, [intent]);
-  assert.deepEqual(result, { documents: { ...before, 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug', 'tdd'] }], remove: [] } }) }, invalid: [] });
+  assert.deepEqual(result, { documents: { ...before, 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug', 'tdd'] }] } }) }, invalid: [] });
   const skills = resolveNamedProfile({ documents: result.documents as Record<string, string>, name: 'personal' }).skills;
   assert.deepEqual(skills.map(skill => [skill.source, skill.name, skill.install]), [['obra/superpowers', 'debug', true], ['obra/superpowers', 'tdd', true]]);
 });
@@ -46,6 +46,21 @@ test('excluding a skill by URL cancels its canonical inclusion', () => {
   const intent = Schema.decodeUnknownSync(IntentSchema)({ kind: 'excludeSkill', profile: 'personal', source: 'https://github.com/Obra/Superpowers.git/', name: 'tdd' });
   const result = replay(before, [intent]);
   assert.deepEqual(result, { documents: { 'profiles/personal.json': json({ skills: { add: [{ source: 'obra/superpowers', names: ['debug'] }], remove: [{ source: 'obra/superpowers', names: ['tdd'] }] } }) }, invalid: [] });
+});
+
+test('including then excluding a skill leaves no empty add/remove list', () => {
+  const before = { ...shared, 'integrations.json': json({ version: 1, integrations: [{ id: 'context7', label: 'Context7', type: 'mcp', target: 'codex', command: 'context7', default: false }] }) };
+  const result = replay(before, [
+    { kind: 'includeSkill', profile: 'personal', source: 'obra/superpowers', name: 'tdd' },
+    { kind: 'excludeSkill', profile: 'personal', source: 'obra/superpowers', name: 'tdd' },
+    { kind: 'setIntegration', profile: 'personal', id: 'context7', include: true },
+    { kind: 'setIntegration', profile: 'personal', id: 'context7', include: false },
+  ]);
+  assert.deepEqual(result.invalid, []);
+  assert.deepEqual(JSON.parse(result.documents['profiles/personal.json']!), { extends: 'base',
+    skills: { remove: [{ source: 'obra/superpowers', names: ['tdd'] }] }, integrations: { remove: ['context7'] } });
+  const back = replay(result.documents as Record<string, string>, [{ kind: 'includeSkill', profile: 'personal', source: 'obra/superpowers', name: 'tdd' }]);
+  assert.deepEqual(JSON.parse(back.documents['profiles/personal.json']!).skills, { add: [{ source: 'obra/superpowers', names: ['tdd'] }] });
 });
 
 test('an intent for a missing profile is invalid with its index and reason', () => {
@@ -132,7 +147,7 @@ test('integration edits cancel the opposite selection and reject undeclared inte
   assert.equal(result.invalid.length, 1);
   assert.equal(result.invalid[0]?.index, 3);
   assert.match(result.invalid[0]!.reason, /not declared/);
-  assert.deepEqual(JSON.parse(result.documents['profiles/personal.json']!), { extends: 'base', integrations: { remove: [], add: ['context7'] } });
+  assert.deepEqual(JSON.parse(result.documents['profiles/personal.json']!), { extends: 'base', integrations: { add: ['context7'] } });
   assert.equal(result.documents['integrations.json'], before['integrations.json']);
 });
 
