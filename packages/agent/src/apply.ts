@@ -6,6 +6,7 @@ import {
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
+import { safeNote } from './operations/safety.ts';
 import { pause } from './pause.ts';
 
 // The only step kinds auto-apply runs. Refusing anything else guards against a classifier bug.
@@ -26,8 +27,13 @@ const LOCK_HELD: AutoApplyOutcome = { kind: 'lock-held' };
 // What a recorded run did, as apply-finished records it.
 export type RunRecord = { readonly steps: ReadonlyArray<StepRecord>; readonly result: 'done' | 'cancelled'; readonly backup: string | null };
 
+// A progress event whose step note is safe to persist, send or log.
+const safeProgress = <P extends Progress>(progress: P): P =>
+  progress.type === 'finished' ? { ...progress, note: safeNote(progress.note) } : progress;
+
 // Runs `planned` with apply.lock already held, bracketed in History by apply-started and
 // apply-finished, so a crash between the two reads as interrupted. `onProgress` sees every event.
+// Every note History, `checkpoint` and `onProgress` see is redacted, after `projectProgress`.
 // Callers make it uninterruptible: `signal` stops it, and it still records how it ended.
 export const recordedRun = <E = never>(
   planned: Plan,
@@ -48,8 +54,9 @@ export const recordedRun = <E = never>(
     const steps: StepRecord[] = [];
     let result: RunRecord['result'] = 'done';
     let backup: string | null = null;
-    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true, checkpoint: options.checkpoint }), (rawEvent) => {
-      const event = options.projectProgress?.(rawEvent) ?? rawEvent;
+    const checkpoint = options.checkpoint;
+    yield* Stream.runForEach(execute(planned, report, domains, { signal: options.signal, lockHeld: true, checkpoint: checkpoint && ((event) => checkpoint(safeProgress(event))) }), (rawEvent) => {
+      const event = safeProgress(options.projectProgress?.(rawEvent) ?? rawEvent);
       return Effect.andThen(Effect.sync(() => {
         if (event.type === 'finished') steps.push({ key: event.key, outcome: event.outcome, note: event.note });
         if (event.type === 'cancelled') result = 'cancelled';

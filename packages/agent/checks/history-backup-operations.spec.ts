@@ -38,7 +38,7 @@ for(const mode of ['done','remove-two','receipt','history','pruned-history'] as 
    const session=yield* makeSession(h,{domains:()=>m.domains,signal:new AbortController().signal}).pipe(
     Effect.provideService(Fs,{...fs,copy:()=>{backupCopies++;return Effect.die('backup-of-backups')},remove:path=>Effect.suspend(()=>{assert.ok(existsSync(join(m.paths.stateRoot,'apply.lock')));removals++;return mode==='remove-two'&&removals===2?Effect.fail(new FsFailed({op:'remove',path,reason:'PRIVATE'})):fs.remove(path)})}),
     Effect.provideService(HistoryStore,{...history,append:event=>(mode==='history'&&removals>0 || mode==='pruned-history'&&event.kind==='backups-pruned')?Effect.fail(new FsFailed({op:'history',path:'PRIVATE',reason:'PRIVATE'})):history.append(event)}),
-    Effect.provideService(RunStore,{...store,write:receipt=>mode==='receipt'&&receipt.view.parity?.committedKeys.length===1&&!receiptFailed?(receiptFailed=true,Effect.fail(new RunStoreError('disk full'))):store.write(receipt)}),
+    Effect.provideService(RunStore,{...store,write:receipt=>mode==='receipt'&&receipt.view.parity?.committedKeys.length===1&&!receiptFailed?(receiptFailed=true,Effect.fail(new RunStoreError('disk full writing https://u:PRIVATE@h GITHUB_TOKEN=PRIVATE'))):store.write(receipt)}),
    );
    const first=yield* session.listBackups(decodeOperationInput('listBackups',{limit:1}));assert.equal(first.folders[0]?.id,names[0]);assert.ok(first.nextCursor);
    const second=yield* session.listBackups(decodeOperationInput('listBackups',{limit:1,cursor:first.nextCursor!}));assert.equal(second.folders[0]?.id,names[1]);
@@ -57,7 +57,8 @@ for(const mode of ['done','remove-two','receipt','history','pruned-history'] as 
    const again=yield* session.runs.submit(request);assert.equal(again.runId,run.runId);
    assert.equal((yield* Effect.flip(session.listBackups(decodeOperationInput('listBackups',{limit:1,cursor:first.nextCursor!})))).code,'UNKNOWN_PLAN');
    assert.doesNotMatch(JSON.stringify(run),/PRIVATE|signInFlow|pendingId|userCode/);
-   if(mode==='receipt')assert.match(JSON.stringify(run.result),/Couldn't save the run record: disk full/);
+   // The receipt failure's real cause reaches the run; its credential-shaped parts do not (PRIVATE above).
+   if(mode==='receipt')assert.match(JSON.stringify(run.result),/Couldn't save the run record: disk full writing https:\/\/\[redacted\]h GITHUB_TOKEN=\[redacted\]/);
    const events=yield* history.read;
    if(mode!=='history'&&mode!=='pruned-history')assert.deepEqual(events.flatMap(e=>e.kind==='backups-pruned'?e.folders:[]),(mode==='done'?names.slice(20):[names[20]!]).map(id=>join(m.paths.backups,id)));
    const pending=run.parity?.remainingKeys??[];for(const id of pending)assert.ok(existsSync(join(m.paths.backups,id)));

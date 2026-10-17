@@ -87,6 +87,21 @@ test('a failed setup machine step reports its own cause in the run and its step 
   }));
 });
 
+test('a setup apply redacts a credential-shaped step note in its run and in History', async () => {
+  await withSetup((m, _setup, _s, handle) => Effect.gen(function* () {
+    const fs = yield* Fs; const settings = join(m.paths.claude, 'settings.json');
+    const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(Effect.provideService(Fs, {
+      ...fs, writeTextAtomic: (path, text) => path === settings ? Effect.fail(new FsFailed({ op: 'write', path, reason: 'EACCES via https://u:p@ss@h/x GITHUB_TOKEN=ghsecret123' })) : fs.writeTextAtomic(path, text),
+    }));
+    const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    const run = yield* finish(session, preview.planId);
+    const dir = join(m.paths.stateRoot, 'history');
+    const history = readdirSync(dir).map(name => readFileSync(join(dir, name), 'utf8')).join('');
+    assert.match(history, /"note":"write [^"]+settings\.json: EACCES via https:\/\/\[redacted\]h\/x GITHUB_TOKEN=\[redacted\]"/);
+    assert.doesNotMatch(history + JSON.stringify(run), /ghsecret|p@ss|ss@h/);
+  }));
+});
+
 test("take setup value resets only that item's override after a backup", async () => {
   await withSetup((m, _setup, s) => Effect.gen(function* () {
     const original = '{"version":2,"settings":{"claude:settings.json":{"effortLevel":"low","theme":"light"}}}\n';
