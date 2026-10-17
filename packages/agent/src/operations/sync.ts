@@ -29,11 +29,11 @@ import { parityObserver, type PreparedParityChange } from './parity.ts';
 import { safeOwnerString } from './safety.ts';
 const digest = (v: unknown) => authorDigest(canonical(v))!;
 const stale = () =>
-  new SessionError('UNKNOWN_PLAN', 'Sync source, trust, account or choices changed; inspect and preview again');
+  new SessionError('UNKNOWN_PLAN', 'Sync source, trust, account or choices changed; preview again');
 const failed = () =>
   new SessionError(
     'INTERNAL',
-    'Sync decision is incomplete; inspect recorded effects and backups before previewing again',
+    'The sync decision did not finish; check for new changes and preview again. Backups are in ~/.config/nortuscc/backups',
   );
 const select = (handle: AgentHandle, id: string) =>
   handle.selectOperationSetup?.(id) ??
@@ -392,7 +392,7 @@ export const prepareSyncOperation = (
       return Effect.fail(
         error instanceof SessionError
           ? error
-          : new SessionError('APP_UNAVAILABLE', 'Sync inputs are unavailable; inspect and preview again'),
+          : new SessionError('APP_UNAVAILABLE', 'Sync inputs are unavailable; preview again'),
       );
     }),
   );

@@ -14,12 +14,13 @@ import type { JobInspection } from '../job.ts';
 import type { AgentDomains, AgentServices } from '../layer.ts';
 import { decodeOperationOutput, type ActionChange, type ParityRunEvidence } from './index.ts';
 import type { PreparedParityChange } from './parity.ts';
-import { safeOwnerString } from './safety.ts';
+import { describe, failedStepsMessage, redact, safeMessage, safeOwnerString } from './safety.ts';
 
 const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 const fileKey = (key: string) => key.split('#')[0]!;
-const stale = () => new SessionError('UNKNOWN_PLAN', 'Selected configuration changed; inspect and preview again');
-const failed = () => new SessionError('INTERNAL', 'Machine action stopped; inspect recorded effects and backups');
+const stale = () => new SessionError('UNKNOWN_PLAN', 'Selected configuration changed; preview again');
+// The failed step's own note, else why the run itself stopped.
+const failed = (error: unknown) => error instanceof SessionError ? error : new SessionError('INTERNAL', safeMessage(`Couldn't finish the machine action: ${describe(error)}`));
 const skipReasons = new Set(['not selected', 'target not selected', 'not managed on this machine', 'changed since nortuscc wrote it',
   'not valid JSON on this machine; fix it by hand', 'changed on this machine; capture keeps it', 'changed on both sides; --take-repo keeps the repo version',
   'Resolve and preview this skill addition to repair or update it with native verification', 'not enabled on this machine',
@@ -29,11 +30,11 @@ const projectPlan = (planned: Plan): Plan => ({ ...planned,
     : step.domain === 'integrations' ? 'Install the selected declared integration using its existing prerequisites'
     : step.domain === 'skills' ? 'Reconcile the selected declared skills using the existing owner'
     : 'Apply the selected owned configuration' })),
-  skipped: planned.skipped.map(item => ({ key: item.key, reason: skipReasons.has(item.reason) ? item.reason : 'Existing owner rules prevent this action; inspect the item in the app' })),
+  skipped: planned.skipped.map(item => ({ key: item.key, reason: skipReasons.has(item.reason) ? item.reason : "Skipped by the item's owner rules" })),
 });
 const safeProgress = (progress: Progress, publicPlan: Plan): Progress => progress.type === 'started'
   ? { ...progress, step: publicPlan.steps[progress.index]! }
-  : progress.type === 'finished' ? { ...progress, note: progress.outcome === 'ok' ? 'Machine effect observed' : 'Machine effect was not completed; inspect recorded effects and backups' }
+  : progress.type === 'finished' ? { ...progress, note: progress.outcome === 'ok' ? 'Machine effect observed' : redact(progress.note) || 'Step did not complete' }
   : progress;
 
 // Only config uninstall expands selected keys to documents. All their rows remain available to owner guards.
@@ -102,6 +103,7 @@ export const prepareActionChange = (change: ActionChange, inspection: JobInspect
         yield* lifecycle.progress(safeProgress(event, publicPlan));
       }),
     });
-    if (ran.steps.some(step => step.outcome !== 'ok')) return yield* Effect.fail(failed());
-  }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.mapError(() => failed()))), afterRelease: 'inspect' as const };
+    if (ran.steps.some(step => step.outcome !== 'ok'))
+      return yield* Effect.fail(new SessionError('INTERNAL', failedStepsMessage(ran.steps) ?? 'Cancelled before every step finished'));
+  }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.mapError(failed))), afterRelease: 'inspect' as const };
 }).pipe(Effect.mapError(error => error instanceof SessionError ? error : new SessionError('INSPECT_FAILED', 'Action preview could not read configuration')));

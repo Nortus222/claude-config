@@ -24,7 +24,7 @@ export const isAccountChange = (change: OperationChange): change is AccountChang
 const digest = (value: unknown) => authorDigest(canonical(value))!;
 const stale = () => new SessionError('UNKNOWN_PLAN', 'Account, machine metadata or policy changed; preview again');
 const unavailable = () => new SessionError('APP_UNAVAILABLE', 'Configure the hosted account connection in the app before this operation');
-const failed = () => new SessionError('INTERNAL', 'Account operation is incomplete; inspect current account and recorded effects before retrying');
+const failed = () => new SessionError('INTERNAL', 'The account change did not finish; reload the account and preview again');
 const unsafeObservation = () => new SessionError('OVERSIZED', 'Account observation contains unsupported owner data');
 const safe = (value: unknown): boolean => {
   if (typeof value === 'string') return !value.includes('nmt_') && safeOwnerString(value);
@@ -103,7 +103,7 @@ const effects = {
   resume: 'Clear an existing failure pause without changing policy',
   signIn: 'Start device authorization; complete it through the existing browser flow. Initiation does not mean authenticated. The display challenge expires within 15 minutes',
   signOut: 'Sign out using the existing account and credential owner',
-  syncAccount: 'Run existing account sync; inspect authoritative values and any remaining queued writes afterward',
+  syncAccount: 'Run existing account sync; afterwards reload to see synced values and any queued writes',
   patchMachineMetadata: 'Queue machine metadata locally; server persistence is not yet confirmed',
 };
 

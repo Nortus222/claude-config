@@ -129,6 +129,26 @@ test('inherit: stderr sends an inherit command\'s output to stderr and gives it 
   assert.match(result.stderr, /noise stdin=""/);
 });
 
+test('tee shows both streams where inherit would and also returns them', () => {
+  const processes = pathToFileURL(join(import.meta.dirname, '..', 'src', 'processes.ts')).href;
+  for (const inherit of ['stdio', 'stderr'] as const) {
+    const script = `
+      import { Effect } from 'effect';
+      import { Processes, nodeProcesses } from ${JSON.stringify(processes)};
+      const done = await Effect.runPromise(Processes.use((p) => p.run({
+        cmd: process.execPath, args: ['-e', 'process.stdout.write("out-line\\\\n"); process.stderr.write("err-line\\\\n"); process.exit(4)'], output: 'tee',
+      })).pipe(Effect.provide(nodeProcesses({ inherit: ${JSON.stringify(inherit)} }))));
+      process.stderr.write('RESULT ' + JSON.stringify(done) + '\\n');
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: join(import.meta.dirname, '..'), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(inherit === 'stdio' ? result.stdout : result.stderr, /out-line/);
+    if (inherit === 'stderr') assert.equal(result.stdout, '');
+    assert.match(result.stderr, /err-line/);
+    assert.match(result.stderr, /RESULT \{"code":4,"stdout":"out-line\\n","stderr":"err-line\\n"\}/);
+  }
+});
+
 // An npm-style .cmd shim on PATH that hands its arguments to a node script.
 const windowsShim = (name: string, script: string) => {
   const bin = mkdtempSync(join(tmpdir(), 'machine-shim-'));

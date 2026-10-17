@@ -19,6 +19,11 @@ export function looksLikeSecretValue(text: string): boolean {
   return SECRET_VALUE.some((pattern) => pattern.test(text));
 }
 
+// `text` with every credential-shaped value replaced, so a diagnostic can be shown or logged.
+export function redactSecretValues(text: string, replacement = '[redacted]'): string {
+  return SECRET_VALUE.reduce((out, pattern) => out.replace(new RegExp(pattern.source, 'g'), replacement), text);
+}
+
 // Complaints for every credential-shaped name or value anywhere inside a settings value.
 export function nestedSecretComplaints(value: unknown, path: string): string[] {
   const errors: string[] = [];

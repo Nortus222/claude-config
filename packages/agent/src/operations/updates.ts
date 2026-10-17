@@ -17,8 +17,8 @@ import { decodeOperationInput, decodeOperationOutput, type OperationChange, type
 import type { PreparedParityChange } from './parity.ts';
 import { safeOwnerString } from './safety.ts';
 const digest = (value: unknown) => authorDigest(canonical(value))!;
-const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author checkout changed; inspect and preview again');
-const failed = () => new SessionError('INTERNAL', 'Update is incomplete; inspect machine effects, author changes and backups before previewing again');
+const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author checkout changed; preview again');
+const failed = () => new SessionError('INTERNAL', 'The update did not finish; check for new changes and preview again. Backups are in ~/.config/nortuscc/backups');
 export const ADDITION_REPAIR = 'Resolve this source and skill with resolveSkillCandidate, review previewChange(addSkill), then applyChange for native verification';
 export const LEGACY_NATIVE_PREREQUISITE = 'Exact legacy source and native selector evidence is required; resolveSkillCandidate then previewChange(addSkill) and applyChange';
 const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8, verifyAdoption: true }).pipe(Effect.timeout('20 seconds'));
@@ -151,7 +151,7 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
         return Effect.flatMap(prepareNative(command),prepared => processes.run(prepared));
       } }));
     }) };
-    const project = (event: Progress): Progress => event.type === 'started' ? { ...event, step: publicPlan.steps[event.index]! } : event.type === 'finished' ? { ...event, note: event.outcome === 'ok' ? 'Update effect observed' : 'Update effect incomplete; inspect recorded effects and backups' } : event;
+    const project = (event: Progress): Progress => event.type === 'started' ? { ...event, step: publicPlan.steps[event.index]! } : event.type === 'finished' ? { ...event, note: event.outcome === 'ok' ? 'Update effect observed' : 'Update effect did not complete' } : event;
     const ran = yield* recordedRun(planned,report,[domain],{ runId: lifecycle.runId, actor: lifecycle.actor, automatic: false, signal, operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId }, projectProgress: project,
       checkpoint: event => Effect.gen(function* () { evidence = { ...evidence, state: 'needsInspection' }; if (event.type === 'finished' && event.outcome === 'ok') yield* commit(event.key); else yield* checkpoint(); yield* lifecycle.progress(project(event)); }) });
     if (ran.steps.some(s => s.outcome !== 'ok')) return yield* Effect.fail(failed());

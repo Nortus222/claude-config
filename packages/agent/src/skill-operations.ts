@@ -156,7 +156,7 @@ export const makeSkillOperations = (options: {
     const targets = overrides.value.manageConfig === false ? [] : overrides.value.configTargets ?? TARGETS;
     if (change.targets.some(t => !targets.includes(t))) return yield* refuse('TARGET_UNAVAILABLE', 'A selected target is unavailable in setup context; configure it in the app or select a configured target');
     const baseline = yield* resolve(inspection, overrides);
-    if (canonical(baseline) !== canonical(inspection.desired)) return yield* refuse('UNKNOWN_PLAN', 'The composed setup or overrides changed; inspect and resolve again');
+    if (canonical(baseline) !== canonical(inspection.desired)) return yield* refuse('UNKNOWN_PLAN', 'The composed setup or overrides changed; resolve the skill again');
     const pin = pinFor(baseline, c.source);
     let acceptedTree: readonly TreeEntry[] | undefined;
     const refreshed = yield* reader({ source: c.source, ...(pin ? { revision: pin } : {}), timeoutMs: SKILL_OPERATION_LIMITS.sourceTimeoutMs, observeTree: (candidate, tree) => { if (identity(candidate) === identity(c)) acceptedTree = tree; } });
@@ -216,7 +216,7 @@ export const makeSkillOperations = (options: {
     }] : [] };
     if ((yield* clock.now).getTime() >= retained.expires) return yield* refuse('UNKNOWN_PLAN', 'Candidate expired during preview; resolve and review again');
     if (generation !== (yield* options.generation) || canonical(yield* store.read) !== canonical(overrides)
-      || canonical(yield* resolve(inspection, overrides)) !== canonical(baseline)) return yield* refuse('UNKNOWN_PLAN', 'The setup changed during preview; inspect and resolve again');
+      || canonical(yield* resolve(inspection, overrides)) !== canonical(baseline)) return yield* refuse('UNKNOWN_PLAN', 'The setup changed during preview; resolve the skill again');
     const preview: ChangePreview = { planId: randomUUID(), scope: { kind: 'machine' }, change, generation: String(generation), plan: additionRunPlan(selectedPlan, c.installedName), nextActions: [],
       skillAddition: { candidate: project(change.candidateId, c), declaration: { before, after, changed: before.length !== 1 || canonical(before[0]) !== canonical(after) },
         ...(enable ? { enablement: { before: false, after: true } } : {}), installationTargets: after.targets,

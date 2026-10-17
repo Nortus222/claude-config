@@ -11,5 +11,6 @@ export { SKILLS_SOURCE, parseSkillsManifest } from './skills.ts';
 export { PINS_SOURCE, isCommitSha, parsePins } from './pins.ts';
 export { INTEGRATIONS_SOURCE, parseIntegrations, referencedFiles } from './integrations.ts';
 export { settingsComplaints, parseSettingsKeys } from './settings.ts';
+export { redactSecretValues } from './secrets.ts';
 export { LEGACY_STATE_SOURCE, decodeOverrides, serializeOverrides, normalizeSkillSource, isSkillAdditionName, overridesFromLegacyState } from './overrides.ts';
 export { intentValueProblem } from './intent-value.ts';

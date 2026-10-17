@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
-import { Effect, Exit, Layer } from 'effect';
+import { Cause, Effect, Exit, Layer } from 'effect';
 import { normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
 import { Backups, backupsForRun, canonical, Fs, inspectMcpRouting, mcpRoutingEvidence, MachinePaths, machinePaths, OverridesStore, overridesPath, peekMachineState, persistMachineIntent, proposeMachineIntent, releasedRouting, setMcpRouting, StateStore, type McpRoutingFileId } from '@nortuscc/machine';
 import { AgentClock } from '../clock.ts';
-import { safeOwnerString } from './safety.ts';
+import { describe, safeMessage, safeOwnerString } from './safety.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { RunLifecycle } from '../runs.ts';
 import { resolveInspection, type JobInspection } from '../job.ts';
@@ -14,7 +14,7 @@ import type { PreparedParityChange } from './parity.ts';
 const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 const refused = (code: SessionError['code'], message: string) => new SessionError(code, message);
 const invalid = () => refused('PROFILE_INVALID', 'Machine intent conflicts with owned declarations or source-wide revision policy');
-const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions changed; inspect and preview again');
+const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions changed; preview again');
 type IntentChange = Extract<OperationInput<'previewChange'>['change'], { kind: 'machineIntent' }>;
 type IntentItem = OperationOutput<'inspectIntent'>['items'][number];
 const safeString = safeOwnerString;
@@ -47,7 +47,7 @@ const intentRows = (section: OperationInput<'inspectIntent'>['section'], desired
     case 'integrations': items = desired.integrations.map(i => ({ kind: 'integration', id: i.id,
       type: ['hook', 'mcp', 'plugin', 'marketplace'].includes(String(i.declaration.type)) ? i.declaration.type as 'hook' | 'mcp' | 'plugin' | 'marketplace' : 'unknown',
       ...(i.declaration.target === 'claude' || i.declaration.target === 'codex' ? { target: i.declaration.target } : {}), enabled: i.enabled, from: origin(i.from), prerequisites: [...(Array.isArray(i.declaration.requiresEnv) && i.declaration.requiresEnv.length ? ['Declared environment prerequisites must be available to the integration owner'] : []), ...(i.declaration.type === 'hook' ? ['The declared hook file must remain available'] : []), 'Installation uses the existing integration owner; removal is unavailable'] })); break;
-    case 'issues': items = desired.issues.map(i => ({ kind: 'issue', layer: i.layer, source: i.source, message: 'Configuration input is invalid; inspect the owning document in the app' })); break;
+    case 'issues': items = desired.issues.map(i => ({ kind: 'issue', layer: i.layer, source: i.source, message: 'Configuration input is invalid; fix the owning document and reload' })); break;
   }
   return items;
 };
@@ -205,10 +205,10 @@ export const makeIntentOperations = (options: {
         options.invalidate();
         if (Exit.isFailure(outcome)) evidence = { ...evidence, state: 'needsInspection' };
         yield* checkpoint();
-        if (Exit.isFailure(outcome)) return yield* Effect.fail(refused('INTERNAL', 'Intent operation stopped; inspect saved intent and routing ownership'));
+        if (Exit.isFailure(outcome)) return yield* Effect.fail(refused('INTERNAL', safeMessage(`Couldn't apply ${step.key}: ${describe(Cause.squash(outcome.cause))}`)));
         yield* lifecycle.progress({ type: 'finished', index, total: plan.steps.length, key: step.key, outcome: 'ok', note: 'Intent effect observed' });
       }
-    }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.ensuring(Effect.sync(options.invalidate)), Effect.mapError(() => refused('INTERNAL', 'Intent progress could not be saved; inspect before retrying')))), afterRelease: 'inspect' as const };
+    }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.ensuring(Effect.sync(options.invalidate)), Effect.mapError(e => e instanceof SessionError ? e : refused('INTERNAL', safeMessage(`Couldn't save intent progress: ${describe(e)}`))))), afterRelease: 'inspect' as const };
   }).pipe(Effect.provideContext(context), Effect.mapError(e => e instanceof SessionError ? e : refused('INSPECT_FAILED', 'Intent preview could not read configuration')));
   return { inspectIntent, prepare };
 });

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
   addCommand, agentSkillsDirs, installedSkillNames, machinePaths, nodeFs, Processes, readExposure, readSkillLock,
-  removeCommand, runInstaller, skillExposure, updateCommand, type Command,
+  installerFailure, removeCommand, runInstaller, skillExposure, updateCommand, type Command,
 } from '../src/index.ts';
 
 const skillsMachine = () => {
@@ -120,7 +120,28 @@ test('runInstaller reports a non-zero exit as a failed result', async () => {
   const fake = Layer.succeed(Processes, { run: (c) => Effect.sync(() => { seen.push(c); return { code: 3, stdout: '' }; }) });
   const result = await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(fake)));
   assert.deepEqual(result, { ok: false, note: 'npx exited with 3' });
-  assert.equal(seen[0]!.output, 'inherit');
+  // Teed: the output is still shown, and its tail explains a failure.
+  assert.equal(seen[0]!.output, 'tee');
   const ok = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 0, stdout: '' }) });
   assert.deepEqual(await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(ok))), { ok: true, note: '' });
+});
+
+test('installerFailure names skills a source no longer has, from styled installer output', () => {
+  const output = '\x1b[36m┌\x1b[39m  skills\n│\n\x1b[31m■\x1b[39m  No matching skills found for: resolving-merge-conflicts\n●  Available skills:\n│    - ask-matt\n│    - tdd\n└\n';
+  assert.deepEqual(installerFailure(1, output, 'mattpocock/skills'), { missing: ['resolving-merge-conflicts'],
+    note: "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again." });
+  assert.deepEqual(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').missing, ['a', 'b']);
+  assert.match(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').note, /^o\/r no longer has a, b\. Remove them /);
+});
+
+test('installerFailure otherwise keeps the last error line, bounded, with the exit code', () => {
+  assert.deepEqual(installerFailure(1, 'Cloning…\n\x1b[31mError: fatal: repository not found\x1b[0m\nDone\n'), { missing: [], note: 'Error: fatal: repository not found (npx exited with 1)' });
+  assert.equal(installerFailure(2, 'just one line\n').note, 'just one line (npx exited with 2)');
+  assert.equal(installerFailure(3, '').note, 'npx exited with 3');
+  assert.equal([...installerFailure(1, `error ${'x'.repeat(1000)}`).note].length <= 320, true);
+});
+
+test('runInstaller notes why the installer failed from its captured output', async () => {
+  const fake = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 1, stdout: '', stderr: 'npm ERR! code E404\nnpm ERR! 404 Not Found - skills@9\n' }) });
+  assert.deepEqual(await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(fake))), { ok: false, note: 'npm ERR! 404 Not Found - skills@9 (npx exited with 1)' });
 });
