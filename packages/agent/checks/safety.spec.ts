@@ -45,7 +45,7 @@ for (const [what, text, redacted] of CREDENTIALS) {
 test('a step note is redacted and bounded in its own case, and an empty note stays empty', () => {
   assert.equal(safeNote('npx exited with 1: GITHUB_TOKEN=xyz'), 'npx exited with 1: GITHUB_TOKEN=[redacted]');
   assert.equal(safeNote(''), '');
-  assert.equal([...safeNote('x'.repeat(2000))].length, 500);
+  assert.equal([...safeNote('x'.repeat(5000))].length, 2000);
 });
 
 test('a failure message keeps ordinary words, paths and URLs', () => {

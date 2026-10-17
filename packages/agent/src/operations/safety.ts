@@ -48,8 +48,8 @@ export const safeMessage = (text: string, limit = 500): string => {
 };
 
 // A step note as safeMessage makes a failure sentence, but in its own case (callers quote it mid-sentence)
-// and empty when it says nothing.
-export const safeNote = (note: string, limit = 500): string => bounded(redact(note), limit);
+// and empty when it says nothing. Run records bound it further.
+export const safeNote = (note: string, limit = 2000): string => bounded(redact(note), limit);
 
 // The safe message of a failed Effect's cause.
 export const causeMessage = (cause: Cause.Cause<unknown>, limit?: number): string => safeMessage(describe(Cause.squash(cause)), limit);
