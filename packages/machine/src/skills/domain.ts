@@ -188,12 +188,22 @@ const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: 
     reason: 'Resolve and preview this skill addition to repair or update it with native verification' }))] };
 };
 
-// Copies each named store folder to the run's backups before the installer touches it.
-const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
+// The lock key for a requested skill name. The installer matches `--skill` names case-insensitively but records
+// each skill under its own name, so `TDD` may land as `tdd`; an exact key wins, and an ambiguous fold finds none.
+const lockKeyOf = (skills: Readonly<Record<string, unknown>>, name: string): string | undefined => {
+  if (name in skills) return name;
+  const folded = Object.keys(skills).filter((key) => key.toLowerCase() === name.toLowerCase());
+  return folded.length === 1 ? folded[0] : undefined;
+};
+const sameName = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+// Copies each named store folder, under the name its lock records, to the run's backups before the installer touches it.
+const preserveAll = (requested: ReadonlyArray<string>) => Effect.gen(function* () {
   const paths = yield* MachinePaths;
   const backups = yield* Backups;
+  const lock = (yield* readSkillLock).skills;
   yield* backups.preserve(skillLockPath(paths), 'skill-lock.json');
-  for (const name of names) {
+  for (const name of requested.map((n) => lockKeyOf(lock, n) ?? n)) {
     yield* backups.preserve(join(paths.agentsSkills, name), join('skills', name));
     for (const target of TARGETS) yield* backups.preserve(join(paths[target], 'skills', name), join(target, 'skills', name));
   }
@@ -203,13 +213,17 @@ const preserveAll = (names: ReadonlyArray<string>) => Effect.gen(function* () {
 // The installer exits 1 naming every requested skill only when none match; when some match it exits 0 and skips
 // the rest. So after a successful add, a requested skill whose lock entry the add did not write is one the source
 // lacks. A successful add that wrote no requested entry leaves the lock without evidence: then all count as landed.
+// Both lists hold the requested names, which may differ in case from the lock keys the add wrote.
 const addSkills = (source: string, installSource: string, names: ReadonlyArray<string>, targets: ReadonlyArray<Target>, pin?: string) =>
   Effect.gen(function* () {
     const before = (yield* readSkillLock).skills;
     const ran = yield* runInstaller(addCommand({ source: installSource, skills: names, targets }), source, pin);
-    if (!ran.ok) return { ok: false, note: ran.note ?? '', landed: [] as string[], missing: names.filter((n) => ran.missing?.includes(n)) };
+    if (!ran.ok) return { ok: false, note: ran.note ?? '', landed: [] as string[], missing: names.filter((n) => ran.missing?.some((m) => sameName(m, n))) };
     const after = (yield* readSkillLock).skills;
-    const landed = names.filter((n) => after[n] !== undefined && JSON.stringify(after[n]) !== JSON.stringify(before[n]));
+    const landed = names.filter((n) => {
+      const key = lockKeyOf(after, n);
+      return key !== undefined && JSON.stringify(after[key]) !== JSON.stringify(before[key]);
+    });
     if (!landed.length) return { ok: true, note: ran.note ?? '', landed: [...names], missing: [] as string[] };
     return { ok: true, note: ran.note ?? '', landed, missing: names.filter((n) => !landed.includes(n)) };
   });
@@ -224,7 +238,8 @@ const installPinned = (source: string, sha: string, names: ReadonlyArray<string>
     yield* preserveAll(names);
     const added = yield* addSkills(source, pinnedSource(source, sha), names, targets, sha);
     const lock = yield* readSkillLock;
-    const written = added.ok ? added.landed : names.filter((n) => !added.missing.includes(n) && lockRef(lock.skills[n]) === sha);
+    const keyOf = (n: string) => lockKeyOf(lock.skills, n) ?? n;
+    const written = (added.ok ? added.landed : names.filter((n) => !added.missing.includes(n) && lockRef(lock.skills[keyOf(n)]) === sha)).map(keyOf);
     const { failed, scripts } = yield* verifyPinned({ source, sha, names: written });
     let removal = '';
     if (failed.size > 0) {

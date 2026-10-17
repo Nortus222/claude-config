@@ -36,6 +36,14 @@ const CREDENTIALS: ReadonlyArray<readonly [string, string, string]> = [
   ['an Anthropic key', 'used sk-ant-api03-abcdEFGH_1234 here', 'Used [redacted] here'],
   ['an OpenRouter key', 'used sk-or-v1-0123456789abcdef here', 'Used [redacted] here'],
   ['a hosted machine token', 'sent nmt_abc_123 to h', 'Sent [redacted] to h'],
+  ['an x-api-key header', 'sent x-api-key: abc123 to h', 'Sent x-api-key: [redacted] to h'],
+  ['a colon-style API key', 'OPENROUTER_API_KEY: abc123 was rejected', 'OPENROUTER_API_KEY: [redacted] was rejected'],
+  ['an Azure SAS signature', 'GET https://a.blob.core.windows.net/c/b?sv=2022-11-02&sig=AbC%2Bd%3D&se=x failed', 'GET https://a.blob.core.windows.net/c/b?sv=2022-11-02&sig=[redacted]&se=x failed'],
+  ['curl user credentials', 'curl -u alice:s3cret https://h/x exited with 22', 'Curl -u [redacted] https://h/x exited with 22'],
+  ['quoted curl user credentials', "curl --user 'alice:two words' https://h/x", 'Curl --user [redacted] https://h/x'],
+  ['a JSON password holding an escaped quote', 'body {"password":"a\\"b c", "n": 1}', 'Body {"password":"[redacted]", "n": 1}'],
+  ['an unterminated JSON secret', 'body {"token": "abc def', 'Body {"token": "[redacted]"'],
+  ['a long credential-named assignment', `${'X'.repeat(80)}_TOKEN=abc123 set`, `${'X'.repeat(80)}_TOKEN=[redacted] set`],
 ];
 
 for (const [what, text, redacted] of CREDENTIALS) {
@@ -49,8 +57,25 @@ test('a step note is redacted and bounded in its own case, and an empty note sta
 });
 
 test('a failure message keeps ordinary words, paths and URLs', () => {
-  for (const text of ['Basic configuration is missing', 'Read /home/u/.claude/settings.json: ENOENT', 'Fetch https://github.com/o/r?ref=main failed (npx exited with 1)', 'Token budget exceeded'])
+  for (const text of ['Basic configuration is missing', 'Read /home/u/.claude/settings.json: ENOENT', 'Fetch https://github.com/o/r?ref=main failed (npx exited with 1)', 'Token budget exceeded',
+    'Skill:tdd is missing', 'Checksum sha256=abc123 did not match', 'Request max_tokens=4096 was too large', 'Mail ops@example.com about it', 'Git push -u origin main failed'])
     assert.equal(safeMessage(text), text);
+});
+
+test('redaction stays fast on runaway output', () => {
+  for (const text of ['a-'.repeat(100_000), 'a.'.repeat(100_000)]) {
+    const started = performance.now();
+    safeNote(text);
+    safeMessage(text);
+    const took = performance.now() - started;
+    assert.ok(took < 200, `took ${Math.round(took)} ms`);
+  }
+});
+
+test('output past the redaction window is cut between words, so no credential is left as a fragment', () => {
+  const head = 'word '.repeat(3275);
+  assert.equal(safeNote(`${head}ghp_abcdefghijklmnop ${'tail '.repeat(1000)}`, 100_000), head.trim());
+  assert.equal([...safeNote('x'.repeat(200_000))].length, 2000);
 });
 
 test('a failure message is one bounded line', () => {

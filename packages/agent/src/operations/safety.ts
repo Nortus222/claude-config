@@ -11,12 +11,17 @@ export const describe = (error: unknown): string => {
   return String(error);
 };
 
-// A name that says its value is a credential, in a query string, an environment assignment or JSON.
-const SECRET_NAME = String.raw`[\w.-]*?(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|signature)`;
+// What a credential's name says. A JSON key may carry a bounded prefix before it; an assignment
+// needs none, since the name's prefix lies outside the match and stays as it was.
+const SECRET_WORD = String.raw`(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|signature)`;
+
+// A double-quoted string, escapes included, or its unterminated remainder (redacted to the end).
+const QUOTED = String.raw`"(?:[^"\\]|\\.)*"?`;
 
 // Credentials an agent diagnostic may carry beyond the setting owner's shapes, each with what of the
-// match to keep: tokens by prefix, authorization headers, credential-named assignments and URL
-// user-info (up to the last `@` before the host, since a password may hold one), and GitHub device codes.
+// match to keep: tokens by prefix, authorization and API-key headers, credential-named assignments,
+// SAS signatures, curl user credentials and URL user-info (up to the last `@` before the host, since a
+// password may hold one), and GitHub device codes. Every pattern runs in time linear in its input.
 const AGENT_SECRETS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bnmt_[A-Za-z0-9_-]+/g, '[redacted]'],
   [/\bgithub_pat_[A-Za-z0-9_]+/g, '[redacted]'],
@@ -25,16 +30,32 @@ const AGENT_SECRETS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[redacted]'],
   [/\b(authorization\s*[:=]\s*)(?:(?:basic|bearer|token|digest)\s+)?[^\s,;]+/gi, '$1[redacted]'],
   [/\bBearer\s+\S+/gi, '[redacted]'],
-  [new RegExp(String.raw`("${SECRET_NAME}"\s*:\s*)"[^"]*"`, 'gi'), '$1"[redacted]"'],
-  [new RegExp(String.raw`\b(${SECRET_NAME}=)(?:"[^"]*"|'[^']*'|[^\s&#'"]+)`, 'gi'), '$1[redacted]'],
+  [new RegExp(String.raw`("[\w.-]{0,64}?${SECRET_WORD}"\s*:\s*)${QUOTED}`, 'gi'), '$1"[redacted]"'],
+  [new RegExp(String.raw`(${SECRET_WORD}=)(?:${QUOTED}|'[^']*'?|[^\s&#'"]+)`, 'gi'), '$1[redacted]'],
+  [/(api[_-]?key\s*:\s*)(?:"[^"]*"?|'[^']*'?|[^\s,;]+)/gi, '$1[redacted]'],
+  [/\b(sig=)[^\s&#'"]+/gi, '$1[redacted]'],
+  [/((?<!\S)(?:-u\s+|--user[\s=]+))(?:"[^":]*:[^"]*"?|'[^':]*:[^']*'?|[^\s:'"]*:\S*)/g, '$1[redacted]'],
   [/(?<=:\/\/)[^/\s?#]*@/g, '[redacted]'],
   [/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, '[redacted]'],
 ];
 
-// Text safe to persist, send or log: credential-shaped values redacted, on one line. Paths,
-// errno reasons and exit codes stay.
+// How much of a diagnostic is redacted at all: far more than any caller keeps, so the final bound
+// still has room, and small enough that redaction stays fast on runaway installer output.
+const REDACT_WINDOW = 16 * 1024;
+
+// The head of `text` within the window, cut at its last whitespace so no credential is split into a
+// fragment its pattern no longer recognises. A window without a late break is one runaway word that
+// the final bound cuts long before its end, so it is cut as it stands.
+const windowed = (text: string): string => {
+  if (text.length <= REDACT_WINDOW) return text;
+  for (let at = REDACT_WINDOW; at > REDACT_WINDOW / 2; at--) if (/\s/.test(text[at]!)) return text.slice(0, at);
+  return text.slice(0, /[\uD800-\uDBFF]/.test(text[REDACT_WINDOW - 1]!) ? REDACT_WINDOW - 1 : REDACT_WINDOW);
+};
+
+// Text safe to persist, send or log: the head of it, credential-shaped values redacted, on one line.
+// Paths, errno reasons and exit codes stay.
 export const redact = (text: string): string =>
-  AGENT_SECRETS.reduce((out, [pattern, replacement]) => out.replace(pattern, replacement), redactSecretValues(text)).replace(/\s+/g, ' ').trim();
+  AGENT_SECRETS.reduce((out, [pattern, replacement]) => out.replace(pattern, replacement), redactSecretValues(windowed(text))).replace(/\s+/g, ' ').trim();
 
 const bounded = (line: string, limit: number): string => {
   const points = [...line];

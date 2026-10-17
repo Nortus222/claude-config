@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { causeText, changeTitle, errorText, itemLabel, relativeTime, runReport } from '../src/copy.ts';
+import { causeText, changeTitle, errorText, itemLabel, namesWhole, relativeTime, runCauses, runReport } from '../src/copy.ts';
 
 test('itemLabel names settings by agent and key, with the key as the name', () => {
   assert.deepEqual(itemLabel('setting:claude:settings.json#model'), { lead: 'Claude setting ', name: 'model', tail: '', text: 'Claude setting model' });
@@ -86,6 +86,15 @@ test('causeText says why a run stopped without the agent\'s inspect advice', () 
   assert.equal(causeText('EACCES: permission denied'), 'EACCES: permission denied.');
   assert.equal(causeText('Couldn\'t inspect the file'), 'Couldn\'t inspect the file.');
   assert.equal(causeText(''), ''); assert.equal(causeText(undefined), ''); assert.equal(causeText('; inspect before retrying'), '');
+});
+
+test('runCauses names whole step keys only, leaving a longer key that merely starts with one', () => {
+  const steps = [{ key: 'skill:a/tdd', outcome: 'failed' as const, note: '' }];
+  const causes = (message: string) => runCauses({ result: { status: 'failed', message }, steps } as Parameters<typeof runCauses>[0]);
+  assert.deepEqual(causes("Couldn't apply skill:a/tdd: checksum mismatch"), ["Couldn't apply Skill tdd from a: checksum mismatch."]);
+  assert.deepEqual(causes("Couldn't apply skill:a/tdd-pro: timed out"), ["Couldn't apply skill:a/tdd-pro: timed out."]);
+  assert.equal(namesWhole('Skill tdd-pro failed', 'Skill tdd'), false);
+  assert.equal(namesWhole('Skill tdd failed', 'Skill tdd'), true);
 });
 
 test('runReport is plain text naming the change, cause, failed steps, run ID, backups and the agent log', () => {

@@ -3,7 +3,7 @@ import type { InspectResult } from '@nortuscc/agent/ipc/protocol';
 import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/operations';
 import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { CopyDetails, RunPlaces, RunRecovery, runCounts } from './run-recovery.tsx';
-import { causeText, changeTitle, errorText, groupLabels, itemLabel, repoName, runCauses, runReport, type ItemLabel } from './copy.ts';
+import { causeText, changeTitle, errorText, groupLabels, itemLabel, namesWhole, repoName, runCauses, runReport, type ItemLabel } from './copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { BusyCard } from './busy-view.tsx';
 
@@ -168,14 +168,12 @@ const stopped = (run: RunView) => run.state === 'failed' || run.result?.status =
 
 const failedSteps = (run: RunView, inspection: InspectResult | null) =>
   run.steps.filter(step => step.outcome === 'failed').map(step => ({ ...step, label: stepLabel(step.key, inspection) }));
-// Whether `cause` names `name` as a whole item name: "Skill tdd" is not named by "Skill tdd-pro".
-const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const names = (cause: string, name: string) => new RegExp(`(?<![\\w-])${literal(name)}(?![\\w-])`).test(cause);
-// Whether a cause already names a failed step, by its item label or key, so the card doesn't say it twice.
-// A note alone identifies the step only when it is the run's one failed step: other steps may share it.
+// Whether a cause already names a failed step, by its whole item label or key, so the card doesn't say it twice:
+// "Skill tdd" is not named by "Skill tdd-pro". A note alone identifies the step only when it is the run's one
+// failed step: other steps may share it.
 const covers = (causes: readonly string[], step: { key: string; note: string; label: ItemLabel }, failed: number) => {
   const note = step.note.trim().replace(/\.$/, '').toLowerCase();
-  return causes.some(cause => cause.includes(step.key) || step.label.text !== 'Item' && names(cause, step.label.text)
+  return causes.some(cause => namesWhole(cause, step.key) || step.label.text !== 'Item' && namesWhole(cause, step.label.text)
     || failed === 1 && note.length > 0 && cause.toLowerCase().includes(note));
 };
 // The run as plain text for Copy details.

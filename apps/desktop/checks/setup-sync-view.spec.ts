@@ -430,6 +430,12 @@ test('a failed step the cause does not name stays listed, even when its note or 
   const longer = failedList([{ key: 'skill:tdd', note: 'Checksum mismatch' }, { key: 'skill:tdd-pro', note: 'Download timed out' }],
     "Couldn't apply skill:tdd-pro: Download timed out (1 more step failed)");
   assert.match(longer, /<strong>tdd<\/strong>/); assert.doesNotMatch(longer, /<strong>tdd-pro<\/strong>/);
+  // A raw key in the cause names only that whole key: "skill:a/tdd-pro" does not name "skill:a/tdd".
+  const longerKey = failedList([{ key: 'skill:a/tdd', note: 'Checksum mismatch' }, { key: 'skill:a/ask', note: 'npx exited with 1' }],
+    "Couldn't apply skill:a/tdd-pro: Download timed out (2 more steps failed)");
+  assert.match(longerKey, /<strong>tdd<\/strong>/);
+  assert.doesNotMatch(failedList([{ key: 'skill:a/tdd', note: 'Checksum mismatch' }, { key: 'skill:a/ask', note: 'npx exited with 1' }],
+    'Agent stopped at skill:a/tdd: checksum mismatch'), /<strong>tdd<\/strong>/);
   // The run's one failed step is covered by its note alone.
   assert.equal(failedList([{ key: 'skill:ask', note: 'npx exited with 1' }], 'Npx exited with 1'), '');
 });

@@ -213,6 +213,23 @@ test('a skill its pinned commit lacks fails by name while the rest of the batch 
   assert.equal(readLock(m.paths).gone!.ref, NEXT);
 });
 
+// The installer records `--skill TDD` as the commit's `tdd`; verification reads that entry and folder.
+test('a pinned profile name that differs in case from the skill installs and verifies under the skill\'s own name', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n', 'skills/tdd/SKILL.md': '# tdd at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
+  const r = report([item('a', 'missing', 'apply'), item('TDD', 'missing', 'apply')], [skill('a', 'o/r', pin(sha)), skill('TDD', 'o/r', pin(sha))]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(plan('apply', r, selectAll, [skillsDomain]), r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const step = events.find((e): e is Extract<Progress, { type: 'finished' }> => e.type === 'finished' && e.key === `skills:install:o/r#${sha}`)!;
+  assert.deepEqual([step.outcome, step.note], ['ok', `verified 2 skill(s) at ${sha.slice(0, 7)}`]);
+  assert.deepEqual(installer.commands.map((c) => c.args[2]), ['add']);
+  assert.equal(readLock(m.paths).tdd!.ref, sha);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'tdd', 'SKILL.md'), 'utf8'), '# tdd at pin\n');
+});
+
 test('a pinned step whose every skill its commit lacks says the pin does not have them', async () => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
