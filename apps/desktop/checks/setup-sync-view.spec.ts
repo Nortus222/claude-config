@@ -364,10 +364,10 @@ test('the Changes heading counts incoming rows like Home and the badge: not unch
 });
 
 test('a failed run says why, lists its failed steps and counts, offers next steps, and names where to look', async t => {
-  const cause = "Couldn't write Claude setting model: EACCES: permission denied";
-  // The cause names the model step; grill failed on its own; CLAUDE.md never ran.
+  // The agent's cause names the model step by its key; grill failed on its own.
+  const cause = "Couldn't apply config:claude:settings.json#model: EACCES: permission denied";
   const steps = [{ key: 'skill:tdd', outcome: 'ok' as const, note: 'Installed' }, { key: 'config:claude:settings.json#model', outcome: 'failed' as const, note: 'EACCES: permission denied' },
-    { key: 'skill:grill', outcome: 'failed' as const, note: 'Download timed out' }, { key: 'config:claude:CLAUDE.md', outcome: 'failed' as const, note: 'Not written because an earlier step failed' }];
+    { key: 'skill:grill', outcome: 'failed' as const, note: 'Download timed out' }];
   const { c, html, handlers, emit, bridge, calls } = await page(t, f => { f.report.items = localItems(); });
   const invoked: { command: string; args: unknown }[] = [], invoke = bridge.invoke;
   bridge.invoke = async (command, args) => { invoked.push({ command, args }); if (command === 'reveal_place') throw new Error('There are no backups on this Mac yet.'); return invoke(command, args); };
@@ -377,7 +377,7 @@ test('a failed run says why, lists its failed steps and counts, offers next step
   emit({ version: 3, event: 'operation-run', runId: 'local-run' }); await flush();
   const text = html(), card = /<section class="card changes-run run-failure"[\s\S]*?<\/section>/.exec(text)?.[0] ?? '';
   assert.match(card, /<span class="pill pill-danger">Failed<\/span>/);
-  assert.match(card, /class="alert run-cause" role="status">Couldn&#x27;t write Claude setting model: EACCES: permission denied\.</);
+  assert.match(card, /class="alert run-cause" role="status">Couldn&#x27;t apply Claude setting model: EACCES: permission denied\.</);
   // Only the failure the cause doesn't name is listed; a step that never ran is not a failure.
   assert.match(card, /<ul class="changes-list run-failed" aria-label="Failed steps"><li><span class="changes-label">Skill <strong>grill<\/strong> from mattpocock\/skills<\/span><small>Download timed out\.<\/small><\/li><\/ul>/);
   assert.doesNotMatch(card.replace(/<details[\s\S]*<\/details>/, ''), /EACCES: permission denied\.<\/small>|CLAUDE\.md|earlier step/);
@@ -390,13 +390,13 @@ test('a failed run says why, lists its failed steps and counts, offers next step
   assert.match(inside, /<code>~\/\.config\/nortuscc\/backups\/backup-1<\/code>[\s\S]*aria-label="Show the backups folder in Finder"/);
   assert.match(inside, /<code>local-run<\/code>/);
   assert.match(inside, /<dt>Failed<\/dt><dd><ul><li><code>config:claude:settings\.json#model<\/code> EACCES: permission denied<\/li><li><code>skill:grill<\/code> Download timed out<\/li><\/ul>/);
-  assert.match(inside, /<dt>Not written<\/dt><dd><ul><li><code>config:claude:settings\.json#model<\/code><\/li><li><code>config:claude:CLAUDE\.md<\/code><\/li><\/ul>/);
+  assert.match(inside, /<dt>Not written<\/dt><dd><ul><li><code>config:claude:settings\.json#model<\/code><\/li><\/ul>/);
   assert.doesNotMatch(outsideDetails(text), /local-run|backup-1|config:|skill:tdd/);
 
   // Copy details carries the plain-text account; Show in Finder names a place, never a path, and reports a refusal.
   const failure = RunCard({ run: c.state.run!, state: c.state, controller: c })!;
   const tree = (failure.type as (props: unknown) => ReactElement)(failure.props);
-  assert.match(find(tree, element => element.type === CopyDetails)!.props.text, /^Apply changes to this Mac: Failed\nCause: Couldn't write Claude setting model[\s\S]*- Claude setting model \(config:claude:settings\.json#model\): EACCES: permission denied\n- Skill grill from mattpocock\/skills \(skill:grill\): Download timed out\nWritten: 1, not written: 1\nRun ID: local-run\nBackups: ~\/\.config\/nortuscc\/backups\/backup-1\nAgent log: ~\/\.config\/nortuscc\/agent\/agent\.log$/);
+  assert.match(find(tree, element => element.type === CopyDetails)!.props.text, /^Apply changes to this Mac: Failed\nCause: Couldn't apply Claude setting model[\s\S]*- Claude setting model \(config:claude:settings\.json#model\): EACCES: permission denied\n- Skill grill from mattpocock\/skills \(skill:grill\): Download timed out\nWritten: 1, not written: 1\nRun ID: local-run\nBackups: ~\/\.config\/nortuscc\/backups\/backup-1\nAgent log: ~\/\.config\/nortuscc\/agent\/agent\.log$/);
   const places = find(tree, element => element.type === RunPlaces)!;
   assert.equal(await places.props.onReveal('backups'), 'There are no backups on this Mac yet.');
   assert.deepEqual(invoked.filter(call => call.command === 'reveal_place'), [{ command: 'reveal_place', args: { place: 'backups' } }]);

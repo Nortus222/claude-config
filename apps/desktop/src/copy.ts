@@ -189,11 +189,16 @@ export function causeText(message: string | undefined): string {
 }
 
 // Why a run stopped, in the agent's words: its result's reason, then what the skill installer reported.
-export function runCauses(run: Pick<RunView, 'result' | 'installation'>): string[] {
+// Item keys the run touched read as item names where `label` knows them.
+export function runCauses(run: Pick<RunView, 'result' | 'installation'> & Partial<Pick<RunView, 'steps' | 'parity'>>,
+  label: (key: string) => ItemLabel = itemLabel): string[] {
   const result = run.result;
   const reason = result && 'message' in result && result.status !== 'succeeded' ? causeText(result.message) : '';
   const installer = run.installation && run.installation.state !== 'verified' ? causeText(run.installation.message) : '';
-  return [...new Set([reason, installer].filter(Boolean))];
+  const keys = [...new Set([...run.steps?.map(step => step.key) ?? [], ...run.parity?.remainingKeys ?? [], ...run.parity?.committedKeys ?? []])]
+    .sort((a, b) => b.length - a.length);
+  const named = (text: string) => keys.reduce((line, key) => { const name = label(key).text; return name === 'Item' ? line : line.split(key).join(name); }, text);
+  return [...new Set([reason, installer].filter(Boolean).map(named))];
 }
 
 // Where the agent keeps what a run leaves behind, as the owner finds them on disk.

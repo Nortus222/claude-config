@@ -166,11 +166,8 @@ const SHOWN_FAILURES = 5;
 // A run stopped before doing all it planned: it failed, or finished with failed steps.
 const stopped = (run: RunView) => run.state === 'failed' || run.result?.status === 'done' && run.result.failed > 0;
 
-// A step recorded as failed only because an earlier one failed: not written, not a failure of its own.
-const SKIPPED = /earlier step failed/i;
-const skipped = (step: RunView['steps'][number]) => step.outcome === 'failed' && SKIPPED.test(step.note);
 const failedSteps = (run: RunView, inspection: InspectResult | null) =>
-  run.steps.filter(step => step.outcome === 'failed' && !skipped(step)).map(step => ({ ...step, label: stepLabel(step.key, inspection) }));
+  run.steps.filter(step => step.outcome === 'failed').map(step => ({ ...step, label: stepLabel(step.key, inspection) }));
 // Whether a cause already names a failed step, by its item or its note, so the card doesn't say it twice.
 const covers = (causes: readonly string[], step: { note: string; label: ItemLabel }) => {
   const note = step.note.trim().replace(/\.$/, '').toLowerCase();
@@ -178,7 +175,7 @@ const covers = (causes: readonly string[], step: { note: string; label: ItemLabe
 };
 // The run as plain text for Copy details.
 const reportOf = (run: RunView, inspection: InspectResult | null) => runReport({ title: changeTitle(run.intent.change.kind), state: RUN_STATE[run.state],
-  cause: runCauses(run).join(' '), runId: run.runId, ...runCounts(run), failed: failedSteps(run, inspection).map(step => ({ label: step.label.text, key: step.key, note: step.note })) });
+  cause: runCauses(run, key => stepLabel(key, inspection)).join(' '), runId: run.runId, ...runCounts(run), failed: failedSteps(run, inspection).map(step => ({ label: step.label.text, key: step.key, note: step.note })) });
 
 type RunActions = Pick<Actions, 'cancel'> & Partial<Pick<Actions, 'reload' | 'repreview' | 'reveal'>>;
 // One run: active, or started in this window. Interrupted and abandoned runs show as recovery instead.
@@ -206,11 +203,11 @@ export function RunCard({ run, state, controller }: { run: RunView; state: Setup
 // A run that stopped short: why, which steps failed and what was written, the next steps, then where to
 // look. Keys, the run ID and folders stay under Details and in Copy details.
 function RunFailure({ run, state, controller, head, outcome }: { run: RunView; state: SetupSyncState; controller: RunActions; head: React.ReactNode; outcome: string }) {
-  const causes = runCauses(run), counts = runCounts(run), failures = failedSteps(run, state.inspection), report = reportOf(run, state.inspection);
+  const causes = runCauses(run, key => stepLabel(key, state.inspection)), counts = runCounts(run), failures = failedSteps(run, state.inspection), report = reportOf(run, state.inspection);
   const lead = causes.length ? causes : [run.result?.status === 'done' ? outcome : causeText('Operation stopped')];
-  // Failed steps the cause doesn't already name; steps that never ran count as not written instead.
+  // Failed steps the cause doesn't already name.
   const listed = failures.filter(step => !covers(causes, step));
-  const notWritten = [...new Set([...run.parity?.remainingKeys ?? [], ...run.steps.filter(skipped).map(step => step.key)])];
+  const notWritten = run.parity?.remainingKeys ?? [];
   const keys = (name: string, values: readonly string[]) => values.length ? <><dt>{name}</dt><dd><ul>{values.map(value => <li key={value}><code>{value}</code></li>)}</ul></dd></> : null;
   return <section className="card changes-run run-failure" aria-labelledby="changes-run-h">
     {head}
