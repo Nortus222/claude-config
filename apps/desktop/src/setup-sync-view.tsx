@@ -168,10 +168,15 @@ const stopped = (run: RunView) => run.state === 'failed' || run.result?.status =
 
 const failedSteps = (run: RunView, inspection: InspectResult | null) =>
   run.steps.filter(step => step.outcome === 'failed').map(step => ({ ...step, label: stepLabel(step.key, inspection) }));
-// Whether a cause already names a failed step, by its item or its note, so the card doesn't say it twice.
-const covers = (causes: readonly string[], step: { note: string; label: ItemLabel }) => {
+// Whether `cause` names `name` as a whole item name: "Skill tdd" is not named by "Skill tdd-pro".
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const names = (cause: string, name: string) => new RegExp(`(?<![\\w-])${literal(name)}(?![\\w-])`).test(cause);
+// Whether a cause already names a failed step, by its item label or key, so the card doesn't say it twice.
+// A note alone identifies the step only when it is the run's one failed step: other steps may share it.
+const covers = (causes: readonly string[], step: { key: string; note: string; label: ItemLabel }, failed: number) => {
   const note = step.note.trim().replace(/\.$/, '').toLowerCase();
-  return causes.some(cause => step.label.text !== 'Item' && cause.includes(step.label.text) || note.length > 0 && cause.toLowerCase().includes(note));
+  return causes.some(cause => cause.includes(step.key) || step.label.text !== 'Item' && names(cause, step.label.text)
+    || failed === 1 && note.length > 0 && cause.toLowerCase().includes(note));
 };
 // The run as plain text for Copy details.
 const reportOf = (run: RunView, inspection: InspectResult | null) => runReport({ title: changeTitle(run.intent.change.kind), state: RUN_STATE[run.state],
@@ -206,7 +211,7 @@ function RunFailure({ run, state, controller, head, outcome }: { run: RunView; s
   const causes = runCauses(run, key => stepLabel(key, state.inspection)), counts = runCounts(run), failures = failedSteps(run, state.inspection), report = reportOf(run, state.inspection);
   const lead = causes.length ? causes : [run.result?.status === 'done' ? outcome : causeText('Operation stopped')];
   // Failed steps the cause doesn't already name.
-  const listed = failures.filter(step => !covers(causes, step));
+  const listed = failures.filter(step => !covers(causes, step, failures.length));
   const notWritten = run.parity?.remainingKeys ?? [];
   const keys = (name: string, values: readonly string[]) => values.length ? <><dt>{name}</dt><dd><ul>{values.map(value => <li key={value}><code>{value}</code></li>)}</ul></dd></> : null;
   return <section className="card changes-run run-failure" aria-labelledby="changes-run-h">

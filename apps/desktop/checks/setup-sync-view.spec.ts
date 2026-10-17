@@ -416,6 +416,24 @@ test('a run that finished with failed steps leads with its counts, and one with 
   assert.doesNotMatch(render({ state: 'succeeded', result: { status: 'done', ok: 2, failed: 0 } }), /run-failure|Copy details/);
 });
 
+test('a failed step the cause does not name stays listed, even when its note or a longer label matches the cause', async t => {
+  const { c } = await page(t);
+  const failedList = (steps: { key: string; note: string }[], message: string) => {
+    const card = renderToStaticMarkup(createElement(RunCard, { run: run({ state: 'failed', steps: steps.map(step => ({ ...step, outcome: 'failed' as const })), result: { status: 'failed', message } }), state: c.state, controller: c }));
+    return /<ul class="changes-list run-failed" aria-label="Failed steps">[\s\S]*?<\/ul>/.exec(card)?.[0] ?? '';
+  };
+  // Two steps share a note; the cause names only the first.
+  const shared = failedList([{ key: 'skill:ask', note: 'npx exited with 1' }, { key: 'skill:grill', note: 'npx exited with 1' }],
+    "Couldn't apply skill:ask: npx exited with 1 (1 more step failed)");
+  assert.match(shared, /<strong>grill<\/strong>/); assert.doesNotMatch(shared, /<strong>ask<\/strong>/);
+  // "Skill tdd-pro" in the cause does not name "Skill tdd".
+  const longer = failedList([{ key: 'skill:tdd', note: 'Checksum mismatch' }, { key: 'skill:tdd-pro', note: 'Download timed out' }],
+    "Couldn't apply skill:tdd-pro: Download timed out (1 more step failed)");
+  assert.match(longer, /<strong>tdd<\/strong>/); assert.doesNotMatch(longer, /<strong>tdd-pro<\/strong>/);
+  // The run's one failed step is covered by its note alone.
+  assert.equal(failedList([{ key: 'skill:ask', note: 'npx exited with 1' }], 'Npx exited with 1'), '');
+});
+
 test('Abandon on Changes asks once and names the run', async t => {
   const interrupted = run({ state: 'interrupted', result: { status: 'interrupted', message: 'Restarted' } });
   const { c, html } = await page(t, f => { f.handlers.listRuns = () => ({ runs: [interrupted], nextBefore: null }); f.handlers.getRun = () => interrupted; });
