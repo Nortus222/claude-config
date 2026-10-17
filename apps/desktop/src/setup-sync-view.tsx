@@ -2,8 +2,8 @@ import React from 'react';
 import type { InspectResult } from '@nortuscc/agent/ipc/protocol';
 import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/operations';
 import { incomingCounts, selectedLocal, type SetupChoice, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
-import { RunRecovery } from './run-recovery.tsx';
-import { changeTitle, errorText, itemLabel, repoName, type ItemLabel } from './copy.ts';
+import { CopyDetails, RunPlaces, RunRecovery, runCounts } from './run-recovery.tsx';
+import { causeText, changeTitle, errorText, groupLabels, itemLabel, repoName, runCauses, runReport, type ItemLabel } from './copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { BusyCard } from './busy-view.tsx';
 
@@ -11,7 +11,7 @@ type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
 type Observed = InspectResult['items'][number];
 type Actions = Pick<SetupSyncController, 'reload' | 'refetch' | 'choose' | 'chooseAll' | 'preview' | 'apply' | 'cancel' | 'repreview' | 'askAbandon' | 'keepRun' | 'abandon' | 'page' | 'selectSource' | 'switchProfile' | 'followSharedLink'
-  | 'toggleLocal' | 'previewLocal' | 'cancelPreview' | 'followRepository'>;
+  | 'toggleLocal' | 'previewLocal' | 'cancelPreview' | 'followRepository' | 'reveal'>;
 // `repoUrl` is the setup repository, whose profiles an unfollowed Mac can follow.
 type Props = { state: SetupSyncState; controller: Actions; onOpenProfiles?: () => void; repoUrl?: string };
 
@@ -48,6 +48,8 @@ function observedLabel(item: Pick<Observed, 'key' | 'label'> & { group?: string 
   return label && label.text !== 'Item' ? label : plain(item.label);
 }
 const keyLabel = (key: string, inspection: InspectResult | null) => observedLabel(inspection?.items.find(item => item.key === key) ?? { key, label: 'Item' });
+// Labels a run step's key: an inspection key, else a setup item id.
+const stepLabel = (key: string, inspection: InspectResult | null) => { const observed = keyLabel(key, inspection); return observed.text !== 'Item' ? observed : itemLabel(key); };
 // Override paths a switch drops: `settings.<file>.<key>`, `skills.<name>`, `integrations.<id>`.
 function overrideLabel(path: string) {
   if (path.startsWith('skills.')) return `Skill ${path.slice('skills.'.length)}`;
@@ -66,10 +68,37 @@ function pairLabel(row: ReviewRow, action: SetupChoice['action']) {
   const incoming = action === 'release' ? "Release the hold and take your profile's value" : "Take your profile's value";
   return row.conflict ? `${incoming} · keep this Mac's ${row.kind === 'file' ? 'file' : 'override'}` : incoming;
 }
-const STAGED: Readonly<Record<SetupChoice['action'], string>> = {
-  accept: "Take your profile's value and keep this Mac's overrides", hold: 'Hold at the current value',
-  release: "Release the hold and take your profile's value", takeTheirs: "Use your profile's value and replace this Mac's (backed up first)",
+// A preview's staged choices, one line per action in this order, each headed by its action and count.
+const CHOICE_GROUPS: readonly { action: SetupChoice['action']; head: (n: number) => string }[] = [
+  { action: 'accept', head: n => `Take ${n}` }, { action: 'release', head: n => `End hold and take ${n}` },
+  { action: 'takeTheirs', head: n => `Replace mine ${n} · backed up first` }, { action: 'hold', head: n => `Hold ${n}` },
+];
+// Names a preview line shows before "+N more".
+const INLINE_NAMES = 12;
+// The one muted line under a preview, by its kind of change.
+const PREVIEW_NOTE: Partial<Readonly<Record<ChangePreview['change']['kind'], string>>> = {
+  setupApply: "Items you don't choose will be held. Anything your choices replace is backed up first.",
+  reconcile: 'Anything this replaces is backed up first.',
 };
+
+// Item names as one wrapping line, grouped by kind so its words appear once ("Claude settings: model, theme ·
+// Skill tdd from owner/repo"). Past INLINE_NAMES names the rest open with "+N more".
+export function NameList({ labels, label }: { labels: readonly ItemLabel[]; label: string }) {
+  const [all, setAll] = React.useState(false);
+  let left = all ? labels.length : INLINE_NAMES;
+  const groups = groupLabels(labels).map(group => { const items = group.items.slice(0, Math.max(left, 0)); left -= items.length; return { ...group, items }; })
+    .filter(group => group.items.length);
+  return <ul className="name-list" aria-label={label}>{groups.map((group, index) => <li key={index}>
+    {group.heading === null && group.items.length === 1 ? <Label label={group.items[0]!} />
+      : <span className="changes-label"><span className="name-group-head">{group.heading ?? group.items[0]!.lead.trim()}: </span>
+        {group.items.map((item, at) => <React.Fragment key={at}>{at ? ', ' : ''}<strong>{item.name}</strong></React.Fragment>)}</span>}
+    {index < groups.length - 1 ? <span className="name-sep"> · </span> : null}</li>)}
+    {labels.length > INLINE_NAMES ? <li className="name-more"><button type="button" className="link" aria-expanded={all} onClick={() => setAll(!all)}>
+      {all ? 'Show fewer' : `+${labels.length - INLINE_NAMES} more`}</button></li> : null}</ul>;
+}
+function PreviewLine({ head, labels, label }: { head?: string; labels: readonly ItemLabel[]; label: string }) {
+  return <div className="preview-line">{head ? <span className="preview-line-head">{head}</span> : null}<NameList labels={labels} label={label} /></div>;
+}
 
 // Why reading and choosing are unavailable, or null when they are available. A busy Mac explains itself
 // in its own card.
@@ -103,29 +132,57 @@ export function PreviewPanel({ state, controller }: { state: SetupSyncState; con
   if (!preview) return null;
   const change = preview.change, { title, apply } = previewCopy(preview, state);
   const dropped = 'droppedChoices' in preview ? preview.droppedChoices : null;
+  const { steps, skipped } = preview.plan, effects = 'actionEffects' in preview ? preview.actionEffects ?? [] : [], note = PREVIEW_NOTE[change.kind];
   return <section className="card changes-preview" aria-labelledby="changes-preview-h">
     <div className="card-head"><div><h2 id="changes-preview-h">{title}</h2>
-      <p>{change.kind === 'followProfile' ? `From ${repoName(change.repoUrl)}. ` : ''}Preview only. Nothing is written until you apply.</p></div></div>
+      <p>{change.kind === 'followProfile' ? `From ${repoName(change.repoUrl)}. ` : ''}Preview only. Nothing is written until you apply.</p></div>
+      <div className="actions"><button className="primary" disabled={!state.eligibility.apply} onClick={() => void controller.apply()}>{apply}</button>
+        <button disabled={state.pending} onClick={() => controller.cancelPreview()}>Cancel</button></div></div>
     {state.previewNotice ? <p className="notice" role="status">{state.previewNotice}</p> : null}
-    {dropped?.holds.length ? <div className="preview-group"><h3>Holds that end with the switch</h3><ul className="changes-list" aria-label="Dropped holds">{dropped.holds.map(id => <li key={id}><Label label={itemLabel(id)} /></li>)}</ul></div> : null}
-    {dropped?.overrides.length ? <div className="preview-group"><h3>Overrides removed</h3><ul className="changes-list" aria-label="Dropped overrides">{dropped.overrides.map(path => <li key={path}>{overrideLabel(path)}</li>)}</ul></div> : null}
-    {change.kind === 'setupApply' ? <ul className="changes-list" aria-label="Reviewed choices">{change.choices.map(choice => <li key={choice.itemId}><Label label={itemLabel(choice.itemId)} /><small>{STAGED[choice.action]}</small></li>)}</ul> : null}
-    {change.kind === 'reconcile' ? <ul className="changes-list" aria-label="Changes to apply">{change.only.map(key => <li key={key}><Label label={keyLabel(key, state.inspection)} /></li>)}</ul>
-      : preview.plan.steps.length ? <ol className="steps setup-sync-steps" aria-label="Planned steps">{preview.plan.steps.map((step, index) => <li key={index}><span>{step.summary}</span></li>)}</ol>
-      : change.kind === 'setupApply' ? <p className="muted">Nothing on this Mac changes yet. Apply saves your choices.</p> : null}
-    {preview.plan.skipped.length ? <div className="preview-group"><h3>Left out</h3><ul className="changes-list" aria-label="Left out">{preview.plan.skipped.map((step, index) => <li key={index}><Label label={keyLabel(step.key, state.inspection)} /><small>{step.reason}</small></li>)}</ul></div> : null}
-    {'actionEffects' in preview ? preview.actionEffects?.map(effect => <p className="muted" key={effect}>{effect}</p>) : null}
-    {change.kind === 'setupApply' ? <p className="muted">Items you don't choose will be held. Overrides and files your choices replace are backed up before writing.</p> : null}
-    <div className="setup-sync-actions"><button className="primary" disabled={!state.eligibility.apply} onClick={() => void controller.apply()}>{apply}</button>
-      <button disabled={state.pending} onClick={() => controller.cancelPreview()}>Cancel</button></div>
+    <div className="preview-lines">
+      {dropped?.holds.length ? <PreviewLine head={`Holds that end ${dropped.holds.length}`} labels={dropped.holds.map(itemLabel)} label="Dropped holds" /> : null}
+      {dropped?.overrides.length ? <PreviewLine head={`Overrides removed ${dropped.overrides.length}`} labels={dropped.overrides.map(path => plain(overrideLabel(path)))} label="Dropped overrides" /> : null}
+      {change.kind === 'setupApply' ? <div className="preview-lines" role="group" aria-label="Reviewed choices">{CHOICE_GROUPS.map(({ action, head }) => {
+        const chosen = change.choices.filter(choice => choice.action === action);
+        return chosen.length ? <PreviewLine key={action} head={head(chosen.length)} labels={chosen.map(choice => itemLabel(choice.itemId))} label={`${head(chosen.length)}: items`} /> : null;
+      })}</div> : null}
+      {change.kind === 'reconcile' ? <PreviewLine labels={change.only.map(key => keyLabel(key, state.inspection))} label="Changes to apply" /> : null}
+    </div>
+    {change.kind === 'setupApply' && !steps.length ? <p className="muted">Nothing on this Mac changes yet. Apply saves your choices.</p> : null}
+    {steps.length || effects.length ? <details className="preview-more"><summary>{steps.length ? `Steps (${steps.length})` : 'What Apply does'}</summary>
+      {steps.length ? <ol className="steps setup-sync-steps" aria-label="Planned steps">{steps.map((step, index) => <li key={index}><span>{step.summary}</span></li>)}</ol> : null}
+      {effects.length ? <ul className="preview-effects">{effects.map(effect => <li key={effect}>{effect}</li>)}</ul> : null}</details> : null}
+    {skipped.length ? <details className="preview-more"><summary>{skipped.length} left out</summary>
+      <ul className="changes-list" aria-label="Left out">{skipped.map((step, index) => <li key={index}><Label label={keyLabel(step.key, state.inspection)} /><small>{step.reason}</small></li>)}</ul></details> : null}
+    {note ? <p className="muted preview-note">{note}</p> : null}
   </section>;
 }
 
 // Planned steps of a run, when its acceptance records them.
 const plannedSteps = (run: RunView) => (run.intent as { parity?: { plannedKeys?: readonly string[] } }).parity?.plannedKeys?.length ?? 0;
 
+// Failed steps the card lists; the rest are under Details and in Copy details.
+const SHOWN_FAILURES = 5;
+// A run stopped before doing all it planned: it failed, or finished with failed steps.
+const stopped = (run: RunView) => run.state === 'failed' || run.result?.status === 'done' && run.result.failed > 0;
+
+// A step recorded as failed only because an earlier one failed: not written, not a failure of its own.
+const SKIPPED = /earlier step failed/i;
+const skipped = (step: RunView['steps'][number]) => step.outcome === 'failed' && SKIPPED.test(step.note);
+const failedSteps = (run: RunView, inspection: InspectResult | null) =>
+  run.steps.filter(step => step.outcome === 'failed' && !skipped(step)).map(step => ({ ...step, label: stepLabel(step.key, inspection) }));
+// Whether a cause already names a failed step, by its item or its note, so the card doesn't say it twice.
+const covers = (causes: readonly string[], step: { note: string; label: ItemLabel }) => {
+  const note = step.note.trim().replace(/\.$/, '').toLowerCase();
+  return causes.some(cause => step.label.text !== 'Item' && cause.includes(step.label.text) || note.length > 0 && cause.toLowerCase().includes(note));
+};
+// The run as plain text for Copy details.
+const reportOf = (run: RunView, inspection: InspectResult | null) => runReport({ title: changeTitle(run.intent.change.kind), state: RUN_STATE[run.state],
+  cause: runCauses(run).join(' '), runId: run.runId, ...runCounts(run), failed: failedSteps(run, inspection).map(step => ({ label: step.label.text, key: step.key, note: step.note })) });
+
+type RunActions = Pick<Actions, 'cancel'> & Partial<Pick<Actions, 'reload' | 'repreview' | 'reveal'>>;
 // One run: active, or started in this window. Interrupted and abandoned runs show as recovery instead.
-export function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: Pick<Actions, 'cancel'> }) {
+export function RunCard({ run, state, controller }: { run: RunView; state: SetupSyncState; controller: RunActions }) {
   if (run.state === 'interrupted' || run.state === 'abandoned') return null;
   const result = run.result, ok = run.steps.filter(step => step.outcome === 'ok').length, failed = run.steps.filter(step => step.outcome === 'failed').length;
   const total = Math.max(plannedSteps(run), run.steps.length), running = activeRun(run);
@@ -133,14 +190,47 @@ export function RunCard({ run, state, controller }: { run: RunView; state: Setup
     : result.status === 'done' ? `${count(result.ok, 'change')} applied${result.failed ? `, ${result.failed} failed` : ''}.`
     : result.status === 'cancelled' ? `Cancelled. ${count(result.remaining.length, 'change')} not started.`
     : errorText(result.message);
+  const head = <div className="card-head"><div><h2 id="changes-run-h">{changeTitle(run.intent.change.kind)}</h2></div>
+    <div className="actions"><span className={`pill ${RUN_TONE[run.state]}`}>{running ? <span className="spinner" aria-hidden="true" /> : null}{RUN_STATE[run.state]}</span>
+      {state.eligibility.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : null}</div></div>;
+  if (!running && stopped(run)) return <RunFailure run={run} state={state} controller={controller} head={head} outcome={outcome} />;
   return <section className="card changes-run" aria-labelledby="changes-run-h">
-    <div className="card-head"><div><h2 id="changes-run-h">{changeTitle(run.intent.change.kind)}</h2></div>
-      <div className="actions"><span className={`pill ${RUN_TONE[run.state]}`}>{running ? <span className="spinner" aria-hidden="true" /> : null}{RUN_STATE[run.state]}</span>
-        {state.eligibility.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : null}</div></div>
+    {head}
     {running && total ? <progress aria-label={`${changeTitle(run.intent.change.kind)} progress`} value={run.steps.length} max={total} /> : null}
     <p role="status" className={result && result.status !== 'done' && result.status !== 'cancelled' ? 'alert' : 'muted'}>{outcome}</p>
     {running && run.current ? <p className="row-sub">{run.current.summary}</p> : null}
     {run.installation ? <p className="muted">{run.installation.message}</p> : null}
+  </section>;
+}
+
+// A run that stopped short: why, which steps failed and what was written, the next steps, then where to
+// look. Keys, the run ID and folders stay under Details and in Copy details.
+function RunFailure({ run, state, controller, head, outcome }: { run: RunView; state: SetupSyncState; controller: RunActions; head: React.ReactNode; outcome: string }) {
+  const causes = runCauses(run), counts = runCounts(run), failures = failedSteps(run, state.inspection), report = reportOf(run, state.inspection);
+  const lead = causes.length ? causes : [run.result?.status === 'done' ? outcome : causeText('Operation stopped')];
+  // Failed steps the cause doesn't already name; steps that never ran count as not written instead.
+  const listed = failures.filter(step => !covers(causes, step));
+  const notWritten = [...new Set([...run.parity?.remainingKeys ?? [], ...run.steps.filter(skipped).map(step => step.key)])];
+  const keys = (name: string, values: readonly string[]) => values.length ? <><dt>{name}</dt><dd><ul>{values.map(value => <li key={value}><code>{value}</code></li>)}</ul></dd></> : null;
+  return <section className="card changes-run run-failure" aria-labelledby="changes-run-h">
+    {head}
+    {lead.map(text => <p className="alert run-cause" role="status" key={text}>{text}</p>)}
+    {listed.length ? <ul className="changes-list run-failed" aria-label="Failed steps">{listed.slice(0, SHOWN_FAILURES).map((step, index) => <li key={index}>
+      <Label label={step.label} /><small>{causeText(step.note) || 'Failed.'}</small></li>)}
+      {listed.length > SHOWN_FAILURES ? <li className="muted">{listed.length - SHOWN_FAILURES} more under Details</li> : null}</ul> : null}
+    <p className="muted">{count(counts.written, 'change')} written{counts.notWritten === null ? '' : ` · ${counts.notWritten} not written`}.
+      {counts.backupIds.length ? ' Backups of what it replaced are kept.' : ''} Nothing is rolled back automatically.</p>
+    <div className="setup-sync-actions">
+      {controller.reload ? <button disabled={!state.eligibility.read} title="Reads this Mac and your profile again" onClick={() => void controller.reload!()}>Check again</button> : null}
+      {controller.repreview && run.state === 'failed' ? <button disabled={!state.eligibility.read} title="Prepares a fresh plan for what is still waiting" onClick={() => void controller.repreview!()}>Re-preview</button> : null}
+      <CopyDetails text={report} /></div>
+    <details className="run-details"><summary>Details</summary>
+      <RunPlaces backupIds={counts.backupIds} onReveal={controller.reveal ? place => controller.reveal!(place) : undefined} />
+      <dl className="setup-sync-facts">
+        <dt>Run</dt><dd><code>{run.runId}</code></dd>
+        {failures.length ? <><dt>Failed</dt><dd><ul>{failures.map((step, index) => <li key={index}><code>{step.key}</code>{step.note ? ` ${step.note}` : ''}</li>)}</ul></dd></> : null}
+        {keys('Written', run.parity?.committedKeys ?? [])}{keys('Not written', notWritten)}
+      </dl></details>
   </section>;
 }
 
@@ -236,6 +326,10 @@ function Disclosure({ open, onToggle, controls, text, label }: { open: boolean; 
 
 const SEGMENT: Readonly<Record<SetupChoice['action'], string>> = { hold: 'Hold', accept: 'Take', release: 'Take', takeTheirs: 'Replace mine' };
 const domId = (prefix: string, key: string) => `${prefix}-${encodeURIComponent(key)}`;
+// Values short enough to read side by side on one line; longer or multi-line values keep their own boxes.
+const SHORT_VALUE = 40;
+const shortValues = (values: readonly (readonly [string, string | undefined])[]) =>
+  values.every(([, value]) => value === undefined || value.length <= SHORT_VALUE && !value.includes('\n'));
 
 // One incoming row on one line: its label and change, its choices, and its values behind Details. A pin
 // group's member shows no choices, since its group decides for it.
@@ -247,6 +341,7 @@ export function IncomingRow({ row, state, controller, open, onToggle, member = f
   const chosen = staged?.action === 'accept' && row.held ? 'release' : staged?.action;
   const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
   const label = itemLabel(row.itemId), values = domId('values', row.itemId);
+  const named = [['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const;
   return <li className={`row incoming-row${member ? ' incoming-member' : ''}`}>
     <span className="incoming-name"><Label label={label} />
       <span className={`pill ${CHANGE_TONE[row.change]}`}>{CHANGE[row.change]}</span>
@@ -257,9 +352,11 @@ export function IncomingRow({ row, state, controller, open, onToggle, member = f
       onSelect={action => controller.choose({ itemId: row.itemId, action })} />}
     <Disclosure open={open} onToggle={onToggle} controls={values} text="Details" label={`Values of ${label.text}`} />
     {open ? <div className="incoming-detail" id={values}>
-      {([['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const).map(([name, value]) => <div key={name}>
-        <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
-      </div>)}
+      {shortValues(named) ? <dl className="incoming-values">{named.map(([name, value]) => <div key={name}>
+        <dt>{name}</dt><dd><code aria-label={`${name} value of ${label.text}`}>{value ?? 'None'}</code></dd></div>)}</dl>
+        : named.map(([name, value]) => <div key={name}>
+          <p className="setup-sync-label">{name}</p><pre className="setup-sync-diff" tabIndex={0} aria-label={`${name} value of ${label.text}`}><code>{value ?? 'None'}</code></pre>
+        </div>)}
       {row.truncated ? <p className="setup-sync-warn">Values are shortened. Only part of each value is shown.</p> : null}
     </div> : null}
   </li>;
@@ -325,7 +422,7 @@ function OnThisMac({ state, controller, onOpenProfiles }: Props) {
   const [all, setAll] = React.useState(false);
   const { inspection, eligibility: can } = state;
   if (!inspection) return <section className="card changes-local" aria-labelledby="changes-local-h"><h2 id="changes-local-h">On this Mac</h2>
-    <p className="muted">This Mac hasn't been inspected yet.</p></section>;
+    <p className="muted">This Mac hasn't been checked yet.</p></section>;
   const excluded = new Set(state.excluded), selected = selectedLocal(state).length;
   const waiting = inspection.items.filter(item => item.disposition === 'apply');
   const captured = inspection.items.filter(item => item.disposition === 'capture');
@@ -401,7 +498,7 @@ export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Pr
       action={busyRun && can.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : undefined} /> : null}
     {run && !busyRun ? <RunCard run={run} state={state} controller={controller} /> : null}
     {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()} onAbandon={() => void controller.abandon()}
-      onKeep={() => controller.keepRun()} confirming={state.confirmingAbandon} disabled={!can.read} /> : null}
+      onKeep={() => controller.keepRun()} confirming={state.confirmingAbandon} disabled={!can.read} onReveal={place => controller.reveal(place)} report={reportOf(run, state.inspection)} /> : null}
     <Following state={state} controller={controller} repoUrl={repoUrl} />
     {review && !busy ? <Incoming review={review} state={state} controller={controller} /> : null}
     {busy ? null : <OnThisMac state={state} controller={controller} onOpenProfiles={onOpenProfiles} />}

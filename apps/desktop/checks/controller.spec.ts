@@ -207,7 +207,7 @@ test('startup NO_REPORT keeps the connection and a later status recovers inspect
   await c.connect();
   assert.equal(c.state.connection, 'connected');
   assert.equal(c.state.inspection, null);
-  assert.match(c.state.detail, /first inspection/i);
+  assert.match(c.state.detail, /first check of this Mac/i);
   assert.equal(c.state.waitingForReport, true);
   f.emit({ generation: 1, version: 3, event: 'status', status: status() } as HostEvent);
   await new Promise((resolve) => setTimeout(resolve, 0));

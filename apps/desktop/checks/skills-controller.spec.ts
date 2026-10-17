@@ -86,6 +86,13 @@ test('failed or interrupted runs preserve the last confirmed choice and require 
     assert.equal(f.skills.state.view!.items[0]!.choice, null); assert.doesNotMatch(f.skills.state.detail, /Saved/); assert.match(f.skills.state.stale!, /Reload/);
   }
 });
+test('a failed Skills run names the change and its cause in words, never a raw state or inspect advice', async () => {
+  const f = await loaded(); f.box.run = { ...receipt('failed'), result: { status: 'failed', message: 'Couldn’t remove skill tdd: EBUSY; inspect before retrying' } } as RunView;
+  await f.skills.setChoice('owner/skills', 'tdd', 'off');
+  assert.equal(f.skills.state.stale, 'Save skill choice failed. Couldn’t remove skill tdd: EBUSY. Reload Skills to see the saved choice and what is on this Mac.');
+  assert.equal(f.skills.state.detail, 'Save skill choice failed.');
+  assert.doesNotMatch(f.skills.state.stale!, /Run failed|inspect/i);
+});
 test('a pre-write refusal retains the last confirmed choice and permits a fresh attempt', async () => {
   const f = await loaded({ previewChange: () => { throw new Error('LOCKED: another apply is active'); } });
   await f.skills.setChoice('owner/skills', 'tdd', 'off'); assert.equal(f.skills.state.view!.items[0]!.choice, null); assert.equal(f.skills.state.stale, null); assert.match(f.skills.state.error!, /LOCKED/);

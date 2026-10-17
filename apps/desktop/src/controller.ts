@@ -137,7 +137,7 @@ export class MachineController {
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
-    if (!bridge) this.state = { ...this.state, connection: 'browser', initialReadPending: false, detail: 'Browser preview. Open the desktop app to inspect this machine.' };
+    if (!bridge) this.state = { ...this.state, connection: 'browser', initialReadPending: false, detail: 'Browser preview. Open the desktop app to see this Mac.' };
   }
 
   subscribe = (listener: () => void) => {
@@ -415,7 +415,7 @@ export class MachineController {
           return !this.state.status.applying && (!initialConnection || !this.state.status.error);
         }
         if (this.state.status === null && this.state.initialReadPending && this.state.inspection === null) {
-          this.update({ waitingForReport: true, detail: 'Waiting for the agent’s first inspection.' });
+          this.update({ waitingForReport: true, detail: 'Waiting for the agent’s first check of this Mac.' });
           return false;
         }
       }
@@ -427,7 +427,7 @@ export class MachineController {
   // Inspects within an action that already holds `pending`; a refusal leaves the app connected.
   private async load(revision: number) {
     this.reviewRefresh = false;
-    this.update({ detail: 'Inspecting this machine' });
+    this.update({ detail: 'Checking this Mac' });
     const statusRevision = this.statusRevision;
     const initialRead = this.state.initialReadPending;
     try {
@@ -437,7 +437,7 @@ export class MachineController {
       const status = this.statusRevision !== statusRevision ? this.state.status : inspection.status ?? this.state.status;
       this.update({
         inspection, status, initialReadError: null,
-        detail: status?.error ? `${status.error}: ${status.detail ?? ''}` : `Inspected ${inspection.items.length} items`,
+        detail: status?.error ? `${status.error}: ${status.detail ?? ''}` : `Checked ${inspection.items.length} items`,
       });
     } catch (error) {
       if (this.owns(revision)) this.refused(error, { inspection: null, ...(initialRead ? { initialReadError: message(error) } : {}) });

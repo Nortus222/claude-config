@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { changeTitle, errorText, itemLabel, relativeTime } from '../src/copy.ts';
+import { causeText, changeTitle, errorText, itemLabel, relativeTime, runReport } from '../src/copy.ts';
 
 test('itemLabel names settings by agent and key, with the key as the name', () => {
   assert.deepEqual(itemLabel('setting:claude:settings.json#model'), { lead: 'Claude setting ', name: 'model', tail: '', text: 'Claude setting model' });
@@ -61,10 +61,41 @@ test('relativeTime counts minutes, hours and days, then shows a short date', () 
 test('errorText picks text by code for codes the app special-cases', () => {
   const coded = (code: string, message = 'raw detail') => Object.assign(new Error(message), { code });
   assert.equal(errorText(coded('NOT_SIGNED_IN')), 'Not signed in to GitHub, or GitHub is unreachable. Sign in, then retry.');
-  assert.equal(errorText(coded('UNAUTHORIZED')), 'Access was refused. Check your permissions, then retry.');
-  assert.equal(errorText(coded('NO_REPORT')), 'Waiting for the agent’s first inspection.');
+  assert.equal(errorText(coded('NO_REPORT')), 'The agent hasn’t checked this Mac yet. Wait a moment, then reload.');
   assert.equal(errorText(coded('MALFORMED')), 'Lost the connection to the agent. Reconnect the agent.');
-  assert.equal(errorText('UNAUTHORIZED: refused'), 'Access was refused. Check your permissions, then retry.');
+});
+
+test('errorText keeps the agent\'s UNAUTHORIZED sentence and adds what to do', () => {
+  assert.equal(errorText('UNAUTHORIZED: No access to repository https://github.com/o/r.git'),
+    'No access to repository https://github.com/o/r.git. Check that your GitHub account can push to it, then try again.');
+  assert.equal(errorText(Object.assign(new Error(''), { code: 'UNAUTHORIZED' })),
+    'GitHub refused access to the repository. Check that your GitHub account can push to it, then try again.');
+});
+
+test('causeText says why a run stopped without the agent\'s inspect advice', () => {
+  assert.equal(causeText('Operation stopped; inspect before retrying'), 'It stopped before finishing, and the agent didn’t record why.');
+  assert.equal(causeText('Agent stopped while applying skill tdd; inspect before trying again'), 'Agent stopped while applying skill tdd.');
+  assert.equal(causeText('Run receipt could not be saved; inspect the machine before trying again'), 'Run receipt could not be saved.');
+  assert.equal(causeText('Couldn\'t write Claude setting theme: EACCES'), 'Couldn\'t write Claude setting theme: EACCES.');
+  assert.equal(causeText('EACCES: permission denied'), 'EACCES: permission denied.');
+  assert.equal(causeText('Couldn\'t inspect the file'), 'Couldn\'t inspect the file.');
+  assert.equal(causeText(''), ''); assert.equal(causeText(undefined), ''); assert.equal(causeText('; inspect before retrying'), '');
+});
+
+test('runReport is plain text naming the change, cause, failed steps, run ID, backups and the agent log', () => {
+  const text = runReport({ title: 'Apply changes to this Mac', state: 'Failed', cause: 'Couldn\'t write Claude setting theme: EACCES.', runId: 'run-1',
+    failed: [{ label: 'Claude setting theme', key: 'config:claude:settings.json#theme', note: 'EACCES: permission denied' }], written: 2, notWritten: 3, backupIds: ['b-1'] });
+  assert.equal(text, [
+    'Apply changes to this Mac: Failed',
+    'Cause: Couldn\'t write Claude setting theme: EACCES.',
+    'Failed steps:',
+    '- Claude setting theme (config:claude:settings.json#theme): EACCES: permission denied',
+    'Written: 2, not written: 3',
+    'Run ID: run-1',
+    'Backups: ~/.config/nortuscc/backups/b-1',
+    'Agent log: ~/.config/nortuscc/agent/agent.log',
+  ].join('\n'));
+  assert.doesNotMatch(runReport({ title: 'T', state: 'Failed', cause: '', runId: 'r', failed: [], written: 0, notWritten: null, backupIds: [] }), /Cause|Failed steps|Backups|not written/);
 });
 
 test('errorText shows the agent\'s own OVERSIZED sentence, with a fallback only when it has none', () => {
@@ -79,6 +110,8 @@ test('errorText keeps other messages without their code prefix', () => {
   assert.equal(errorText(Object.assign(new Error('INVALID_INPUT: Choose at least one item.'), { code: 'INVALID_INPUT' })), 'Choose at least one item.');
   assert.equal(errorText(new Error('Disk is full.')), 'Disk is full.');
   assert.equal(errorText({ message: 'BUSY: Another run is in progress.' }), 'Another run is in progress.');
-  assert.equal(errorText(undefined), 'Something went wrong.');
-  assert.equal(errorText(new Error('CODE: ')), 'Something went wrong.');
+  const unknown = 'The agent stopped without saying why. Try again, and if it keeps happening use Reconnect agent in Settings.';
+  assert.equal(errorText(undefined), unknown);
+  assert.equal(errorText(new Error('CODE: ')), unknown);
+  assert.equal(errorText(new Error('first line\n  second line')), 'first line second line');
 });

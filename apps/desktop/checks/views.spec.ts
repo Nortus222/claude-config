@@ -136,7 +136,7 @@ test('an existing installation waiting for native setup does not flash first-run
     for (const markup of [readingStatus, inspecting]) {
       assert.match(markup, /Loading your configuration/);
       assert.match(markup, /Agent connection<\/span><span[^>]*>Complete/);
-      assert.match(markup, /aria-current="step"[^>]*>.*?Local inspection/);
+      assert.match(markup, /aria-current="step"[^>]*>.*?Checking this Mac/);
       assert.match(markup, /Updates remain available/);
       assert.doesNotMatch(markup, /FIRST RUN|role="alert"|Last inspection:|<strong>/);
     }
@@ -213,7 +213,7 @@ test('initial NO_REPORT shows startup progress until real status and inspection 
   try {
     assert.equal(c.state.connection, 'connected');
     assert.doesNotMatch(waiting, /NO_REPORT|agent has not responded|role="alert"/);
-    assert.match(waiting, /starting|waiting|inspection/i);
+    assert.match(waiting, /starting|waiting|checking/i);
     assert.doesNotMatch(waiting, /Operational view|<strong>/);
     assert.doesNotMatch(inspecting, /NO_REPORT|agent has not responded|role="alert"/);
     assert.match(ready, /Operational view: 2026-10-11T12:00:00Z/);
@@ -236,7 +236,7 @@ test('a failed initial inspection remains visible with a read-only retry after v
   const render = () => renderToStaticMarkup(createElement(StartupBoundary, { setup: setup.state, setupController: setup, machine: c.state, machineController: c, updates: null,
     children: createElement(ShellView, { screen: 'home', navigate: () => {}, machine: c.state, onReconnect: () => {}, onRecheck: () => { rechecks++; }, children: createElement('p', null, 'Home body') }) }));
   const markup = render();
-  assert.match(markup, /class="alert shell-banner" role="alert"><div><strong>This Mac couldn’t be inspected.<\/strong> <span>fixture read failed<\/span>/);
+  assert.match(markup, /class="alert shell-banner" role="alert"><div><strong>This Mac couldn’t be checked.<\/strong> <span>fixture read failed<\/span>/);
   assert.match(markup, />Check again<\/button>/);
   assert.match(markup, /Home body/);
   assert.doesNotMatch(markup, /Opening Nortuscc|FIRST RUN|INSPECT_FAILED|>Reconnect</);

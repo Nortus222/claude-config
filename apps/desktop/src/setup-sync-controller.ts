@@ -7,6 +7,8 @@ import { operation } from './operations.ts';
 
 type Review = OperationOutput<'setupReview'>;
 type Source = OperationOutput<'inspectSetups'>['items'][number];
+// The places on disk the host can show in Finder; it resolves each itself, so no path crosses the bridge.
+export type RevealPlace = 'agentLog' | 'backups';
 export type SetupChoice = Extract<ChangePreview['change'], { kind: 'setupApply' }>['choices'][number];
 export type SetupSyncState = {
   profiles: OperationOutput<'inspectProfiles'> | null; profileNotice: string | null;
@@ -417,16 +419,21 @@ export class SetupSyncController {
     const same = rows.size === fresh.size && [...rows].every(([itemId, row]) => fresh.get(itemId) === row);
     this.update({ choices: choices.filter(choice => kept.has(choice.itemId)), previewError: same ? MAC_CHANGED : PROFILE_CHANGED });
   }
-  // Prepares a fresh preview of an interrupted run's change; a reconcile keeps only what is still waiting.
+  // Prepares a fresh preview of an interrupted or failed run's change; a reconcile keeps only what is still waiting.
   async repreview() {
     const run = this.state.run;
-    if (run?.state !== 'interrupted' || !this.state.eligibility.read) return;
+    if ((run?.state !== 'interrupted' && run?.state !== 'failed') || !this.state.eligibility.read) return;
     const change = run.intent.change;
     if (change.kind !== 'reconcile') return this.prepare(change);
     const waiting = new Set(applyKeys(this.state.inspection));
     const only = change.only.filter(key => waiting.has(key));
     if (!only.length) { this.update({ localError: 'Nothing from that run is still waiting to apply on this Mac.' }); return; }
     await this.prepare({ ...change, only });
+  }
+  // Shows the agent log or the backups folder in Finder. Resolves to why it couldn't, or null once shown.
+  async reveal(place: RevealPlace): Promise<string | null> {
+    if (!this.bridge) return 'Open the desktop app to show files in Finder.';
+    try { await this.bridge.invoke('reveal_place', { place }); return null; } catch (error) { return errorText(error); }
   }
   // Opens the one confirmation Abandon needs; confirming calls abandon().
   askAbandon() { if (this.state.run?.state === 'interrupted' && this.state.eligibility.read) this.update({ confirmingAbandon: true }); }

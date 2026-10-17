@@ -6,7 +6,7 @@ import type { UpdateBridge } from './update-controller.ts';
 import { decodeMessage, type RunEvent, type OperationRunEvent, type StatusEvent } from '@nortuscc/agent/ipc/protocol';
 
 // Shared operations use registry inputs; legacy commands accept public metadata and opaque IDs.
-export type Command = 'operation' | 'get_operation_run' | 'list_operation_runs' | 'mcp_connections' | 'agent_generation' | 'agent_status' | 'inspect_machine' | 'restart_agent' | 'take_review_request' | 'desktop_setup_state' | 'setup_desktop' | 'install_git' | 'hosted_state' | 'sign_in' | 'sign_out' | 'sync_now' | 'trust_setup' | 'machine_settings' | 'set_policy' | 'resume_agent' | 'open_device_login' | 'open_github_link';
+export type Command = 'operation' | 'get_operation_run' | 'list_operation_runs' | 'mcp_connections' | 'agent_generation' | 'agent_status' | 'inspect_machine' | 'restart_agent' | 'take_review_request' | 'desktop_setup_state' | 'setup_desktop' | 'install_git' | 'hosted_state' | 'sign_in' | 'sign_out' | 'sync_now' | 'trust_setup' | 'machine_settings' | 'set_policy' | 'resume_agent' | 'open_device_login' | 'open_github_link' | 'reveal_place';
 export type HostEvent = (RunEvent | OperationRunEvent | StatusEvent | { event: 'disconnected'; detail: string } | { event: 'review-requested' }) & { generation: number };
 export type Envelope = { generation: number; data: unknown };
 export interface Bridge {

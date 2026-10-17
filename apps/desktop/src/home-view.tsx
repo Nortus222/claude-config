@@ -5,8 +5,9 @@ import { incomingCounts, MACHINE_KINDS, type SetupSyncState } from './setup-sync
 import { AUTHOR_RUN_KINDS } from './controller.ts';
 import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
-import { changeTitle, plural, repoName } from './copy.ts';
+import { changeTitle, plural, repoName, runCauses } from './copy.ts';
 import { BusyProgress } from './busy-view.tsx';
+
 
 export type HomeScreen = 'changes' | 'publish' | 'settings';
 export type HomeProps = {
@@ -34,7 +35,7 @@ function agentLine({ machine }: HomeProps, open: (screen: HomeScreen, label?: st
 }
 
 function interruptedLine(run: RunView, { home, controller, navigate }: HomeProps): ReactNode {
-  const title = changeTitle(run.intent.change.kind);
+  const title = changeTitle(run.intent.change.kind), [cause] = runCauses(run);
   const busy = home.abandoning || !home.available;
   if (home.confirming === run.runId) return <Line key={run.runId} tone="attention" action={<>
     <button className="danger" disabled={busy} onClick={() => void controller.abandon()}>Abandon</button>
@@ -46,7 +47,7 @@ function interruptedLine(run: RunView, { home, controller, navigate }: HomeProps
   return <Line key={run.runId} tone="attention" action={<>
     {screen ? <button onClick={() => navigate(screen)}>Review</button> : null}
     <button disabled={busy || home.confirming !== null} onClick={() => controller.confirmAbandon(run.runId)}>Abandon</button>
-  </>}>{title} was interrupted.</Line>;
+  </>}>{title} was interrupted.{cause ? <> <span className="row-sub">{cause}</span></> : null}</Line>;
 }
 
 // Home: what this Mac follows and what needs attention, each line with its next action.

@@ -48,7 +48,7 @@ function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onRe
 // A failed inspection on a connected agent stays visible on every screen with a read-only retry.
 function InspectionBanner({ machine, onRecheck }: { machine: ViewState; onRecheck: () => void }) {
   return <div className="alert shell-banner" role="alert">
-    <div><strong>This Mac couldn’t be inspected.</strong> <span>{errorText(machine.initialReadError)}</span></div>
+    <div><strong>This Mac couldn’t be checked.</strong> <span>{errorText(machine.initialReadError)}</span></div>
     <button disabled={machine.pending || machine.status?.applying === true} onClick={onRecheck}>Check again</button>
   </div>;
 }
@@ -119,7 +119,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
             </label>
           ))}
         </fieldset>
-        <p className="muted">Skills and integrations are included in the later inspection and preview.</p>
+        <p className="muted">Skills and integrations are checked and previewed next.</p>
         <p role="status" className="feedback">{state.detail}</p>
         {state.setup && !state.setup.gitAvailable ? (
           <div className="prerequisite">
@@ -150,13 +150,13 @@ function StartupCard({ stage, title, detail, error = false, children }: {
       <div><h1 id="startup-heading">{title}</h1><p role={error ? 'alert' : undefined}>{detail}</p></div>
     </div>
     <ol className="startup-milestones" aria-label="Startup readiness">
-      {['Local setup', 'Agent connection', 'Local inspection'].map((label, index) => <li key={label}
+      {['Local setup', 'Agent connection', 'Checking this Mac'].map((label, index) => <li key={label}
         aria-current={!error && index === stage ? 'step' : undefined} className={index < stage ? 'complete' : index === stage ? 'current' : ''}>
         <span className="startup-step-mark" aria-hidden="true">{index < stage ? '✓' : index + 1}</span>
         <span>{label}</span><span className="startup-step-state">{index < stage ? 'Complete' : index === stage ? error ? 'Needs attention' : 'In progress' : 'Waiting'}</span>
       </li>)}
     </ol>
-    <div className="startup-next">{children ?? <p className="muted">Your configuration will be ready to review when the local inspection finishes.</p>}</div>
+    <div className="startup-next">{children ?? <p className="muted">Your configuration will be ready to review when the agent finishes checking this Mac.</p>}</div>
     </section>
   </>;
 }
@@ -166,7 +166,7 @@ function MachineStartupView({ state, controller }: { state: ViewState; controlle
     title={state.connection === 'connected' ? 'Loading your configuration' : 'Starting local agent'}
     detail={state.waitingForReport ? 'Reading your local setup and checking for changes.' : state.detail}>
     {state.waitingForReport ? <>
-      <p className="muted">You can review the results when the inspection finishes.</p>
+      <p className="muted">You can review the results when the check finishes.</p>
       {controller ? <button disabled={state.pending} onClick={() => void controller.inspect()}>Recheck agent status</button> : null}
     </> : null}
   </StartupCard>;
