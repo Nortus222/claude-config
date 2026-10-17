@@ -849,16 +849,20 @@ pub fn reveal_command(path: &Path) -> Command {
     command.process_group(0);
     command
 }
-/// Selects the place in a Finder window. A place that does not exist yet is refused with what that means.
-pub fn reveal_place(state_root: &Path, place: RevealPlace) -> Result<Value, String> {
-    let path = reveal_path(state_root, place);
+/// Selects the place in a Finder window. Off macOS it is refused before `state_root` is looked up; a place
+/// that does not exist yet is refused with what that means.
+pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    reveal_place_on(cfg!(target_os = "macos"), state_root, place)
+}
+fn reveal_place_on(macos: bool, state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    if !macos { return Err("Show in Finder works only on macOS.".into()); }
+    let path = reveal_path(&state_root()?, place);
     if !path.exists() {
         return Err(match place {
             RevealPlace::AgentLog => "The agent log doesn't exist yet. The agent writes it once it has run on this Mac.",
             RevealPlace::Backups => "There are no backups on this Mac yet.",
         }.into());
     }
-    if !cfg!(target_os = "macos") { return Err("Show in Finder works only on macOS.".into()); }
     run_browser(reveal_command(&path), Duration::from_secs(5), "Finder")
 }
 fn run_browser(mut command: Command, timeout: Duration, what: &str) -> Result<Value, String> {
@@ -1959,8 +1963,12 @@ mod onboarding_bridge_tests {
             assert!(decode_args::<RevealArgs>(bad).is_err());
         }
         let missing = std::env::temp_dir().join(format!("nortuscc-reveal-{}", std::process::id()));
-        assert!(reveal_place(&missing, RevealPlace::AgentLog).unwrap_err().contains("doesn't exist yet"));
-        assert!(reveal_place(&missing, RevealPlace::Backups).unwrap_err().contains("no backups"));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::AgentLog).unwrap_err().contains("doesn't exist yet"));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::Backups).unwrap_err().contains("no backups"));
+        // Off macOS the refusal comes first: the state root is never looked up, and a missing place is not reported.
+        for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
+            assert_eq!(reveal_place_on(false, || panic!("looked up the state root"), place).unwrap_err(), "Show in Finder works only on macOS.");
+        }
     }
 }
 

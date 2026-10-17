@@ -376,13 +376,16 @@ async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::
     let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, |_| host::open_device_login()).await
 }
 /// Shows the agent log or the backups folder in Finder; the host resolves the path from the state root.
+/// It works after a failed startup too, since the state root is known without a connection and the log
+/// matters most then.
 #[tauri::command]
 async fn reveal_place(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let args: host::RevealArgs = native_args(request)?; let owner=owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        owner.startup.wait()?;
+        // Settled, so a connection's state root is recorded; whether startup succeeded doesn't matter here.
+        let _ = owner.startup.wait();
         let generation = { let current=owner.session.lock().unwrap(); if current.closed {return Err("App connection closed".into());} current.generation };
-        Ok(json!({"generation":generation,"data":host::reveal_place(&owner.state_root()?, args.place)?}))
+        Ok(json!({"generation":generation,"data":host::reveal_place(|| owner.state_root(), args.place)?}))
     }).await.map_err(|e|e.to_string())?
 }
 #[derive(serde::Deserialize)]
