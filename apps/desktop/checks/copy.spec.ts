@@ -72,6 +72,12 @@ test('errorText keeps the agent\'s UNAUTHORIZED sentence and adds what to do', (
     'GitHub refused access to the repository. Check that your GitHub account can push to it, then try again.');
 });
 
+test('errorText drops the agent\'s closing inspect advice as causeText does', () => {
+  assert.equal(errorText('UNKNOWN_KEY: \'skill:tdd\' is not an item of the last inspection; inspect again'), '\'skill:tdd\' is not an item of the last inspection');
+  assert.equal(errorText('Instructions changed since inspection; inspect the machine before trying again'), 'Instructions changed since inspection');
+  assert.equal(errorText('Couldn\'t inspect the file'), 'Couldn\'t inspect the file');
+});
+
 test('causeText says why a run stopped without the agent\'s inspect advice', () => {
   assert.equal(causeText('Operation stopped; inspect before retrying'), 'It stopped before finishing, and the agent didn’t record why.');
   assert.equal(causeText('Agent stopped while applying skill tdd; inspect before trying again'), 'Agent stopped while applying skill tdd.');

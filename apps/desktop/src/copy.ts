@@ -158,9 +158,11 @@ const CODE_PREFIX = /^([A-Z][A-Z0-9_]*): /;
 const MAX_SENTENCE = 300;
 const oneLine = (text: string) => { const line = text.replace(/\s+/g, ' ').trim(); return line.length > MAX_SENTENCE ? `${line.slice(0, MAX_SENTENCE - 1)}…` : line; };
 const sentence = (text: string) => { const capital = text[0]!.toUpperCase() + text.slice(1); return /[.!?…]$/.test(capital) ? capital : `${capital}.`; };
+// The agent's closing "; inspect …" advice: the app names the next step in its own words.
+const INSPECT_ADVICE = /;\s*inspect\b[^;]*$/i;
 
 // One sentence for an error: text chosen by its code when the app knows it, else the agent's own sentence
-// without its code, else a fallback that names the next step.
+// without its code or closing inspect advice, else a fallback that names the next step.
 export function errorText(error: unknown): string {
   const raw = typeof error === 'string' ? error
     : typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string' ? error.message : '';
@@ -168,7 +170,7 @@ export function errorText(error: unknown): string {
     ? error.code : CODE_PREFIX.exec(raw)?.[1];
   const known = code === undefined ? undefined : ERROR_TEXT[code];
   if (known) return known;
-  const message = oneLine(raw.replace(CODE_PREFIX, ''));
+  const message = oneLine(raw.replace(CODE_PREFIX, '').replace(INSPECT_ADVICE, ''));
   const action = code === undefined ? undefined : ACTION_TEXT[code];
   if (action) return message ? `${sentence(message)} ${action.action}` : action.fallback;
   return message || (code === undefined ? undefined : FALLBACK_TEXT[code]) || UNKNOWN_ERROR;
@@ -183,7 +185,7 @@ const CAUSES: Readonly<Record<string, string>> = {
 // Why a run or step stopped, from the agent's record, without its "inspect before retrying": the view names
 // the next step and where to look. A leading system code such as EACCES stays. '' when there is no reason.
 export function causeText(message: string | undefined): string {
-  const text = oneLine((message ?? '').replace(/;\s*inspect\b[^;]*$/i, ''));
+  const text = oneLine((message ?? '').replace(INSPECT_ADVICE, ''));
   if (!text) return '';
   return CAUSES[text] ?? sentence(text);
 }

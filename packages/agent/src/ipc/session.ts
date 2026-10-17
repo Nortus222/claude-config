@@ -138,7 +138,7 @@ const busy = new SessionError('BUSY', 'An apply is running');
 const noInspection = (status: AgentStatus): SessionError => {
   const detail = status.detail ? `: ${status.detail}` : '';
   if (status.error === 'PROFILE_INVALID') return new SessionError('PROFILE_INVALID', `The profile is invalid${detail}`);
-  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent could not inspect (${status.error})${detail}`);
+  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent couldn't read this Mac (${status.error})${detail}`);
   return new SessionError('NO_REPORT', 'The agent has no inspection; check for new changes again');
 };
 
