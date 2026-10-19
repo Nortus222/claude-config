@@ -1,4 +1,5 @@
 import type { ResolvedSkill, SkillGroup } from '@nortuscc/profile-engine';
+import { matchSkillName, sameSkillName } from './store.ts';
 
 export const MANIFEST_FILE = 'skills-manifest.txt';
 
@@ -51,15 +52,21 @@ export function groupsFromLock(lock: SkillLock): SkillGroup[] {
 
 // The manifest a machine implies: lock sources filtered to what is present, keeping the declared
 // manifest's `exact` markers and its optional declarations (an optional skill may never be installed here).
+// Names match as the installer matches them, ignoring case, and a declared skill keeps its declared spelling.
 export function installedGroups(
   lock: SkillLock,
   installed: ReadonlyArray<string>,
   declared: ReadonlyArray<SkillGroup> = [],
 ): SkillGroup[] {
-  const present = new Set(installed);
+  const declaredNames = declared.flatMap((g) => g.skills);
+  const spelled = (name: string) => matchSkillName(declaredNames, name) ?? name;
   const exact = new Set(declared.filter((g) => g.exact).map((g) => g.source));
   const groups = groupsFromLock(lock)
-    .map((group) => ({ ...group, skills: group.skills.filter((n) => present.has(n)), exact: exact.has(group.source) }))
+    .map((group) => ({
+      ...group,
+      skills: [...new Set(group.skills.filter((n) => matchSkillName(installed, n) !== undefined).map(spelled))].sort(byCodePoint),
+      exact: exact.has(group.source),
+    }))
     .filter((group) => group.skills.length > 0);
   for (const declaration of declared.filter((g) => g.optional)) {
     const group = groups.find((g) => g.source === declaration.source);
@@ -75,6 +82,7 @@ export function installedGroups(
 
 // The shrink guard: compares sets, so an adopt cannot mask a miss. Every name the current manifest lists
 // that neither survives nor was pruned is one this machine merely lacks, and must not be dropped for everyone.
+// A name that differs only in case is the same skill to the installer, so it counts as surviving or pruned.
 export function manifestOutcome(input: {
   readonly before: ReadonlyArray<SkillGroup>;
   readonly groups: ReadonlyArray<SkillGroup>;
@@ -82,9 +90,8 @@ export function manifestOutcome(input: {
 }): { write: boolean; reason: string } {
   const afterCount = input.groups.reduce((n, g) => n + g.skills.length, 0);
   if (afterCount === 0) return { write: false, reason: 'would leave the manifest empty; nothing was written' };
-  const after = new Set(input.groups.flatMap((g) => g.skills));
-  const pruned = new Set(input.prunedNames ?? []);
-  const missing = input.before.flatMap((g) => g.skills).filter((n) => !after.has(n) && !pruned.has(n));
+  const kept = [...input.groups.flatMap((g) => g.skills), ...(input.prunedNames ?? [])];
+  const missing = input.before.flatMap((g) => g.skills).filter((n) => !kept.some((k) => sameSkillName(k, n)));
   if (missing.length) {
     return {
       write: false,
@@ -96,26 +103,28 @@ export function manifestOutcome(input: {
 }
 
 // Routine regeneration never publishes machine additions, including additions overlaid on base intent.
+// Installed, pruned and held names match declared ones ignoring case; the declared spelling is kept.
 export function updateManifestGroups(input: {
   desired: readonly ResolvedSkill[]; lock: SkillLock; installed: readonly string[];
   prunedNames?: readonly string[]; heldManifestGroups?: readonly SkillGroup[]; heldItemIds?: readonly string[];
 }): SkillGroup[] {
-  const pruned = new Set(input.prunedNames ?? []);
-  const personal = new Set(input.desired.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
-  const additions = new Set(input.desired.filter(s => s.targets !== undefined).map(s => s.name));
-  const declared = groupsOf(input.desired.filter(s => !personal.has(s.name))).map(g => ({ ...g, skills: g.skills.filter(n => !pruned.has(n)) })).filter(g => g.skills.length);
-  const groups = installedGroups(input.lock, input.installed.filter(n => !personal.has(n) && !additions.has(n)), declared);
+  const among = (names: readonly string[]) => (name: string) => names.some(n => sameSkillName(n, name));
+  const pruned = among(input.prunedNames ?? []);
+  const personal = among(input.desired.filter(s => s.declaredFrom?.layer === 'machine').map(s => s.name));
+  const additions = among(input.desired.filter(s => s.targets !== undefined).map(s => s.name));
+  const declared = groupsOf(input.desired.filter(s => !personal(s.name))).map(g => ({ ...g, skills: g.skills.filter(n => !pruned(n)) })).filter(g => g.skills.length);
+  const groups = installedGroups(input.lock, input.installed.filter(n => !personal(n) && !additions(n)), declared);
   const retain = (declarations: readonly SkillGroup[]) => { for (const group of declarations) {
-    for (const name of group.skills) for (const existing of groups) existing.skills = existing.skills.filter(n => n !== name);
+    for (const name of group.skills) for (const existing of groups) existing.skills = existing.skills.filter(n => !sameSkillName(n, name));
     let target = groups.find(g => g.source === group.source);
     if (!target) { target = { ...group, skills: [] }; groups.push(target); }
     target.skills = [...new Set([...target.skills, ...group.skills])].sort(byCodePoint);
     target.exact = group.exact; target.optional = group.optional;
   } };
-  retain(groupsOf(input.desired.filter(s => additions.has(s.name) && !personal.has(s.name))));
+  retain(groupsOf(input.desired.filter(s => additions(s.name) && !personal(s.name))));
   for (const id of input.heldItemIds ?? []) {
     const identity = /^skill:([^/]+\/[^/]+)\/([^/]+)$/.exec(id);
-    if (identity) for (const group of groups) if (group.source === identity[1]) group.skills = group.skills.filter(name => name !== identity[2]);
+    if (identity) for (const group of groups) if (group.source === identity[1]) group.skills = group.skills.filter(name => !sameSkillName(name, identity[2]!));
   }
   retain(input.heldManifestGroups ?? []);
   return groups.filter(g => g.skills.length).sort((a,b) => byCodePoint(a.source,b.source));
