@@ -64,7 +64,8 @@ export const setupSourceLayer = (
 
   const fetch = Effect.gen(function* () {
     const upstream = yield* trustedOrigin('HEAD');
-    if (!(yield* fetchTracked(repo, upstream))) return yield* unavailable('HEAD', `git fetch of ${upstream.remote}/${upstream.branch} failed`);
+    const failure = yield* fetchTracked(repo, upstream);
+    if (failure !== undefined) return yield* unavailable('HEAD', failure);
     const head = yield* revParse(repo, upstream.ref);
     if (head === undefined) return yield* unavailable('HEAD', `${upstream.ref} is missing after the fetch`);
     return { head };
@@ -89,6 +90,7 @@ export const setupSourceLayer = (
       Effect.catchTag('LaunchFailed', (e) => unavailable(revision, e.message)),
       Effect.catchTag('FsFailed', (e) => Effect.die(e)),
       Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
     );
 
   const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) =>
@@ -118,6 +120,7 @@ export const setupSourceLayer = (
       Effect.catchTag('LaunchFailed', (e) => unavailable('HEAD', e.message)),
       Effect.catchTag('FsFailed', (e) => Effect.die(e)),
       Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
       Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
     );
 
@@ -131,6 +134,7 @@ export const setupSourceLayer = (
     Effect.catchTag('LaunchFailed', (e) => unavailable('HEAD', e.message)),
     Effect.catchTag('FsFailed', (e) => Effect.die(e)),
     Effect.catchTag('ReadFailed', (e) => Effect.die(e)),
+      Effect.catchTag('ProfileInvalid', (e) => Effect.die(e)),
     Effect.catchTag('SyncStateInvalid', (e) => Effect.die(e)),
   );
 

@@ -30,3 +30,11 @@ test('strips userinfo containing @ or quotes', () => {
   assert.equal(redact('https://user:p@ss@host/x'), 'https://host/x');
   assert.equal(redact("https://u:it's@host/x"), 'https://host/x');
 });
+
+test('redacts long text without backtracking', () => {
+  for (const text of ['a'.repeat(200_000), 'a-'.repeat(100_000), `${'h'.repeat(100_000)}://${'u'.repeat(100_000)}`]) {
+    const started = performance.now();
+    redact(text);
+    assert.ok(performance.now() - started < 200, `${text.length} chars took too long`);
+  }
+});

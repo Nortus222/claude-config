@@ -22,7 +22,7 @@ test('notes are plain text and availability never implies verified or installabl
 });
 test('download progress supports unknown and known lengths and only downloading or waiting can cancel', () => {
   const unknown = render({ phase: 'downloading', downloadedBytes: 120 });
-  assert.match(unknown, /120 bytes/); assert.match(unknown, /<progress aria-label="Update download"/); assert.doesNotMatch(unknown, /value="/); assert.match(unknown, /Cancel/);
+  assert.match(unknown, /120 B downloaded/); assert.match(unknown, /<progress aria-label="Update download"/); assert.doesNotMatch(unknown, /value="/); assert.match(unknown, /Cancel/);
   const known = render({ phase: 'downloading', downloadedBytes: 50, totalBytes: 100 }); assert.match(known, /value="50" max="100"/);
   assert.match(render({ phase: 'waiting' }), /Waiting for configuration apply/); assert.match(render({ phase: 'waiting' }), /Cancel/);
   assert.doesNotMatch(render({ phase: 'installing' }), />Cancel</); assert.doesNotMatch(render({ phase: 'restarting' }), /Install and restart/);

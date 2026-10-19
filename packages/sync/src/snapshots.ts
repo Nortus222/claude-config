@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Effect } from 'effect';
-import { loadProfile, nodeFiles, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
+import { loadProfile, loadNamedProfile, nodeFiles, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
 import { canonical, Fs, type FsFailed } from '@nortuscc/machine';
 import { composeDocuments } from './compose.ts';
 import { writeDocuments, type Documents } from './documents.ts';
@@ -20,21 +20,23 @@ const KEY = /^[0-9a-f]{32}$/;
 
 // Bumped whenever composition changes what a snapshot folder holds, so a new format never reuses
 // folders an older one wrote.
-export const SNAPSHOT_FORMAT = 1;
+export const SNAPSHOT_FORMAT = 2;
 
 const snapshotsDir = (stateRoot: string) => join(stateRoot, 'snapshots');
 
 // The folder name of a commit with holds: the first 32 hex digits of a sha256 over the format,
-// the commit and the holds.
-export const snapshotKey = (input: { readonly commit: string; readonly held: Holds }, format: number = SNAPSHOT_FORMAT): string =>
-  createHash('sha256').update(canonical({ format, commit: input.commit, held: input.held })).digest('hex').slice(0, 32);
+// repository/profile identity, the commit and the holds.
+export const snapshotKey = (input: { readonly commit: string; readonly held: Holds; readonly repoUrl: string; readonly profile: string }, format: number = SNAPSHOT_FORMAT): string =>
+  createHash('sha256').update(canonical({ format, repoUrl: input.repoUrl, profile: input.profile, commit: input.commit, held: input.held })).digest('hex').slice(0, 32);
 
 // A commit with holds, composed from git objects only into <stateRoot>/snapshots/<key>/ (ADR 0016)
-// and resolved with `overrides`. Keyed by (format, commit, holds) and reused; a fresh one is staged in
+// and resolved with `overrides`. Keyed by (format, repoUrl, profile, commit, holds); a fresh one is staged in
 // a folder named for its key, `now` and a uuid, and moved into place whole, so a reader never sees half
 // a snapshot.
 export const snapshotFor = (input: {
   readonly repo: string;
+  readonly repoUrl?: string;
+  readonly profile?: string;
   readonly stateRoot: string;
   readonly commit: string;
   readonly held: Holds;
@@ -42,24 +44,27 @@ export const snapshotFor = (input: {
   readonly now: Date;
 }) =>
   materializeSnapshot({
-    stateRoot: input.stateRoot, key: snapshotKey(input), overrides: input.overrides, now: input.now,
-    marker: { commit: input.commit, held: input.held },
-    documents: composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.commit }, held: input.held }),
+    stateRoot: input.stateRoot, key: snapshotKey({ ...input, repoUrl: input.repoUrl ?? input.repo, profile: input.profile ?? 'default' }), profile: input.profile, overrides: input.overrides, now: input.now,
+    marker: { commit: input.commit, held: input.held, repoUrl: input.repoUrl ?? input.repo, profile: input.profile ?? 'default' },
+    documents: composeDocuments({ repo: input.repo, head: { kind: 'commit', commit: input.commit }, held: input.held, profile: input.profile }),
   });
 
 // Materializes an empty or mixed-provenance configuration without inventing a Git commit.
 export const snapshotFromDocuments = (input: {
   readonly documents: Documents;
+  readonly repoUrl?: string;
+  readonly profile?: string;
   readonly stateRoot: string;
   readonly overrides: Input<MachineOverrides>;
   readonly now: Date;
 }) => materializeSnapshot({
   ...input,
-  key: createHash('sha256').update(canonical({ format: SNAPSHOT_FORMAT, documents: input.documents })).digest('hex').slice(0, 32),
+  key: createHash('sha256').update(canonical({ format: SNAPSHOT_FORMAT, repoUrl: input.repoUrl ?? '', profile: input.profile ?? 'default', documents: input.documents })).digest('hex').slice(0, 32),
   marker: { documents: true }, documents: Effect.succeed(input.documents),
 });
 
 const materializeSnapshot = <E, R>(input: {
+  readonly profile?: string;
   readonly stateRoot: string; readonly key: string; readonly now: Date;
   readonly overrides: Input<MachineOverrides>; readonly marker: Readonly<Record<string, unknown>>;
   readonly documents: Effect.Effect<Documents, E, R>;
@@ -77,7 +82,8 @@ const materializeSnapshot = <E, R>(input: {
   } else {
     yield* fs.writeTextAtomic(join(dir, MARKER), marker);
   }
-  const snapshot: Snapshot = { desired: yield* loadProfile(dir, { overrides: input.overrides }).pipe(Effect.provide(nodeFiles)), repo: dir };
+  const desired = yield* (input.profile === undefined ? loadProfile(dir, { overrides: input.overrides }) : loadNamedProfile(dir, input.profile, { overrides: input.overrides })).pipe(Effect.provide(nodeFiles));
+  const snapshot: Snapshot = { desired, repo: dir };
   return snapshot;
 });
 

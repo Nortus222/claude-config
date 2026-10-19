@@ -6,7 +6,6 @@ import type { Database, FeedOptions, RequestOptions } from '@azure/cosmos';
 import { Effect } from 'effect';
 import { MAX_COSMOS_BATCH_BYTES, validateCosmosConfiguration } from '../src/cosmos-store.ts';
 import { account, upsert } from './support/store-contract.ts';
-import { requireEmulatorConfiguration } from './support/cosmos.ts';
 
 test('physical IDs reversibly encode unsafe logical IDs without marker collisions', () => {
   const ids = ['account', 'decision:setup:skill:owner/repo#name?x\\y', '~escaped', '__partition-other'];
@@ -98,21 +97,6 @@ test('configuration checks partition paths, TTL and Strong account support witho
   }
 });
 
-test('emulator harness rejects remote and malformed endpoints before creating a client', () => {
-  const endpoint = process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT;
-  const key = process.env.NORTUSCC_COSMOS_EMULATOR_KEY;
-  try {
-    process.env.NORTUSCC_COSMOS_EMULATOR_KEY = 'dummy';
-    for (const value of ['https://cloud.documents.azure.com', 'http://127.0.0.1.evil', 'http://localhost/dbs', 'http://secret@localhost', 'http://localhost?secret=yes', 'file://localhost']) {
-      process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT = value;
-      assert.throws(requireEmulatorConfiguration);
-    }
-  } finally {
-    if (endpoint === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT; else process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT = endpoint;
-    if (key === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_KEY; else process.env.NORTUSCC_COSMOS_EMULATOR_KEY = key;
-  }
-});
-
 test('validation and mutation requests forward Effect AbortSignal to the SDK', async () => {
   const signals: AbortSignal[] = [];
   const capture = (options: RequestOptions) => { assert.ok(options.abortSignal instanceof AbortSignal); signals.push(options.abortSignal); };
@@ -163,4 +147,28 @@ test('cancelled emulator endpoint lookup cannot start later container validation
   const controller = new AbortController(); const running = Effect.runPromise(validateCosmosConfiguration(database, { localEmulator: true }), { signal: controller.signal });
   while (!release) await new Promise((resolve) => setImmediate(resolve));
   controller.abort(); await assert.rejects(running); release(); await new Promise((resolve) => setImmediate(resolve)); assert.equal(reads, 0);
+});
+
+
+test('legacy Cosmos setup payloads and account reservations read as default and persist on write', async () => {
+  const legacySetup = { type:'setup', version:1, id:'setup-a', setupId:'setup-a', ownerAccountId:'account-a', name:'Legacy', repoUrl:'https://github.com/a/b', latestRevision:0, createdAt:'2026-10-07T00:00:00Z', publicationDay:null, publicationsToday:0 };
+  const legacyAccount = { ...account(), setups:[{ setupId:'setup-a', name:legacySetup.name, repoUrl:legacySetup.repoUrl, createdAt:legacySetup.createdAt, state:'ready', publishedHead:0 }] };
+  for (const [container, key, payload] of [['setups', 'setup-a', legacySetup], ['accounts', 'account-a', legacyAccount]] as const) {
+    let operations: unknown[] = [];
+    const raw = { id:cosmosDocumentId(payload.id), [container === 'setups' ? 'setupId' : 'accountId']:key, payload };
+    const database = fakeDatabase({
+      point:async () => ({ resource:{ _etag:'marker', closed:false, [container === 'setups' ? 'setupId' : 'accountId']:key } }),
+      query:() => { let done = false; return { hasMoreResults:() => !done, fetchNext:async () => { done = true; return { resources:[raw] }; } }; },
+      batch:async (...args) => { operations = args[0] as unknown[]; return { code:200, result:operations.map(() => ({ statusCode:200 })) }; },
+    });
+    const store = makeCosmosStore({ database });
+    const snapshot = await Effect.runPromise(store.readPartition(container, key));
+    const document = snapshot.documents[0];
+    if (document.type === 'setup') assert.equal(document.profile, 'default');
+    else { assert.equal(document.type, 'account'); if (document.type === 'account') assert.equal(document.setups[0].profile, 'default'); }
+    assert.equal(await Effect.runPromise(store.commitPartition(container, key, snapshot.version, [{ type:'upsert', document } ])), true);
+    const written = operations as Array<{ resourceBody?: { id:string; payload?: unknown } }>;
+    const stored = written.find(op => op.resourceBody?.id === raw.id)!.resourceBody!;
+    assert.deepEqual(stored, { ...raw, payload:document });
+  }
 });

@@ -359,7 +359,7 @@ test('real hosted selector verifies tagged repository and account consent before
     login: 'fixture',
     machineId: 'machine-1',
     auth: 'signed-in',
-    setups: [{ setupId: 'setup-1', name: 'fixture', repoUrl: url, latestRevision: 1 }],
+    setups: [{ setupId: 'setup-1', name: 'fixture', repoUrl: url, profile: 'default', owned: true, latestRevision: 1 }],
     machine: null,
     lastSyncAt: null,
     retryAt: '9999-01-01T00:00:00Z',
@@ -405,6 +405,12 @@ test('real hosted selector verifies tagged repository and account consent before
           const overrides = yield* OverridesStore,
             decisions = yield* DecisionsStore;
           const client: HostedClient = {
+            registerSetup: () => Effect.die('Unexpected setup registration'),
+            publishRevision: () => Effect.die('Unexpected publication'),
+            listRevisions: () => Effect.succeed([]),
+            publicSetup: () => Effect.die('Unexpected public setup read'),
+            subscribe: () => Effect.void,
+            unsubscribe: () => Effect.void,
             signInFlow: Effect.succeed(null),
             state: Effect.sync(() => state),
             revisions: () => Effect.sync(() => records),

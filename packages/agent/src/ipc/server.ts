@@ -197,9 +197,9 @@ export const serveIpc = (input: {
       Effect.map(session.running, (running) => ({
         ...toWireStatus(status), applying: running || liveLockHolder(join(input.paths.stateRoot, 'apply.lock')) !== undefined,
       }));
-    const unsubscribe = handle.onStatus((status) => {
+    const unsubscribe = handle.onStatus((status, cause) => {
       void run(Effect.map(liveStatus(status), (status) => {
-        const message = { version: PROTOCOL_VERSION, event: 'status', status };
+        const message = { version: PROTOCOL_VERSION, event: 'status', status, ...(cause ? { runId: cause.runId } : {}) };
         for (const conn of subscribers()) event(conn, message);
       }));
     });
@@ -280,7 +280,7 @@ export const serveIpc = (input: {
         : decodeOverrides((() => { try { return JSON.parse(overrideText); } catch { return null; } })(), 'overrides.json');
       const pending = yield* fs.exists(join(input.paths.stateRoot, 'agent/pending-update.json'));
       const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
-      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; inspect and repair the overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
+      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; repair the machine overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
       return projectContext({ app, agent: { version: input.agentVersion, protocol: PROTOCOL_VERSION },
         targets: choices.issues.length ? [] : (choices.value.manageConfig === false ? [] : choices.value.configTargets ?? (inspection ? TARGETS : [])),
         setups: hosted?.enabled ? { state: 'available', items: hosted.setups.map(s => ({setupId:s.setupId, trusted: trustedSetups?.some(t => t.setupId === s.setupId && t.accountId === hosted.accountId) ?? false, revision:s.latestRevision})) }
@@ -290,7 +290,7 @@ export const serveIpc = (input: {
         account: hosted?.enabled ? hosted.auth === 'signed-in' && hosted.accountId ? {state:'signed-in',accountId:hosted.accountId} : {state:hosted.auth === 'unauthenticated' ? 'unauthenticated' : 'signed-out'} : {state:'unavailable',reason:'Hosted mode is not configured.'},
         policy:state.policy, paused:state.paused === null ? null : {reason:state.paused.reason,at:state.paused.at},
         scopes:{machine:operations,user:{available:false,reason:'User mutations are not supported.'},profile:{available:false,reason:'Profile mutations are not supported.'}},
-        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name === 'applyChange' || name === 'cancelRun' ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
+        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
       });
     });
     // Until the start job finishes there is no status; answering at once beats making a client wait for a job.
@@ -344,6 +344,15 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'authorProfiles': result = yield* session.authorProfiles(request.input); break;
+            case 'machineFile': result = yield* session.machineFile(request.input); break;
+            case 'authorFile': result = yield* session.authorFile(request.input); break;
+            case 'upstreams': result = yield* session.upstreams(request.input); break;
+            case 'discoverUpstream': result = yield* session.discoverUpstream(request.input); break;
+            case 'upstreamSkill': result = yield* session.upstreamSkill(request.input); break;
+            case 'drafts': result = yield* session.drafts(request.input); break;
+            case 'draftPreview': result = yield* session.draftPreview(request.input); break;
+            case 'ghState': result = yield* session.ghState(request.input); break;
             case 'listBackups': result = yield* session.listBackups(request.input); break;
             case 'agentStatus': result = yield* session.agentStatus(request.input); break;
             case 'accountState': result = yield* session.accountState(request.input); break;
@@ -351,7 +360,10 @@ export const serveIpc = (input: {
             case 'inspectSourceDiff': result = yield* session.inspectSourceDiff(request.input); break;
             case 'pinImpact': result = yield* session.pinImpact(request.input); break;
             case 'draftChangelog': result = yield* session.draftChangelog(request.input); break;
+            case 'inspectProfiles': result = yield* session.inspectProfiles(request.input); break;
+            case 'inspectShareLink': result = yield* session.inspectShareLink(request.input); break;
             case 'inspectSetups': result = yield* session.inspectSetups(request.input); break;
+            case 'setupReview': result = yield* session.setupReview(request.input); break;
             case 'incomingChanges': result = yield* session.incomingChanges(request.input); break;
             case 'prepareTrustRequest': result = yield* session.prepareTrustRequest(request.input); break;
             case 'inspectUpdates': result = yield* session.inspectUpdates(request.input); break;
@@ -369,12 +381,13 @@ export const serveIpc = (input: {
             }
             case 'getRun': result = yield* session.runs.get(request.input.runId); break;
             case 'listRuns': result = yield* session.runs.list(request.input); break;
-            case 'cancelRun': {
+            case 'cancelRun':
+            case 'abandonRun': {
               const fs = yield* Fs;
               const path = join(input.paths.stateRoot, 'agent/pending-update.json');
               const pending = yield* fs.readText(path).pipe(Effect.mapError(() => new SessionError('LOCKED', 'Desktop maintenance state is unavailable; open or repair the app.')));
               if (pending !== undefined || (yield* fs.exists(path))) return yield* Effect.fail(new SessionError('LOCKED', 'Desktop update recovery is pending; open the app before changing the machine.'));
-              result = yield* session.runs.cancel(request.input.runId); break;
+              result = yield* (request.operation === 'cancelRun' ? session.runs.cancel(request.input.runId) : session.runs.abandon(request.input.runId)); break;
             }
             case 'history': {
               const history = request.input;

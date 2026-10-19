@@ -1,7 +1,7 @@
 import {
   FILES, INTEGRATIONS_SOURCE, parsePins, parseSkillsManifest, PINS_SOURCE, SKILLS_SOURCE, type SkillGroup,
 } from '@nortuscc/profile-engine';
-import { desiredOfDocuments, documentOf, inside, type Documents } from './documents.ts';
+import { desiredOfDocuments, documentOf, hasProfile, inside, type Documents } from './documents.ts';
 import { parseItemId, type ItemRef } from './items.ts';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
@@ -115,8 +115,8 @@ const patchSkill = (head: Documents, ref: Extract<ItemRef, { kind: 'skill' }>, h
 };
 
 // The declaration as the engine resolved it at the held commit (a refused held document declares
-// nothing): replaced in place, appended, or removed. A held hook keeps
-// the file it ships when head no longer has one, and only from inside the repository (ruling 30).
+// nothing): replaced in place, appended, or removed. A held hook restores a missing file
+// inside the repository, preserving existing bytes that another hook may share.
 const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integration' }>, held: Documents): Documents => {
   const entry: unknown = desiredOfDocuments(held).integrations.find((i) => i.id === ref.id)?.declaration;
   const text = documentOf(head, INTEGRATIONS_SOURCE);
@@ -136,8 +136,12 @@ const patchIntegration = (head: Documents, ref: Extract<ItemRef, { kind: 'integr
 };
 
 // `head` with one held item's value taken from `held`, the documents at the commit it is held at.
-export const patchItem = (head: Documents, itemId: string, held: Documents): Documents => {
+// A commit without the followed profile has no held value to replay.
+export const patchItem = (head: Documents, itemId: string, held: Documents, profile?: string): Documents => {
+  if (!hasProfile(held, profile)) return head;
   const ref = parseItemId(itemId);
+  if (ref && profile !== undefined && (Object.keys(head).some(path => path.startsWith('profiles/')) || Object.keys(held).some(path => path.startsWith('profiles/'))))
+    return patchProfileItem(head, ref, held, profile);
   switch (ref?.kind) {
     case 'setting': return patchSetting(head, ref, held);
     case 'file': return patchFile(head, ref, held);
@@ -145,4 +149,66 @@ export const patchItem = (head: Documents, itemId: string, held: Documents): Doc
     case 'integration': return patchIntegration(head, ref, held);
     default: return head;
   }
+};
+
+// Strip one selection from profile layers before setting its resolved held value in the leaf.
+const withoutSelection = (head: Documents, ref: ItemRef): Documents => Object.fromEntries(Object.entries(head).map(([path, text]) => {
+  if (!/^profiles\/[^/]+\.json$/.test(path)) return [path, text];
+  const doc = parseObject(text);
+  if (!doc) return [path, text];
+  if (ref.kind === 'skill' && isRecord(doc.skills)) {
+    doc.skills = Object.fromEntries(Object.entries(doc.skills).map(([action, groups]) => [action, Array.isArray(groups) ? groups.map(group =>
+      isRecord(group) && group.source === ref.source && Array.isArray(group.names) ? { ...group, names: group.names.filter(name => name !== ref.name) } : group,
+    ).filter(group => !isRecord(group) || !Array.isArray(group.names) || group.names.length > 0) : groups]));
+  }
+  if (ref.kind === 'integration' && isRecord(doc.integrations)) {
+    doc.integrations = Object.fromEntries(Object.entries(doc.integrations).map(([action, ids]) => [action, Array.isArray(ids) ? ids.filter(id => id !== ref.id) : ids]));
+  }
+  return [path, json(doc)];
+}));
+
+const patchProfileItem = (head: Documents, ref: ItemRef, held: Documents, profile: string): Documents => {
+  const current = desiredOfDocuments(head, undefined, profile);
+  const previous = desiredOfDocuments(held, undefined, profile);
+  const path = `profiles/${profile}.json`;
+  let out = withoutSelection(head, ref);
+  const leaf = parseObject(out[path]) ?? {};
+  if (ref.kind === 'file') {
+    const file = previous.files.find(file => file.id === ref.fileId);
+    if (!file) return head;
+    leaf.files = { ...(isRecord(leaf.files) ? leaf.files : {}), [ref.fileId]: file.managed ? file.src : null };
+    out = withDocument(out, file.src, documentOf(held, file.src));
+  } else if (ref.kind === 'setting') {
+    const file = current.files.find(file => file.id === ref.fileId);
+    if (!file) return head;
+    const prior = previous.files.find(file => file.id === ref.fileId);
+    const text = documentOf(out, file.src);
+    const settings = file.managed && text !== undefined ? parseObject(text) : {};
+    if (settings === undefined) return head;
+    const key = prior?.keys?.[ref.key];
+    if (key) settings[ref.key] = key.value; else delete settings[ref.key];
+    // A head exclusion can be held back one owned key at a time.
+    if (key && !file.managed) leaf.files = { ...(isRecord(leaf.files) ? leaf.files : {}), [ref.fileId]: file.src };
+    out = withDocument(out, file.src, Object.keys(settings).length > 0 ? json(settings) : undefined);
+  } else if (ref.kind === 'skill') {
+    const skill = previous.skills.find(skill => skill.source === ref.source && skill.name === ref.name);
+    const markers = [skill?.exact ? 'exact' : '', skill?.optional ? 'optional' : ''].filter(Boolean).join(' ');
+    const heldRoot = { ...held, [SKILLS_SOURCE]: skill ? `[${skill.source}] ${markers}\n${skill.name}\n` : '' };
+    out = patchSkill(out, ref, heldRoot);
+    if (skill) {
+      const action = skill.install ? 'add' : 'remove';
+      const selections = isRecord(leaf.skills) ? leaf.skills : {};
+      leaf.skills = { ...selections, [action]: [...(Array.isArray(selections[action]) ? selections[action] : []), { source: ref.source, names: [ref.name] }] };
+    }
+  } else if (ref.kind === 'integration') {
+    const integration = previous.integrations.find(integration => integration.id === ref.id);
+    const heldRoot = { ...held, [INTEGRATIONS_SOURCE]: json({ version: 1, integrations: integration ? [integration.declaration] : [] }) };
+    out = patchIntegration(out, ref, heldRoot);
+    if (integration) {
+      const action = integration.enabled ? 'add' : 'remove';
+      const selections = isRecord(leaf.integrations) ? leaf.integrations : {};
+      leaf.integrations = { ...selections, [action]: [...(Array.isArray(selections[action]) ? selections[action] : []), ref.id] };
+    }
+  }
+  return withDocument(out, path, json(leaf));
 };

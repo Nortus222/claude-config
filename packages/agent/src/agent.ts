@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { Cause, Effect, Exit, Layer, Ref, Semaphore } from 'effect';
 import {
-  acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, Processes, type ProcessDialogue,
+  canonical, acquireApplyLock, MachinePaths, acquirePidLock, type Actor, type Decision, type DecisionsInvalid, type DecisionsStore, type FsFailed, type HistoryStore, type MachinePathsValue, Processes, type ProcessDialogue,
 } from '@nortuscc/machine';
 import type { AgentSkillInstaller } from './skill-installer.ts';
 import { AgentClock } from './clock.ts';
@@ -14,8 +14,8 @@ import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from '
 import { makeNotifier } from './notifier.ts';
 import { resume } from './pause.ts';
 import { changePolicy, recordDecision } from './policy.ts';
-import { makeScheduler, timerLoop, type Trigger } from './scheduler.ts';
-import { SetupSource, SetupsStore, ownSetup, originUrl, normalizeRepoUrl } from '@nortuscc/sync';
+import { makeScheduler, timerLoop, type Trigger, type TriggerCause } from './scheduler.ts';
+import { FollowedStore, followedSetupSourceLayer, RevisionUnavailable, SetupSource, SetupsStore, ownSetup, originUrl, normalizeRepoUrl } from '@nortuscc/sync';
 import { configuredHostedRuntime, type HostedRuntime, type HostedOptions } from './hosted.ts';
 import { HostedFailure, type SignInStarted } from '@nortuscc/hosted-client';
 import type { AgentStateStore, Policy } from './state.ts';
@@ -43,6 +43,9 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly authorClient?: import('@nortuscc/hosted-client').HostedClient;
+  readonly operationDomains?: AgentDomains;
+  readonly profileHosted?: HostedRuntime['profileHosted'];
   readonly signInFlow?: HostedRuntime['signInFlow'];
   readonly selectOperationSetup?: (setupId:string)=>Effect.Effect<OperationSetup,unknown>;
   readonly operationSetupIds?: Effect.Effect<readonly string[],unknown>;
@@ -63,7 +66,7 @@ export type AgentHandle = {
     readonly machine: (patch: Parameters<HostedRuntime['machine']>[0], actor: Actor) => Effect.Effect<void, unknown>;
   };
   readonly inspection: Effect.Effect<JobInspection | undefined>;
-  readonly request: (trigger: Trigger) => Effect.Effect<AgentStatus>;
+  readonly request: (trigger: Trigger, cause?: TriggerCause) => Effect.Effect<AgentStatus>;
   readonly decide: (decision: Decision, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid | HostedFailure | SessionError>;
   // Records each decision in turn, then runs one job for them all.
   readonly decideAll: (decisions: ReadonlyArray<Decision>, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | DecisionsInvalid | HostedFailure | SessionError>;
@@ -71,7 +74,11 @@ export type AgentHandle = {
   readonly setPolicy: (policy: Policy, actor: Actor) => Effect.Effect<AgentStatus, FsFailed | HostedFailure | SessionError>;
   // Calls `listener` with each job's status once it is the latest; answers the unsubscribe. It runs
   // before the job's requests are answered, so it is not ordered relative to their replies.
-  readonly onStatus: (listener: (status: AgentStatus) => void) => () => void;
+  // The cause identifies the latest caused request in that job's batch, if any.
+  readonly onStatus: (listener: (status: AgentStatus, cause?: TriggerCause) => void) => () => void;
+  // Calls the onStatus listeners again with the latest status, without a job, so they re-read what
+  // changes outside jobs (whether a run is applying). Nothing happens before the first job.
+  readonly announce?: (cause?: TriggerCause) => Effect.Effect<void>;
   // Runs `effect` while no scheduled job runs, holding the next one back until it ends, so a job
   // run outside the scheduler never overlaps one.
   readonly exclusive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
@@ -86,19 +93,32 @@ const describe = (cause: Cause.Cause<unknown>): string => {
 // changes trust: until a person runs trustOwnSetup, every job inspects for drift only. Closing the
 // scope (or aborting `signal`) cancels an in-flight auto-apply, which still records how it ended.
 // `onStatus` is awaited after listeners and cannot fail a job; defer startup until IPC is attached.
-export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly deferStart?: boolean; readonly hosted?: HostedRuntime; readonly onStatus?: (status: AgentStatus) => Effect.Effect<void> } = {}) =>
+export const startAgent = (domains: AgentDomains, options: { readonly signal?: AbortSignal; readonly deferStart?: boolean; readonly hosted?: HostedRuntime; readonly onStatus?: (status: AgentStatus, cause?: TriggerCause) => Effect.Effect<void> } = {}) =>
   Effect.gen(function* () {
     const clock = yield* AgentClock;
     const latest = yield* Ref.make<AgentStatus | undefined>(undefined);
     const inspection = yield* Ref.make<JobInspection | undefined>(undefined);
-    const listeners = new Set<(status: AgentStatus) => void>();
+    const listeners = new Set<(status: AgentStatus, cause?: TriggerCause) => void>();
     const shutdown = new AbortController();
     const signal = options.signal ? AbortSignal.any([options.signal, shutdown.signal]) : shutdown.signal;
     // One job at a time, scheduled or not. A scheduled auto-apply that finds apply.lock held skips
     // rather than waits, so a holder of apply.lock may wait here without a cycle.
     const jobs = yield* Semaphore.make(1);
-    const job = (_triggers: ReadonlyArray<Trigger>) =>
-      jobs.withPermit((options.hosted?.runJobs ?? runJob(domains, { signal })).pipe(
+    const sourceContext = yield* Effect.context<import('./layer.ts').AgentServices | SetupSource>();
+    const paths = yield* MachinePaths;
+    const localSource = yield* SetupSource;
+    const followedStore = yield* FollowedStore;
+    const sourceProcesses = yield* Processes;
+    const initialFollowed = yield* followedStore.read.pipe(Effect.catch(() => Effect.succeed(undefined)));
+    const primarySource: Effect.Effect<SetupSource['Service'] | undefined, unknown> = options.hosted?.followedSource ?? Effect.flatMap(followedStore.read, followed => canonical(followed) === canonical(initialFollowed) ? Effect.succeed(localSource) : followed
+      ? SetupSource.pipe(Effect.provide(followedSetupSourceLayer(paths, followed, { processes: Layer.succeed(Processes, sourceProcesses) })))
+      : Effect.succeed(undefined)).pipe(Effect.catch(error => {
+        const unavailable = Effect.fail(error instanceof RevisionUnavailable ? error : new RevisionUnavailable({ revision: 'HEAD', reason: String(error) }));
+        return Effect.succeed({ trusted: unavailable, fetch: unavailable, current: unavailable, load: () => unavailable, effective: () => unavailable });
+      }));
+    const inspectPrimary = options.hosted?.inspectPrimary ?? Effect.flatMap(primarySource, source => runJob(domains, { signal, inspectOnly: true }).pipe(Effect.provideService(SetupSource, source ?? localSource)));
+    const job = (_triggers: ReadonlyArray<Trigger>, cause?: TriggerCause) =>
+      jobs.withPermit((options.hosted?.runJobs ?? Effect.flatMap(primarySource, source => runJob(domains, { signal }).pipe(Effect.provideService(SetupSource, source ?? localSource)))).pipe(
         // A failed job is reported, never fatal: the loop must survive failures and defects alike.
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -111,11 +131,11 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         Effect.tap((result) => Effect.sync(() => {
           for (const listener of listeners) {
             try {
-              listener(result.status);
+              listener(result.status, cause);
             } catch {}
           }
         })),
-        Effect.tap((result) => options.onStatus === undefined ? Effect.void : Effect.suspend(() => options.onStatus!(result.status)).pipe(Effect.catchCause(() => Effect.void))),
+        Effect.tap((result) => options.onStatus === undefined ? Effect.void : Effect.suspend(() => options.onStatus!(result.status, cause)).pipe(Effect.catchCause(() => Effect.void))),
         Effect.map((result) => result.status),
       ));
     const scheduler = yield* makeScheduler(job);
@@ -129,7 +149,6 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const context = yield* Effect.context<AgentStateStore | HistoryStore | DecisionsStore>();
     const withServices = <A, E>(effect: Effect.Effect<A, E, AgentStateStore | HistoryStore | DecisionsStore>) =>
       Effect.provideContext(effect, context);
-    const paths = yield* MachinePaths;
     let generation = 0, legacyGeneration = 0;
     const mutateJob = <A, E, R>(effect: Effect.Effect<A, E, R>, invalidate = true, localDecision = false) => jobs.withPermit(Effect.gen(function* () {
       if (invalidate) { generation++; if (!localDecision) legacyGeneration++; yield* Ref.set(inspection, undefined); }
@@ -139,17 +158,18 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true, localDecision = false) =>
       Effect.scoped(Effect.andThen(acquireApplyLock, mutateJob(effect, invalidate, localDecision))).pipe(Effect.provideService(MachinePaths, paths),
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
-        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
+        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Nortuscc before changing the machine'))));
     const hosted = options.hosted;
-    const localSource = yield* SetupSource;
     const setups = yield* SetupsStore;
-    const sourceProcesses = yield* Processes;
     const selectOperationSetup = (setupId: string): Effect.Effect<OperationSetup, unknown> =>
       setupId !== 'local'
         ? hosted
           ? hosted.selectOperationSetup(setupId)
           : Effect.fail(new SessionError('UNKNOWN_KEY', 'Setup is unavailable'))
         : Effect.gen(function* () {
+            const followed = yield* followedStore.read;
+            if (followed?.setupId) return yield* Effect.fail(new SessionError('UNKNOWN_KEY', 'The followed profile uses its hosted setup ID'));
+            if (followed) return { setupId: 'local', accountId: null, repository: normalizeRepoUrl(followed.repoUrl), trusted: true, source: (yield* primarySource) ?? localSource };
             const entry = ownSetup(yield* setups.read, paths.repo);
             const url = yield* originUrl(paths.repo).pipe(Effect.provideService(Processes, sourceProcesses));
             const repository = url === undefined ? null : (normalizeRepoUrl(url) ?? null);
@@ -171,8 +191,12 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       ...(hosted ? { hosted: { signIn: hosted.signIn, signOut: hosted.signOut, sync: () => hosted.sync, machine: hosted.machine } } : {}),
     };
     const handle: AgentHandle = {
-      mutationBodies, withJobMutation, selectOperationSetup,
-      operationSetupIds: hosted ? Effect.map(hosted.state,state=>['local',...state.setups.map(s=>s.setupId)]) : Effect.succeed(['local']),
+      freshInspection: inspectPrimary.pipe(Effect.provideContext(sourceContext)),
+      operationDomains: domains, mutationBodies, withJobMutation, selectOperationSetup,
+      operationSetupIds: Effect.gen(function* () {
+        const followed = yield* followedStore.read;
+        return followed ? [followed.setupId ?? 'local'] : hosted ? ['local', ...(yield* hosted.state).setups.map(s => s.setupId)] : ['local'];
+      }),
       status: Ref.get(latest),
       inspection: Ref.get(inspection),
       request: scheduler.request,
@@ -184,6 +208,8 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       legacyGeneration: Effect.gen(function* () { return legacyGeneration + (hosted ? yield* hosted.generation : 0); }),
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
+        profileHosted: hosted.profileHosted,
+        authorClient: hosted.authorClient,
         signInFlow: hosted.signInFlow,
         freshInspection: hosted.inspectPrimary,
         afterPerson: hosted.afterPerson,
@@ -200,6 +226,14 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+      announce: (cause) => Effect.flatMap(Ref.get(latest), (status) => Effect.sync(() => {
+        if (status === undefined) return;
+        for (const listener of listeners) {
+          try {
+            listener(status, cause);
+          } catch {}
+        }
+      })),
       exclusive: (effect) => jobs.withPermit(effect),
     };
     if (hosted) yield* Effect.forkScoped(Effect.forever(Effect.gen(function* () {

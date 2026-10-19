@@ -1,3 +1,4 @@
+import { normalizeDocument } from './documents.ts';
 import { Buffer } from 'node:buffer';
 import { ConsistencyLevel, type Database, type OperationInput, type RequestOptions } from '@azure/cosmos';
 import { Effect } from 'effect';
@@ -97,7 +98,7 @@ export const makeCosmosStore = ({ database, now = Date.now, pageSize = 100, maxS
     if (!document || !belongsTo(document, container, key) || document.id === PARTITION_MARKER_ID
       || raw.id !== (container === 'identities' ? document.id : cosmosDocumentId(document.id))
       || raw[partitionFields[container]] !== key) throw unavailable();
-    return structuredClone(document);
+    return normalizeDocument(structuredClone(document));
   };
   const snapshot = async (container: Container, key: string, signal: AbortSignal): Promise<PartitionSnapshot> => {
     if (!validKey(key) || (container === 'identities' && !validId(key, container))) throw invalid();

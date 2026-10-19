@@ -104,6 +104,19 @@ test('installedGroups on malformed lock entries is empty rather than throwing', 
   assert.deepEqual(installedGroups({ skills: {} }, ['tdd']), []);
 });
 
+// The installer treats skill names case-insensitively and may record a manifest `TDD` as `tdd`.
+test('installedGroups keeps the manifest spelling of a skill whose lock entry and folder differ in case', () => {
+  assert.deepEqual(installedGroups({ skills: { tdd: meta('o/r'), Grill: meta('o/r') } }, ['tdd', 'grill'], [g('o/r', ['TDD'])]),
+    [g('o/r', ['Grill', 'TDD'])]);
+  assert.deepEqual(installedGroups({ skills: { tdd: meta('o/r') } }, ['tdd'], [g('o/r', ['TDD', 'later'], { optional: true })]),
+    [g('o/r', ['TDD', 'later'], { optional: true })]);
+});
+
+test('manifestOutcome counts a name that differs only in case as kept or pruned', () => {
+  assert.equal(manifestOutcome({ before: [g('o/r', ['TDD', 'a'])], groups: [g('o/r', ['tdd', 'a'])] }).write, true);
+  assert.equal(manifestOutcome({ before: [g('o/r', ['TDD', 'a'])], groups: [g('o/r', ['a'])], prunedNames: ['tdd'] }).write, true);
+});
+
 test('manifestOutcome writes when nothing shrank', () => {
   assert.equal(manifestOutcome({ before: [g('o/r', ['a', 'b'])], groups: [g('o/r', ['a', 'b'])], prunedNames: [] }).write, true);
 });
@@ -160,4 +173,13 @@ test('author update proposal binds dirty author bytes and preserves unselected d
  const prepared = await m.run(prepareUpdateManifest({ author,desired,report,selected,heldManifestGroups:[g('o/r',['held'])] }));
  assert.match(prepared.documents[0]!.text,/held\none/); assert.doesNotMatch(prepared.documents[0]!.text,/gone/);
  m.write(join(m.paths.repo,'skills-manifest.txt'),'external'); await assert.rejects(m.run(prepareUpdateManifest({ author,desired,report,selected })));
+});
+
+test('routine update manifests keep the declared spelling of a skill installed under another case', () => {
+ const desired = [resolved('TDD'), resolved('Personal', { declaredFrom: { layer: 'machine', source: 'overrides.json' } }), resolved('Addition', { targets: ['claude'] }), resolved('Held')];
+ const lock = { skills: { tdd: { source: 'o/r' }, personal: { source: 'o/r' }, addition: { source: 'o/r' }, held: { source: 'o/r' }, gone: { source: 'o/r' } } };
+ const groups = updateManifestGroups({ desired, lock, installed: ['tdd', 'personal', 'addition', 'held'], heldItemIds: ['skill:o/r/Held'] });
+ assert.deepEqual(groups, [g('o/r', ['Addition', 'TDD'], { exact: true })]);
+ const pruned = updateManifestGroups({ desired: [resolved('TDD'), resolved('a')], lock: { skills: { a: { source: 'o/r' } } }, installed: ['a'], prunedNames: ['tdd'] });
+ assert.deepEqual(pruned, [g('o/r', ['a'], { exact: true })]);
 });

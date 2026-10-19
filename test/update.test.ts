@@ -110,6 +110,18 @@ test('reportLines counts each bucket and names an unreachable skill', () => {
   assert.match(text, /available\s+1\s+a/);
 });
 
+test('reportLines says once per source why it could not be reached', () => {
+  const why = "Couldn't reach github.com: Failed to connect to github.com port 443: Timeout was reached";
+  const text = reportLines(updateItems({
+    current: [], outdated: [], gone: [], local: [], available: [],
+    unknown: [{ name: 'u', source: 'o/r', reason: why }, { name: 'v', source: 'o/r', reason: why }, { name: 'w', source: 'o/w' }],
+  }, EMPTY)).join('\n');
+  assert.match(text, /unreachable\s+3\s+u, v, w/);
+  assert.equal(text.split('\n').filter((l) => l.includes(why)).length, 1);
+  assert.match(text, new RegExp(`^\\s+o/r: ${why}$`, 'm'));
+  assert.doesNotMatch(text, /o\/w:/, 'a source with no recorded cause adds no line');
+});
+
 test('reportLines says so when nothing is installed', () => {
   assert.match(reportLines([]).join('\n'), /skills\s+none\s+nothing installed to check/);
 });
@@ -311,7 +323,7 @@ function machine(options: Options = {}) {
     return Layer.succeed(Processes, {
       run: (command: Command) => {
         if (command.cmd === 'git') {
-          if (behaviour.blockClone && command.args[0] === 'clone') {
+          if (behaviour.blockClone && command.args.includes('clone')) {
             commands.push(command);
             return Effect.never;
           }
@@ -324,7 +336,8 @@ function machine(options: Options = {}) {
             verbAt += 2;
           }
           assert.ok(directory && inside(directory), 'Git must stay inside the owned fixture');
-          assert.ok(['clone', 'rev-parse', 'ls-tree', 'cat-file', 'ls-files', 'fetch'].includes(args[verbAt]!), 'Only known fixture Git operations may run');
+          assert.ok(['clone', 'rev-parse', 'ls-tree', 'cat-file', 'ls-files', 'fetch'].includes(args[verbAt]!)
+            || (args[verbAt] === 'config' && args[verbAt + 1] === '--get'), 'Only known fixture Git operations may run');
           if (args[verbAt] === 'clone') assert.ok(inside(args.at(-1)!), 'Clone destination must be fixture-owned');
           assert.ok(!args.some(arg => /^(?:https?:|git@|ssh:)/.test(arg)), 'Unrouted remote refused');
           assert.ok(!args.some(arg => arg.startsWith('file:') && !inside(fileURLToPath(arg))), 'Non-fixture file remote refused');
@@ -731,17 +744,21 @@ test('Ctrl-C while sources are being checked cancels before the picker and exits
   const m = machine({ upstream: WITH_WIZARD });
   const controller = new AbortController();
   let picked = false;
-  const timer = setTimeout(() => controller.abort(), 50);
+  // Cancels once the clone is under way (local git reads precede it), or after five seconds regardless.
+  const started = Date.now();
+  const timer = setInterval(() => {
+    if (Date.now() - started > 5000 || m.commands.some((c) => c.cmd === 'git' && c.args.includes('clone'))) controller.abort();
+  }, 5);
   const result = await go([], m.deps({
     behaviour: { blockClone: true }, signal: controller.signal,
     select: async () => { picked = true; return []; },
   }));
-  clearTimeout(timer);
+  clearInterval(timer);
   assert.equal(result.code, 1);
   assert.match(result.out, /\ncancelled\n/);
   assert.equal(picked, false, 'the picker must not open after a cancel');
   assert.deepEqual(m.npx(), []);
-  assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args[0] === 'clone'), 'the clone had started');
+  assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args.includes('clone')), 'the clone had started');
 });
 
 for (const held of [false, true]) for (const overlay of [false, true]) {

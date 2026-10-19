@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { Effect, Layer } from 'effect';
 import { nodeProcesses, Processes, type Command, type MachinePathsValue } from '@nortuscc/machine';
@@ -11,6 +12,7 @@ import { AgentError, connectAgent, type AgentConnection } from '../../../src/age
 import { runDesktopEntry } from '../agent/main.ts';
 import { STARTUP_PREFIX } from '../agent/startup-diagnostics.ts';
 import { probeLoginEnvironment } from '../agent/login-environment.ts';
+import { assertExited, assertReaped } from './support/processes.ts';
 
 const fixture = (t: { after: (f: () => void) => void }) => {
   const home = mkdtempSync(join(tmpdir(), 'nae-'));
@@ -41,6 +43,8 @@ const fixture = (t: { after: (f: () => void) => void }) => {
     args: ['--ensure', '--app', join(home, 'Nortuscc.app/Contents/MacOS/Nortuscc')], resources,
     env: { HOME: home, NORTUSCC_DESKTOP_LOCAL_ONLY: '1', SHELL: '/fake/shell', PATH: '/inherited', NORTUSCC_STATE_DIR: stateRoot },
     platform: 'darwin' as const, uid: 501, user: 'fixture', processes,
+    // Stand-ins for Homebrew's prefixes, so a host's real tools there (CI runners carry git) stay out of fake Processes.
+    toolDirectories: [join(home, 'homebrew/bin'), join(home, 'local/bin')],
     hostedDependencies: { keychain: { read: () => Effect.succeed(undefined), write: () => Effect.void, remove: () => Effect.void },
       transport: Layer.succeed(HostedTransport, { request: () => Effect.fail(new HostedFailure({ code: 'network' })) }) },
     probe: async () => { probes++; return { env: { HOME: home, PATH: '/login/bin', NORTUSCC_STATE_DIR: stateRoot } }; },
@@ -68,15 +72,35 @@ test('paths helper emits safe phase timings while keeping its one-record stdout 
   assert.deepEqual(f.commands, [], 'read-only helper does not register services');
 });
 
+test('a helper whose login probe times out uses the PATH remembered under the state root', {
+  skip: process.platform === 'win32' ? 'requires POSIX shell scripts' : false, timeout: 10000,
+}, async (t) => {
+  const f = fixture(t);
+  const good = join(f.home, 'good-login-shell');
+  const hang = join(f.home, 'hanging-login-shell');
+  writeFileSync(good, '#!/bin/sh\nPATH=/remembered/bin:/usr/bin\nAPI_TOKEN=secret\nexport PATH API_TOKEN\nexec /bin/sh -c "$2"\n'); chmodSync(good, 0o755);
+  writeFileSync(hang, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(hang, 0o755);
+  const seen: Array<{ PATH?: string }> = [];
+  const run = (shell: string) => runDesktopEntry({ ...f.input, args: ['--paths'], env: { ...f.input.env, SHELL: shell },
+    probe: async input => { const result = await probeLoginEnvironment({ ...input, timeoutMs: 1000 }); seen.push(result.env); return result; } });
+  assert.equal(await run(good), 0);
+  assert.equal(readFileSync(join(realpathSync(f.stateRoot), 'agent', 'login-path'), 'utf8'), '/remembered/bin:/usr/bin');
+  assert.equal(await run(hang), 0);
+  assert.equal(seen[1]!.PATH, '/remembered/bin:/usr/bin');
+  assert.match(f.stderr.join(''), /timed out after 1000 ms; using the PATH from the last successful read/);
+});
+
 test('the ensure helper resolves recorded checkout from login environment and prints exactly one result', async (t) => {
   const f = fixture(t);
-  assert.equal(await runDesktopEntry(f.input), 0);
+  // The shipped tool directories; this helper never probes Git, so the host's tools there cannot reach fake Processes.
+  assert.equal(await runDesktopEntry({ ...f.input, toolDirectories: undefined }), 0);
   assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
   assert.deepEqual(f.stderr.filter(line => !line.startsWith(STARTUP_PREFIX)), []);
   assert.equal(f.probes(), 1);
   assert.ok(f.commands.some((c) => c.cmd === 'launchctl'));
   assert.equal(JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8')).agentVersion, 'bundle-hash');
-  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('/login/bin'));
+  // Homebrew's prefixes follow the login PATH, so a service finds gh and other tools a terminal would.
+  assert.ok(readFileSync(join(f.home, 'Library/LaunchAgents/com.nortuscc.agent.plist'), 'utf8').includes('<string>/login/bin:/opt/homebrew/bin:/usr/local/bin</string>'));
 });
 
 test('missing recorded checkout refuses helper install instead of using bundled resource directory', async (t) => {
@@ -139,9 +163,23 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
   const shell = join(f.home, 'slow-login-shell');
   writeFileSync(shell, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(shell, 0o755);
   const controller = new AbortController(); t.after(() => controller.abort());
+  let now = 0;
+  const originalNow = performance.now;
+  t.after(() => { performance.now = originalNow; });
+  performance.now = () => now;
+  let expire: (() => void) | undefined;
+  let deadlineCleared = false;
   const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal,
     env: { ...f.input.env, SHELL: shell, API_TOKEN: 'secret-never-in-trace' },
-    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100 }) });
+    probe: input => probeLoginEnvironment({ ...input, timeoutMs: 100,
+      scheduleTimeout: (callback, ms) => {
+        assert.equal(ms, 100); expire = callback;
+        return () => { deadlineCleared = true; };
+      },
+      onProgress: (phase, status) => {
+        input.onProgress?.(phase, status);
+        if (phase === 'shell_ready' && status === 'started') { now = 100; expire!(); }
+      } }) });
   let conn: AgentConnection | undefined;
   try {
     const until = Date.now() + 3000;
@@ -152,7 +190,9 @@ test('a real login timeout reports fallback and still reaches IPC readiness and 
     assert.ok(conn, f.stderr.join(''));
     const ready = startupRecords(f.stderr);
     assert.ok(ready.some(r => r.phase === 'shell_ready' && r.status === 'timed_out'));
-    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs >= 80));
+    assert.ok(ready.some(r => r.phase === 'login_probe' && r.status === 'fallback' && r.durationMs === 100));
+    assert.equal(deadlineCleared, true);
+    assert.ok(ready.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
     assert.ok(ready.some(r => r.phase === 'ipc' && r.status === 'completed'));
     assert.equal(f.stderr.join('').includes('secret-never-in-trace'), false);
     await conn.request({ command: 'shutdown' });
@@ -302,6 +342,23 @@ test('setup helpers are available before a checkout or runtime metadata and boot
   assert.equal(await runDesktopEntry({ ...f.input, args: ['--install-git'] }), 0);
   assert.deepEqual(JSON.parse(f.stdout.at(-1)!), { requested: true });
   assert.ok(f.commands.at(-1)?.args.includes('--install'));
+});
+
+test('setup state finds Git in a Homebrew directory the login PATH lacks', async (t) => {
+  const f = fixture(t);
+  rmSync(join(f.stateRoot, 'state.json'));
+  const brew = join(f.home, 'brew-bin');
+  mkdirSync(brew);
+  writeFileSync(join(brew, 'git'), '#!/bin/sh\n');
+  chmodSync(join(brew, 'git'), 0o755);
+  const ran: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    ran.push(command);
+    return { code: 0, stdout: 'git version 2.50.0', stderr: '' };
+  }) });
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--setup-state'], processes, toolDirectories: [brew] }), 0);
+  assert.equal(JSON.parse(f.stdout.at(-1)!).gitAvailable, true);
+  assert.deepEqual(ran.map((command) => command.cmd), [realpathSync(join(brew, 'git'))]);
 });
 
 test('a completed first-run clone survives failed service registration and retries without cloning or changing choices', async (t) => {
@@ -475,7 +532,8 @@ test('startup cancellation joins a real held login capture before returning with
     pids.push(Number(readFileSync(shellPid, 'utf8')), Number(readFileSync(runtimePid, 'utf8')));
     controller.abort();
     assert.equal(await running, 1);
-    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `PID ${pid} must be joined before helper return`);
+    assertReaped(pids[0]!, 'the login shell must be reaped before helper return');
+    assertExited(pids[1]!, 'the capture runtime must exit before helper return');
     assert.deepEqual(f.stdout, []); assert.deepEqual(f.commands, []);
     const records = startupRecords(f.stderr);
     assert.ok(records.some(r => r.phase === 'probe_cleanup' && r.status === 'completed'));
@@ -722,4 +780,65 @@ test('the installed app service accepts late registration and advertises real ru
     await assert.rejects(conn.request({command:'operation',operation:'inspect',input:{}}),error => error instanceof AgentError && error.code==='APP_UNAVAILABLE');
     assert.ok(f.commands.every(command=>command.cmd!=='launchctl'));
   } finally {conn?.close();controller.abort();assert.equal(await running,0);}
+});
+
+test('a corrupt followed store leaves the agent running with the setup source unavailable', { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+  const path = join(f.stateRoot, 'agent/followed.json');
+  writeFileSync(path, '{invalid');
+  writeFileSync(join(f.stateRoot, 'agent/setups.json'), JSON.stringify({ version: 1, setups: [
+    { setupId: null, repoUrl: null, checkout: f.repo, trustedAt: '2026-10-16T00:00:00Z' },
+  ] }));
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal });
+  let conn: AgentConnection | undefined;
+  const until = Date.now() + 5000;
+  try {
+    while (!conn && Date.now() < until) {
+      try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); }
+      catch { await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.ok(conn, f.stderr.join(''));
+    let status: { error?: string } | undefined;
+    while (!status && Date.now() < until) {
+      try { status = await conn.request({ command: 'status' }); }
+      catch (error) { if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error; await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.equal(status?.error, 'REVISION_UNAVAILABLE');
+    await assert.rejects(conn.request({ command: 'operation', operation: 'setupReview', input: { setupId: 'local', refetch: true, limit: 100 } }),
+      error => error instanceof AgentError && error.code === 'INSPECT_FAILED');
+    assert.equal(readFileSync(path, 'utf8'), '{invalid');
+    assert.ok(f.commands.every(c => c.cmd === 'git' && c.args.includes('get-url')), 'only the setup review trust check reads the CLI origin');
+    await conn.request({ command: 'shutdown' });
+  } finally { conn?.close(); controller.abort(); await running; }
+  assert.equal(await running, 0);
+});
+
+test('a foreground agent follows its private source after the CLI checkout disappears', { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  rmSync(f.repo, { recursive: true, force: true });
+  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+  writeFileSync(join(f.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed: { repoUrl: 'https://github.com/example/followed.git', profile: 'default', setupId: null } }));
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const running = runDesktopEntry({ ...f.input, args: [], signal: controller.signal });
+  let conn: AgentConnection | undefined;
+  const until = Date.now() + 5000;
+  while (!conn && Date.now() < until) {
+    try { conn = await connectAgent(f.paths, { client: 'app', timeoutMs: 100 }); }
+    catch { await new Promise(done => setTimeout(done, 10)); }
+  }
+  assert.ok(conn, f.stderr.join(''));
+  try {
+    let status: { error?: string } | undefined;
+    while (!status && Date.now() < until) {
+      try { status = await conn.request({ command: 'status' }); }
+      catch (error) { if (!(error instanceof AgentError && error.code === 'NO_REPORT')) throw error; await new Promise(done => setTimeout(done, 10)); }
+    }
+    assert.equal(status?.error, 'REVISION_UNAVAILABLE');
+    assert.ok(f.commands.some(c => c.cmd === 'git' && c.args.includes('ls-remote')), 'the selected private source checks access');
+    assert.equal(f.commands.some(c => c.cwd === f.repo), false);
+    await conn.request({ command: 'shutdown' });
+    assert.equal(await running, 0);
+  } finally { conn.close(); controller.abort(); }
 });

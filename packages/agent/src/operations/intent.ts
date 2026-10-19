@@ -1,20 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
-import { Effect, Exit, Layer } from 'effect';
-import { loadProfile, normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
+import { Cause, Effect, Exit, Layer } from 'effect';
+import { normalizeSkillSource, ProfileFiles, ReadFailed, settingsComplaints, intentValueProblem, type DesiredConfig, type Input, type MachineOverrides, type Origin } from '@nortuscc/profile-engine';
 import { Backups, backupsForRun, canonical, Fs, inspectMcpRouting, mcpRoutingEvidence, MachinePaths, machinePaths, OverridesStore, overridesPath, peekMachineState, persistMachineIntent, proposeMachineIntent, releasedRouting, setMcpRouting, StateStore, type McpRoutingFileId } from '@nortuscc/machine';
 import { AgentClock } from '../clock.ts';
-import { safeOwnerString } from './safety.ts';
+import { describe, safeMessage, safeOwnerString } from './safety.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { RunLifecycle } from '../runs.ts';
-import type { JobInspection } from '../job.ts';
+import { resolveInspection, type JobInspection } from '../job.ts';
 import { decodeOperationInput, decodeOperationOutput, type ChangePreview, type OperationInput, type OperationOutput, type ParityAcceptance, type ParityRunEvidence } from './index.ts';
 import type { PreparedParityChange } from './parity.ts';
 
 const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 const refused = (code: SessionError['code'], message: string) => new SessionError(code, message);
 const invalid = () => refused('PROFILE_INVALID', 'Machine intent conflicts with owned declarations or source-wide revision policy');
-const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions changed; inspect and preview again');
+const stale = () => refused('UNKNOWN_PLAN', 'The machine intent or instructions changed; preview again');
 type IntentChange = Extract<OperationInput<'previewChange'>['change'], { kind: 'machineIntent' }>;
 type IntentItem = OperationOutput<'inspectIntent'>['items'][number];
 const safeString = safeOwnerString;
@@ -43,11 +43,11 @@ const intentRows = (section: OperationInput<'inspectIntent'>['section'], desired
     ]; break;
     case 'files': items = desired.files.map(f => ({ kind: 'file', id: f.id, target: f.target, managed: f.managed, from: origin(f.from) })); break;
     case 'settings': items = desired.files.flatMap(f => Object.entries(f.keys ?? {}).map(([key, value]) => ({ kind: 'setting' as const, fileId: f.id, key, value: value.value, from: origin(value.from) }))); break;
-    case 'skills': items = desired.skills.map(s => ({ kind: 'skill', source: normalizeSkillSource(s.source) ?? s.source, name: s.name, enabled: s.install, from: origin(s.from), declaredFrom: origin(s.declaredFrom ?? { layer: 'base', source: 'skills-manifest.txt' }), targets: s.targets ?? ['claude', 'codex'], policy: !s.pin ? 'upstream' : s.pin.from.layer === 'machine' ? 'personal-pin' : 'source-pin', ...(s.pin ? { revision: s.pin.ref } : {}) })); break;
+    case 'skills': items = desired.skills.map(s => ({ kind: 'skill', source: normalizeSkillSource(s.source) ?? s.source, name: s.name, choice: current.value.skills?.[s.name] ?? null, defaultEnabled: s.targets !== undefined || !s.optional, enabled: s.install, from: origin(s.from), declaredFrom: origin(s.declaredFrom ?? { layer: 'base', source: 'skills-manifest.txt' }), targets: s.targets ?? ['claude', 'codex'], policy: !s.pin ? 'upstream' : s.pin.from.layer === 'machine' ? 'personal-pin' : 'source-pin', ...(s.pin ? { revision: s.pin.ref } : {}) })); break;
     case 'integrations': items = desired.integrations.map(i => ({ kind: 'integration', id: i.id,
       type: ['hook', 'mcp', 'plugin', 'marketplace'].includes(String(i.declaration.type)) ? i.declaration.type as 'hook' | 'mcp' | 'plugin' | 'marketplace' : 'unknown',
       ...(i.declaration.target === 'claude' || i.declaration.target === 'codex' ? { target: i.declaration.target } : {}), enabled: i.enabled, from: origin(i.from), prerequisites: [...(Array.isArray(i.declaration.requiresEnv) && i.declaration.requiresEnv.length ? ['Declared environment prerequisites must be available to the integration owner'] : []), ...(i.declaration.type === 'hook' ? ['The declared hook file must remain available'] : []), 'Installation uses the existing integration owner; removal is unavailable'] })); break;
-    case 'issues': items = desired.issues.map(i => ({ kind: 'issue', layer: i.layer, source: i.source, message: 'Configuration input is invalid; inspect the owning document in the app' })); break;
+    case 'issues': items = desired.issues.map(i => ({ kind: 'issue', layer: i.layer, source: i.source, message: 'Configuration input is invalid; fix the owning document and reload' })); break;
   }
   return items;
 };
@@ -68,8 +68,11 @@ export const makeIntentOperations = (options: {
   const observeRouting = (desired: DesiredConfig, id: McpRoutingFileId) => inspectMcpRouting(desired, id).pipe(Effect.provideService(StateStore, { ...stateStore, read: peekMachineState }));
   const files = Layer.succeed(ProfileFiles, {
     readText: path => fs.readText(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))), exists: fs.exists,
+    list: path => fs.list(path).pipe(Effect.mapError(() => new ReadFailed({ path, reason: 'Configuration cannot be read' }))),
   });
-  const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => loadProfile(inspection.paths.repo, { overrides }).pipe(Effect.provide(files));
+  // A named profile that no longer resolves cleanly is an invalid intent, as root issues are.
+  const resolve = (inspection: JobInspection, overrides: Input<MachineOverrides>) => resolveInspection(inspection, overrides).pipe(
+    Effect.catchTag('ProfileInvalid', () => Effect.fail(invalid())), Effect.provide(files));
   const ready = Effect.gen(function* () {
     const inspection = yield* options.inspection;
     if (!inspection) return yield* Effect.fail(refused('NO_REPORT', 'Inspect the machine before reading or changing intent'));
@@ -202,10 +205,10 @@ export const makeIntentOperations = (options: {
         options.invalidate();
         if (Exit.isFailure(outcome)) evidence = { ...evidence, state: 'needsInspection' };
         yield* checkpoint();
-        if (Exit.isFailure(outcome)) return yield* Effect.fail(refused('INTERNAL', 'Intent operation stopped; inspect saved intent and routing ownership'));
+        if (Exit.isFailure(outcome)) return yield* Effect.fail(refused('INTERNAL', safeMessage(`Couldn't apply ${step.key}: ${describe(Cause.squash(outcome.cause))}`)));
         yield* lifecycle.progress({ type: 'finished', index, total: plan.steps.length, key: step.key, outcome: 'ok', note: 'Intent effect observed' });
       }
-    }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.ensuring(Effect.sync(options.invalidate)), Effect.mapError(() => refused('INTERNAL', 'Intent progress could not be saved; inspect before retrying')))), afterRelease: 'inspect' as const };
+    }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))), Effect.provideContext(context), Effect.ensuring(Effect.sync(options.invalidate)), Effect.mapError(e => e instanceof SessionError ? e : refused('INTERNAL', safeMessage(`Couldn't save intent progress: ${describe(e)}`))))), afterRelease: 'inspect' as const };
   }).pipe(Effect.provideContext(context), Effect.mapError(e => e instanceof SessionError ? e : refused('INSPECT_FAILED', 'Intent preview could not read configuration')));
   return { inspectIntent, prepare };
 });

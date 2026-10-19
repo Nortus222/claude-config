@@ -1,3 +1,4 @@
+import { normalizeDocument } from './documents.ts';
 import { randomUUID } from 'node:crypto';
 import { Effect, Layer } from 'effect';
 import { validMutations } from './store-validation.ts';
@@ -7,8 +8,10 @@ import { Store, type Container, type PartitionSnapshot } from './store.ts';
 export const makeMemoryStore = (): Store['Service'] => {
   const containers = new Map<Container, Map<string, PartitionSnapshot>>();
   return {
-    readPartition: (container, key) => Effect.sync(() =>
-      structuredClone(containers.get(container)?.get(key) ?? { version: null, closed: false, documents: [] })),
+    readPartition: (container, key) => Effect.sync(() => {
+      const snapshot = structuredClone(containers.get(container)?.get(key) ?? { version: null, closed: false, documents: [] });
+      return { ...snapshot, documents:snapshot.documents.map(normalizeDocument) };
+    }),
     closePartition: (container, key, expectedVersion) => Effect.suspend(() => {
       if (!key || (container !== 'accounts' && container !== 'setups')) return Effect.fail(new ServiceFailure({ code: 'invalid' }));
       const partitions = containers.get(container) ?? new Map<string, PartitionSnapshot>();

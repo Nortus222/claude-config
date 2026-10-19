@@ -25,7 +25,7 @@ const docs = {
 };
 export type HttpObservation = { readonly method: string; readonly path: string; readonly status: number; readonly body?: unknown; readonly reply?: unknown; readonly etag: string | null; readonly conditional: string | null };
 
-export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, options: Pick<FixtureOptions, 'store' | 'clock' | 'hosting'> = {}) {
+export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, options: Pick<FixtureOptions, 'store' | 'clock'> = {}) {
   const f = await fixture(options);
   const lifetime = new AbortController();
   const activeRuns = new Set<Promise<unknown>>();
@@ -53,7 +53,7 @@ export async function clientFixture(t: Pick<TestContext, 'after' | 'signal'>, op
   const commitSha = git(['rev-parse', 'HEAD'], repo); git(['tag', 'v1'], repo); git(['push', '-q', 'origin', 'main', 'refs/tags/v1'], repo);
   const items = diffItems(itemValues({}), itemValues(docs)).map((item) => ({ id: item.itemId, kind: item.kind, change: 'added' as const }));
   const register = async (token: string) => {
-    const response = await f.call('POST', '/v1/setups', { name: 'Fixture config', repoUrl: REPO_URL }, token);
+    const response = await f.call('POST', '/v1/setups', { name: 'Fixture config', repoUrl: REPO_URL, profile: 'default' }, token);
     assert.equal(response.status, 201); return decodeHosted(SetupRecordSchema, await response.json());
   };
   const publish = async (token: string, setupId: string, number: number, overrides: Partial<RevisionPublication> = {}) => {

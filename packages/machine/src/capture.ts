@@ -4,7 +4,7 @@ import { parseSettingsKeys, parseSkillsManifest, type DesiredConfig, type SkillG
 import { authorDigest, AuthorUnavailable, observedAuthorReplacement, validateAuthorBinding, type AuthorBinding, type AuthorDocument, type AuthorServices, type PreparedAuthorEdit } from './author.ts';
 import { Backups } from './backups.ts';
 import { configDomain } from './config/domain.ts';
-import { configFileId } from './config/observe.ts';
+import { configFileId, parseDocument } from './config/observe.ts';
 import { Fs } from './fs.ts';
 import { FsFailed } from './errors.ts';
 import type { MutationObserver } from './history.ts';
@@ -20,9 +20,25 @@ export type PreparedCapture = PreparedAuthorEdit & { readonly report: MachineRep
 type CapturePrivate = { stateDigest: string | null; installedDigest?: string | null; };
 const internals = new WeakMap<PreparedCapture, CapturePrivate>();
 const digestState = (state: unknown) => authorDigest(JSON.stringify(state));
-const failure = () => new FsFailed({ op: 'capture', path: 'configured author checkout', reason: 'Capture inputs changed or could not be written; inspect again' });
+const failure = () => new FsFailed({ op: 'capture', path: 'configured author checkout', reason: 'Capture inputs changed or could not be written; check for new changes again' });
 const noop = { pending: () => Effect.void, committed: () => Effect.void };
 const heldKey = (key: string) => key.includes('#') ? `setting:${key.slice('config:'.length)}` : `file:${configFileId(key)}`;
+
+// The author document defines ownership; values outside it never enter a capture.
+export const projectOwnedKeys = <A>(owned: Readonly<Record<string, unknown>>, values: Readonly<Record<string, A>>): Record<string, A> =>
+  Object.fromEntries(Object.entries(values).filter(([key]) => Object.hasOwn(owned, key)));
+
+export function captureFileText(file: { mode: string; src: string }, authorText: string | undefined, machineText: string): string {
+  if (file.mode !== 'merge-keys') return machineText;
+  const owned = parseSettingsKeys(authorText, file.src);
+  if (owned.issues.length || !owned.value) throw new Error(owned.issues.map(issue => issue.message).join('; ') || 'The author file owns no settings keys');
+  const local = parseDocument(machineText);
+  if (local.kind !== 'object') throw new Error('Machine settings must be a JSON object');
+  const text = JSON.stringify({ ...owned.value, ...projectOwnedKeys(owned.value, local.value) }, null, 2) + '\n';
+  const issues = parseSettingsKeys(text, file.src).issues;
+  if (issues.length) throw new Error(issues.map(issue => issue.message).join('; '));
+  return text;
+}
 
 // Preview through the same config owner using an in-memory write boundary. No baseline is persisted.
 export const prepareCapture = (input: CaptureInput): Effect.Effect<PreparedCapture, unknown, AuthorServices> => Effect.gen(function* () {
@@ -54,7 +70,7 @@ export const prepareCapture = (input: CaptureInput): Effect.Effect<PreparedCaptu
     const text = yield* readText(join(paths.repo, file.src));
     const current = parseSettingsKeys(text, file.src);
     // The current author document owns the allowlist. Snapshot keys cannot restore a removed key.
-    const keys = Object.fromEntries(Object.entries(file.keys ?? {}).filter(([key]) => current.value && Object.hasOwn(current.value, key)).map(([key, entry]) => [key, { ...entry, value: current.value![key] }]));
+    const keys = Object.fromEntries(Object.entries(projectOwnedKeys(current.value ?? {}, file.keys ?? {})).map(([key, entry]) => [key, { ...entry, value: current.value![key] }]));
     desiredFiles.push({ ...file, keys });
   }
   const desired = { ...input.desired, files: desiredFiles };

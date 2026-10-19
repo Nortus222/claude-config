@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
   addCommand, agentSkillsDirs, installedSkillNames, machinePaths, nodeFs, Processes, readExposure, readSkillLock,
-  removeCommand, runInstaller, skillExposure, updateCommand, type Command,
+  installerFailure, matchSkillName, removeCommand, runInstaller, skillExposure, updateCommand, type Command,
 } from '../src/index.ts';
 
 const skillsMachine = () => {
@@ -105,6 +105,17 @@ test('skillExposure splits exposed, partial and missing', () => {
   assert.deepEqual(skillExposure({ names: ['a'], targets: ['claude'], list: { claude: ['a'], codex: [] } }), { exposed: ['a'], partial: [], missing: [] });
 });
 
+test('skillExposure finds a name an agent lists in another case', () => {
+  assert.deepEqual(skillExposure({ names: ['TDD'], targets: ['claude'], list: { claude: ['tdd'] } }), { exposed: ['TDD'], partial: [], missing: [] });
+});
+
+test('matchSkillName prefers an exact name, folds case otherwise, and finds none for an ambiguous fold', () => {
+  assert.equal(matchSkillName(['tdd', 'want'], 'TDD'), 'tdd');
+  assert.equal(matchSkillName(['tdd', 'TDD'], 'TDD'), 'TDD');
+  assert.equal(matchSkillName(['tdd', 'TDD'], 'Tdd'), undefined);
+  assert.equal(matchSkillName(['want'], 'TDD'), undefined);
+});
+
 test('installer argv: variadic names, explicit agents, global and non-interactive', () => {
   assert.deepEqual(addCommand({ source: 'o/r', skills: ['a', 'b'], targets: ['claude', 'codex'] }).args,
     ['-y', 'skills', 'add', 'o/r', '--skill', 'a', 'b', '--agent', 'claude-code', 'codex', '--global', '--yes']);
@@ -120,7 +131,37 @@ test('runInstaller reports a non-zero exit as a failed result', async () => {
   const fake = Layer.succeed(Processes, { run: (c) => Effect.sync(() => { seen.push(c); return { code: 3, stdout: '' }; }) });
   const result = await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(fake)));
   assert.deepEqual(result, { ok: false, note: 'npx exited with 3' });
-  assert.equal(seen[0]!.output, 'inherit');
+  // Teed: the output is still shown, and its tail explains a failure.
+  assert.equal(seen[0]!.output, 'tee');
   const ok = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 0, stdout: '' }) });
   assert.deepEqual(await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(ok))), { ok: true, note: '' });
+});
+
+test('installerFailure names skills a source no longer has, from styled installer output', () => {
+  const output = '\x1b[36m┌\x1b[39m  skills\n│\n\x1b[31m■\x1b[39m  No matching skills found for: resolving-merge-conflicts\n●  Available skills:\n│    - ask-matt\n│    - tdd\n└\n';
+  assert.deepEqual(installerFailure(1, output, 'mattpocock/skills'), { missing: ['resolving-merge-conflicts'],
+    note: "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again." });
+  assert.deepEqual(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').missing, ['a', 'b']);
+  assert.match(installerFailure(1, '■  No matching skills found for: a, b\n', 'o/r').note, /^o\/r no longer has a, b\. Remove them /);
+  // Names split on commas and whitespace alike, as they are requested; quotes and a closing stop are dropped.
+  assert.deepEqual(installerFailure(1, "No matching skills found for: 'a',b  c.\n", 'o/r').missing, ['a', 'b', 'c']);
+  assert.equal(installerFailure(1, '■  No matching skills found for: gone\n', 'o/r', 'c'.repeat(40)).note,
+    "o/r at ccccccc doesn't have gone. Move the pin to a commit that has it, or remove it from your profile's skills, then apply again.");
+});
+
+test('addCommand refuses a skill name the installer would split, join ambiguously or read as a flag', () => {
+  for (const name of ['two words', 'a,b', '-x', '--skill', 'tab\there', ''])
+    assert.throws(() => addCommand({ source: 'o/r', skills: ['ok', name], targets: ['claude'] }), /can't be installed/);
+});
+
+test('installerFailure otherwise keeps the last error line, bounded, with the exit code', () => {
+  assert.deepEqual(installerFailure(1, 'Cloning…\n\x1b[31mError: fatal: repository not found\x1b[0m\nDone\n'), { missing: [], note: 'Error: fatal: repository not found (npx exited with 1)' });
+  assert.equal(installerFailure(2, 'just one line\n').note, 'just one line (npx exited with 2)');
+  assert.equal(installerFailure(3, '').note, 'npx exited with 3');
+  assert.equal([...installerFailure(1, `error ${'x'.repeat(1000)}`).note].length <= 320, true);
+});
+
+test('runInstaller notes why the installer failed from its captured output', async () => {
+  const fake = Layer.succeed(Processes, { run: () => Effect.succeed({ code: 1, stdout: '', stderr: 'npm ERR! code E404\nnpm ERR! 404 Not Found - skills@9\n' }) });
+  assert.deepEqual(await Effect.runPromise(runInstaller(updateCommand(['a'])).pipe(Effect.provide(fake))), { ok: false, note: 'npm ERR! 404 Not Found - skills@9 (npx exited with 1)' });
 });

@@ -1,9 +1,12 @@
 import { Schema } from 'effect';
 import type { OperationDefinition } from './model.ts';
 import {
+  InspectProfilesInputSchema, InspectProfilesResultSchema, InspectShareLinkInputSchema, InspectShareLinkResultSchema,
+  MachineFileInputSchema, MachineFileResultSchema, AuthorProfilesInputSchema, AuthorFileInputSchema, UpstreamsInputSchema, DiscoverUpstreamInputSchema, UpstreamSkillInputSchema, DraftsInputSchema, DraftPreviewInputSchema, GhStateInputSchema,
+  AuthorProfilesResultSchema, AuthorFileResultSchema, UpstreamsResultSchema, DiscoveryResultSchema, UpstreamSkillResultSchema, DraftsResultSchema, DraftPreviewSchema, GhStateResultSchema,
   ListBackupsInputSchema, ListBackupsResultSchema, AgentStatusInputSchema, AgentStatusResultSchema, AccountStateInputSchema, AccountStateResultSchema,
   WatchSourcesInputSchema, WatchSourcesResultSchema, InspectSourceDiffInputSchema, SourceDiffResultSchema, PinImpactInputSchema, PinImpactResultSchema, DraftChangelogInputSchema, ChangelogResultSchema,
-  InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
+  SetupReviewInputSchema, SetupReviewSchema, InspectSetupsInputSchema, SetupInspectionResultSchema, IncomingChangesInputSchema, IncomingChangesResultSchema, PrepareTrustRequestInputSchema, TrustRequestResultSchema,
   InspectUpdatesInputSchema, UpdatesInspectionResultSchema, InspectIntentInputSchema, IntentInspectionResultSchema, GetContextInputSchema, ContextResultSchema, InspectInputSchema, InspectResultSchema,
   PreviewChangeInputSchema, ChangePreviewSchema, ApplyChangeInputSchema, ApplyChangeResultSchema,
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
@@ -20,6 +23,18 @@ const define = <N extends string, I extends Schema.ConstraintDecoder<unknown>, O
 ): OperationDefinition<N, I, O> => ({ name, input, output, scopes: ['machine'], mutation });
 
 export const operationDefinitions = {
+  inspectProfiles: define('inspectProfiles',InspectProfilesInputSchema,InspectProfilesResultSchema),
+  inspectShareLink: define('inspectShareLink',InspectShareLinkInputSchema,InspectShareLinkResultSchema),
+  authorProfiles: define('authorProfiles', AuthorProfilesInputSchema, AuthorProfilesResultSchema),
+  machineFile: define('machineFile', MachineFileInputSchema, MachineFileResultSchema),
+  authorFile: define('authorFile', AuthorFileInputSchema, AuthorFileResultSchema),
+  upstreams: define('upstreams', UpstreamsInputSchema, UpstreamsResultSchema),
+  discoverUpstream: define('discoverUpstream', DiscoverUpstreamInputSchema, DiscoveryResultSchema),
+  upstreamSkill: define('upstreamSkill', UpstreamSkillInputSchema, UpstreamSkillResultSchema),
+  drafts: define('drafts', DraftsInputSchema, DraftsResultSchema),
+  draftPreview: define('draftPreview', DraftPreviewInputSchema, DraftPreviewSchema),
+  ghState: define('ghState', GhStateInputSchema, GhStateResultSchema),
+
   listBackups: define('listBackups',ListBackupsInputSchema,ListBackupsResultSchema),
   agentStatus: define('agentStatus',AgentStatusInputSchema,AgentStatusResultSchema),
   accountState: define('accountState',AccountStateInputSchema,AccountStateResultSchema),
@@ -27,6 +42,7 @@ export const operationDefinitions = {
   inspectSourceDiff: define('inspectSourceDiff',InspectSourceDiffInputSchema,SourceDiffResultSchema),
   pinImpact: define('pinImpact',PinImpactInputSchema,PinImpactResultSchema),
   draftChangelog: define('draftChangelog',DraftChangelogInputSchema,ChangelogResultSchema),
+  setupReview: define('setupReview', SetupReviewInputSchema, SetupReviewSchema),
   inspectSetups: define('inspectSetups',InspectSetupsInputSchema,SetupInspectionResultSchema),
   incomingChanges: define('incomingChanges',IncomingChangesInputSchema,IncomingChangesResultSchema),
   prepareTrustRequest: define('prepareTrustRequest',PrepareTrustRequestInputSchema,TrustRequestResultSchema),
@@ -40,6 +56,7 @@ export const operationDefinitions = {
   getRun: define('getRun', GetRunInputSchema, RunViewSchema),
   listRuns: define('listRuns', ListRunsInputSchema, RunListResultSchema),
   cancelRun: define('cancelRun', CancelRunInputSchema, RunViewSchema, true),
+  abandonRun: define('abandonRun', GetRunInputSchema, RunViewSchema, true),
   history: define('history', HistoryInputSchema, OperationHistoryResultSchema),
 } as const;
 export type OperationName = keyof typeof operationDefinitions;

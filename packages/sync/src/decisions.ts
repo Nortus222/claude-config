@@ -16,7 +16,7 @@ import { INTEGRATIONS_SOURCE, type DesiredConfig, type MachineOverrides } from '
 import { desiredOfDocuments, worktreeDocuments } from './documents.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { withoutOverride } from './plan.ts';
-import { LOCAL_SETUP, type SetupSource } from './source.ts';
+import { LOCAL_SETUP, type SetupSource, type Revision } from './source.ts';
 import { SyncStore, type Holds } from './store.ts';
 export type SyncDecisionChange = {
   readonly kind: 'syncDecision';
@@ -29,6 +29,8 @@ export type SyncDecisionChange = {
 };
 export type SyncDecisionInput = {
   source: SetupSource['Service'];
+  // The batch owner validates the complete composition after preparing every independent decision.
+  deferComposition?: boolean;
   // Legacy CLI applies valid independent domains and reports the refused integrations manifest separately.
   validation?: 'cli-independent-integrations';
   change: SyncDecisionChange;
@@ -36,6 +38,8 @@ export type SyncDecisionInput = {
   holds: Holds;
   decisions: readonly Decision[];
   now: Date;
+  // A batch owner's single fresh observation of `source`; each decision otherwise observes afresh.
+  observed?: SyncObservation;
 };
 export type PreparedSyncDecision = {
   change: SyncDecisionChange;
@@ -65,26 +69,29 @@ const digest = (value: unknown) => createHash('sha256').update(canonical(value))
 const invalidProfile = (desired: DesiredConfig, independentIntegrations = false) =>
   desired.issues.some(issue => !(independentIntegrations && issue.layer === 'base' && issue.source === INTEGRATIONS_SOURCE));
 // Verify the source's exact offer before reading snapshots. Values remain inside the owner.
-export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[], independentIntegrations = false) =>
+export const observeSyncSource = (source: SetupSource['Service'], decisions: readonly Decision[], independentIntegrations = false, knownHead?: Revision) =>
   Effect.gen(function* () {
     if (source.trusted && !(yield* source.trusted)) return yield* Effect.fail(refused());
-    const { head } = yield* source.fetch;
+    const head = knownHead ?? (yield* source.fetch).head;
     const offered = yield* source.load(head);
     const effective = yield* source.effective(decisions);
     const before = yield* worktreeDocuments(effective.applied.repo),
       after = yield* worktreeDocuments(offered.repo);
-    if (invalidProfile(desiredOfDocuments(before), independentIntegrations) || invalidProfile(desiredOfDocuments(after), independentIntegrations))
+    const profile = source.profile;
+    const beforeValues = itemValues(before, profile), afterValues = itemValues(after, profile);
+    if (invalidProfile(desiredOfDocuments(before, undefined, profile), independentIntegrations) || invalidProfile(desiredOfDocuments(after, undefined, profile), independentIntegrations))
       return yield* Effect.fail(refused());
-    const changes = diffItems(itemValues(before), itemValues(after));
+    const changes = diffItems(beforeValues, afterValues);
     const offers = source.offeredItems
       ? yield* source.offeredItems
-      : [...new Set([...itemValues(before).keys(), ...itemValues(after).keys()])].map((itemId) => ({
+      : [...new Set([...beforeValues.keys(), ...afterValues.keys()])].map((itemId) => ({
           itemId,
           revision: head,
         }));
-    if (canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
-    return { head, offered, effective, before, after, changes, offers };
+    if (knownHead === undefined && canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
+    return { head, offered, effective, before, after, beforeValues, afterValues, profile, changes, offers };
   });
+export type SyncObservation = Effect.Success<ReturnType<typeof observeSyncSource>>;
 export const prepareSyncDecision = (
   input: SyncDecisionInput,
 ): Effect.Effect<PreparedSyncDecision, unknown, Fs | Processes | MachinePaths> =>
@@ -94,14 +101,15 @@ export const prepareSyncDecision = (
       return yield* Effect.fail(refused());
     const independentIntegrations = input.validation === 'cli-independent-integrations' && change.setupId === LOCAL_SETUP
       && change.revision.kind === 'local' && parseItemId(change.itemId)?.kind !== 'integration';
-    const observed = yield* observeSyncSource(source, input.decisions, independentIntegrations);
+    const observed = input.observed ?? (yield* observeSyncSource(source, input.decisions, independentIntegrations));
     const offeredItem = observed.offers.find((item) => item.itemId === change.itemId);
     // An existing local hold can be released even when both snapshots omit its item.
     const releaseLocalHold =
       typeof observed.head === 'string' && change.action === 'release' && Object.hasOwn(input.holds, change.itemId);
     const head = offeredItem?.revision ?? (releaseLocalHold ? observed.head : undefined);
     if (head === undefined) return yield* Effect.fail(refused());
-    yield* source.load(head);
+    // The observation already loaded and verified its own head.
+    if (canonical(head) !== canonical(observed.head)) yield* source.load(head);
     const local = typeof head === 'string';
     if (
       local
@@ -127,10 +135,11 @@ export const prepareSyncDecision = (
     if (
       !unchanged &&
       !observed.changes.some((c) => c.itemId === change.itemId) &&
-      !(change.action === 'release' && held)
+      !(change.action === 'release' && held) &&
+      !(input.deferComposition && (observed.beforeValues.has(change.itemId) || observed.afterValues.has(change.itemId)))
     )
       return yield* Effect.fail(refused());
-    if (unchanged && !itemValues(observed.before).has(change.itemId) && !itemValues(observed.after).has(change.itemId))
+    if (unchanged && !observed.beforeValues.has(change.itemId) && !observed.afterValues.has(change.itemId))
       return yield* Effect.fail(refused());
     if (!local && !head.items.some((c) => c.id === change.itemId)) return yield* Effect.fail(refused());
     const nextOverrides =
@@ -172,7 +181,7 @@ export const prepareSyncDecision = (
     );
     // Composition owns source-wide pin validity. An individual hold must not create incompatible source pins.
     let nextDesired = observed.effective.effective.desired;
-    if (!unchanged) {
+    if (!unchanged && !input.deferComposition) {
       const overrides = {
         value: nextOverrides,
         issues: [],

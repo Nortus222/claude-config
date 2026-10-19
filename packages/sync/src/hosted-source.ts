@@ -5,27 +5,34 @@ import {
   decodeHosted, IdSchema, normalizeRepoUrl, RepoUrlSchema, SyncRevisionSchema, type SyncRevision,
 } from '@nortuscc/hosted-protocol';
 import {
-  canonical, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
+  Backups, backupsForRun, canonical, FETCH_TIMEOUT_MS, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes, STALL_LIMIT_ARGS,
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
-import { commitDocuments, FETCH_TIMEOUT_MS, originUrl, revParse } from './git.ts';
+import { fetchFollowedMain, privateFollowedRepository } from './followed-repository.ts';
+import { gitAuthArgs } from './git-auth.ts';
+import type { FollowedProfile } from './followed.ts';
+import { commitDocuments, commitDocumentsCache, originUrl, revParse, type CommitDocumentsCache } from './git.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
 import { overrideOf } from './plan.ts';
 import { SetupsStore, setupsStore } from './setups.ts';
 import { snapshotFromDocuments } from './snapshots.ts';
+import { droppedOnSwitch, retainedOverrides } from './resolved-items.ts';
 import {
   RevisionMismatch, RevisionUnavailable, SetupSource, type AppliedEvidence, type HostedBaseline, type Revision,
 } from './source.ts';
 import { SyncStore, syncStore } from './store.ts';
-import type { Documents } from './documents.ts';
+import { desiredOfDocuments, hasProfile, type Documents } from './documents.ts';
 
-type Services = Fs | Processes | SetupsStore | OverridesStore | SyncStore;
+type Services = Fs | Processes | SetupsStore | OverridesStore | SyncStore | CommitDocumentsCache;
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));
 const mismatch = (revision: Revision, reason: string) => Effect.fail(new RevisionMismatch({ revision, reason }));
 const hash = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+export const hostedBaselineRelative = (accountId: string, repoUrl: string, setupId: string): string =>
+  join('agent', 'baselines', accountId, hash(normalizeRepoUrl(repoUrl)), `${setupId}.json`);
 
 // HTTP records are untrusted metadata. Only explicit local account/repository consent followed
 // by exact remote tag and recomputed item verification authorizes these snapshots.
@@ -34,11 +41,17 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   readonly currentAccountId: Effect.Effect<string | null, unknown>;
   readonly setupId: string;
   readonly repoUrl: string;
+  readonly profile?: string;
   // Runtime supplies only the durable offered range, after recovering the client's projections.
   readonly records: Effect.Effect<ReadonlyArray<SyncRevision>, unknown>;
   readonly processes?: Layer.Layer<Processes>;
   readonly now?: () => Date;
+  // A followed selection owns its clone independently of the legacy CLI checkout/account.
+  readonly followed?: FollowedProfile;
 }): Layer.Layer<SetupSource> => {
+  const profile = options.followed?.profile ?? options.profile;
+  const valuesOf = (documents: Documents) => itemValues(documents, profile);
+  const patch = (head: Documents, id: string, held: Documents) => patchItem(head, id, held, profile);
   const now = options.now ?? (() => new Date());
   const repoIdentity = normalizeRepoUrl(options.repoUrl);
   // Identity-only host/path references need an explicit transport before reaching Git.
@@ -46,8 +59,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     ? options.repoUrl : `https://${options.repoUrl}`;
   const repoKey = hash(repoIdentity);
   const scope = hash([options.accountId, options.setupId, repoIdentity]);
-  const baselinePath = join(paths.stateRoot, 'agent', 'baselines', options.accountId, repoKey, `${options.setupId}.json`);
+  const baselineRelative = hostedBaselineRelative(options.accountId, options.repoUrl, options.setupId);
+  const baselinePath = join(paths.stateRoot, baselineRelative);
   const clone = join(paths.stateRoot, 'agent', 'checkouts', options.accountId, repoKey, options.setupId);
+  const hooks = join(paths.stateRoot, 'agent', 'empty-hooks');
+  const verifiedRelative = join('agent', 'follow', `${scope}.json`);
+  const verifiedRecords = join(paths.stateRoot, verifiedRelative);
   const snapshotsRoot = join(paths.stateRoot, 'agent', 'hosted', options.accountId, repoKey, options.setupId);
   const git = (repo: string, args: ReadonlyArray<string>) => Processes.use((p) => p.run({ cmd: 'git', args, cwd: repo, output: 'capture', stderr: 'capture' }));
 
@@ -57,6 +74,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     }, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'invalid hosted source identity' }) });
     const active = yield* options.currentAccountId.pipe(Effect.catch(() => unavailable('HEAD', 'active account unavailable')));
     if (active !== options.accountId) return yield* unavailable('HEAD', 'the active account changed');
+    if (options.followed) return { checkout: null };
     const setups = yield* (yield* SetupsStore).read;
     const entry = setups?.find((s) => s.accountId === options.accountId && s.setupId === options.setupId && s.repoUrl !== null && normalizeRepoUrl(s.repoUrl) === repoIdentity);
     if (!entry) return yield* unavailable('HEAD', 'the hosted setup is not trusted for this account and repository');
@@ -65,6 +83,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
 
   const repository = Effect.gen(function* () {
     const entry = yield* consent;
+    if (options.followed) return { repo: yield* privateFollowedRepository(paths, options.followed), linked: false };
     const repo = entry.checkout ?? clone;
     const fs = yield* Fs;
     const origin = entry.checkout === null
@@ -95,7 +114,11 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   });
 
   const records = Effect.gen(function* () {
-    const values = yield* options.records.pipe(Effect.catch(() => unavailable('HEAD', 'hosted revision metadata unavailable')));
+    const values = yield* options.records.pipe(Effect.catch(() => options.followed
+      ? Fs.use(fs => fs.readText(verifiedRecords)).pipe(Effect.flatMap(text => text === undefined
+        ? unavailable('HEAD', 'no previously verified hosted revision')
+        : Effect.try({ try: () => JSON.parse(text) as ReadonlyArray<SyncRevision>, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }) })))
+      : unavailable('HEAD', 'hosted revision metadata unavailable')));
     return yield* Effect.try({ try: () => {
       const decoded = values.map((r) => decodeHosted(SyncRevisionSchema, r));
       if (decoded.length === 0 || decoded.some((r, i) => r.setupId !== options.setupId || r.number !== i + 1)) throw new Error();
@@ -112,19 +135,42 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       const verifiedRef = `refs/nortuscc/hosted/${scope}/verified/${record.number}-${hash(record)}`;
       const fetchedRef = `refs/nortuscc/hosted/${scope}/candidate/${record.number}`;
       const fetched = yield* Processes.use((p) => p.run({
-        cmd: 'git', args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
+        cmd: 'git', args: [...(options.followed ? gitAuthArgs(hooks) : []), '-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
         cwd: repo, env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
       })).pipe(Effect.timeoutOption(FETCH_TIMEOUT_MS), Effect.map((result) => result._tag === 'Some' && result.value.code === 0), Effect.catchTag('LaunchFailed', () => Effect.succeed(false)));
       const sha = yield* revParse(repo, fetched ? fetchedRef : verifiedRef);
       if (sha === undefined) return yield* unavailable(record, 'the tag is unavailable and has no previously verified cache');
       if (sha !== record.commitSha) return yield* mismatch(record, 'trusted repository tag does not match its recorded commit');
       const current = yield* commitDocuments(repo, sha);
-      const actual = diffItems(itemValues(previous), itemValues(current)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' }));
+      if (profile !== undefined && hasProfile(current, profile) && desiredOfDocuments(current, undefined, profile).issues.length) return yield* mismatch(record, 'published profile is invalid');
+      const actual = diffItems(valuesOf(previous), valuesOf(current)).map((c) => ({ id: c.itemId, kind: c.kind, change: c.before === undefined ? 'added' : c.after === undefined ? 'removed' : 'changed' }));
       const advertised = [...record.items].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
       if (canonical(actual) !== canonical(advertised)) return yield* mismatch(record, 'advertised items do not match the published Git diff');
       if (fetched && (yield* git(repo, ['update-ref', verifiedRef, sha])).code !== 0) return yield* unavailable(record, 'verified revision cache could not be recorded');
       documents.set(sha, current);
       previous = current;
+    }
+    if (options.followed) {
+      const fs = yield* Fs;
+      const text = JSON.stringify(range) + '\n';
+      // A load of an older revision must not roll back the offline head.
+      const prior = yield* fs.readText(verifiedRecords);
+      const priorCount = prior === undefined ? 0 : yield* Effect.try({
+        try: () => {
+          const cached: unknown = JSON.parse(prior);
+          if (!Array.isArray(cached)) throw new Error();
+          const decoded = cached.map(r => decodeHosted(SyncRevisionSchema, r));
+          if (decoded.some((r, i) => r.setupId !== options.setupId || r.number !== i + 1)) throw new Error();
+          return decoded.length;
+        },
+        catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'verified metadata is invalid' }),
+      }).pipe(Effect.catch(() => Effect.succeed(-1)));
+      if (range.length > priorCount) {
+        yield* Backups.use(b => b.preserve(verifiedRecords, verifiedRelative, undefined, { private: true })).pipe(
+          Effect.provide(backupsForRun(now()).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), Layer.succeed(Fs, fs))))),
+        );
+        yield* fs.writeTextAtomic(verifiedRecords, text);
+      }
     }
     return documents;
   });
@@ -141,9 +187,10 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       return { revisionApplied, origins: origins as Readonly<Record<string, string>> };
     }, catch: () => new RevisionUnavailable({ revision: 'HEAD', reason: 'hosted baseline is invalid' }) });
     const origins: Record<string, string> = {};
-    if (linked) {
-      let commit: string | undefined;
-      let holds: Readonly<Record<string, string>> = {};
+    const migrated = options.followed ? yield* revParse(repo, 'refs/nortuscc/migration/applied') : undefined;
+    if (linked || migrated !== undefined) {
+      let commit: string | undefined = migrated;
+      let holds: Readonly<Record<string, string>> = migrated === undefined ? {} : yield* (yield* SyncStore).read;
       if (repo === paths.repo) {
         const recorded = yield* fs.readText(join(paths.stateRoot, 'state.json'));
         if (recorded !== undefined) {
@@ -158,26 +205,27 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       const docs = yield* commitDocuments(repo, commit);
       const cache = new Map([[commit, docs]]);
       let seed = docs;
-      for (const id of itemValues(docs).keys()) origins[id] = commit;
+      for (const id of valuesOf(docs).keys()) origins[id] = commit;
       for (const id of Object.keys(holds).sort()) {
         const held = holds[id]!;
         let heldDocs = cache.get(held);
         if (heldDocs === undefined) { heldDocs = yield* commitDocuments(repo, held); cache.set(held, heldDocs); }
-        seed = patchItem(seed, id, heldDocs);
-        if (itemValues(heldDocs).has(id)) origins[id] = held;
+        if (!hasProfile(heldDocs, profile)) continue;
+        seed = patch(seed, id, heldDocs);
+        if (valuesOf(heldDocs).has(id)) origins[id] = held;
         else delete origins[id];
       }
       // A root hold can also move a sibling's shared pin. Choose an existing origin with
       // that composed value, then prove the whole seed survives item-order materialization.
-      const expected = itemValues(seed);
+      const expected = valuesOf(seed);
       for (const id of Object.keys(origins)) if (!expected.has(id)) delete origins[id];
       for (const [id, value] of expected) {
-        if (origins[id] !== undefined && itemValues(cache.get(origins[id]!)!).get(id) === value) continue;
-        const origin = [...cache].find(([, candidate]) => itemValues(candidate).get(id) === value)?.[0];
+        if (origins[id] !== undefined && valuesOf(cache.get(origins[id]!)!).get(id) === value) continue;
+        const origin = [...cache].find(([, candidate]) => valuesOf(candidate).get(id) === value)?.[0];
         if (origin === undefined) return yield* unavailable('HEAD', 'local held seed cannot be represented by item origins');
         origins[id] = origin;
       }
-      const materialized = itemValues(yield* baselineDocuments(repo, { revisionApplied: 0, origins }, cache));
+      const materialized = valuesOf(yield* baselineDocuments(repo, { revisionApplied: 0, origins }, cache));
       if ([...new Set([...expected.keys(), ...materialized.keys()])].some((id) => expected.get(id) !== materialized.get(id))) return yield* unavailable('HEAD', 'local held seed cannot be preserved by item origins');
     }
     const baseline: HostedBaseline = { revisionApplied: 0, origins };
@@ -191,7 +239,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     for (const [id, origin] of Object.entries(baseline.origins).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       let docs = cache.get(origin);
       if (docs === undefined) { docs = yield* commitDocuments(repo, origin); cache.set(origin, docs); }
-      documents = patchItem(documents, id, docs);
+      documents = patch(documents, id, docs);
     }
     return documents;
   });
@@ -217,16 +265,23 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const conflicts = [...accepted].filter((id) => overrideOf(id, overrides.value) !== undefined).sort();
     // Accepted override conflicts stay visible, and use the baseline value under the override.
     const take = new Set([...accepted].filter((id) => !conflicts.includes(id)));
-    for (const id of new Set([...itemValues(documents).keys(), ...itemValues(appliedDocuments).keys()])) {
-      if (!take.has(id)) documents = patchItem(documents, id, appliedDocuments);
+    for (const id of new Set([...valuesOf(documents).keys(), ...valuesOf(appliedDocuments).keys()])) {
+      if (!take.has(id)) documents = patch(documents, id, appliedDocuments);
     }
     return { repo, cache, head, headDocuments, baseline, documents, appliedDocuments, overrides, conflicts, take };
   });
 
   const snapshot = (documents: Documents, overrides: Input<MachineOverrides>) => Effect.gen(function* () {
     yield* consent;
-    return yield* snapshotFromDocuments({ documents, stateRoot: snapshotsRoot, overrides, now: now() });
+    const content = profile !== undefined && Object.keys(documents).length === 0 ? { [`profiles/${profile}.json`]: '{}' } : documents;
+    return yield* snapshotFromDocuments({ documents: content, repoUrl: options.repoUrl, profile, stateRoot: snapshotsRoot, overrides, now: now() });
   });
+
+  // Historical and mixed snapshots can predate an overridden item; keep its choice on disk.
+  const historicalSnapshot = (documents: Documents, overrides: Input<MachineOverrides>) => {
+    const dropped = droppedOnSwitch({ holds: {}, overrides: overrides.value, to: desiredOfDocuments(documents, undefined, profile) });
+    return snapshot(documents, { ...overrides, value: retainedOverrides(overrides.value, dropped.overrides) });
+  };
 
   const offeredItems = Effect.gen(function* () {
     const { repo } = yield* repository;
@@ -236,7 +291,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     for (const revision of range) for (const item of revision.items) offers.set(item.id, revision);
     return [...offers].map(([itemId, revision]) => ({ itemId, revision }));
   });
-  const fetch = Effect.gen(function* () { yield* repository; const range = yield* records; return { head: range[range.length - 1]! }; });
+  const fetch = Effect.gen(function* () {
+    const { repo } = yield* repository;
+    if (options.followed) yield* fetchFollowedMain(paths, repo, options.repoUrl).pipe(Effect.ignore);
+    const range = yield* records;
+    return { head: range[range.length - 1]! };
+  });
   const load = (revision: Revision) => Effect.gen(function* () {
     const { repo } = yield* repository;
     const range = yield* records;
@@ -246,12 +306,12 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
   });
   const effective = (decisions: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => Effect.gen(function* () {
     const composed = yield* compose(decisions, choices);
-    return { applied: { ...yield* snapshot(composed.appliedDocuments, composed.overrides), revision: null }, effective: yield* snapshot(composed.documents, composed.overrides), conflicts: composed.conflicts };
+    return { applied: { ...yield* historicalSnapshot(composed.appliedDocuments, composed.overrides), revision: null }, effective: yield* historicalSnapshot(composed.documents, composed.overrides), conflicts: composed.conflicts };
   });
   const current = Effect.gen(function* () {
     const { repo, linked } = yield* repository;
     const baseline = yield* readBaseline(repo, linked);
-    return yield* snapshot(yield* baselineDocuments(repo, baseline, new Map()), yield* (yield* OverridesStore).read);
+    return yield* historicalSnapshot(yield* baselineDocuments(repo, baseline, new Map()), yield* (yield* OverridesStore).read);
   });
   const baseline = Effect.gen(function* () { const { repo, linked } = yield* repository; return yield* readBaseline(repo, linked); });
   const recordApplied = (evidence: AppliedEvidence) => Effect.gen(function* () {
@@ -259,8 +319,8 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     if (canonical(composed.head) !== canonical(evidence.revision)) return yield* mismatch(evidence.revision, 'inspection revision is no longer the hosted head');
     const observed = new Set(evidence.observed);
     const released = new Set(evidence.released);
-    const values = itemValues(composed.documents);
-    const headValues = itemValues(composed.headDocuments);
+    const values = valuesOf(composed.documents);
+    const headValues = valuesOf(composed.headDocuments);
     for (const id of new Set([...observed, ...released])) {
       if (!composed.take.has(id) || (observed.has(id) && released.has(id)) || observed.has(id) !== values.has(id) || values.get(id) !== headValues.get(id)) return yield* mismatch(evidence.revision, 'adoption evidence does not describe an accepted unconflicted effective item');
     }
@@ -271,12 +331,16 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     // Source-wide pins can couple siblings. Refuse an origin set that would reconstruct a
     // different selected value or silently change an item without its own positive evidence.
     const next: HostedBaseline = { revisionApplied: Math.max(composed.baseline.revisionApplied, composed.head.number), origins };
-    const materialized = itemValues(yield* baselineDocuments(composed.repo, next, composed.cache));
-    const prior = itemValues(composed.appliedDocuments);
+    const materialized = valuesOf(yield* baselineDocuments(composed.repo, next, composed.cache));
+    const prior = valuesOf(composed.appliedDocuments);
     const selected = new Set([...observed, ...released]);
     for (const id of new Set([...materialized.keys(), ...prior.keys(), ...selected])) {
       if (materialized.get(id) !== (selected.has(id) ? values.get(id) : prior.get(id))) return yield* mismatch(evidence.revision, 'selected origins cannot preserve the confirmed values independently');
     }
+    if (canonical(next) === canonical(composed.baseline)) return;
+    yield* consent;
+    yield* Backups.use(backups => backups.preserve(baselinePath, baselineRelative, undefined, { private: true }))
+      .pipe(Effect.provide(backupsForRun(now()).pipe(Layer.provide(machinePaths(paths)))));
     yield* consent;
     yield* (yield* Fs).writeTextAtomic(baselinePath, JSON.stringify(next, null, 2) + '\n');
   });
@@ -292,7 +356,8 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     ) };
   })).pipe(Layer.provide(options.processes ?? nodeProcesses({ inherit: 'stderr' })));
 
-  const services = Layer.mergeAll(setupsStore, overridesStore, syncStore).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, guardedProcesses)));
+  // A cached read still resolves its commit through the guarded processes first.
+  const services = Layer.mergeAll(setupsStore, overridesStore, syncStore, commitDocumentsCache).pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, guardedProcesses)));
   return Layer.effect(SetupSource, Effect.gen(function* () {
     const context = yield* Effect.context<Services>();
     const lock = yield* Semaphore.make(1);
@@ -305,6 +370,6 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
     const available = <A>(effect: Effect.Effect<A, unknown, Services>) => provide(effect).pipe(
       Effect.catchTag('RevisionMismatch', () => unavailable('HEAD', 'hosted baseline unavailable')),
     );
-    return { setupId: options.setupId, offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
+    return { setupId: options.setupId, ...(profile === undefined ? {} : { profile }), offeredItems: provide(offeredItems), trusted: available(repository.pipe(Effect.as(true))), fetch: available(fetch), load: (r: Revision) => provide(load(r)), effective: (d: ReadonlyArray<Decision>, choices?: Parameters<SetupSource['Service']['effective']>[1]) => provide(effective(d, choices)), current: available(current), baseline: available(baseline), recordApplied: (e: AppliedEvidence) => provide(recordApplied(e)) };
   })).pipe(Layer.provide(services));
 };

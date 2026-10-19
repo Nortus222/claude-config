@@ -20,6 +20,9 @@ const AccountSchema = Schema.Struct({
   etag: Schema.optionalKey(Schema.String),
 });
 export type HostedAccount = typeof AccountSchema.Type;
+const LegacySetupSchema = Schema.Struct({ ...SyncSetupSchema.fields, profile:Schema.optionalKey(Schema.String), owned:Schema.optionalKey(Schema.Boolean) });
+const ReadDocumentSchema = Schema.Struct({ version:Schema.Literal(1), activeAccountId:Schema.NullOr(IdSchema),
+  accounts:Schema.Array(Schema.Struct({ ...AccountSchema.fields, setups:Schema.Array(LegacySetupSchema) })) });
 const StoreDocumentSchema = Schema.Struct({ version: Schema.Literal(1), activeAccountId: Schema.NullOr(IdSchema), accounts: Schema.Array(AccountSchema) }).check(
   Schema.makeFilter((doc) => new Set(doc.accounts.map((a) => a.accountId)).size === doc.accounts.length
     && (doc.activeAccountId === null || doc.accounts.some((a) => a.accountId === doc.activeAccountId))
@@ -53,7 +56,9 @@ export const hostedStore = Layer.effect(HostedStore, Effect.gen(function* () {
   const parse = (text: string) => Effect.try({ try: () => JSON.parse(text) as unknown, catch: storageFailure });
   const read = Effect.gen(function* () {
     const text = yield* fs.readText(statePath).pipe(Effect.mapError(storageFailure));
-    return text === undefined ? { version: 1 as const, activeAccountId: null, accounts: [] } : yield* decoded(StoreDocumentSchema, yield* parse(text));
+    if (text === undefined) return { version:1 as const, activeAccountId:null, accounts:[] };
+    const legacy = yield* decoded(ReadDocumentSchema, yield* parse(text));
+    return yield* decoded(StoreDocumentSchema, { ...legacy, accounts:legacy.accounts.map(account => ({ ...account, setups:account.setups.map(setup => ({ ...setup, profile:setup.profile ?? 'default', owned:setup.owned ?? true })) })) });
   });
   const cachePath = (accountId: string, setupId: string) => Effect.gen(function* () {
     yield* decoded(IdSchema, accountId); yield* decoded(IdSchema, setupId);

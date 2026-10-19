@@ -157,16 +157,17 @@ test('a --skip or --take-theirs id that is not waiting exits 2 and accepts nothi
   assert.equal(existsSync(join(m.state, 'decisions.json')), false);
 });
 
-// Review Focus 3.
-test('an applied commit the checkout no longer has is reported, and sync measures from HEAD', async () => {
+test('sync refuses an unavailable applied commit before changing the machine', async () => {
   const m = machine();
   mkdirSync(m.state, { recursive: true });
   writeFileSync(join(m.state, 'state.json'), JSON.stringify({ version: 1, repo: null, files: {}, applied: { commit: 'f'.repeat(40), at: '2026-10-07T00:00:00.000Z' } }) + '\n');
   pushUpstream(m, { 'claude/CLAUDE.md': '# from another machine\n' });
   const result = await sync(m, '--yes');
-  assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stderr, /the applied commit fffffff is not in this checkout; measuring from/);
-  assert.equal(state(m).applied.commit, originHead(m));
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /CLI checkout refused \(unavailable\)/);
+  assert.equal(state(m).applied.commit, 'f'.repeat(40));
+  assert.equal(existsSync(join(m.state, 'decisions.json')), false);
+  assert.equal(existsSync(join(m.claude, 'CLAUDE.md')), false);
 });
 
 test('pull is sync', async () => {

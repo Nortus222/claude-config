@@ -1,9 +1,13 @@
+import { execFileSync } from 'node:child_process';
+import { followedSetupSourceLayer } from '@nortuscc/sync';
+import { tempRepo } from '../../sync/checks/support/repo.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { realpathSync, rmSync } from 'node:fs';
+import { readFileSync, realpathSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Effect, Layer, Deferred, Queue } from 'effect';
-import { acquireApplyLock } from '@nortuscc/machine';
+import { acquireApplyLock, nodeProcesses, Processes } from '@nortuscc/machine';
 import { HostedFailure, HostedTransport, type HostedClient, type HostedState } from '@nortuscc/hosted-client';
 import { AgentClock, configuredHostedRuntime, hostedCadence, hostedWait, makeHostedRuntime, makeSession, SetupSource, SetupsStore, startAgent } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
@@ -11,6 +15,12 @@ import { setupFixture } from './support/setup-fixture.ts';
 
 const empty: HostedState = { accountId: null, login: null, machineId: null, auth: 'signed-out', setups: [], machine: null, lastSyncAt: null, retryAt: null, pollAfter: 900, error: null };
 const fakeClient = (calls: string[], failRecovery = false): HostedClient => ({
+  registerSetup: () => Effect.die('Unexpected setup registration'),
+  publishRevision: () => Effect.die('Unexpected publication'),
+  listRevisions: () => Effect.succeed([]),
+  publicSetup: () => Effect.die('Unexpected public setup read'),
+  subscribe: () => Effect.void,
+  unsubscribe: () => Effect.void,
   signInFlow: Effect.succeed(null),
   state: Effect.succeed(empty), revisions: () => Effect.succeed([]),
   recover: () => Effect.suspend(() => { calls.push('recover'); return failRecovery ? Effect.fail(new HostedFailure({ code: 'storage' })) : Effect.succeed(empty); }),
@@ -159,4 +169,58 @@ test('runtime passes reporting intent only as local sign-in preference', async (
     const handle = yield* startAgent(() => m.domains, { hosted: runtime, deferStart: true });
     yield* handle.hosted!.signIn('My Mac', false);
   })), f.source);
+});
+
+test('a followed Git profile takes precedence over the CLI primary even if hosted recovery fails', async t => {
+  const m = agentMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const f = setupFixture(m.root); await m.trust();
+  m.write(join(m.paths.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed: { repoUrl: 'https://github.com/example/followed.git', profile: 'default', setupId: null } }));
+  await m.run(Effect.gen(function* () {
+    const runtime = yield* makeHostedRuntime(fakeClient([], true), { domains: () => m.domains, os: 'macos' });
+    const result = yield* runtime.runJobs;
+    assert.equal(result.status.error, 'REVISION_UNAVAILABLE');
+    assert.equal(result.inspection, undefined, 'the old CLI source must never apply');
+  }).pipe(Effect.provide(Layer.succeed(Processes, { run: () => Effect.succeed({ code: 128, stdout: '', stderr: 'offline' }) }))), f.source);
+});
+
+
+test('a hosted follower inspects the last verified private snapshot during a service outage', async t => {
+  const m = agentMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const repository = tempRepo({ 'claude/CLAUDE.md': '# announced\n' });
+  t.after(() => rmSync(repository.root, { recursive: true, force: true }));
+  const origin = join(repository.root, 'origin.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  repository.git('remote', 'add', 'origin', origin);
+  repository.git('tag', 'v1'); repository.git('push', '-q', 'origin', 'main', 'v1');
+  const repoUrl = 'https://github.com/example/followed.git';
+  const followed = { repoUrl, profile: 'default', setupId: 'setup-1' };
+  m.write(join(m.paths.stateRoot, 'agent/followed.json'), JSON.stringify({ version: 1, followed }));
+  const revision = { setupId: 'setup-1', number: 1, commitSha: repository.first, tag: 'v1', changelog: '', requiredEnv: [], items: [{ id: 'file:claude:CLAUDE.md', kind: 'file' as const, change: 'added' as const }] };
+  let offline = false;
+  const processes = Layer.effect(Processes, Effect.gen(function* () {
+    const real = yield* Processes;
+    return { run: (command: Parameters<Processes['Service']['run']>[0]) => {
+      assert.equal(command.cmd, 'git'); assert.notEqual(command.cwd, m.paths.repo);
+      if (offline && command.args.includes('fetch')) return Effect.succeed({ code: 128, stdout: '', stderr: 'offline' });
+      return real.run({ ...command, args: command.args.map(arg => arg === repoUrl && (command.args.includes('fetch') || command.args.includes('ls-remote')) ? origin : arg), stderr: 'capture' });
+    } };
+  })).pipe(Layer.provide(nodeProcesses()));
+  await Effect.runPromise(SetupSource.use(source => source.load(revision)).pipe(Effect.provide(followedSetupSourceLayer(m.paths, followed, { processes, records: Effect.succeed([revision]) }))));
+  repository.commit({ 'claude/CLAUDE.md': '# unannounced\n' }); repository.git('push', '-q', 'origin', 'main');
+  offline = true;
+  const fallback = setupFixture(m.root);
+  const client: HostedClient = { ...fakeClient([], true),
+    publicSetup: () => Effect.fail(new HostedFailure({ code: 'network' })),
+    listRevisions: () => Effect.fail(new HostedFailure({ code: 'network' })),
+  };
+  await m.run(Effect.gen(function* () {
+    const runtime = yield* makeHostedRuntime(client, { domains: () => m.domains, os: 'macos' });
+    const result = yield* runtime.inspectPrimary;
+    assert.equal(result.status.error, undefined);
+    assert.deepEqual(result.inspection?.revision, revision);
+    // Cached content remains usable while recovery is unavailable.
+    const source = yield* SetupSource.pipe(Effect.provide(followedSetupSourceLayer(m.paths, followed, { processes })));
+    const snapshot = yield* source.load(revision);
+    assert.equal(readFileSync(join(snapshot.repo, 'claude/CLAUDE.md'), 'utf8'), '# announced\n');
+  }).pipe(Effect.provide(processes)), fallback.source);
 });

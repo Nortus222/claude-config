@@ -4,16 +4,19 @@ import type { AuthenticatedPrincipal } from './auth.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
 import type { Store } from './store.ts';
 import { ServiceFailure } from './errors.ts';
-import { ownedSetup } from './setups.ts';
+import { readableSetup, subscribedSetups } from './subscriptions.ts';
 import { revisionRange } from './revisions.ts';
 import { changeAccount } from './machines.ts';
 
 export function statusRoute(request: ServiceRequest, principal: AuthenticatedPrincipal, store: Store['Service']): Effect.Effect<ServiceResponse | undefined,ServiceFailure> {
   return Effect.gen(function* () {
     if (request.method !== 'PUT' || request.path !== '/v1/machines/self/status') return undefined;
-    const summary = yield* Effect.try({ try:() => decodeRequestBody(StatusSummarySchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
+    const received = yield* Effect.try({ try:() => decodeRequestBody(StatusSummarySchema,request.body),catch:() => new ServiceFailure({ code:'invalid' }) });
+    const subscriptions = yield* subscribedSetups(store,yield* store.readPartition('accounts',principal.accountId));
+    const closed = new Set(subscriptions.filter(s => s.closed).map(s => s.setup.setupId));
+    const summary = { ...received,setups:received.setups.filter(report => !closed.has(report.setupId)) };
     for (const report of summary.setups) {
-      const { setup,snapshot } = yield* ownedSetup(store,principal.accountId,report.setupId);
+      const { setup,snapshot } = yield* readableSetup(store,principal.accountId,report.setupId);
       if (report.revisionApplied > setup.latestRevision) return yield* Effect.fail(new ServiceFailure({ code:'invalid' }));
       const history = yield* Effect.try({ try:() => revisionRange(snapshot,setup.latestRevision,0),catch:(e) => e as ServiceFailure });
       const known = new Set(history.flatMap((r) => r.items.map((i) => i.id)));

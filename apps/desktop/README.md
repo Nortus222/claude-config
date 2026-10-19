@@ -63,10 +63,10 @@ removal, selected-backup restoration, user pause, personal distribution and prof
 require owners that are not available through MCP.
 
 The connected app discovers accepted and changed runs through bounded run-ID notifications and
-reads the current safe receipt through its existing controller. Review & apply shows the operation's
-intent, author destination, committed and remaining effects, uncertainty and backups. Device
-sign-in success means initiation only. A current safe read may display the human challenge until
-its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
+reads the current safe receipt through its existing controller. Changes shows a machine run's
+progress, committed and remaining effects and recovery; Publish shows author runs. Device
+sign-in success means initiation only. The controller treats a human challenge as current only
+until its expiry; notifications never carry the code or URI. Metadata runs report local queueing separately
 from confirmed hosted state. History uses the shared bounded projection with constant fallback for
 unknown events and closed summaries for historical diagnostics.
 
@@ -186,7 +186,7 @@ npm run test:resources -w apps/desktop
 
 `test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and independent Bun, agent and MCP hashes, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
 
-Unknown local setup displays **Opening Claude Config**; first-run consent appears only after a validated setup-needed reply. Existing installations wait for genuine connection and initial reads. `status` may answer `NO_REPORT` before the first inspection; this remains connected with a waiting explanation and a read-only **Recheck agent status** action. A current report completes that wait, and an active apply exposes the existing Cancel control. Actual transport, setup and inspection failures remain visible with explicit recheck or Settings recovery; they are not treated as startup progress. Startup uses one focused loading card with confirmed Local setup, Agent connection and Local inspection milestones. Activity is indeterminate, announced politely and respects reduced motion. Updates remain available in a secondary disclosure independently of agent readiness; update activity, availability and retry open it automatically, while idle checks start compact. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
+Unknown local setup displays **Opening Nortuscc**; first-run consent appears only after a validated setup-needed reply. Existing installations wait for genuine connection and initial reads. `status` may answer `NO_REPORT` before the first inspection; this remains connected with a waiting explanation and a read-only **Recheck agent status** action. A current report completes that wait, and an active apply exposes the existing Cancel control. Actual transport, setup and inspection failures remain visible with explicit recheck or Settings recovery; they are not treated as startup progress. Startup uses one focused loading card with confirmed Local setup, Agent connection and Local inspection milestones. Activity is indeterminate, announced politely and respects reduced motion. Updates remain available in a secondary disclosure independently of agent readiness; update activity, availability and retry open it automatically, while idle checks start compact. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
 
 Every JSON line is bounded to 1,048,576 bytes. Inspect/apply time out after 60 seconds, preview after 10, cancel after 30, and shutdown after 5. The shared `<stateRoot>/apply.lock` keeps the agent and standalone CLI from changing the machine together. An apply re-inspects and returns a replacement preview when the plan is stale.
 
@@ -231,8 +231,12 @@ waiting commands refuse and late publication is fenced. The owned worker is join
 event loop returns, outside UI callbacks. Closing leaves a successfully launched persistent agent
 running. Forced kills and crashes can still bypass cleanup. The first renderer setup read consumes the initial display snapshot once; subsequent reads
 are fresh, and restart, bootstrap or Git installation invalidate it. Explicit lifecycle actions retain
-their existing helpers and locks. The legacy read-only paths helper has a ten-second outer deadline,
-allowing its five-second login-shell probe and bounded overhead to finish.
+their existing helpers and locks. Every helper and the agent probe the login shell first, for up to
+15 seconds, so every native deadline exceeds that: the read-only paths, setup-state and
+maintenance-state helpers and native readiness have 30 seconds, Git installation 45, and lifecycle,
+update and connection helpers 120. `Setup::timeout` in `src-tauri/src/host.rs` owns these deadlines.
+A successful probe remembers only its PATH, in the private file `agent/login-path` under the state
+root; a later timeout or failure uses the app's environment with that PATH, and its message says which.
 
 On a disposable machine, verify inspect, selection, preview, apply, cancellation, offline recovery and Restart agent. Close the window during apply and reconnect to the continuing service. Check relocation and an upgrade while a run is active. Real launchd behavior, notifications and GUI interaction need manual verification; socket fixtures and fake Processes do not exercise the OS service manager.
 
@@ -263,7 +267,7 @@ OS/runtime delay before that instruction or prove that cold-start delay has been
 
 For a slow login probe, `shell_ready` measures reaching the first fixed marker after shell
 startup; `environment_ready` measures the bundled runtime's environment capture after that
-marker. `timed_out` followed by `login_probe: fallback` records the existing five-second
+marker. `timed_out` followed by `login_probe: fallback` records the 15-second
 fallback. Captured shell output is limited to one MiB and is never logged. Agent phases
 include lock acquisition, log rotation, service construction, scheduler/session creation,
 IPC readiness and shutdown. `shutdown: started` followed by `ipc_closed: completed` without
@@ -290,7 +294,7 @@ lose queued records. No logs are uploaded automatically.
 
 ## Agent notifications
 
-The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the existing Review & apply view. A pending review request survives renderer startup; clicks refresh and focus that view without previewing or applying automatically.
+The Rust host posts macOS notifications through UserNotifications under the installed app's identity. Ordinary startup requests permission; `--notify <id>` never prompts. Posting requires authorized notifications with alerts or Notification Center enabled. The OS add-request completion, rather than sending a socket event or launching the app, determines the delivery acknowledgment. The delegate stays retained before app launch finishes, presents foreground notifications, and routes a default click to the Changes screen (Home when the agent reports an error or pause). A pending review request survives renderer startup; clicks refresh the inspection without previewing or applying automatically.
 
 Hidden delivery branches before Tauri creates a window. Its fixed `--paths` helper resolves the same configured state root without registering or restarting the service. It reads the current token, authenticates as an app without subscribing, fetches the exact id and active receipt, posts, acknowledges and exits. Invalid ids, expired receipts and malformed payloads fail closed. Unbundled executables decline native posting. Native posting on non-macOS platforms returns unavailable so the agent can try Linux `notify-send`; packaging remains macOS arm64 only.
 
@@ -361,11 +365,14 @@ Missing Git exposes an explicit Apple installer request and recheck. Bootstrap r
 completed native-owned checkouts; existing recorded setups are inspected without bootstrap.
 Setup prepares the agent and does not apply configuration changes.
 
-The sidebar contains Overview, Review & apply, Resolved and Settings. Overview reads the current
-agent status. Resolved shows inspected items and their available layer/source provenance.
-Review keeps selection, stale replacement previews, progress, cancellation and reconnect behavior.
-Notification clicks route to Review, refresh it and focus its heading without applying.
-Browser preview shows empty real states with native actions disabled.
+The sidebar, under the Nortuscc brand, groups THIS MAC (Home, Changes, Skills) and MY PROFILES
+(Profiles, Upstreams, Publish), then Settings. Badges count undecided incoming changes on Changes and
+unpublished drafts on Publish, and flag an app update on Settings. Home names what this Mac follows
+and what needs attention, each line with its next action. Changes holds the one preview and Apply for
+incoming changes, this Mac's own items (a durable `reconcile`) and profile switches; its Details keep
+layer/source provenance. Item notifications open Changes and agent failures open Home, without
+applying. A lost connection or failed inspection shows one banner above every screen with Reconnect
+or Check again. Browser preview shows empty real states with native actions disabled.
 
 Settings offers optional GitHub Device Flow and defaults status sharing off before sign-in.
 The code lives only in renderer memory. Open GitHub is an explicit fixed native action.
@@ -391,8 +398,8 @@ The manual `desktop-release` workflow targets only macOS arm64. The owner dispat
 `main` with its exact reviewed SHA, stable version and plain release notes. By default it validates
 the signed distribution and retains workflow artifacts without publishing. Selecting `publish`
 on that manual dispatch is the release approval. The workflow checks the repository, current main SHA, matching versions in
-`package.json`, `Cargo.toml` and `tauri.conf.json`, and successful main runs of macos, linux,
-windows and cosmos. It creates a temporary release overlay with the owner's public updater key,
+`package.json`, `Cargo.toml` and `tauri.conf.json`, and successful main runs of macos, linux
+and windows. It creates a temporary release overlay with the owner's public updater key,
 the fixed stable endpoint and `requireSignedVersion: true`. Ordinary builds remain unconfigured
 for updates and do not use signing secrets.
 

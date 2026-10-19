@@ -2,17 +2,17 @@
 
 This directory defines the existing metadata service's Azure delivery. Deployment
 completion and public health/readiness checks do not establish OAuth sign-in,
-LIVE acceptance or billing proof. Issues #51 and #81 remain open. Local image/emulator tests and
-Bicep compilation do not establish Azure identity, Strong consistency, capacity,
-regional availability or ingress behavior.
+LIVE acceptance or billing proof. Issues #51 and #81 remain open. Bicep compilation
+does not establish Azure identity, Strong consistency, capacity, regional
+availability or ingress behavior.
 
 `service-image.yml` and `service-deploy.yml` accept **workflow_dispatch only**.
 Both reject forks, tags and branches other than this repository's `main`.
 `reviewed_commit` must equal the run's captured `github.sha` and checked-out HEAD;
 a run waiting while main advances still releases that captured source.
-The checkout retains no Git credentials. Ordinary PR/push checks build locally,
-exercise the real image against the isolated emulator and compile Bicep; they
-cannot publish or obtain cloud OIDC credentials.
+The checkout retains no Git credentials. Ordinary PR/push checks compile Bicep and
+statically check the delivery files; they build and run no image and cannot publish
+or obtain cloud OIDC credentials.
 
 ## Owner setup
 

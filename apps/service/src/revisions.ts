@@ -5,6 +5,7 @@ import type { RevisionDocument } from './documents.ts';
 import type { ServiceRequest, ServiceResponse } from './service.ts';
 import type { Store, PartitionSnapshot } from './store.ts';
 import { activeAccount } from './machines.ts';
+import { readableSetup } from './subscriptions.ts';
 import { ownedSetup, reconcileSetup } from './setups.ts';
 import { ServiceFailure } from './errors.ts';
 
@@ -43,7 +44,7 @@ export function revisionRoute(request: ServiceRequest, principal: AuthenticatedP
         if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error();
         return Number(value);
       },catch:() => new ServiceFailure({ code:'invalid' }) });
-      const { setup,snapshot } = yield* ownedSetup(store,principal.accountId,setupId);
+      const { setup,snapshot } = yield* readableSetup(store,principal.accountId,setupId);
       if (after > setup.latestRevision) return yield* Effect.fail(new ServiceFailure({ code:'invalid' }));
       const all = yield* Effect.try({ try:() => revisionRange(snapshot,setup.latestRevision,after),catch:(e) => e as ServiceFailure });
       const page = all.slice(0,MAX_REVISIONS);
