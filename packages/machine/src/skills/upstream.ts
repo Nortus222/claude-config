@@ -10,7 +10,7 @@ import { Processes, type Command } from '../processes.ts';
 import { readSkillCandidates, type SkillCandidate, type SkillCandidatesResult } from './candidates.ts';
 import type { SkillLock } from './manifest.ts';
 import { lockRef, offPinNote, pinsBySource, short } from './pins.ts';
-import { additionLockEntry, installedSkillNames, readSkillLockEvidence } from './store.ts';
+import { additionLockEntry, installedSkillNames, matchSkillName, readSkillLockEvidence } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -295,13 +295,14 @@ export const checkUpdates = (desired: DesiredConfig, options?: { readonly maxSou
     return { ...planUpdates({ lock, installed, remoteTrees, pins, additions }), available, ...(sourceFailures.length ? { sourceFailures } : {}) };
   });
 
-// Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names.
+// Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names,
+// in any case; items keep the installed name, which their update and remove commands act on.
 export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[] {
   const declared = new Map(desired.skills.map((s) => [s.name, s]));
   const item = (
     name: string, group: string, state: string, disposition: Observed['disposition'], note?: string,
   ): Observed => {
-    const from = declared.get(name)?.from;
+    const from = declared.get(matchSkillName(declared.keys(), name) ?? name)?.from;
     return {
       key: `skill:${name}`, domain: 'skills', label: name, group, state, disposition,
       ...(note === undefined ? {} : { note }),

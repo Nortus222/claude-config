@@ -11,6 +11,22 @@ import type { SkillLock } from './manifest.ts';
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+// The skills installer treats skill names case-insensitively but keeps each skill's own spelling, so a declared
+// `TDD` may be installed, locked and exposed as `tdd`. This is the one name comparison for that.
+export const sameSkillName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+// The one of `names` that `name` refers to: an exact name wins, otherwise a unique case-insensitive match;
+// an ambiguous fold finds none.
+export const matchSkillName = (names: Iterable<string>, name: string): string | undefined => {
+  let folded: string | undefined;
+  let count = 0;
+  for (const candidate of names) {
+    if (candidate === name) return name;
+    if (sameSkillName(candidate, name)) { folded = candidate; count++; }
+  }
+  return count === 1 ? folded : undefined;
+};
+
 // A sibling of the store, so redirecting the store (NORTUSCC_AGENTS_DIR) redirects the lock too.
 export const skillLockPath = (paths: MachinePathsValue) => join(dirname(paths.agentsSkills), '.skill-lock.json');
 
@@ -82,7 +98,8 @@ export const readExposure = (targets: ReadonlyArray<Target>): Effect.Effect<
   return { list, errors };
 });
 
-// Classifies names by how many of `targets` can load them; an agent without a list sees nothing.
+// Classifies names by how many of `targets` can load them, matching names as the installer does;
+// an agent without a list sees nothing.
 export function skillExposure(input: {
   readonly names: ReadonlyArray<string>;
   readonly targets: ReadonlyArray<Target>;
@@ -92,7 +109,7 @@ export function skillExposure(input: {
   const partial: { name: string; missing: Target[] }[] = [];
   const missing: string[] = [];
   for (const name of input.names) {
-    const lacking = input.targets.filter((t) => !(input.list[t] ?? []).includes(name));
+    const lacking = input.targets.filter((t) => matchSkillName(input.list[t] ?? [], name) === undefined);
     if (lacking.length === 0) exposed.push(name);
     else if (lacking.length === input.targets.length) missing.push(name);
     else partial.push({ name, missing: lacking });
