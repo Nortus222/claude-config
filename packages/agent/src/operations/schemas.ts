@@ -400,7 +400,7 @@ export const InspectUpdatesInputSchema = Schema.Struct({ scope, cursor: Schema.o
 export const UpdatesInspectionResultSchema = Schema.Struct({ generation: IdSchema, items: Schema.Array(Schema.Struct({
   id: Text, key: KeySchema, source: SkillSourceSchema, name: SkillNameSchema, state: Schema.Literals(['current', 'outdated', 'off-pin', 'gone', 'unknown', 'available', 'local']), targets: IntentTargets, policy: Schema.Literals(['upstream', 'source-pin', 'personal-pin']),
   offered: Schema.NullOr(Schema.Struct({ kind: Schema.Literals(['tree', 'revision']), digest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$(?![\s\S])/u)) })), repairRoute: Schema.Literals(['reconcile', 'addition', 'unavailable']), prerequisite: Schema.optionalKey(Text),
-  // Which host an unknown row's source could not reach, or that it timed out; redacted.
+  // Why an unknown row's source could not be read, as a stable category only: "Couldn't reach <host>" or "timed out".
   reason: Schema.optionalKey(Text),
 })).check(Schema.isMaxLength(100)), nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(512))), unavailable: Schema.Boolean, limitReason: Schema.optionalKey(Schema.Literals(['unsafe-owner-data', 'result-bytes'])) });
 export const InspectInputSchema = Schema.Struct({ scope });

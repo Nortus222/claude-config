@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
@@ -281,7 +281,9 @@ test('inspectSource clones unattended, aborts a stalled transfer, captures stder
   assert.deepEqual(clone.args.slice(0, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
   assert.deepEqual(clone.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work -o BatchMode=yes' },
     'the configured core.sshCommand is kept, with batch mode added');
-  assert.equal(calls.find((c) => c.args.includes('core.sshCommand'))!.cwd, clone.cwd, 'ssh config is read where the clone runs');
+  const config = calls.find((c) => c.args.includes('core.sshCommand'))!;
+  assert.equal(config.cwd, clone.cwd, 'ssh config is read where the clone runs');
+  assert.equal(config.env?.GIT_CEILING_DIRECTORIES, dirname(clone.cwd!), 'and never from a repository above that scratch directory');
   assert.equal(clone.output, 'capture');
   assert.equal(clone.stderr, 'capture', "git's stderr never reaches the agent log raw");
   assert.ok(clone.captureLimit?.stderr !== undefined, 'captured stderr is bounded');

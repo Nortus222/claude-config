@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
@@ -41,6 +42,31 @@ test('without configured ssh, networkGit runs plain ssh in batch mode', async ()
   const { calls, layer } = recording();
   await Effect.runPromise(networkGit('git clone', { args: ['clone', 'u', '/d'], cwd: '/d' }).pipe(Effect.provide(layer)));
   assert.equal(network(calls).env?.GIT_SSH_COMMAND, 'ssh -o BatchMode=yes');
+});
+
+// A scratch directory inside a repository (a dotfiles repo at ~/.config holding ~/.config/nortuscc/tmp) must not
+// lend that repository's core.sshCommand to a clone. Real git reads the config; the clone itself is not run.
+test('outside a repository, ssh config never comes from a repository above the scratch directory', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'machine-ssh-ceiling-'));
+  const env = { PATH: process.env.PATH ?? '', HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'no-global') };
+  execFileSync('git', ['init', '-q', root], { env });
+  execFileSync('git', ['-C', root, 'config', 'core.sshCommand', 'ssh -i dotfiles-key'], { env });
+  const scratch = join(root, 'nortuscc', 'tmp', 'trees-x');
+  mkdirSync(scratch, { recursive: true });
+  const real = Effect.runSync(Effect.gen(function* () { return yield* Processes; }).pipe(Effect.provide(nodeProcesses({ env }))));
+  const sshFor = async (outsideRepository: boolean) => {
+    const calls: Command[] = [];
+    const layer = Layer.succeed(Processes, { run: (command) => {
+      calls.push(command);
+      return command.args.includes('core.sshCommand') ? real.run(command) : Effect.succeed({ code: 0, stdout: '', stderr: '' });
+    } });
+    await Effect.runPromise(networkGit('git clone', { args: ['clone', 'u', scratch], cwd: scratch, ...(outsideRepository ? { outsideRepository } : {}) })
+      .pipe(Effect.provide(layer)));
+    return network(calls).env?.GIT_SSH_COMMAND;
+  };
+  assert.equal(await sshFor(false), 'ssh -i dotfiles-key -o BatchMode=yes', 'the fixture repository above is discoverable');
+  assert.equal(await sshFor(true), 'ssh -o BatchMode=yes');
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('stderr past the capture limit becomes a clean cause, not a failure', async () => {

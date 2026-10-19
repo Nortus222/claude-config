@@ -22,7 +22,8 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean; unreachable?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean; unreachable?: (attempt: number) => string } = {}) => {
+ let cloneAttempts = 0;
  const m = agentMachine();
  const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\n${options.spelled ?? 'one'}\ngone\n`;
  const pins: Record<string, string> = options.pinned ? { 'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': OLD } }) } : {};
@@ -44,8 +45,8 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const processes = yield* Processes;
   const fake: Processes['Service'] = { ...processes, run: command => {
-   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.succeed(options.unreachable
-    ? { code: 128, stdout: '', stderr: "fatal: unable to access 'https://x-access-token:PRIVATE_TOKEN@github.com/owner/repo.git/': Could not resolve host: github.com\n" }
+   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.sync(() => options.unreachable
+    ? { code: 128, stdout: '', stderr: options.unreachable(++cloneAttempts) }
     : { code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
    if (command.cmd === 'git' && command.args[0] === '-c') {
@@ -192,14 +193,36 @@ test('an addition declared in another case does not exempt the installed row fro
  }));
 });
 
-test('an unreachable source says why on its update rows, redacted', async () => {
- const f = await fixture({ unreachable: true }); await f.within(s => Effect.gen(function* () {
+test('an unreachable source names only its host on update rows, never a credential or local path', async () => {
+ const f = await fixture({ unreachable: () => "fatal: unable to access 'https://x-access-token:PRIVATE_TOKEN@github.com/owner/repo.git/': error setting certificate file: /Users/x/certs/corp.pem\n" });
+ await f.within(s => Effect.gen(function* () {
   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
   const one = read.items.find(i => i.name === 'one')!;
   assert.equal(one.state,'unknown');
-  assert.equal(one.reason,"Source unreachable: Couldn't reach github.com: Could not resolve host: github.com");
-  assert.doesNotMatch(JSON.stringify(read),/PRIVATE_TOKEN/);
+  assert.equal(one.reason,"Couldn't reach github.com");
+  assert.doesNotMatch(JSON.stringify(read),/PRIVATE_TOKEN|corp\.pem|\/Users\/x/);
   assert.ok(read.items.filter(i => i.state !== 'unknown').every(i => !('reason' in i)), 'only unknown rows carry a reason');
+ }));
+ const local = await fixture({ unreachable: () => "fatal: '/Users/x/src/repo' does not appear to be a git repository\n" });
+ await local.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  assert.equal(read.items.find(i => i.name === 'one')!.state,'unknown');
+  assert.ok(read.items.every(i => !('reason' in i)), 'a cause that names no host is not sent');
+  assert.doesNotMatch(JSON.stringify(read),/\/Users\/x/);
+ }));
+});
+
+// curl's tail carries per-attempt timings; rows built from it would never compare equal between a preview and its
+// revalidation, or between pages of one cursor.
+test('an unreachable source whose failure timing changes per attempt keeps update cursors and previews valid', async () => {
+ const f = await fixture({ unreachable: attempt => `fatal: unable to access 'https://github.com/owner/repo.git/': Failed to connect to github.com port 443 after ${75000 + attempt} ms: Timeout was reached\n` });
+ await f.within(s => Effect.gen(function* () {
+  const first = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1 })); assert.ok(first.nextCursor);
+  const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! }));
+  assert.equal(next.items.length,1);
+  assert.ok([...first.items,...next.items].every(i => i.state !== 'unknown' || i.reason === "Couldn't reach github.com"));
+  const p = yield* s.previewChange(update([]));
+  assert.equal((yield* submit(s,p.planId)).state,'succeeded');
  }));
 });
 

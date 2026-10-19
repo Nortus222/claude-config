@@ -5,7 +5,7 @@ import { parseSkillsManifest, normalizeSkillSource } from '@nortuscc/profile-eng
 import { addCommand, authorDigest, Backups, backupsForRun, bindAuthorCheckout, canonical, executeUpdateManifest, Fs, inspectUpdates,
   installedSkillNames, machinePaths, MANIFEST_FILE, plan, prepareUpdateManifest, Processes, readSkillLockEvidence, selectAll, skillsDomain, skillsUpdateDomain, additionLockEntry, hasVerifiedAdoption,
   SKILL_STEP, skillNamesOf, matchSkillName, validateAuthorBinding,
-  type MachinePathsValue, type MachineReport, type Plan, type PreparedAuthorEdit, type Progress } from '@nortuscc/machine';
+  type MachinePathsValue, type MachineReport, type Observed, type Plan, type PreparedAuthorEdit, type Progress } from '@nortuscc/machine';
 import { checkoutGroups, decodeSyncState } from '@nortuscc/sync';
 import { AgentClock } from '../clock.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
@@ -15,7 +15,7 @@ import type { JobInspection } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { decodeOperationInput, decodeOperationOutput, type OperationChange, type OperationInput, type OperationOutput, type ParityRunEvidence } from './index.ts';
 import type { PreparedParityChange } from './parity.ts';
-import { safeMessage, safeOwnerString } from './safety.ts';
+import { safeOwnerString } from './safety.ts';
 const digest = (value: unknown) => authorDigest(canonical(value))!;
 const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author checkout changed; preview again');
 const failed = () => new SessionError('INTERNAL', 'The update did not finish; check for new changes and preview again. Backups are in ~/.config/nortuscc/backups');
@@ -30,10 +30,23 @@ const declarationOf = (desired: JobInspection['desired'], label: string) => {
 // The addition an update row is, matched exactly as the skills domain plans additions: a row whose addition differs only
 // in case is legacy work and takes the legacy guard.
 const additionOf = (desired: JobInspection['desired'], label: string) => desired.skills.find(s => s.name === label && s.targets !== undefined);
-// The unreachable causes an update row may carry: which host could not be reached, or a timeout. git's other
-// lines can name local paths and source URLs, which stay off the wire.
-const WIRE_UNREACHABLE = /^source unreachable: (?:Couldn't reach [^\s:]{1,253}: |git clone timed out after \d+ s$)/;
-const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8, verifyAdoption: true }).pipe(Effect.timeout('20 seconds'));
+const UNREACHABLE = 'source unreachable';
+const UNREACHABLE_FACT = 'unreachable:';
+// What an unreachable cause may say in the agent's rows and on the wire: which host could not be reached, or that it
+// timed out. The rest of git's line varies per attempt (curl's timings) and can name local files, so it stays out.
+const unreachableCategory = (cause: string): string | undefined => {
+  const host = /^Couldn't reach ([A-Za-z0-9.-]{1,253}): /.exec(cause)?.[1];
+  return host ? `Couldn't reach ${host}` : / timed out after \d+ s$/.test(cause) ? 'timed out' : undefined;
+};
+// An unknown row keeps a constant note and only its cause's category, as a fact, so rows from separate observations
+// compare equal for revalidation and cursors.
+const stableRow = (row: Observed): Observed => {
+  if (row.state !== 'unknown' || !row.note?.startsWith(`${UNREACHABLE}: `)) return row;
+  const category = unreachableCategory(row.note.slice(UNREACHABLE.length + 2));
+  return { ...row, note: UNREACHABLE, ...(category ? { facts: [`${UNREACHABLE_FACT}${category}`] } : {}) };
+};
+const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8, verifyAdoption: true }).pipe(Effect.timeout('20 seconds'),
+  Effect.map(observed => ({ ...observed, items: observed.items.map(stableRow) })));
 
 export const inspectUpdateOperations = (inspection: JobInspection | undefined, generation: number, input: OperationInput<'inspectUpdates'>): Effect.Effect<OperationOutput<'inspectUpdates'>, SessionError, AgentServices> => Effect.gen(function* () {
   const args = yield* Effect.try({ try: () => decodeOperationInput('inspectUpdates', input), catch: () => new SessionError('INVALID_REQUEST', 'Invalid update inspection') });
@@ -56,6 +69,7 @@ export const inspectUpdateOperations = (inspection: JobInspection | undefined, g
     if (!source) continue;
     const addition = additionDeclaration !== undefined;
     const tree = row.facts?.find(f => /^offered-tree:[a-f0-9]{40}$/.test(f))?.slice(13);
+    const reason = row.state === 'unknown' ? row.facts?.find(f => f.startsWith(UNREACHABLE_FACT))?.slice(UNREACHABLE_FACT.length) : undefined;
     const revision = row.state === 'off-pin' ? declaration?.pin?.ref : undefined;
     const adoptionPrerequisite = row.state === 'available' && !hasVerifiedAdoption(row);
     const exactLegacy = row.state === 'available' ? hasVerifiedAdoption(row) : additionLockEntry(acceptedLock.success.lock,row.label)?.selectorName === row.label;
@@ -65,7 +79,7 @@ export const inspectUpdateOperations = (inspection: JobInspection | undefined, g
       policy: !declaration?.pin ? 'upstream' as const : declaration.pin.from.layer === 'machine' ? 'personal-pin' as const : 'source-pin' as const,
       offered: tree ? { kind: 'tree' as const, digest: tree } : revision && /^[a-f0-9]{40}$/.test(revision) ? { kind: 'revision' as const, digest: revision } : null,
       repairRoute, ...(addition || adoptionPrerequisite ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}),
-      ...(row.state === 'unknown' && row.note && WIRE_UNREACHABLE.test(row.note) ? { reason: safeMessage(row.note) } : {}) };
+      ...(reason ? { reason } : {}) };
     if ([item.id,item.key,item.source,item.name].some(v => !safeOwnerString(v))) return { generation: String(generation), items: [], nextCursor: null, unavailable: true, limitReason: 'unsafe-owner-data' as const };
     items.push(item);
   }
