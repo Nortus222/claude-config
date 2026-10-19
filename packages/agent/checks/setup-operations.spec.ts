@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { configDomain, integrationsDomain, DecisionsStore, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
+import { configDomain, integrationsDomain, DecisionsStore, Fs, FsFailed, HistoryStore, nodeProcesses, Processes } from '@nortuscc/machine';
 import { startAgent, makeSession, type AgentSession } from '../src/index.ts';
 import { decodeOperationInput } from '../src/operations/index.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -68,6 +68,37 @@ test('setup apply persists every choice and applies them in one run', async () =
     assert.equal(settings.hooks, undefined);
     assert.ok(run.parity?.committedKeys.includes('sync:decision'));
     assert.equal(run.parity?.remainingKeys.length, 0);
+  }));
+});
+
+test('a failed setup machine step reports its own cause in the run and its step note', async () => {
+  await withSetup((m, _setup, _s, handle) => Effect.gen(function* () {
+    const fs = yield* Fs; const settings = join(m.paths.claude, 'settings.json');
+    const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(Effect.provideService(Fs, {
+      ...fs, writeTextAtomic: (path, text) => path === settings ? Effect.fail(new FsFailed({ op: 'write', path, reason: 'EACCES: permission denied' })) : fs.writeTextAtomic(path, text),
+    }));
+    const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    const run = yield* finish(session, preview.planId);
+    assert.equal(run.state, 'failed');
+    const key = 'config:claude:settings.json#effortLevel';
+    assert.deepEqual(run.result, { status: 'failed', message: `Couldn't apply ${key}: write ${settings}: EACCES: permission denied` });
+    assert.deepEqual(run.steps.find(step => step.key === key), { key, outcome: 'failed', note: `write ${settings}: EACCES: permission denied` });
+    assert.ok(run.parity?.remainingKeys.includes(key));
+  }));
+});
+
+test('a setup apply redacts a credential-shaped step note in its run and in History', async () => {
+  await withSetup((m, _setup, _s, handle) => Effect.gen(function* () {
+    const fs = yield* Fs; const settings = join(m.paths.claude, 'settings.json');
+    const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal }).pipe(Effect.provideService(Fs, {
+      ...fs, writeTextAtomic: (path, text) => path === settings ? Effect.fail(new FsFailed({ op: 'write', path, reason: 'EACCES via https://u:p@ss@h/x GITHUB_TOKEN=ghsecret123' })) : fs.writeTextAtomic(path, text),
+    }));
+    const preview = yield* session.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    const run = yield* finish(session, preview.planId);
+    const dir = join(m.paths.stateRoot, 'history');
+    const history = readdirSync(dir).map(name => readFileSync(join(dir, name), 'utf8')).join('');
+    assert.match(history, /"note":"write [^"]+settings\.json: EACCES via https:\/\/\[redacted\]h\/x GITHUB_TOKEN=\[redacted\]"/);
+    assert.doesNotMatch(history + JSON.stringify(run), /ghsecret|p@ss|ss@h/);
   }));
 });
 
@@ -448,7 +479,7 @@ test('hook body-only changes appear in review with both executable bodies', asyn
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
 
-test('an omitted hook refuses settlement when hold replay would replace its retained body', async () => {
+test('an omitted hook refuses settlement when replay cannot preserve its held body', async () => {
   const m = agentMachine();
   const { HEAD_FILES } = await import('./support/setup-fixture.ts');
   const setup = setupFixture(join(m.root, 'snapshots'), { composeStateRoot: m.paths.stateRoot,
@@ -462,8 +493,9 @@ test('an omitted hook refuses settlement when hold replay would replace its reta
       const before = durableFiles(m.paths.stateRoot);
       const error = yield* Effect.flip(session.previewChange(change([{ itemId: EFFORT, action: 'accept' }])));
       assert.equal(error.code, 'INVALID_REQUEST');
-      assert.match(error.message, /hook bytes cannot be retained/);
+      assert.match(error.message, /hook bytes/);
       assert.deepEqual(durableFiles(m.paths.stateRoot), before);
+      assert.deepEqual((yield* session.runs.list({ limit: 10 })).runs, []);
     })), setup.source);
   } finally { rmSync(m.root, { recursive: true, force: true }); }
 });
@@ -477,6 +509,27 @@ test('unchosen source pin groups are held together while an independent setting 
     assert.equal(holds['skill:owner/repo/two'], APPLIED);
     assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, HEAD);
   }), { 'skills-manifest.txt': '[owner/repo]\none\ntwo\n', 'skill-pins.json': json({ version: 1, pins: { 'owner/repo': '1'.repeat(40) } }) });
+});
+
+test('setup failures report a timeout as a timeout', async () => {
+  const { setupFailure } = await import('../src/operations/setup.ts');
+  const { Cause } = await import('effect');
+  const message = async (cause: import('effect').Cause.Cause<unknown>) => (await Effect.runPromise(Effect.flip(setupFailure(cause)))).message;
+  assert.match(await message(Cause.fail(new Cause.TimeoutError())), /timed out after 20 seconds/);
+  assert.match(await message(Cause.fail(new Error('git failed'))), /unavailable/);
+});
+
+test('a setup preview observes the source once however many incoming rows it holds or takes', async () => {
+  const keys = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`key${i}`, i]));
+  await withSetup((_m, setup, s) => Effect.gen(function* () {
+    setup.calls.length = 0;
+    const preview = yield* s.previewChange(change([{ itemId: EFFORT, action: 'accept' }]));
+    assert.equal(preview.change.kind, 'setupApply');
+    const count = (call: string) => setup.calls.filter(c => c === call).length;
+    assert.ok(count('fetch') <= 2, `fetched ${count('fetch')} times`);
+    assert.ok(count('effective') <= 2, `composed ${count('effective')} times`);
+    assert.ok(count('load') <= 2, `loaded ${count('load')} times`);
+  }), { 'claude/settings.keys.json': json({ theme: 'dark', effortLevel: 'high', ...keys }) });
 });
 
 test('large setup reviews paginate within the IPC record limit without dropping rows', async () => {
@@ -521,4 +574,109 @@ test('review without refetch keeps the latest refetched revision instead of an o
     assert.deepEqual(read.revision, fresh.revision);
     assert.deepEqual(read.revision, { kind: 'local', commit: next });
   }));
+});
+
+test('setup review shows a profile file exclusion instead of unchanged file text', async () => {
+  const m = agentMachine();
+  const { SetupSource } = await import('@nortuscc/sync');
+  const files = { 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# same rules\n' };
+  const setup = setupFixture(join(m.root, 'snapshots'), { appliedFiles: files, headFiles: { ...files, 'profiles/child.json': json({ files: { 'claude:CLAUDE.md': null } }) } });
+  await m.trust();
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const session = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* session.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true, limit: 100 }));
+      const row = review.rows.find(row => row.itemId === 'file:claude:CLAUDE.md')!;
+      assert.equal(row.before, '# same rules\n');
+      assert.deepEqual(JSON.parse(row.after!), { managed: false });
+    })), Layer.succeed(SetupSource, { ...setup.service, profile: 'child' }));
+  } finally { rmSync(m.root, { recursive: true, force: true }); }
+});
+
+test('a stale settings hold does not block accepting an independent item', async () => {
+  const { desiredFor, revisionCommit, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo({ 'claude/settings.keys.json': json({ theme: 'auto' }) });
+  const applied = repo.commit({ 'profiles/child.json': '{}', 'claude/settings.keys.json': json({ theme: 'dark' }), 'claude/CLAUDE.md': '# before\n' });
+  const head = repo.commit({ 'claude/CLAUDE.md': '# accepted\n' });
+  const itemId = 'file:claude:CLAUDE.md';
+  const held = { 'setting:claude:settings.json#theme': repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), json({ version: 1, held }));
+  const snapshot = (commit: string, holds: Record<string, string> = {}) => Effect.promise(() => runSync(desiredFor({
+    repo: repo.dir, profile: commit === repo.first ? 'default' : 'child', head: { kind: 'commit', commit }, held: holds,
+    into: join(m.root, 'snapshots', commit, Object.keys(holds).length ? 'held' : 'plain'),
+  })));
+  const service: SetupSource['Service'] = {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: revision => snapshot(revisionCommit(revision)),
+    current: snapshot(applied, held),
+    effective: (decisions, choices) => Effect.gen(function* () {
+      const holds = choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held;
+      const current = yield* snapshot(applied, holds);
+      const accepted = decisions.some(d => d.itemId === itemId && d.commit === head && d.decision === 'accept');
+      return { applied: { ...current, revision: applied }, effective: yield* snapshot(accepted ? head : applied, holds), conflicts: [] };
+    }),
+  };
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => m.domains, { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => m.domains, signal: new AbortController().signal });
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: true }));
+      assert.equal(review.rows.find(row => row.itemId === 'setting:claude:settings.json#theme')?.after, '"dark"');
+      const preview = yield* s.previewChange({ kind: 'setupApply', setupId: 'local', revision: { kind: 'local', commit: head }, choices: [{ itemId, action: 'accept' }] });
+      assert.equal((yield* finish(s, preview.planId)).state, 'succeeded');
+      assert.equal(m.read(join(m.paths.claude, 'CLAUDE.md')), '# accepted\n');
+      assert.deepEqual(yield* (yield* SyncStore).read, held);
+      assert.equal(JSON.parse(m.read(join(m.paths.stateRoot, 'state.json'))!).applied.commit, head);
+      const effective = yield* service.effective(yield* (yield* DecisionsStore).read);
+      assert.equal(effective.effective.desired.files.find(file => file.id === 'claude:settings.json')?.keys?.theme?.value, 'dark');
+    })), Layer.succeed(SetupSource, service));
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
+});
+
+test('a hold from before the followed profile stays listed and can be released', async () => {
+  const { desiredFor, SetupSource, SyncStore } = await import('@nortuscc/sync');
+  const { tempRepo, runSync } = await import('../../sync/checks/support/repo.ts');
+  const m = agentMachine();
+  const repo = tempRepo();
+  const itemId = 'file:claude:CLAUDE.md';
+  const head = repo.commit({ 'profiles/child.json': '{}', 'claude/CLAUDE.md': '# current\n' });
+  const held = { [itemId]: repo.first };
+  await m.trust();
+  m.write(join(m.paths.stateRoot, 'sync.json'), JSON.stringify({ version: 1, held }));
+  const snapshot = (holds: Record<string, string>) => Effect.promise(() => runSync(desiredFor({ repo: repo.dir, profile: 'child', head: { kind: 'commit', commit: head }, held: holds, into: join(m.root, 'profile-snapshot') })));
+  const source = Layer.succeed(SetupSource, {
+    profile: 'child',
+    fetch: Effect.succeed({ head }),
+    load: () => snapshot({}),
+    current: snapshot(held),
+    effective: (_decisions, choices) => Effect.gen(function* () {
+      const current = yield* snapshot(choices?.holds ?? JSON.parse(m.read(join(m.paths.stateRoot, 'sync.json'))!).held);
+      return { applied: { ...current, revision: head }, effective: current, conflicts: [] };
+    }),
+  });
+  try {
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      const handle = yield* startAgent(() => [], { deferStart: true });
+      const s = yield* makeSession(handle, { domains: () => [], signal: new AbortController().signal });
+      const incoming = yield* s.incomingChanges(decodeOperationInput('incomingChanges', { setupId: 'local' }));
+      assert.ok(incoming.items.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const review = yield* s.setupReview(decodeOperationInput('setupReview', { setupId: 'local', refetch: false }));
+      assert.ok(review.rows.some(row => row.itemId === itemId && row.held && row.change === 'unchanged'));
+      const preview = yield* s.previewChange({ kind: 'syncDecision', setupId: 'local', itemId, revision: { kind: 'local', commit: head }, action: 'release' });
+      const run = yield* finish(s, preview.planId);
+      assert.equal(run.state, 'succeeded');
+      assert.deepEqual(yield* (yield* SyncStore).read, {});
+    })), source);
+  } finally {
+    rmSync(repo.root, { recursive: true, force: true });
+    rmSync(m.root, { recursive: true, force: true });
+  }
 });

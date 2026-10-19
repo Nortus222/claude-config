@@ -10,13 +10,16 @@ export type SetupViewState = {
   readonly configTargets: SetupChoices['configTargets'];
   readonly pending: boolean;
   readonly detail: string;
+  // First-run setup completed in this app session. Later launches find the setup recorded and never bootstrap,
+  // so this is what makes the first-run profile choice appear once.
+  readonly bootstrapped: boolean;
 };
 const installerAck = Schema.decodeUnknownSync(Schema.Struct({ requested: Schema.Literal(true) }), { onExcessProperty: 'error' });
 const helloEnvelope = Schema.decodeUnknownSync(Schema.Struct({ hello: Schema.Unknown }), { onExcessProperty: 'error' });
 
 // First-run operations are available before an agent connection exists.
 export class SetupController {
-  state: SetupViewState = { phase: 'checking', setup: null, configTargets: ['claude', 'codex'], pending: false, detail: 'Checking local setup' };
+  state: SetupViewState = { phase: 'checking', setup: null, configTargets: ['claude', 'codex'], pending: false, detail: 'Checking local setup', bootstrapped: false };
   private listeners = new Set<() => void>();
   private revision = 0;
   private disposed = false;
@@ -68,7 +71,7 @@ export class SetupController {
       const reply = await this.bridge.invoke('setup_desktop', { configTargets: [...this.state.configTargets] });
       if (!this.owns(revision)) return;
       decodeHelloResult(helloEnvelope(reply.data).hello);
-      this.update({ phase: 'ready', detail: 'Setup ready. Review changes before applying.' });
+      this.update({ phase: 'ready', detail: 'Setup ready. Review changes before applying.', bootstrapped: true });
       await this.machine.connect();
     } catch { if (this.owns(revision)) this.update({ detail: 'Setup could not finish. Retry will reuse any completed checkout.' }); }
     finally { if (this.owns(revision)) this.update({ pending: false }); }

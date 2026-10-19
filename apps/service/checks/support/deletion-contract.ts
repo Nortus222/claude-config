@@ -105,7 +105,7 @@ export function registerDeletionContract(name: string, factory: ServiceStoreFact
         let pendingId: string | undefined;
         if (phase === 'issuance') { pendingId = (await f.start()).body.pendingId; f.clock.now += 5000; }
         armed = true;
-        pending = phase === 'publisher' ? f.call('POST',`/v1/setups/${oldSetupId}/revisions`,publication(1),owner.token) : phase === 'issuance' ? f.call('POST','/v1/auth/device/poll',{ pendingId }) : f.call('POST','/v1/setups',{ name:'Paused',repoUrl:'https://github.com/a/b' },owner.token);
+        pending = phase === 'publisher' ? f.call('POST',`/v1/setups/${oldSetupId}/revisions`,publication(1),owner.token) : phase === 'issuance' ? f.call('POST','/v1/auth/device/poll',{ pendingId }) : f.call('POST','/v1/setups',{ name:'Paused',repoUrl:'https://github.com/a/b', profile: 'default' },owner.token);
         await Promise.race([held.entered,pending.then(() => assert.fail('writer must pause'))]);
       }
       assert.equal((await f.call('DELETE','/v1/account',undefined,owner.token)).status,204);

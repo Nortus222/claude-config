@@ -125,7 +125,8 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
       yield* save(store); // Lookup payload is durable before either app delivery path starts.
       yield* post(batch);
     });
-    yield* add(currentItems, 'Review & apply', `${new Set(pending.map((p) => p.itemId)).size} items need review.`);
+    const incoming = new Set(pending.map((p) => p.itemId)).size;
+    yield* add(currentItems, 'Incoming changes', incoming === 1 ? '1 change from your profile needs review' : `${incoming} changes from your profile need review`);
     // Pending failure payloads already cover these identities even when delivery is unavailable.
     const queued = new Set(Object.values(store.batches).flatMap((b) => b.identities));
     yield* add(freshFailures.filter((id) => !queued.has(id)), 'Agent needs review', status.detail ?? status.paused?.reason ?? 'An apply, inspection, or revision verification needs review.');

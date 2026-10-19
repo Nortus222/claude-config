@@ -184,6 +184,7 @@ test('pending or corrupt desktop maintenance blocks changes after a dead updater
     writeFileSync(join(dirname(lock), 'agent', 'pending-update.json'), content);
     const exit = await run(Effect.andThen(acquireApplyLock, Effect.sync(() => assert.fail('pending maintenance must prevent machine changes'))));
     assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('MaintenancePending'));
+    assert.ok(Exit.isFailure(exit) && String(exit.cause).includes('open Nortuscc to recover'), 'the refusal names the app');
     assert.equal(existsSync(lock), false, 'refusal releases the scoped apply fence');
   }
 });

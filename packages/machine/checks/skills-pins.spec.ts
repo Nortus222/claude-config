@@ -139,11 +139,11 @@ test('checkUpdates never clones a pinned source', async () => {
   const processes = Layer.succeed(Processes, { run: (c: Command) => Effect.sync(() => (commands.push(c), { code: 1, stdout: '' })) });
   const desired = desiredWith([skill('p', 'p/p', pin(SHA)), skill('u', 'u/u')]);
   const result = await Effect.runPromise(checkUpdates(desired).pipe(Effect.provide(Layer.mergeAll(m.layer, processes))));
-  const clones = commands.filter((c) => c.cmd === 'git' && c.args[0] === 'clone');
+  const clones = commands.filter((c) => c.cmd === 'git' && c.args.includes('clone'));
   assert.ok(clones.some((c) => c.args.includes('url-free')));
   assert.ok(!clones.some((c) => c.args.includes('url-pinned')));
   assert.deepEqual(result.current, [{ name: 'p', source: 'p/p' }]);
-  assert.deepEqual(result.unknown, [{ name: 'u', source: 'u/u' }]);
+  assert.deepEqual(result.unknown, [{ name: 'u', source: 'u/u', reason: 'git clone exited with code 1' }]);
 });
 
 test('planUpdates classifies pinned skills by their lock ref without a remote tree', () => {
@@ -185,6 +185,64 @@ test('an off-pin reinstall backs up the installed folder and adds the skill at i
     [`npx -y skills add o/r#${sha} --skill a --agent claude-code codex --global --yes`]);
   assert.equal(readLock(m.paths).a!.ref, sha);
   assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
+});
+
+// The installer exits 0 and skips a name the pinned commit lacks. An installed copy at another ref is left
+// alone and named as missing at the pin, not reported as a verification mismatch.
+test('a skill its pinned commit lacks fails by name while the rest of the batch installs and verifies', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  mkdirSync(join(m.paths.agentsSkills, 'gone'), { recursive: true });
+  writeFileSync(join(m.paths.agentsSkills, 'gone', 'SKILL.md'), '# gone\n');
+  writeLock(m.paths, { gone: { source: 'o/r', ref: NEXT, skillPath: 'skills/gone/SKILL.md' } });
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
+  const r = report([item('a', 'missing', 'apply'), item('gone', 'off-pin', 'apply')], [skill('a', 'o/r', pin(sha)), skill('gone', 'o/r', pin(sha))]);
+  const p: Plan = plan('apply', r, selectAll, [skillsDomain]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(p, r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  assert.deepEqual(installer.commands.map((c) => [c.cmd, ...c.args].join(' ')), [
+    `npx -y skills add o/r#${sha} --skill a gone --agent claude-code codex --global --yes`,
+  ]);
+  const step = events.find((e): e is Extract<Progress, { type: 'finished' }> => e.type === 'finished' && e.key === `skills:install:o/r#${sha}`)!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, `o/r at ${sha.slice(0, 7)} doesn't have gone. Move the pin to a commit that has it, or remove it from your profile's skills, then apply again. Verified 1 other skill(s) at ${sha.slice(0, 7)}.`);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'a', 'SKILL.md'), 'utf8'), '# a at pin\n');
+  assert.equal(readLock(m.paths).a!.ref, sha);
+  assert.equal(readLock(m.paths).gone!.ref, NEXT);
+});
+
+// The installer records `--skill TDD` as the commit's `tdd`; verification reads that entry and folder.
+test('a pinned profile name that differs in case from the skill installs and verifies under the skill\'s own name', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n', 'skills/tdd/SKILL.md': '# tdd at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
+  const r = report([item('a', 'missing', 'apply'), item('TDD', 'missing', 'apply')], [skill('a', 'o/r', pin(sha)), skill('TDD', 'o/r', pin(sha))]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(plan('apply', r, selectAll, [skillsDomain]), r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const step = events.find((e): e is Extract<Progress, { type: 'finished' }> => e.type === 'finished' && e.key === `skills:install:o/r#${sha}`)!;
+  assert.deepEqual([step.outcome, step.note], ['ok', `verified 2 skill(s) at ${sha.slice(0, 7)}`]);
+  assert.deepEqual(installer.commands.map((c) => c.args[2]), ['add']);
+  assert.equal(readLock(m.paths).tdd!.ref, sha);
+  assert.equal(readFileSync(join(m.paths.agentsSkills, 'tdd', 'SKILL.md'), 'utf8'), '# tdd at pin\n');
+});
+
+test('a pinned step whose every skill its commit lacks says the pin does not have them', async () => {
+  const m = skillsMachine();
+  mkdirSync(m.paths.repo, { recursive: true });
+  const src = skillSource(m.home);
+  const sha = src.commit({ 'skills/a/SKILL.md': '# a at pin\n' });
+  const installer = fakeInstaller(m.paths, src);
+  const layer = backupsForRun().pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, installer.layer)));
+  const r = report([item('gone', 'missing', 'apply'), item('later', 'missing', 'apply')], [skill('gone', 'o/r', pin(sha)), skill('later', 'o/r', pin(sha))]);
+  const events: Progress[] = [...await Effect.runPromise(Stream.runCollect(execute(plan('apply', r, selectAll, [skillsDomain]), r, [skillsDomain])).pipe(Effect.provide(layer)))];
+  const step = events.find((e): e is Extract<Progress, { type: 'finished' }> => e.type === 'finished' && e.key === `skills:install:o/r#${sha}`)!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, `o/r at ${sha.slice(0, 7)} doesn't have gone, later. Move the pin to a commit that has them, or remove them from your profile's skills, then apply again.`);
+  assert.equal(installer.commands.length, 1);
 });
 
 test('update re-exposes a pinned skill lacking an agent link at its pin, never at upstream HEAD', async () => {

@@ -53,7 +53,7 @@ export function resolveSkillAdditions(
     seen.add(key);
     const pin = refs.get(source);
     skills.push({ ...skill, ...(pin ? { pin } : {}), ...(addition ? {
-      targets: addition.targets, declaredFrom: { layer: 'base', source: SKILLS_SOURCE } as const,
+      targets: addition.targets, declaredFrom: skill.declaredFrom ?? { layer: 'base', source: SKILLS_SOURCE } as const,
       install: choices && Object.hasOwn(choices, skill.name) ? choices[skill.name]! : true, from: machine,
     } : {}) });
   }

@@ -38,6 +38,8 @@ export type SyncDecisionInput = {
   holds: Holds;
   decisions: readonly Decision[];
   now: Date;
+  // A batch owner's single fresh observation of `source`; each decision otherwise observes afresh.
+  observed?: SyncObservation;
 };
 export type PreparedSyncDecision = {
   change: SyncDecisionChange;
@@ -75,18 +77,21 @@ export const observeSyncSource = (source: SetupSource['Service'], decisions: rea
     const effective = yield* source.effective(decisions);
     const before = yield* worktreeDocuments(effective.applied.repo),
       after = yield* worktreeDocuments(offered.repo);
-    if (invalidProfile(desiredOfDocuments(before), independentIntegrations) || invalidProfile(desiredOfDocuments(after), independentIntegrations))
+    const profile = source.profile;
+    const beforeValues = itemValues(before, profile), afterValues = itemValues(after, profile);
+    if (invalidProfile(desiredOfDocuments(before, undefined, profile), independentIntegrations) || invalidProfile(desiredOfDocuments(after, undefined, profile), independentIntegrations))
       return yield* Effect.fail(refused());
-    const changes = diffItems(itemValues(before), itemValues(after));
+    const changes = diffItems(beforeValues, afterValues);
     const offers = source.offeredItems
       ? yield* source.offeredItems
-      : [...new Set([...itemValues(before).keys(), ...itemValues(after).keys()])].map((itemId) => ({
+      : [...new Set([...beforeValues.keys(), ...afterValues.keys()])].map((itemId) => ({
           itemId,
           revision: head,
         }));
     if (knownHead === undefined && canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
-    return { head, offered, effective, before, after, changes, offers };
+    return { head, offered, effective, before, after, beforeValues, afterValues, profile, changes, offers };
   });
+export type SyncObservation = Effect.Success<ReturnType<typeof observeSyncSource>>;
 export const prepareSyncDecision = (
   input: SyncDecisionInput,
 ): Effect.Effect<PreparedSyncDecision, unknown, Fs | Processes | MachinePaths> =>
@@ -96,14 +101,15 @@ export const prepareSyncDecision = (
       return yield* Effect.fail(refused());
     const independentIntegrations = input.validation === 'cli-independent-integrations' && change.setupId === LOCAL_SETUP
       && change.revision.kind === 'local' && parseItemId(change.itemId)?.kind !== 'integration';
-    const observed = yield* observeSyncSource(source, input.decisions, independentIntegrations);
+    const observed = input.observed ?? (yield* observeSyncSource(source, input.decisions, independentIntegrations));
     const offeredItem = observed.offers.find((item) => item.itemId === change.itemId);
     // An existing local hold can be released even when both snapshots omit its item.
     const releaseLocalHold =
       typeof observed.head === 'string' && change.action === 'release' && Object.hasOwn(input.holds, change.itemId);
     const head = offeredItem?.revision ?? (releaseLocalHold ? observed.head : undefined);
     if (head === undefined) return yield* Effect.fail(refused());
-    yield* source.load(head);
+    // The observation already loaded and verified its own head.
+    if (canonical(head) !== canonical(observed.head)) yield* source.load(head);
     const local = typeof head === 'string';
     if (
       local
@@ -130,10 +136,10 @@ export const prepareSyncDecision = (
       !unchanged &&
       !observed.changes.some((c) => c.itemId === change.itemId) &&
       !(change.action === 'release' && held) &&
-      !(input.deferComposition && (itemValues(observed.before).has(change.itemId) || itemValues(observed.after).has(change.itemId)))
+      !(input.deferComposition && (observed.beforeValues.has(change.itemId) || observed.afterValues.has(change.itemId)))
     )
       return yield* Effect.fail(refused());
-    if (unchanged && !itemValues(observed.before).has(change.itemId) && !itemValues(observed.after).has(change.itemId))
+    if (unchanged && !observed.beforeValues.has(change.itemId) && !observed.afterValues.has(change.itemId))
       return yield* Effect.fail(refused());
     if (!local && !head.items.some((c) => c.id === change.itemId)) return yield* Effect.fail(refused());
     const nextOverrides =

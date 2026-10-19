@@ -1,6 +1,8 @@
+import { prepareProfileOperation, readProfileOperation } from '../operations/profiles.ts';
+import { makeAuthorOperations, isAuthorChange, type AuthorRead } from '../operations/author.ts';
 import { prepareBackupOperation, readBackupOperation } from '../operations/backups.ts';
 import { isAccountChange, prepareAccountOperation, readAccountOperation } from '../operations/account.ts';
-import { prepareSourceDecision, readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
+import { readSourceOperation, sourceReadCache, type SourceOperation } from '../operations/sources.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { Cause, Deferred, Effect, Exit, Layer, Scope } from 'effect';
@@ -20,10 +22,10 @@ import { makeSkillOperations, type SkillOperations, type AcceptedSkillPlan } fro
 import { readSetupReview, prepareSetupApply } from '../operations/setup.ts';
 import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
-import { prepareCaptureChange } from '../operations/capture.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
+import { causeMessage, describe, safeMessage } from '../operations/safety.ts';
 import type { ParityAcceptance } from '../operations/index.ts';
 import { AgentClock } from '../clock.ts';
 import { runJob, type AgentStatus, type JobInspection } from '../job.ts';
@@ -44,8 +46,18 @@ export class SessionError extends Error {
 
 type Client = 'app' | 'cli' | 'mcp';
 
-// One person's preview and at most one run, over the agent's latest job inspection.
+// One person's preview and machine run, plus an independent GitHub sign-in.
 export type AgentSession = {
+  readonly authorProfiles: (input: OperationInput<'authorProfiles'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorProfiles'>, SessionError>;
+  readonly machineFile: (input: OperationInput<'machineFile'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'machineFile'>, SessionError>;
+  readonly authorFile: (input: OperationInput<'authorFile'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'authorFile'>, SessionError>;
+  readonly upstreams: (input: OperationInput<'upstreams'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'upstreams'>, SessionError>;
+  readonly discoverUpstream: (input: OperationInput<'discoverUpstream'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'discoverUpstream'>, SessionError>;
+  readonly upstreamSkill: (input: OperationInput<'upstreamSkill'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'upstreamSkill'>, SessionError>;
+  readonly drafts: (input: OperationInput<'drafts'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'drafts'>, SessionError>;
+  readonly draftPreview: (input: OperationInput<'draftPreview'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftPreview'>, SessionError>;
+  readonly ghState: (input: OperationInput<'ghState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'ghState'>, SessionError>;
+
   readonly listBackups: (input: OperationInput<'listBackups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'listBackups'>, SessionError>;
   readonly agentStatus: (input: OperationInput<'agentStatus'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'agentStatus'>, SessionError>;
   readonly accountState: (input: OperationInput<'accountState'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'accountState'>, SessionError>;
@@ -57,6 +69,8 @@ export type AgentSession = {
   readonly inspectSourceDiff: (input: OperationInput<'inspectSourceDiff'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSourceDiff'>, SessionError>;
   readonly pinImpact: (input: OperationInput<'pinImpact'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'pinImpact'>, SessionError>;
   readonly draftChangelog: (input: OperationInput<'draftChangelog'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'draftChangelog'>, SessionError>;
+  readonly inspectProfiles: (input: OperationInput<'inspectProfiles'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectProfiles'>, SessionError>;
+  readonly inspectShareLink: (input: OperationInput<'inspectShareLink'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectShareLink'>, SessionError>;
   readonly inspectSetups: (input: OperationInput<'inspectSetups'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'inspectSetups'>, SessionError>;
   readonly setupReview: (input: OperationInput<'setupReview'>) => Effect.Effect<import('../operations/index.ts').SetupReview, SessionError>;
   readonly incomingChanges: (input: OperationInput<'incomingChanges'>) => Effect.Effect<import('../operations/index.ts').OperationOutput<'incomingChanges'>, SessionError>;
@@ -82,11 +96,9 @@ export type AgentSession = {
 type Previewed = { readonly planId: string; readonly exclude: ReadonlyArray<string>; readonly plan: Plan; readonly generation: number; readonly legacyGeneration: number; readonly legacySetupIdentity: string; readonly change: ReconcileChange; readonly exactSelection: boolean; readonly instructionEvidence: ReadonlyMap<string, string>; readonly baselineDigest: string };
 type Active = { readonly runId: string; readonly abort: AbortController; readonly done: Deferred.Deferred<void> };
 
-const describe = (error: unknown): string => {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'object' && error !== null && '_tag' in error && typeof error._tag === 'string') return error._tag;
-  return String(error);
-};
+// A terminal failure carries its whole redacted cause; the run record bounds it and agent.log keeps it.
+const terminalMessage = (cause: Cause.Cause<unknown>) => causeMessage(cause, 2000);
+const AGAIN = 'check for new changes and preview again';
 
 const wireItem = (item: MachineReport['items'][number]): WireObserved => ({
   key: item.key, domain: item.domain, ...(item.target === undefined ? {} : { target: item.target }), label: item.label, group: item.group, state: item.state,
@@ -126,8 +138,8 @@ const busy = new SessionError('BUSY', 'An apply is running');
 const noInspection = (status: AgentStatus): SessionError => {
   const detail = status.detail ? `: ${status.detail}` : '';
   if (status.error === 'PROFILE_INVALID') return new SessionError('PROFILE_INVALID', `The profile is invalid${detail}`);
-  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent could not inspect (${status.error})${detail}`);
-  return new SessionError('NO_REPORT', 'The agent has no inspection; inspect again');
+  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent couldn't read this Mac (${status.error})${detail}`);
+  return new SessionError('NO_REPORT', 'The agent has no inspection; check for new changes again');
 };
 
 const validate = (inspection: JobInspection): Effect.Effect<void, SessionError> => {
@@ -163,8 +175,13 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const intentOperations = yield* makeIntentOperations({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0),
       freshInspection: (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.map(job => job.inspection), Effect.provideContext(context)), invalidate: skillOperations.clear });
 
+    const authorOperations = yield* Effect.cached(makeAuthorOperations(handle).pipe(Effect.provideContext(context)));
+    // The author owner serializes its own state; reads must never hold the scheduler permit while waiting.
+    const authorRead = <N extends AuthorRead>(name: N, input: OperationInput<N>) => Effect.flatMap(authorOperations, owner => owner.read(name, input));
+
     let previewed: Previewed | undefined;
     let active: Active | undefined;
+    let loginActive: Active | undefined;
     const clock = yield* AgentClock;
     const parityPlans = new Map<string, { prepared: PreparedParityChange; expires: number }>();
     yield* Effect.addFinalizer(() => Effect.sync(() => parityPlans.clear()));
@@ -175,7 +192,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       return parityPlans.get(planId)?.prepared;
     });
     const retainPrepared = (prepared: PreparedParityChange, replacing = false) => Effect.gen(function* () {
-      if (active && !replacing) return yield* Effect.fail(busy);
+      if (active && !replacing && prepared.acceptance.kind !== 'ghLogin') return yield* Effect.fail(busy);
       yield* retainedParity('');
       if (prepared.preview.scope.kind !== 'machine' || prepared.preview.change.kind !== prepared.acceptance.kind || prepared.preview.generation !== prepared.acceptance.generation
         || prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0)))
@@ -214,7 +231,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const legacySetupIdentity = (inspection: JobInspection) => Effect.gen(function* () {
       const setupId = inspection.revision === null ? 'local' : revisionSetupId(inspection.revision);
       const setup = handle.selectOperationSetup ? yield* handle.selectOperationSetup(setupId).pipe(
-        Effect.mapError(() => new SessionError('UNKNOWN_PLAN', 'The setup identity is unavailable; inspect again')),
+        Effect.mapError(() => new SessionError('UNKNOWN_PLAN', 'The setup identity is unavailable; check for new changes again')),
       ) : undefined;
       return digest({ checkout: configuredPaths.repo, setupId, trusted: inspection.trusted,
         ...(setup ? { accountId: setup.accountId, repository: setup.repository, configuredTrust: setup.trusted } : {}) });
@@ -229,7 +246,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const keys = new Set(inspection.report.items.map((item) => item.key));
         const unknown = [...exclude, ...(change?.only ?? [])].find((key) => !keys.has(key));
         if (unknown !== undefined) {
-          return yield* Effect.fail(new SessionError('UNKNOWN_KEY', `'${unknown}' is not an item of the last inspection; inspect again`));
+          return yield* Effect.fail(new SessionError('UNKNOWN_KEY', `'${unknown}' is not an item of the last inspection; check for new changes again`));
         }
         const unique = [...new Set(exclude)];
         const selected: ReconcileChange = { kind: 'reconcile', only: change ? [...new Set(change.only)] : [...keys].filter(key => !unique.includes(key)) };
@@ -249,14 +266,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       generation: String(next.generation), nextActions: [],
     });
     const preview: AgentSession['preview'] = exclude => Effect.map(makePreview(exclude), legacyPreview);
-    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<import('../operations/index.ts').OperationChange, { kind: 'capture' | 'update' | 'sourceDecision' }>, inspection: JobInspection) => Effect.gen(function* () {
-      const sourceGeneration = yield* (handle.generation ?? Effect.succeed(0));
-      const setup = change.kind === 'sourceDecision' && handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE', 'Configured source trust is unavailable'))) : undefined;
-      if (setup && !setup.trusted) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', 'Trust this repository in the app before editing source policy'));
-      const setupIdentity = JSON.stringify(setup);
-      const prepared = yield* (change.kind === 'sourceDecision' ? prepareSourceDecision(change, inspection, configuredPaths) : change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : change.kind === 'capture' ? prepareCaptureChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
+    const prepareAction = (change: import('../operations/index.ts').ActionChange | Extract<OperationChange, { kind: 'update' }>, inspection: JobInspection) => Effect.gen(function* () {
+      const prepared = yield* (change.kind === 'update' ? prepareUpdateChange(change, inspection, configuredPaths) : prepareActionChange(change, inspection, options.domains)).pipe(Effect.provideContext(context));
       const generation = String(yield* (handle.generation ?? Effect.succeed(0)));
-      if (change.kind === 'sourceDecision' && (generation !== String(sourceGeneration) || (yield* handle.inspection) !== inspection)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Source observation changed; inspect again'));
       return { ...prepared, preview: { ...prepared.preview, generation }, acceptance: { ...prepared.acceptance, generation },
         execute: (lifecycle: RunLifecycle, signal: AbortSignal) => {
           const successful = new Set<string>();
@@ -274,10 +286,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             })).pipe(Effect.catchCause(() => Effect.void)) : Effect.void));
         },
         revalidate: Effect.gen(function* () {
-          if (change.kind === 'sourceDecision' && handle.selectOperationSetup && JSON.stringify(yield* handle.selectOperationSetup('local')) !== setupIdentity) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Configured source trust changed; inspect again'));
           const fresh = yield* (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.provideContext(context));
           if (!fresh.inspection || canonical(fresh.inspection.desired) !== canonical(inspection.desired) || canonical(fresh.inspection.revision) !== canonical(inspection.revision))
-            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
           yield* prepared.revalidate;
         }).pipe(Effect.mapError(error => error instanceof SessionError ? error : new SessionError('INSPECT_FAILED', 'Selected configuration could not be revalidated'))),
       };
@@ -288,6 +299,16 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         try: () => decodeOperationInput('previewChange', { change }),
         catch: () => new SessionError('INVALID_REQUEST', 'Invalid change selection'),
       });
+      if (input.change.kind === 'capture' || input.change.kind === 'sourceDecision' || input.change.kind === 'update' && input.change.authorManifest)
+        return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Use draft intents and publishDraft for author changes'));
+      if (isAuthorChange(input.change)) {
+        if (input.change.kind === 'ghLogin' ? loginActive : active) return yield* Effect.fail(busy);
+        const change = input.change;
+        return yield* Effect.gen(function* () {
+          const owner = yield* authorOperations;
+          return yield* retainParityChange(yield* owner.prepare(change));
+        });
+      }
       if (input.change.kind === 'pruneBackups') {
         if (active) return yield* Effect.fail(busy);
         return yield* handle.exclusive(Effect.gen(function* () {
@@ -308,12 +329,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           return yield* retainParityChange(prepared);
         }));
       }
-      if (input.change.kind === 'syncDecision' || input.change.kind === 'setupApply') {
+      if (input.change.kind === 'followProfile' || input.change.kind === 'syncDecision' || input.change.kind === 'setupApply') {
         if (active) return yield* Effect.fail(busy);
         const change = input.change;
         return yield* handle.exclusive(Effect.gen(function* () {
           const generation = yield* (handle.generation ?? Effect.succeed(0));
-          const prepared = yield* (change.kind === 'setupApply' ? prepareSetupApply(handle, change, generation) : prepareSyncOperation(handle, change, generation)).pipe(Effect.provideContext(context));
+          const prepared = yield* (change.kind === 'followProfile' ? prepareProfileOperation(handle, change, generation) : change.kind === 'setupApply' ? prepareSetupApply(handle, change, generation) : prepareSyncOperation(handle, change, generation)).pipe(Effect.provideContext(context));
           if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation)
             return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed'));
           return yield* retainParityChange(prepared);
@@ -346,8 +367,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             process.stderr.write(`apply run ${runId}: a progress listener failed: ${describe(error)}\n`);
           }
         };
-        if (active) return yield* Effect.fail(busy);
         const prepared = yield* retainedParity(planId);
+        const login = prepared?.acceptance.kind === 'ghLogin';
+        if (login ? loginActive : active) return yield* Effect.fail(busy);
         const addition = yield* skillOperations.acceptedPlan(planId);
         if ((prepared || addition) && !lifecycle) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'This operation requires durable applyChange'));
         const wanted = prepared ? { planId, generation: Number(prepared.acceptance.generation) } : addition ? { planId, generation: addition.generation } : previewed;
@@ -356,11 +378,13 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         }
         const abort = new AbortController();
         const self: Active = { runId: lifecycle?.runId ?? randomUUID(), abort, done: Deferred.makeUnsafe<void>() };
-        active = self;
-        // Holds apply.lock; made synchronously, so nothing can interrupt between busy and its release.
+        if (login) loginActive = self;
+        else active = self;
+        // Machine runs hold apply.lock; login has only its own admission slot.
         const lock = Scope.makeUnsafe();
         const release = Scope.close(lock, Exit.void);
         const clear = Effect.sync(() => {
+          if (loginActive === self) loginActive = undefined;
           if (active === self) active = undefined;
           Deferred.doneUnsafe(self.done, Effect.void);
         });
@@ -371,7 +395,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         let handedOff = false;
 
         const prepare = Effect.gen(function* () {
-          yield* acquireApplyLock.pipe(
+          if (!login) yield* acquireApplyLock.pipe(
             Scope.provide(lock),
             Effect.provideContext(context),
             Effect.catchTag('LockHeld', (held) => Effect.fail(new SessionError('LOCKED', `${held.message}; apply again when it finishes`))),
@@ -382,14 +406,15 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             && (wanted as Previewed).legacyGeneration === (yield* (handle.legacyGeneration ?? handle.generation ?? Effect.succeed(0)));
           if (generationChanged && !legacyRecovery) {
             previewed = undefined;
-            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
           }
           if (prepared) {
-            const validation = yield* Effect.exit(handle.withJobMutation(Effect.gen(function* () {
+            const revalidate = Effect.gen(function* () {
               if (prepared.acceptance.generation !== String(yield* (handle.generation ?? Effect.succeed(0))))
-                return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+                return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
               yield* prepared.revalidate;
-            }), false));
+            });
+            const validation = yield* Effect.exit(login ? revalidate : handle.withJobMutation(revalidate, false));
             if (Exit.isFailure(validation)) {
               const error = Cause.squash(validation.cause);
               if (prepared.preview.change.kind === 'setupApply' && error instanceof SessionError && error.code === 'UNKNOWN_PLAN') {
@@ -410,26 +435,30 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               const observer = yield* parityObserver(lifecycle!, prepared.acceptance);
               const observed: RunLifecycle = { ...lifecycle!, parity: update => observer.checkpoint(update) };
               const signal = AbortSignal.any([shutdown, abort.signal]);
-              const exit = yield* Effect.exit(handle.withJobMutation(Effect.gen(function* () {
+              const execute = Effect.gen(function* () {
                 if (signal.aborted) return;
                 yield* observer.checkpoint({ state: 'needsInspection' });
                 yield* prepared.execute(observed, signal);
-              })));
+              });
+              const exit = yield* Effect.exit(login ? execute : handle.withJobMutation(execute));
               const evidence = observer.evidence();
               const incomplete = evidence.remainingKeys.length > 0;
               const checkpoint = yield* Effect.exit(observer.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : signal.aborted ? 'partial' : incomplete ? 'needsInspection' : 'committed' }));
               yield* release;
-              const terminal = Exit.isFailure(exit) || Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: 'Operation stopped; inspect before retrying' }
+              const terminal = Exit.isFailure(exit) ? { type: 'failed' as const, message: terminalMessage(exit.cause) }
+                : Exit.isFailure(checkpoint) ? { type: 'failed' as const, message: terminalMessage(checkpoint.cause) }
                 : signal.aborted ? { type: 'cancelled' as const, remaining: [...evidence.remainingKeys] }
-                : incomplete ? { type: 'failed' as const, message: 'Operation completion was not observed; inspect before retrying' }
+                : incomplete ? { type: 'failed' as const, message: safeMessage(`The run ended before ${evidence.remainingKeys.slice(0, 3).join(', ')}${evidence.remainingKeys.length > 3 ? ` and ${evidence.remainingKeys.length - 3} more` : ''} finished; ${AGAIN}`) }
                 : { type: 'done' as const, ok: evidence.committedKeys.length, failed: 0 };
               yield* lifecycle!.finished(terminal).pipe(Effect.catch(() => Effect.void));
               yield* clear;
               emit(self.runId, terminal);
+              // A follow-up job reports the status; without one, the latest is announced again so `applying` ends with the run.
               if (prepared.afterRelease && !shutdown.aborted) yield* Effect.forkIn(handle.request(prepared.afterRelease, { runId: self.runId }), runs);
+              else if (handle.announce) yield* handle.announce({ runId: self.runId });
             }).pipe(Effect.provideContext(context));
             yield* Effect.uninterruptible(Effect.andThen(lifecycle!.accepted(prepared.preview.change, prepared.acceptance.plannedKeys, undefined, prepared.acceptance),
-              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; parityPlans.clear(); }))));
+              Effect.forkIn(Effect.uninterruptible(Effect.andThen(Deferred.await(answered), run)), runs)).pipe(Effect.andThen(Effect.sync(() => { handedOff = true; if (login) parityPlans.delete(planId); else parityPlans.clear(); }))));
             return { status: 'started' as const, runId: self.runId };
           }
           const job = yield* handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(
@@ -440,11 +469,11 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           if (inspection === undefined) return yield* Effect.fail(noInspection(job.status));
           yield* validate(inspection);
           if (addition) {
-            if (canonical(inspection.desired) !== canonical(addition.baseline)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+            if (canonical(inspection.desired) !== canonical(addition.baseline)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
             const freshPreview = yield* skillOperations.previewAddSkill({ scope: { kind: 'machine' }, candidateId: addition.preview.change.kind === 'addSkill' ? addition.preview.change.candidateId : '', targets: addition.preview.skillAddition!.installationTargets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
             const checked = (yield* skillOperations.acceptedPlan(freshPreview.planId))!;
             if (!samePlan(addition.plan, checked.plan) || canonical(addition.overrides) !== canonical(checked.overrides)
-              || canonical(addition.preview.skillAddition) !== canonical(checked.preview.skillAddition)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The selected skill changed; inspect and preview again'));
+              || canonical(addition.preview.skillAddition) !== canonical(checked.preview.skillAddition)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The selected skill changed; preview again'));
             let invocation: AdditionInvocation | undefined;
             if (addition.plan.steps.length) {
               const command = yield* installer.prepare(inspection.paths, { source: addition.candidate.source, revision: addition.candidate.revision, selectorName: addition.candidate.selectorName, targets: addition.preview.skillAddition!.declaration.after.targets }).pipe(Effect.mapError(e => new SessionError(e.code, e.message)));
@@ -452,7 +481,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
               if (text !== undefined) yield* Effect.try({ try: () => {
                 const lock = JSON.parse(text);
                 if (!lock || lock.version !== 3 || !lock.skills || typeof lock.skills !== 'object' || Array.isArray(lock.skills)) throw new Error();
-              }, catch: () => new SessionError('SKILL_INSTALL_UNAVAILABLE', 'Native skill lock version is incompatible; inspect it before installing') });
+              }, catch: () => new SessionError('SKILL_INSTALL_UNAVAILABLE', 'The native skill lock has an unsupported version; nortuscc will not install over it') });
               invocation = { command, lockText: text };
             }
             const selected = additionRunPlan(addition.plan, addition.candidate.installedName);
@@ -465,7 +494,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           if (reconcile.exactSelection) {
             const available = new Set(inspection.report.items.map(item => item.key));
             if (reconcile.change.only.some(key => !available.has(key))) {
-              return yield* Effect.fail(new SessionError('UNKNOWN_KEY', 'The selected items changed; inspect and preview again'));
+              return yield* Effect.fail(new SessionError('UNKNOWN_KEY', 'The selected items changed; preview again'));
             }
           }
           const fresh = planFor(inspection, reconcile.exclude, reconcile.exactSelection ? reconcile.change.only : undefined);
@@ -473,7 +502,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           if (reconcile.legacyGeneration !== (yield* (handle.legacyGeneration ?? handle.generation ?? Effect.succeed(0)))
             || reconcile.legacySetupIdentity !== (yield* legacySetupIdentity(inspection))) {
             previewed = undefined;
-            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; inspect and preview again'));
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
           }
           if (generationChanged || reconcile.baselineDigest !== digest(inspection.desired) || !samePlan(reconcile.plan, fresh) || !sameInstructionEvidence(reconcile.instructionEvidence, evidence)) {
             const next: Previewed = { ...reconcile, planId: randomUUID(), baselineDigest: digest(inspection.desired), plan: fresh, instructionEvidence: evidence, generation: yield* (handle.generation ?? Effect.succeed(0)) };
@@ -539,9 +568,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         );
         if (parity) {
           const checkpoint = yield* Effect.exit(parity.checkpoint({ state: Exit.isFailure(exit) ? 'needsInspection' : terminal?.type === 'done' && terminal.failed === 0 ? 'committed' : 'partial' }));
-          if (Exit.isFailure(checkpoint)) terminal = { type: 'failed', message: 'Operation progress could not be saved; inspect before retrying' };
+          if (Exit.isFailure(checkpoint)) terminal = { type: 'failed', message: terminalMessage(checkpoint.cause) };
         }
-        if (Exit.isFailure(exit)) terminal = { type: 'failed', message: addition ? 'Skill addition was interrupted; inspect saved intent and partial installation before retrying' : describe(Cause.squash(exit.cause)) };
+        if (Exit.isFailure(exit)) terminal = { type: 'failed', message: addition ? safeMessage(`The skill addition stopped: ${describe(Cause.squash(exit.cause))}`, 2000) : terminalMessage(exit.cause) };
         if (driver && (Exit.isFailure(exit) || terminal?.type === 'cancelled' || (terminal?.type === 'done' && terminal.failed > 0))) {
           yield* driver.finish(Exit.isFailure(exit) ? 'needsInspection' : terminal?.type === 'cancelled' ? 'cancelled' : 'failed').pipe(Effect.catch(() => Effect.void));
         }
@@ -579,8 +608,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       }, lifecycle).pipe(Effect.map(result =>
         result.status === 'stale' ? { status: 'stale' as const, preview: result.preview } : result)),
       cancel: runId => Effect.suspend(() => {
-        const current = active;
-        if (current === undefined || current.runId !== runId) return Effect.void;
+        const current = [active, loginActive].find(run => run?.runId === runId);
+        if (current === undefined) return Effect.void;
         current.abort.abort();
         return Deferred.await(current.done);
       }),
@@ -601,7 +630,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             inspection = yield* handle.inspection;
           const unchanged = Effect.gen(function* () {
             if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection)
-              return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed; inspect again'));
+              return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'Sync observation changed; check for new changes again'));
           });
           yield* unchanged;
           const result = yield* readSyncOperation(handle, name, args, generation).pipe(Effect.provideContext(context));
@@ -621,9 +650,9 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       const setupIdentity=JSON.stringify(setup && {setupId:setup.setupId,accountId:setup.accountId,repository:setup.repository,trusted:setup.trusted});
       const unchanged=Effect.gen(function* () {
         const current=handle.selectOperationSetup ? yield* handle.selectOperationSetup('local').pipe(Effect.mapError(() => new SessionError('APP_UNAVAILABLE','Configured source trust is unavailable'))) : undefined;
-        if(setupIdentity!==JSON.stringify(current && {setupId:current.setupId,accountId:current.accountId,repository:current.repository,trusted:current.trusted})) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Configured source trust changed; inspect again'));
+        if(setupIdentity!==JSON.stringify(current && {setupId:current.setupId,accountId:current.accountId,repository:current.repository,trusted:current.trusted})) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Configured source trust changed; check for new changes again'));
         if((yield* (handle.generation ?? Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)
-          return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Source observation changed; inspect again'));
+          return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Source observation changed; check for new changes again'));
       });
       yield* unchanged;
       const result=yield* readSourceOperation(name,input,inspection,generation,sourceCache,setup?.repository).pipe(Effect.provideContext(context));
@@ -633,10 +662,28 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
     const accountRead = <N extends 'agentStatus'|'accountState'>(name:N,input:OperationInput<N>) => handle.exclusive(Effect.gen(function*(){
       const generation=yield* (handle.generation??Effect.succeed(0)),inspection=yield* handle.inspection;
       const result=yield* readAccountOperation(handle,name,input,generation).pipe(Effect.provideContext(context));
-      if((yield* (handle.generation??Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Account observation changed; inspect again'));
+      if((yield* (handle.generation??Effect.succeed(0)))!==generation || (yield* handle.inspection)!==inspection)return yield* Effect.fail(new SessionError('UNKNOWN_PLAN','Account observation changed; check for new changes again'));
       return result;
     }));
+    const recoverAuthorRun = (run: import('../operations/index.ts').RunView) => !run.publication || run.result === null ? Effect.succeed(run)
+      : Effect.flatMap(authorOperations, owner => owner.recoverPublication(run)).pipe(
+        Effect.map(publicationRecovery => ({ ...run, publicationRecovery })),
+        Effect.catch(() => Effect.succeed({ ...run, publicationRecovery: { published: 'unknown' as const, action: 're-check' as const } })),
+      );
+    const publicRuns: AgentRuns = { ...agentRuns,
+      get: id => agentRuns.get(id).pipe(Effect.flatMap(recoverAuthorRun)),
+    };
     const session: AgentSession = {
+      authorProfiles: input => authorRead('authorProfiles', input),
+      machineFile: input => authorRead('machineFile', input),
+      authorFile: input => authorRead('authorFile', input),
+      upstreams: input => authorRead('upstreams', input),
+      discoverUpstream: input => authorRead('discoverUpstream', input),
+      upstreamSkill: input => authorRead('upstreamSkill', input),
+      drafts: input => authorRead('drafts', input),
+      draftPreview: input => authorRead('draftPreview', input),
+      ghState: input => authorRead('ghState', input),
+
       listBackups: input => handle.exclusive(Effect.gen(function* () {
         const generation = yield* (handle.generation ?? Effect.succeed(0)), inspection = yield* handle.inspection;
         const result = yield* readBackupOperation(input, generation).pipe(Effect.provideContext(context));
@@ -650,6 +697,8 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       inspectSourceDiff: input => sourceRead('inspectSourceDiff',input),
       pinImpact: input => sourceRead('pinImpact',input),
       draftChangelog: input => sourceRead('draftChangelog',input),
+      inspectProfiles: input => readProfileOperation(handle, 'inspectProfiles', input).pipe(Effect.provideContext(context)),
+      inspectShareLink: input => handle.exclusive(readProfileOperation(handle, 'inspectShareLink', input).pipe(Effect.provideContext(context))),
       inspectSetups: input => syncRead('inspectSetups', input),
       setupReview: input => handle.exclusive(Effect.gen(function* () {
         const args = yield* Effect.try({ try: () => decodeOperationInput('setupReview', input), catch: () => new SessionError('INVALID_REQUEST', 'Invalid setup review') });
@@ -662,12 +711,12 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       })),
       incomingChanges: input => syncRead('incomingChanges', input),
       prepareTrustRequest: input => syncRead('prepareTrustRequest', input),
-      runs: agentRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
+      runs: publicRuns, skillOperations, resolveSkillCandidate, retainParityChange, inspectUpdates: input => handle.exclusive(Effect.gen(function* () {
         const generation = yield* (handle.generation ?? Effect.succeed(0));
         const inspection = yield* handle.inspection;
         const unchanged = Effect.gen(function* () {
           if ((yield* (handle.generation ?? Effect.succeed(0))) !== generation || (yield* handle.inspection) !== inspection)
-            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The update inspection changed; inspect again'));
+            return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The update inspection changed; check for new changes again'));
         });
         yield* unchanged;
         const result = yield* inspectUpdateOperations(inspection,generation,input).pipe(Effect.provideContext(context));
@@ -683,7 +732,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         Effect.mapError(error => error instanceof SessionError ? error : new SessionError('INTERNAL', describe(error))),
       ),
       cancel: Effect.suspend(() => {
-        const current = active;
+        const current = active ?? loginActive;
         if (current === undefined) return Effect.succeed(false);
         current.abort.abort();
         return Effect.as(Deferred.await(current.done), true);

@@ -81,7 +81,7 @@ test('release overlay requires a minisign public key and enables signed versions
   for (const key of ['', 'placeholder', Buffer.from('untrusted comment: key\nnot-key').toString('base64'), publicKey + '\n']) assert.throws(() => releaseOverlay(key));
 });
 test('all required workflows must complete successfully on the exact reviewed SHA', async () => {
-  const transport: typeof fetch = async () => new Response(JSON.stringify({ total_count: 4, workflow_runs: ['macos.yml','linux.yml','windows.yml','cosmos.yml'].map(path => ({ path: `.github/workflows/${path}`, head_sha: sha, event: 'push', head_branch: 'main', status: 'completed', conclusion: 'success', id: 1 })) }));
+  const transport: typeof fetch = async () => new Response(JSON.stringify({ total_count: 2, workflow_runs: ['macos.yml','windows.yml'].map(path => ({ path: `.github/workflows/${path}`, head_sha: sha, event: 'push', head_branch: 'main', status: 'completed', conclusion: 'success', id: 1 })) }));
   await verifyChecks(sha, 'test-token', transport);
   await assert.rejects(verifyChecks(sha, '', async () => new Response(JSON.stringify({ total_count: 0, workflow_runs: [] }))));
   await assert.rejects(verifyChecks(sha, '', async () => new Response(JSON.stringify({ total_count: 1, workflow_runs: [{ path: '.github/workflows/macos.yml', head_sha: sha, status: 'completed', conclusion: 'failure' }] }))));

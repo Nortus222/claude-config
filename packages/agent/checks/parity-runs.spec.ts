@@ -13,7 +13,7 @@ import { makeAgentRuns, operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from './support/setup-fixture.ts';
 
-// Prepared changes settle receipt failures silently; keep legacy production diagnostics observable.
+// Captures agent.log diagnostics: each failed or interrupted run writes one line naming its cause.
 const observeStderr = (t: import('node:test').TestContext) => {
   const diagnostics: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
@@ -73,7 +73,7 @@ test('receipt failure prevents effects', async t => {
     yield* finish(session, accepted.runId);
     assert.equal(f.effects(), 0); assert.equal((yield* session.runs.get(accepted.runId)).state, 'interrupted');
   }));
-  assert.deepEqual(diagnostics, []);
+  assert.equal(diagnostics.length, 1); assert.match(diagnostics[0]!, /^apply run [0-9a-f-]+ \(reconcile\) interrupted: Couldn't save the .*receipt unavailable.*\n$/);
 });
 
 test('observed committed evidence survives History failure', async () => {
@@ -180,7 +180,7 @@ for (const failure of ['receipt', 'history', 'both'] as const) test(`observed co
     assert.equal(done.parity?.state, 'needsInspection'); assert.equal(done.parity?.committedKeys.length, 1); assert.equal(done.parity?.backupIds.length, 1);
     assert.equal((yield* session.runs.submit(request(p.planId))).runId, run.runId); assert.equal(f.effects(), 1);
   }));
-  if (diagnostics) assert.deepEqual(diagnostics, []);
+  if (diagnostics) { assert.equal(diagnostics.length, 1); assert.match(diagnostics[0]!, /^apply run [0-9a-f-]+ \(reconcile\) interrupted: Couldn't save the .*receipt unavailable.*\n$/); }
 });
 
 test('History pending checkpoint failure prevents physical effects', async () => {

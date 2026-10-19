@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { conflictsOf, incoming, incomingChanges, nextHolds, withoutOverride, type ItemChange } from '../src/index.ts';
-import { json, runSync, tempRepo } from './support/repo.ts';
+import { BASE, json, runSync, tempRepo } from './support/repo.ts';
 
 const THEME = 'setting:claude:settings.json#theme';
 const EFFORT = 'setting:claude:settings.json#effortLevel';
@@ -83,5 +83,13 @@ test('incoming reads the applied and head commits and the holds from git', async
 
 test('incoming at the applied commit itself has nothing', async () => {
   const repo = tempRepo();
-  assert.deepEqual(await runSync(incoming({ repo: repo.dir, applied: repo.first, head: repo.first, holds: {}, overrides: {} })), { changes: [], conflicts: [] });
+  assert.deepEqual(await runSync(incoming({ repo: repo.dir, applied: repo.first, head: repo.first, holds: {}, overrides: {} })), { changes: [], conflicts: [], staleHolds: [] });
+});
+
+test('incoming compares the followed profile with a held inherited value', async () => {
+  const repo = tempRepo({ ...BASE, 'profiles/default.json': '{}', 'profiles/child.json': json({ extends: 'default' }) });
+  const second = repo.commit({ 'claude/settings.keys.json': json({ theme: 'light', effortLevel: 'high' }) });
+  const head = repo.commit({ 'claude/settings.keys.json': json({ theme: 'dark', effortLevel: 'high' }) });
+  const result = await runSync(incoming({ repo: repo.dir, profile: 'child', applied: second, head, holds: { 'setting:claude:settings.json#theme': repo.first }, overrides: {} }));
+  assert.equal(result.changes.find(change => change.itemId === 'setting:claude:settings.json#theme')!.before, '"auto"');
 });

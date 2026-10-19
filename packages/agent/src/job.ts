@@ -3,7 +3,7 @@ import {
   backupsForRun, DecisionsStore, HistoryStore, inspect, MachinePaths, machinePaths,
   type HistoryEvent, type ItemReason, type MachinePathsValue, type MachineReport,
 } from '@nortuscc/machine';
-import type { DesiredConfig } from '@nortuscc/profile-engine';
+import { loadNamedProfile, loadProfile, type DesiredConfig, type Input, type MachineOverrides } from '@nortuscc/profile-engine';
 import { observeSyncSource, LOCAL_SETUP, ownSetup, revisionIdentity, revisionSetupId, SetupSource, SetupsStore, type Revision } from '@nortuscc/sync';
 import { autoApply, type AutoApplyOutcome } from './apply.ts';
 import { AgentClock } from './clock.ts';
@@ -38,7 +38,14 @@ export type JobInspection = {
   readonly report: MachineReport;
   readonly domains: ReadonlyArray<AgentDomain>;
   readonly trusted: boolean;
+  // The followed profile the source resolved `desired` with; absent for a root-only source.
+  readonly profile?: string;
 };
+
+// Resolves an inspection's snapshot again, with other overrides, the way its source resolved `desired`.
+export const resolveInspection = (inspection: JobInspection, overrides: Input<MachineOverrides>) => inspection.profile === undefined
+  ? loadProfile(inspection.paths.repo, { overrides })
+  : loadNamedProfile(inspection.paths.repo, inspection.profile, { overrides });
 
 // A job's status, and its inspection when it got as far as inspecting.
 export type JobResult = { readonly status: AgentStatus; readonly inspection?: JobInspection };
@@ -113,7 +120,7 @@ export const runJob = (domains: AgentDomains, options: { readonly signal?: Abort
         const jobPaths = { ...paths, repo };
         const built = domains(jobPaths);
         const report = yield* inspect(desired, built);
-        const inspection: JobInspection = { paths: jobPaths, revision, desired, report, domains: built, trusted };
+        const inspection: JobInspection = { paths: jobPaths, revision, desired, report, domains: built, trusted, ...(source.profile === undefined ? {} : { profile: source.profile }) };
         return inspection;
       });
     // MachinePaths.repo at a snapshot's files, and a fresh backup folder.

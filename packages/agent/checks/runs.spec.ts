@@ -182,6 +182,21 @@ test('cancel waits for a noninterruptible step and records its commit before sto
   }));
 });
 
+test('a running receipt names the step in flight until it finishes', async () => {
+  const f = await fixture({ summary: () => 'writing settings.json' });
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session);
+    const run = yield* session.runs.submit(inputFor(planned.planId));
+    yield* Deferred.await(f.started);
+    const running = yield* session.runs.get(run.runId);
+    yield* Deferred.succeed(f.release, undefined);
+    yield* terminal(session, run.runId);
+    assert.deepEqual(running.current, { key: planned.plan.steps[0]!.key, summary: 'writing settings.json' });
+    assert.deepEqual(decodeRunView(running), running);
+    assert.equal('current' in (yield* session.runs.get(run.runId)), false);
+  }));
+});
+
 test('restart recovers an incomplete receipt without replaying an installer', async () => {
   const f = await fixture();
   let id = '';

@@ -1,7 +1,7 @@
 import { HostedFailure, type HostedState } from '@nortuscc/hosted-client';
 import { Effect } from 'effect';
 import { HistoryStore, MachinePaths, Processes, type Actor } from '@nortuscc/machine';
-import { normalizeRepoUrl, SetupsStore, type TrustedSetup } from '@nortuscc/sync';
+import { migrateFollowed, normalizeRepoUrl, SetupsStore, type TrustedSetup } from '@nortuscc/sync';
 import { AgentClock } from './clock.ts';
 
 // Grants local consent to this checkout and origin. Reinstall preserves a matching linked
@@ -18,9 +18,10 @@ export const trustOwnSetup = (actor: Actor) =>
       Effect.catchTag('LaunchFailed', () => Effect.succeed(null)),
     );
     const own = setups.find((s) => s.checkout === paths.repo && (s.repoUrl === null ? null : normalizeRepoUrl(s.repoUrl)) === repoUrl);
-    if (own) return own;
+    if (own) { yield* migrateFollowed(paths); return own; }
     const entry: TrustedSetup = { setupId: null, repoUrl, checkout: paths.repo, trustedAt: (yield* (yield* AgentClock).now).toISOString() };
     yield* store.write([...setups.filter((s) => s.setupId !== null && s.checkout !== paths.repo), entry]);
+    yield* migrateFollowed(paths);
     yield* (yield* HistoryStore).append({ kind: 'setup-trusted', actor, setupId: null, repoUrl });
     return entry;
   });

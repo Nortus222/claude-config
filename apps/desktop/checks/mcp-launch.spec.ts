@@ -59,7 +59,7 @@ test('native MCP starts without setup or GUI, from unrelated cwd, and EOF leaves
   const f = fixture(t), client = open(t, f);
   const tools = await client.ask('tools/list');
   assert.deepEqual(tools.result.tools.map((tool: { name: string }) => tool.name).sort(), [
-    'nortuscc_list_backups', 'nortuscc_agent_status', 'nortuscc_account_state', 'nortuscc_watch_sources', 'nortuscc_inspect_source_diff', 'nortuscc_pin_impact', 'nortuscc_draft_changelog', 'nortuscc_setup_review', 'nortuscc_inspect_setups', 'nortuscc_incoming_changes', 'nortuscc_prepare_trust_request', 'nortuscc_inspect_updates', 'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect', 'nortuscc_preview_change',
+    'nortuscc_inspect_profiles', 'nortuscc_inspect_share_link', 'nortuscc_author_profiles','nortuscc_machine_file','nortuscc_author_file','nortuscc_upstreams','nortuscc_discover_upstream','nortuscc_upstream_skill','nortuscc_drafts','nortuscc_draft_preview','nortuscc_gh_state','nortuscc_list_backups', 'nortuscc_agent_status', 'nortuscc_account_state', 'nortuscc_watch_sources', 'nortuscc_inspect_source_diff', 'nortuscc_pin_impact', 'nortuscc_draft_changelog', 'nortuscc_setup_review', 'nortuscc_inspect_setups', 'nortuscc_incoming_changes', 'nortuscc_prepare_trust_request', 'nortuscc_inspect_updates', 'nortuscc_inspect_intent', 'nortuscc_get_context', 'nortuscc_resolve_skill_candidate', 'nortuscc_inspect', 'nortuscc_preview_change',
     'nortuscc_apply_change', 'nortuscc_get_run', 'nortuscc_list_runs', 'nortuscc_cancel_run', 'nortuscc_abandon_run', 'nortuscc_history',
   ].sort());
   const reply = await client.ask('tools/call', { name: 'nortuscc_inspect', arguments: {} });

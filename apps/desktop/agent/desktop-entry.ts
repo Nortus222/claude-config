@@ -1,17 +1,18 @@
+import { realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { Cause, Effect, Exit, Layer } from 'effect';
 import { agentSkillInstaller, agentLayer, runAgent, type HostedOptions } from '@nortuscc/agent';
 import {
-  backupsForRun, configDomain, Fs, integrationsDomain, nodeFileIntegrity, nodeFs, nodeProcesses, nodeProcessDialogue, pathsFromEnvironment, skillsDomain,
+  backupsForRun, configDomain, Fs, integrationsDomain, machinePaths, nodeFileIntegrity, nodeFs, nodeProcesses, nodeProcessDialogue, pathsFromEnvironment, skillsDomain, stateRootFromEnvironment,
   type MachinePathsValue, type Processes,
 } from '@nortuscc/machine';
-import { setupSourceLayer } from '@nortuscc/sync';
+import { followedSetupSourceLayer, migrateFollowed, RevisionUnavailable, SetupSource, setupsStore, setupSourceLayer } from '@nortuscc/sync';
 import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
 import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
 import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
 import { ensureAgent } from './lifecycle.ts';
-import { probeLoginEnvironment } from './login-environment.ts';
+import { MACOS_TOOL_DIRECTORIES, probeLoginEnvironment, withToolDirectories } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
 import { desktopHostedUrl } from './public-config.ts';
 import { decodeRecoverUpdate } from '../shared/maintenance-protocol.ts';
@@ -27,6 +28,8 @@ export type DesktopEntryInput = {
   readonly user?: string;
   readonly processes?: Layer.Layer<Processes>;
   readonly probe?: typeof probeLoginEnvironment;
+  // Appended to the login PATH on macOS; defaults to Homebrew's prefixes.
+  readonly toolDirectories?: ReadonlyArray<string>;
   readonly signal?: AbortSignal;
   readonly bootstrapTimeoutMs?: number;
   readonly stdin?: AsyncIterable<string | Uint8Array>;
@@ -43,15 +46,22 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     Effect.sync(() => trace.record(name, 'started')).pipe(Effect.andThen(effect), Effect.onExit(exit => Effect.sync(() =>
       trace.record(name, Exit.isSuccess(exit) ? 'completed'
         : controller.signal.aborted || input.signal?.aborted || Cause.hasInterruptsOnly(exit.cause) ? 'cancelled' : 'failed'))));
+  // The last good login PATH lives under the pre-probe state root, the only one a failed probe knows.
+  // Its real path, because privateFile refuses symlinked ancestors.
+  const loginPathFile = () => {
+    const root = stateRootFromEnvironment(input.env, input.env.HOME ?? homedir(), input.platform ?? process.platform);
+    try { return join(realpathSync(root), 'agent', 'login-path'); } catch { return join(root, 'agent', 'login-path'); }
+  };
   // The probe owns detached children; interruption must wait for its abort-aware cleanup to join.
   const probe = () => Effect.tryPromise({ try: async () => {
     trace.record('login_probe', 'started');
     try {
       signal.throwIfAborted();
-      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, onProgress: trace.record, signal });
+      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, pathFile: loginPathFile(), onProgress: trace.record, signal });
       signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
-      return result;
+      // Every helper, the registered service's PATH and the agent's tools (git, npx, gh) see Homebrew.
+      return (input.platform ?? process.platform) === 'darwin' ? { ...result, env: withToolDirectories(result.env, input.toolDirectories ?? MACOS_TOOL_DIRECTORIES) } : result;
     } catch (error) { trace.record('login_probe', signal.aborted ? 'cancelled' : 'failed'); throw error; }
   }, catch: error => error }).pipe(Effect.uninterruptible);
   trace.record('entry', 'started');
@@ -188,7 +198,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       const hostedUrl = desktopHostedUrl(env);
       const home = env.HOME ?? input.env.HOME ?? homedir();
       const platform = input.platform ?? process.platform;
-      const paths = yield* phase('paths', pathsFromEnvironment({ env, home, platform, ...(arg === '--maintenance-state' ? { fallbackRepo: home } : {}) }));
+      const paths = yield* phase('paths', pathsFromEnvironment({ env, home, platform, ...(arg === '--maintenance-state' || arg === undefined ? { fallbackRepo: home } : {}) }));
       const processes = input.processes ?? nodeProcesses({ env, inherit: 'stderr' });
       if (arg !== undefined) {
         if (platform !== 'darwin' && platform !== 'linux') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
@@ -230,7 +240,18 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
         ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: resolve(input.resources, '../../MacOS'), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
-        paths, domains, source: setupSourceLayer(paths, { processes }), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
+        paths, domains, source: Layer.unwrap(migrateFollowed(paths).pipe(
+          Effect.map(followed => followed ? followedSetupSourceLayer(paths, followed, { processes }) : setupSourceLayer(paths, { processes })),
+          Effect.provide(setupsStore.pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, processes)))),
+          Effect.catch(error => {
+            const unavailable = Effect.fail(error instanceof RevisionUnavailable ? error
+              : new RevisionUnavailable({ revision: 'HEAD', reason: String(error) }));
+            return Effect.succeed(Layer.succeed(SetupSource, {
+              trusted: unavailable, fetch: unavailable, current: unavailable,
+              load: () => unavailable, effective: () => unavailable,
+            }));
+          }),
+        )), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
         signal,
         onLifecycle: trace.record,
       });

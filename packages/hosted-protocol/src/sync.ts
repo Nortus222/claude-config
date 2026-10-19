@@ -14,7 +14,7 @@ export const SyncRevisionSchema = Schema.Struct({ setupId: IdSchema, ...Revision
 export type SyncRevision = typeof SyncRevisionSchema.Type;
 export const SyncMachineSchema = Schema.Struct({ policy: PolicySchema, reportStatus: Schema.Boolean });
 export type SyncMachine = typeof SyncMachineSchema.Type;
-export const SyncSetupSchema = Schema.Struct({ setupId: IdSchema, ...SetupRegistrationSchema.fields, latestRevision: RevisionCursorSchema });
+export const SyncSetupSchema = Schema.Struct({ setupId: IdSchema, ...SetupRegistrationSchema.fields, latestRevision: RevisionCursorSchema, owned: Schema.Boolean, closed: Schema.optionalKey(Schema.Literal(true)) });
 export type SyncSetup = typeof SyncSetupSchema.Type;
 export const SyncResponseSchema = Schema.Struct({
   seq: SequenceSchema,

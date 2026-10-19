@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 const MAX_RECORD: usize = 16_384;
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(180);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(5);
@@ -33,7 +32,7 @@ fn absolute(path: &Path) -> bool {
 }
 impl Maintenance for NativeHelper {
     fn prepare(&self, from: &str, to: &str, cancel: Arc<AtomicBool>) -> Result<Box<dyn Handoff>, String> {
-        self.prepare_with_timeout(from, to, cancel, READY_TIMEOUT, SESSION_TIMEOUT)
+        self.prepare_with_timeout(from, to, cancel, Setup::PrepareUpdate.timeout(), SESSION_TIMEOUT)
     }
 }
 impl NativeHelper {
@@ -85,7 +84,7 @@ impl Handoff for NativeHandoff {
 }
 
 pub fn maintenance_state(resources: &Path) -> Result<MaintenanceState, String> {
-    let value = one_shot(resources, Setup::MaintenanceState, None, Duration::from_secs(10))?;
+    let value = one_shot(resources, Setup::MaintenanceState, None, Setup::MaintenanceState.timeout())?;
     validate_maintenance_state(value)
 }
 pub(crate) fn validate_maintenance_state(value: Value) -> Result<MaintenanceState, String> {
@@ -113,7 +112,7 @@ pub(crate) fn validate_maintenance_state(value: Value) -> Result<MaintenanceStat
 }
 pub fn recover(resources: &Path, compiled_version: &str) -> Result<PathBuf, String> {
     version(compiled_version)?;
-    let value = one_shot(resources, Setup::RecoverUpdate, Some(json!({"appVersion":compiled_version})), READY_TIMEOUT)?;
+    let value = one_shot(resources, Setup::RecoverUpdate, Some(json!({"appVersion":compiled_version})), Setup::RecoverUpdate.timeout())?;
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields, rename_all="camelCase")]
     struct Recovered { recovered: bool, interrupted: bool, state_root: PathBuf }
@@ -267,7 +266,7 @@ mod tests {
   fn new(body:&str)->Self {
    let root=crate::host::fixtures::scratch();
    fs::write(root.join("agent.mjs"), "test only").unwrap();
-   let script=format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/args'\necho $$ > '{}/pid'\n{}\n",root.display(),root.display(),body);
+   let script=format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/args'\necho $$ > '{}/pid.tmp' && mv '{}/pid.tmp' '{}/pid'\n{}\n",root.display(),root.display(),root.display(),root.display(),body);
    fs::write(root.join("bun"),script).unwrap();fs::set_permissions(root.join("bun"),fs::Permissions::from_mode(0o700)).unwrap();Self {root}
   }
   fn helper(&self)->NativeHelper {NativeHelper::new(self.root.clone())}

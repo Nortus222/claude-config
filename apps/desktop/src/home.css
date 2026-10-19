@@ -1,0 +1,37 @@
+/* Home: one card of rows, one per fact about this Mac, each with its next action. */
+.home-view {
+  display: grid;
+  gap: var(--space-4);
+}
+ul.home-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+}
+.home-lines > .row:first-child {
+  border-top: 0;
+}
+.home-line strong {
+  font-weight: 600;
+}
+.home-line-attention > .row-main::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  background: var(--warning);
+  vertical-align: 1px;
+}
+.home-busy {
+  align-items: flex-start;
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+.home-error {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-size: var(--text-small);
+}

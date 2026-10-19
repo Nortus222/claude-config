@@ -17,7 +17,7 @@ export function registerClientIntegrationContract(name: string, factory: Service
       const clock = { now: Date.UTC(2026, 9, 7) };
       const backend = await factory({ now: () => clock.now });
       try {
-        await scenario(t, backend, (context, options = {}) => createClientFixture(context, { hosting: backend.hosting, ...options, store: options.store ?? backend.store, clock }));
+        await scenario(t, backend, (context, options = {}) => createClientFixture(context, { ...options, store: options.store ?? backend.store, clock }));
       } finally { t.after(backend.dispose); }
     });
 
@@ -112,7 +112,7 @@ export function registerClientIntegrationContract(name: string, factory: Service
           notifier.setConnected((notification) => ({ timeoutMs: 1000, deliver: Effect.sync(() => { delivered.push(notification.id); return true; }) }));
           yield* notifier.notify(job.status);
           assert.equal(delivered.length, 1);
-          assert.equal((yield* notifier.get(delivered[0]!))!.title, 'Review & apply');
+          assert.equal((yield* notifier.get(delivered[0]!))!.title, 'Incoming changes');
         }
       }
       const response = yield* Effect.promise(() => f.call('GET', '/v1/machines', undefined, publisher.token));

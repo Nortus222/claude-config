@@ -1,6 +1,8 @@
 export * from './model.ts';
 export { ProfileInvalid, ReadFailed } from './errors.ts';
-export { ProfileFiles, loadProfile, memoryFiles, nodeFiles, requireValid } from './load.ts';
+export { ProfileFiles, loadProfile, loadNamedProfile, listProfiles, memoryFiles, nodeFiles, requireValid } from './load.ts';
+export { parseProfileDocument, isProfileName, type ProfileDocument } from './profile-document.ts';
+export { resolveNamedProfile, profilesUsingPath, PROFILE_MAX_DEPTH } from './profile-chain.ts';
 export { buildBaseProfile } from './base.ts';
 export type { BaseTexts } from './base.ts';
 export { resolveProfile } from './resolve.ts';
@@ -9,5 +11,6 @@ export { SKILLS_SOURCE, parseSkillsManifest } from './skills.ts';
 export { PINS_SOURCE, isCommitSha, parsePins } from './pins.ts';
 export { INTEGRATIONS_SOURCE, parseIntegrations, referencedFiles } from './integrations.ts';
 export { settingsComplaints, parseSettingsKeys } from './settings.ts';
+export { redactSecretValues } from './secrets.ts';
 export { LEGACY_STATE_SOURCE, decodeOverrides, serializeOverrides, normalizeSkillSource, isSkillAdditionName, overridesFromLegacyState } from './overrides.ts';
 export { intentValueProblem } from './intent-value.ts';

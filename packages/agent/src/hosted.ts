@@ -7,7 +7,7 @@ import {
   type HostedClient, type HostedState, type TokenKeychain,
 } from '@nortuscc/hosted-client';
 import {
-  hostedSetupSourceLayer, itemIdOf, normalizeRepoUrl, SetupSource, SetupsStore,
+  FollowedStore, followedSetupSourceLayer, hostedSetupSourceLayer, itemIdOf, normalizeRepoUrl, SetupSource, SetupsStore,
 } from '@nortuscc/sync';
 import { parseItemId, type DeviceStartRequest, type MachinePatch, type SetupStatus, type StatusSummary, type SyncRevision } from '@nortuscc/hosted-protocol';
 import { AgentClock } from './clock.ts';
@@ -40,6 +40,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
   const paths = yield* MachinePaths;
   const local = yield* SetupSource;
   const store = yield* SetupsStore;
+  const followedStore = yield* FollowedStore;
   const decisions = yield* DecisionsStore;
   const agentState = yield* AgentStateStore;
   const clock = yield* AgentClock;
@@ -71,27 +72,42 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     if (cached.length !== offered.latestRevision || cached.some((r, i) => r.number !== i + 1)) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
     return cached;
   });
+  const sourceForProfile = (followed: import('@nortuscc/sync').FollowedProfile) => Effect.gen(function* () {
+    const metadata = Effect.gen(function* () {
+      const offered = yield* client.publicSetup(followed.setupId!);
+      if (normalizeRepoUrl(offered.repoUrl) !== normalizeRepoUrl(followed.repoUrl) || offered.profile !== followed.profile) {
+        return yield* Effect.fail(new HostedFailure({ code: 'invalid_response' }));
+      }
+      const revisions = yield* client.listRevisions(followed.setupId!);
+      if (revisions.length !== offered.latestRevision) return yield* Effect.fail(new HostedFailure({ code: 'invalid_response' }));
+      return revisions.map(({ setupId, number, commitSha, tag, changelog, items, requiredEnv }) => ({ setupId, number, commitSha, tag, changelog, items, requiredEnv }));
+    });
+    return yield* SetupSource.pipe(Effect.provide(followedSetupSourceLayer(paths, followed, { processes, records: metadata })));
+  });
+  const followedSource = Effect.flatMap(followedStore.read, followed => followed ? sourceForProfile(followed) : Effect.succeed(undefined));
   type Selected = { source: SetupSource['Service']; records: ReadonlyArray<SyncRevision>; scope: string };
   const select = Effect.gen(function* () {
     const current = yield* client.state;
     const trust = yield* store.read;
-    if (trust === undefined) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
-    const linked = trust.filter((s) => s.accountId === current.accountId && s.setupId !== null && s.repoUrl !== null);
+    const followed = yield* followedStore.read;
+    const followedPrimary = yield* followedSource;
+    if (trust === undefined && !followedPrimary) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
+    const linked = (trust ?? []).filter((s) => s.accountId === current.accountId && s.setupId !== null && s.repoUrl !== null);
     const selected: Selected[] = [];
-    let primary = local;
+    let primary = followedPrimary ?? local;
     let complete = true;
     let primaryUnavailable = false;
     for (const entry of linked) {
       const offered = current.setups.find((s) => s.setupId === entry.setupId);
-      if (!offered || normalizeRepoUrl(offered.repoUrl) !== normalizeRepoUrl(entry.repoUrl!) || selected.some((s) => s.source.setupId === entry.setupId)) { complete = false; if (entry.checkout === paths.repo) primaryUnavailable = true; continue; }
-      const source = yield* SetupSource.pipe(Effect.provide(hostedSetupSourceLayer(paths, {
+      if (!offered || normalizeRepoUrl(offered.repoUrl) !== normalizeRepoUrl(entry.repoUrl!) || selected.some((s) => s.source.setupId === entry.setupId)) { complete = false; if (!followed && entry.checkout === paths.repo) primaryUnavailable = true; continue; }
+      const source = followed?.setupId === offered.setupId ? primary : yield* SetupSource.pipe(Effect.provide(hostedSetupSourceLayer(paths, {
         accountId: current.accountId!, currentAccountId: Effect.map(client.state, (s) => s.accountId), setupId: offered.setupId,
-        repoUrl: offered.repoUrl, records: records(offered.setupId, current.accountId!), processes,
+        repoUrl: offered.repoUrl, profile: offered.profile, records: records(offered.setupId, current.accountId!), processes,
       })));
       const cached = yield* records(offered.setupId, current.accountId!).pipe(Effect.catch(() => Effect.succeed(undefined)));
-      if (cached === undefined) { complete = false; if (entry.checkout === paths.repo) primaryUnavailable = true; continue; }
+      if (cached === undefined) { complete = false; if (!followed && entry.checkout === paths.repo) primaryUnavailable = true; continue; }
       selected.push({ source, records: cached, scope: `${current.accountId}/${offered.setupId}/${normalizeRepoUrl(offered.repoUrl)}` });
-      if (entry.checkout === paths.repo) primary = source;
+      if (!followed && entry.checkout === paths.repo) primary = source;
     }
     return { primary, selected, complete, primaryUnavailable, accountId: current.accountId };
   }).pipe(Effect.mapError(safe));
@@ -143,7 +159,7 @@ export const makeHostedRuntime = (client: HostedClient, input: {
   }).pipe(Effect.mapError(safe), Effect.catch((error) => { failure = error; return Effect.void; }));
 
   const inspectPrimary = Effect.gen(function* () {
-    yield* recover;
+    yield* recover.pipe(Effect.catch(error => Effect.flatMap(followedStore.read, followed => followed ? Effect.void : Effect.fail(error))));
     const selection = yield* select;
     if (selection.primaryUnavailable) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
     return yield* runWith(selection.primary, true);
@@ -153,6 +169,8 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     const ready = yield* withServices(Effect.scoped(Effect.andThen(acquireApplyLock, recover))).pipe(
       Effect.match({ onFailure: () => false, onSuccess: () => true }));
     const fallback = Effect.gen(function* () {
+      const selected = yield* followedSource;
+      if (selected) return yield* runWith(selected);
       const trust = yield* store.read.pipe(Effect.catch(() => Effect.succeed(undefined)));
       return yield* runWith(local, trust === undefined || trust.some((s) => s.checkout === paths.repo && s.setupId !== null));
     });
@@ -174,8 +192,13 @@ export const makeHostedRuntime = (client: HostedClient, input: {
     return current;
   }));
   return {
+    profileHosted: { publicSetup: client.publicSetup, subscribe: client.subscribe, unsubscribe: client.unsubscribe },
+    followedSource,
+    authorClient: client,
     selectOperationSetup: (setupId: string) => Effect.gen(function* () {
       const current = yield* client.state;
+      const followed = yield* followedStore.read;
+      if (followed?.setupId === setupId) return { setupId, accountId: current.accountId, repository: normalizeRepoUrl(followed.repoUrl), trusted: true, source: yield* sourceForProfile(followed) };
       const offered = current.setups.find(s => s.setupId === setupId);
       if (!offered || !current.accountId) return yield* Effect.fail(new HostedFailure({ code: 'storage' }));
       const selection = yield* select;

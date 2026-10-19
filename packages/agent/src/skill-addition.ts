@@ -8,6 +8,9 @@ import type { RunLifecycle } from './runs.ts';
 import type { RunView } from './operations/index.ts';
 import type { AgentDomain } from './layer.ts';
 import type { JobInspection } from './job.ts';
+import { describe, redact, safeMessage } from './operations/safety.ts';
+
+const REPAIR = 'preview the skill again to repair it. Backups are in ~/.config/nortuscc/backups';
 
 export interface AdditionInvocation { readonly command: Command; readonly lockText: string | undefined }
 
@@ -42,6 +45,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   let intentState: RunView['intentState'] = 'pending';
   let prepared = false;
   let installed = accepted.plan.steps.length === 0;
+  let installerNote = '';
   let installation: Installation | undefined;
   let retainedDirectory: string | undefined;
   const update = () => Effect.gen(function* () {
@@ -49,7 +53,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
     yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, runId: lifecycle.runId,
       operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId,
       intentSaved: saved, intentState: intentState!, ...(installation ? { installationState: installation.state } : {}),
-      message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Declaration write may be in progress; inspect intent before retrying') });
+      message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Saving the machine declaration has not finished') });
     if (Exit.isFailure(receipt)) return yield* Effect.failCause(receipt.cause);
   }).pipe(Effect.onExit(exit => Effect.sync(() => { if (Exit.isFailure(exit)) persistenceUncertain = true; })));
   const result = (state: Installation['state'], message: string, evidence: Pick<Installation, 'claude' | 'codex'> = {}): Installation => ({
@@ -76,14 +80,14 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         const fresh = yield* refresh;
         const persisted = yield* overrides.read;
         if (persisted.issues.length || canonical(persisted.value) !== canonical(accepted.overrides.value))
-          return { ok: false, note: 'Machine declaration changed after saving; inspect before retrying' };
+          return { ok: false, note: 'The machine declaration changed after saving; preview the skill again' };
         const resolved = { ...fresh.desired, skills: fresh.desired.skills.map(s => s.name === tuple.installedName && s.source === tuple.source ? { ...s, exact: true } : s) };
         if (canonical(resolved) !== canonical(accepted.desired))
-          return { ok: false, note: 'Saved intent could not be resolved; inspect before retrying' };
+          return { ok: false, note: 'The saved declaration does not resolve to the accepted skill; preview the skill again' };
         prepared = true;
         return { ok: true, note: 'Machine declaration saved; shared store is also scanned by Codex' };
       }
-      if (!saved || !prepared) return { ok: false, note: 'Intent was not confirmed saved; inspect before retrying' };
+      if (!saved || !prepared) return { ok: false, note: 'The machine declaration was not confirmed saved; preview the skill again' };
       if (!step.key.startsWith('skill-verify:')) {
         if (!invocation || (yield* fs.readText(skillLockPath(paths))) !== invocation.lockText)
           return { ok: false, note: 'Native skill lock changed after acceptance; preview again' };
@@ -93,8 +97,8 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         for (const target of tuple.targets) yield* backups.preserve(join(paths[target], 'skills', tuple.installedName), join(target, 'skills', tuple.installedName));
         if ((yield* fs.readText(skillLockPath(paths))) !== invocation.lockText)
           return { ok: false, note: 'Native skill lock changed during backup; preview again' };
-        const ran = yield* runInstaller(invocation.command);
-        installed = ran.ok;
+        const ran = yield* runInstaller(invocation.command, tuple.source);
+        installed = ran.ok; installerNote = ran.note ?? '';
         return ran;
       }
       const content = yield* (readers.content ?? verifyAcceptedSkill)(accepted.candidate).pipe(Effect.onExit(exit => Effect.gen(function* () {
@@ -115,7 +119,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         return { ok: false, note: installation.message };
       }
       if (!installed || !content.verified) {
-        installation = result('failed', !installed ? 'Installer failed; saved intent and backups remain available for repair' : content.problems.join('; '));
+        installation = result('failed', !installed ? safeMessage(`The skills installer failed${installerNote ? ` (${redact(installerNote)})` : ''}; ${REPAIR}`) : content.problems.join('; '));
         yield* update();
         return { ok: false, note: installation.message };
       }
@@ -154,13 +158,13 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
         : 'Installed content verified; selected native catalog availability remains unverified', evidence);
       yield* update();
       return { ok: verified, note: installation.message };
-    }).pipe(Effect.catch(() => Effect.succeed({ ok: false, note: 'Skill addition could not complete; inspect saved intent and backups before retrying' }))),
+    }).pipe(Effect.catch(error => Effect.succeed({ ok: false, note: safeMessage(`The skill addition stopped: ${describe(error)}`) }))),
   };
   const finish = (state: 'failed' | 'cancelled' | 'needsInspection') => Effect.gen(function* () {
     if (persistenceUncertain || intentState === 'needsInspection' || installation?.state === 'needsInspection') state = 'needsInspection';
     if (installation?.state === state) return;
     if (installation?.state === 'verified') state = 'needsInspection';
-    installation = result(state, state === 'cancelled' ? 'Installation cancelled; saved intent is retained' : 'Inspect saved intent and partial installation before retrying', { ...(installation?.claude ? { claude: installation.claude } : {}), ...(installation?.codex ? { codex: installation.codex } : {}) });
+    installation = result(state, state === 'cancelled' ? 'Installation cancelled; saved intent is retained' : `The skill installation did not finish; ${REPAIR}`, { ...(installation?.claude ? { claude: installation.claude } : {}), ...(installation?.codex ? { codex: installation.codex } : {}) });
     yield* update();
   });
   return { domain, finish };

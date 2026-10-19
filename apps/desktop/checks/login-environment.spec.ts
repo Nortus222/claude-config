@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { missingTools, probeLoginEnvironment } from '../agent/login-environment.ts';
+import { Effect } from 'effect';
+import { nodeProcesses } from '@nortuscc/machine';
+import { ghStatus } from '../../../packages/agent/src/author/gh.ts';
+import { MACOS_TOOL_DIRECTORIES, missingTools, probeLoginEnvironment, withToolDirectories } from '../agent/login-environment.ts';
 import type { StartupPhase, StartupStatus } from '../agent/startup-diagnostics.ts';
 import { assertExited, assertReaped } from './support/processes.ts';
 
@@ -87,6 +90,44 @@ test('a hanging shell times out and falls back to the inherited PATH', unixShell
   assert.ok(Date.now() - started < 3000);
   assert.equal(result.env.PATH, '/inherited');
   assert.match(result.error!, /timed out/);
+});
+
+test('the default timeout tolerates slow rc files and names the app environment fallback', unixShell, async () => {
+  const shell = script('default-timeout', '/bin/sleep 30');
+  let scheduled: number | undefined;
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' },
+    scheduleTimeout: (callback, ms) => { scheduled = ms; setImmediate(callback); return () => {}; } });
+  assert.equal(scheduled, 15000);
+  assert.equal(result.env.PATH, '/inherited');
+  assert.match(result.error!, /timed out after 15000 ms; using the app's environment$/);
+});
+
+test('a successful probe remembers only PATH, privately, and a later timeout uses it', unixShell, async () => {
+  // privateFile refuses symlinked ancestors, and macOS's tmpdir is one.
+  const pathFile = join(realpathSync(mkdtempSync(join(dir, 'remembered-'))), 'agent', 'login-path');
+  const good = script('remember', 'PATH=/opt/conda/bin:/usr/bin\nAPI_TOKEN=secret\nexport PATH API_TOKEN\n/bin/sh -c "$2"');
+  const first = await probeLoginEnvironment({ env: { SHELL: good, PATH: '/inherited' }, pathFile });
+  assert.equal(first.error, undefined);
+  assert.equal(readFileSync(pathFile, 'utf8'), '/opt/conda/bin:/usr/bin');
+  assert.equal(statSync(pathFile).mode & 0o777, 0o600);
+
+  const hang = script('remember-hang', '/bin/sleep 30');
+  const later = await probeLoginEnvironment({ env: { SHELL: hang, PATH: '/inherited', KEEP: 'me' }, pathFile, timeoutMs: 200 });
+  assert.deepEqual(later.env, { SHELL: hang, PATH: '/opt/conda/bin:/usr/bin', KEEP: 'me' });
+  assert.match(later.error!, /timed out after 200 ms; using the PATH from the last successful read$/);
+  assert.equal(readFileSync(pathFile, 'utf8'), '/opt/conda/bin:/usr/bin', 'a failed probe keeps the remembered PATH');
+
+  const silent = await probeLoginEnvironment({ env: { SHELL: script('remember-silent', 'exit 0'), PATH: '/inherited' }, pathFile });
+  assert.equal(silent.env.PATH, '/opt/conda/bin:/usr/bin');
+  assert.match(silent.error!, /no environment; using the PATH from the last successful read$/);
+});
+
+test('without a remembered PATH a failed probe says it uses the app environment', unixShell, async () => {
+  const pathFile = join(realpathSync(mkdtempSync(join(dir, 'unremembered-'))), 'agent', 'login-path');
+  const result = await probeLoginEnvironment({ env: { SHELL: script('unremembered', 'exit 0'), PATH: '/inherited' }, pathFile });
+  assert.equal(result.env.PATH, '/inherited');
+  assert.match(result.error!, /no environment; using the app's environment$/);
+  assert.equal(existsSync(pathFile), false);
 });
 
 test('probe timing distinguishes shell readiness from a stalled runtime and joins cleanup once', unixShell, async () => {
@@ -174,4 +215,22 @@ test('missingTools names each tool not executable on PATH', {
     "'claude' was not found on the login shell's PATH",
     "'codex' was not found on the login shell's PATH",
   ]);
+});
+
+test('a login PATH without Homebrew still finds gh under a Homebrew prefix, after its own entries', unixShell, async () => {
+  const prefix = mkdtempSync(join(dir, 'homebrew-'));
+  const brewBin = join(prefix, 'bin');
+  mkdirSync(brewBin);
+  writeFileSync(join(brewBin, 'gh'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(brewBin, 'gh'), 0o755);
+  const empty = mkdtempSync(join(dir, 'launchd-path-'));
+  const status = (env: Record<string, string>) => Effect.runPromise(ghStatus().pipe(Effect.provide(nodeProcesses({ env }))));
+  // A launchd PATH, or a login shell that never set up Homebrew: gh is missing by its launch ENOENT.
+  assert.equal(await status({ PATH: empty }), 'missing');
+  const env = withToolDirectories({ PATH: empty, KEEP: 'me' }, [brewBin, '/usr/local/bin']);
+  assert.deepEqual(env, { PATH: `${empty}:${brewBin}:/usr/local/bin`, KEEP: 'me' });
+  assert.equal(await status(env), 'ready');
+  assert.deepEqual(withToolDirectories({ PATH: `${brewBin}:/usr/bin` }, [brewBin, '/usr/local/bin']), { PATH: `${brewBin}:/usr/bin:/usr/local/bin` }, 'login entries keep their order; none repeats');
+  assert.deepEqual(withToolDirectories({}, [brewBin]), { PATH: brewBin });
+  assert.deepEqual(MACOS_TOOL_DIRECTORIES, ['/opt/homebrew/bin', '/usr/local/bin']);
 });

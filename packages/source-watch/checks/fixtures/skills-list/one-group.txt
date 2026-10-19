@@ -1,0 +1,23 @@
+
+│
+◇  Source: https://github.com/example/skills.git
+│
+◇  Repository cloned
+│
+◇  Found 2 skills
+
+│
+◇  Available Skills
+Example Skills
+│
+│    first
+│
+│      First description.
+│
+│    second
+│
+│      A Unicode description with café and 日本語.
+
+│
+└  Use --skill <name> to install specific skills
+

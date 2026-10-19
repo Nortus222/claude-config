@@ -1,0 +1,19 @@
+
+│
+◇  Source: https://github.com/example/skills.git
+│
+◇  Repository cloned
+│
+◇  Found 1 skill
+
+│
+◇  Available Skills
+│
+│    first
+│
+│      First description.
+│  Files: 12
+
+│
+└  Use --skill <name> to install specific skills
+

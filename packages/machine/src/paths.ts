@@ -42,6 +42,10 @@ const recordedRepo = (paths: readonly string[]): string | undefined => {
   return undefined;
 };
 
+// The state root alone, for callers that need it before a full path resolution.
+export const stateRootFromEnvironment = (env: Readonly<Record<string, string | undefined>>, home: string, platform: NodeJS.Platform): string =>
+  env.NORTUSCC_STATE_DIR || (platform === 'win32' ? join(env.APPDATA ?? '', 'nortuscc') : join(home, '.config', 'nortuscc'));
+
 // Resolves today's NORTUSCC_* and HOME rules into explicit paths, so nothing below reads the environment.
 export const pathsFromEnvironment = (input: PathsEnvironment): Effect.Effect<MachinePathsValue, RepoNotFound> =>
   Effect.suspend(() => {
@@ -50,8 +54,7 @@ export const pathsFromEnvironment = (input: PathsEnvironment): Effect.Effect<Mac
     const codex = env.NORTUSCC_CODEX_DIR || join(home, '.codex');
     const codexOpenRouter = env.NORTUSCC_OPENROUTER_CODEX_DIR
       || (env.NORTUSCC_CODEX_DIR ? join(dirname(env.NORTUSCC_CODEX_DIR), '.codex-openrouter') : join(home, '.codex-openrouter'));
-    const stateRoot = env.NORTUSCC_STATE_DIR
-      || (platform === 'win32' ? join(env.APPDATA ?? '', 'nortuscc') : join(home, '.config', 'nortuscc'));
+    const stateRoot = stateRootFromEnvironment(env, home, platform);
 
     let repo = env.NORTUSCC_REPO_DIR || undefined;
     let recorded: string | undefined;

@@ -61,7 +61,7 @@ test('fake three-machine service: person accepts/configures first, inert auto ap
       if (req.path.startsWith('/sync?')) {
         const first = !req.path.includes('setup1%3A1');
         return { status: 200, body: { seq: authoritative.length, decisions: authoritative, revisions: first ? [record, { ...record, setupId: 'setup2' }] : [],
-          machine: { policy, reportStatus: true }, setups: [{ setupId: 'setup1', name: 'Test', repoUrl: URL, latestRevision: 1 }, { setupId: 'setup2', name: 'Additional', repoUrl: ADDITIONAL, latestRevision: 1 }], pollAfter: 900 } };
+          machine: { policy, reportStatus: true }, setups: [{ setupId: 'setup1', name: 'Test', repoUrl: URL, profile: 'default', owned: true, latestRevision: 1 }, { setupId: 'setup2', name: 'Additional', repoUrl: ADDITIONAL, profile: 'default', owned: true, latestRevision: 1 }], pollAfter: 900 } };
       }
       if (req.path === '/machines/self/status') { reports[index]!.push(req.body as StatusSummary); return { status: 204 }; }
       assert.fail(`unexpected fake HTTP ${req.path}`);
@@ -162,7 +162,7 @@ for (const reportStatus of [true, false]) test(`accepted override conflict prese
     if (req.path === '/auth/device/poll') return { status: 200, body: { accountId: 'account1', login: 'person', machineId: 'machine1', token: `nmt_account1_machine1_${'s'.repeat(43)}`, defaultPolicy: 'notify' } };
     if (req.path.startsWith('/sync?')) return { status: 200, body: { seq: 2, revisions: [record],
       decisions: [EFFORT, MODEL].map((itemId) => ({ setupId: 'setup1', itemId, revision: 1, decision: 'accept', decidedAt: new Date(now).toISOString(), machineId: 'other' })),
-      machine: { policy: 'notify', reportStatus }, setups: [{ setupId: 'setup1', name: 'Test', repoUrl: URL, latestRevision: 1 }], pollAfter: 900 } };
+      machine: { policy: 'notify', reportStatus }, setups: [{ setupId: 'setup1', name: 'Test', repoUrl: URL, profile: 'default', owned: true, latestRevision: 1 }], pollAfter: 900 } };
     if (req.path === '/machines/self/status') { reports.push(req.body as StatusSummary); return { status: 204 }; }
     assert.fail(`unexpected fake HTTP ${req.path}`);
   }) });
