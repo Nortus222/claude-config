@@ -237,7 +237,7 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
       // Cloned into an empty directory that exists first, so git runs (and reads ssh config) there.
       yield* fs.createDirectory(dir, { recursive: true });
       const failure = yield* networkGit('git clone',
-        { args: ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir], cwd: dir }, options.timeoutMs);
+        { args: ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir], cwd: dir, outsideRepository: true }, options.timeoutMs);
       if (failure !== undefined) return failure;
       const listed = yield* processes.run(lsTree(dir));
       if (listed.code !== 0) return 'the cloned tree could not be listed';

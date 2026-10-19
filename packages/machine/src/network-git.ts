@@ -1,3 +1,4 @@
+import { dirname } from 'node:path';
 import { Effect } from 'effect';
 import { redactSecretValues } from '@nortuscc/profile-engine';
 import type { LaunchFailed } from './errors.ts';
@@ -43,19 +44,22 @@ export const boundedNetworkGit = <E, R>(what: string, run: Effect.Effect<Complet
   );
 
 // Runs `git <args>` in `cwd` against the network, unattended and bounded. git, credential helpers and
-// ssh never prompt: ssh keeps the core.sshCommand configured where `cwd` is (its repository's, or system
-// and global config outside one) with batch mode added, and replaces any GIT_SSH_COMMAND in the
-// environment. A stalled HTTPS transfer aborts, output past NETWORK_OUTPUT_BYTES or a run past
+// ssh never prompt: ssh keeps the core.sshCommand configured where `cwd` is with batch mode added, and
+// replaces any GIT_SSH_COMMAND in the environment. `cwd` is the target repository unless
+// `outsideRepository` says it is a scratch directory; then only system and global config apply, never
+// a repository's above it. A stalled HTTPS transfer aborts, output past NETWORK_OUTPUT_BYTES or a run past
 // `timeoutMs` stops its process group, and stderr is captured, never shown. Answers undefined when it
 // succeeded, otherwise a redacted one-line cause; fails only when git cannot be launched.
 export const networkGit = (
   what: string,
-  command: { readonly args: readonly string[]; readonly cwd: string },
+  command: { readonly args: readonly string[]; readonly cwd: string; readonly outsideRepository?: boolean },
   timeoutMs: number = FETCH_TIMEOUT_MS,
 ): Effect.Effect<string | undefined, LaunchFailed, Processes> =>
   Effect.gen(function* () {
     const processes = yield* Processes;
-    const configured = yield* processes.run({ cmd: 'git', args: ['config', '--get', 'core.sshCommand'], cwd: command.cwd, output: 'capture' });
+    const configured = yield* processes.run({ cmd: 'git', args: ['config', '--get', 'core.sshCommand'], cwd: command.cwd, output: 'capture',
+      // Repository discovery stops before the scratch directory's parent.
+      ...(command.outsideRepository ? { env: { GIT_CEILING_DIRECTORIES: dirname(command.cwd) } } : {}) });
     const ssh = configured.code === 0 && configured.stdout.trim() !== '' ? configured.stdout.trim() : 'ssh';
     const run = processes.run({
       cmd: 'git',
