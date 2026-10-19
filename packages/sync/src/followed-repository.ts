@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { Fs, Processes, type MachinePathsValue } from '@nortuscc/machine';
+import { FETCH_TIMEOUT_MS, Fs, Processes, STALL_LIMIT_ARGS, type MachinePathsValue } from '@nortuscc/machine';
 import { gitAuthArgs, proveReadAccess } from './git-auth.ts';
-import { FETCH_TIMEOUT_MS } from './git.ts';
 import type { FollowedProfile } from './followed.ts';
 import { RevisionUnavailable, type Revision } from './source.ts';
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));
@@ -41,5 +40,5 @@ export const privateFollowedRepository = (paths: MachinePathsValue, followed: Fo
 });
 
 export const fetchFollowedMain = (paths: MachinePathsValue, repo: string, repoUrl: string) => followedGit(paths, repo, [
-  'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--', repoUrl, `+refs/heads/main:${FOLLOWED_MAIN}`,
+  ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--', repoUrl, `+refs/heads/main:${FOLLOWED_MAIN}`,
 ]).pipe(Effect.timeoutOption(FETCH_TIMEOUT_MS), Effect.map(result => result._tag === 'Some' && result.value.code === 0));

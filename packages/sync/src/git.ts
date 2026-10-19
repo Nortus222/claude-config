@@ -1,5 +1,5 @@
 import { Context, Effect, Layer, Option } from 'effect';
-import { Processes, type LaunchFailed } from '@nortuscc/machine';
+import { boundedNetworkGit, Processes, STALL_LIMIT_ARGS, type LaunchFailed } from '@nortuscc/machine';
 import { readDocuments, type Documents } from './documents.ts';
 import { RevisionUnavailable } from './source.ts';
 
@@ -82,30 +82,26 @@ export const originUrl = (repo: string): Effect.Effect<string | undefined, Launc
   Effect.map(git(repo, ['remote', 'get-url', 'origin']), ({ code, stdout }) =>
     (code === 0 && stdout.trim() !== '' ? stdout.trim() : undefined));
 
-// How long a fetch may take before it is abandoned as failed.
-export const FETCH_TIMEOUT_MS = 120_000;
-
 // Updates the tracked branch's remote-tracking ref only: never the working tree, the index or HEAD.
-// Runs unattended: git, its credential helpers and ssh are told never to prompt, and a fetch still
-// running after `timeoutMs` is killed and answers false. ssh keeps the repository's core.sshCommand;
-// a GIT_SSH_COMMAND already in the environment is replaced, not honoured.
+// Runs unattended: git, its credential helpers and ssh are told never to prompt, a stalled transfer
+// aborts, and a fetch still running after `timeoutMs` has its process group killed. Answers undefined
+// once fetched, otherwise a redacted cause; git's stderr is captured, never passed through.
+// ssh keeps the repository's core.sshCommand; a GIT_SSH_COMMAND already in the environment is
+// replaced, not honoured.
 export const fetchTracked = (
   repo: string,
   upstream: Upstream,
   options: { readonly timeoutMs?: number } = {},
-): Effect.Effect<boolean, LaunchFailed, Processes> =>
+): Effect.Effect<string | undefined, LaunchFailed, Processes> =>
   Effect.gen(function* () {
     const configured = yield* git(repo, ['config', '--get', 'core.sshCommand']);
     const ssh = configured.code === 0 && configured.stdout.trim() !== '' ? configured.stdout.trim() : 'ssh';
-    const { code } = yield* Processes.use((p) => p.run({
+    return yield* boundedNetworkGit(`git fetch of ${upstream.remote}/${upstream.branch}`, Processes.use((p) => p.run({
       cmd: 'git',
-      args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`],
+      args: ['-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`],
       cwd: repo,
       env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` },
       output: 'capture',
-    }));
-    return code === 0;
-  }).pipe(
-    Effect.timeoutOption(options.timeoutMs ?? FETCH_TIMEOUT_MS),
-    Effect.map((fetched) => fetched._tag === 'Some' && fetched.value),
-  );
+      stderr: 'capture',
+    })), options.timeoutMs);
+  });

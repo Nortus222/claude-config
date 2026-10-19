@@ -44,7 +44,7 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const processes = yield* Processes;
   const fake: Processes['Service'] = { ...processes, run: command => {
-   if (command.cmd === 'git' && command.args[0] === 'clone') return Effect.succeed({ code: 0, stdout: '', stderr: '' });
+   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.succeed({ code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
    if (command.cmd === 'git' && command.args[0] === '-c') {
     const names = ['one','two','three'];

@@ -15,7 +15,7 @@ test('proveReadAccess passes the gh credential helper and disables prompts', asy
   });
   assert.deepEqual(gitAuthArgs('/empty-hooks'), ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential', '-c', 'core.hooksPath=/empty-hooks']);
   assert.deepEqual(commands.map(c => [c.cmd, c.args, c.env, c.output, c.stderr]), [[
-    'git', [...gitAuthArgs('/empty-hooks'), 'ls-remote', '--symref', '--', 'https://github.com/a/repo.git', 'HEAD'],
+    'git', [...gitAuthArgs('/empty-hooks'), '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30', 'ls-remote', '--symref', '--', 'https://github.com/a/repo.git', 'HEAD'],
     { GIT_TERMINAL_PROMPT: '0' }, 'capture', 'capture',
   ]]);
 });

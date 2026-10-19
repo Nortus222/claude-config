@@ -4,6 +4,7 @@ export * from './fs.ts';
 export * from './file-integrity.ts';
 export * from './private-file.ts';
 export * from './processes.ts';
+export * from './network-git.ts';
 export * from './hash.ts';
 export * from './state.ts';
 export * from './overrides.ts';

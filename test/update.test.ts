@@ -311,7 +311,7 @@ function machine(options: Options = {}) {
     return Layer.succeed(Processes, {
       run: (command: Command) => {
         if (command.cmd === 'git') {
-          if (behaviour.blockClone && command.args[0] === 'clone') {
+          if (behaviour.blockClone && command.args.includes('clone')) {
             commands.push(command);
             return Effect.never;
           }
@@ -741,7 +741,7 @@ test('Ctrl-C while sources are being checked cancels before the picker and exits
   assert.match(result.out, /\ncancelled\n/);
   assert.equal(picked, false, 'the picker must not open after a cancel');
   assert.deepEqual(m.npx(), []);
-  assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args[0] === 'clone'), 'the clone had started');
+  assert.ok(m.commands.some((c) => c.cmd === 'git' && c.args.includes('clone')), 'the clone had started');
 });
 
 for (const held of [false, true]) for (const overlay of [false, true]) {

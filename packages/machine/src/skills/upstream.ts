@@ -6,6 +6,7 @@ import type { FsFailed } from '../errors.ts';
 import { Fs } from '../fs.ts';
 import type { Observed } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
+import { boundedNetworkGit, STALL_LIMIT_ARGS } from '../network-git.ts';
 import { Processes, type Command } from '../processes.ts';
 import { readSkillCandidates, type SkillCandidate, type SkillCandidatesResult } from './candidates.ts';
 import type { SkillLock } from './manifest.ts';
@@ -218,17 +219,19 @@ const lsTree = (dir: string): Command => ({ cmd: 'git', args: ['ls-tree', '-r', 
 
 // One shallow, blob-less clone per source answers both questions: each known folder's tree SHA, and
 // (unless the source is exact) every SKILL.md it offers. ls-tree is silent about missing paths, so a
-// skill gone upstream reads as null without git complaining on the terminal. null: not reachable.
-export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, discover: boolean) =>
+// skill gone upstream reads as null without git complaining on the terminal. null: not reachable,
+// including a clone that runs past `timeoutMs` and is killed. The clone runs unattended.
+export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, discover: boolean, options: { readonly timeoutMs?: number } = {}) =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const processes = yield* Processes;
     const dir = join((yield* MachinePaths).stateRoot, 'tmp', `trees-${randomUUID()}`);
     const body = Effect.gen(function* () {
-      const cloned = yield* processes.run({
-        cmd: 'git', args: ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir], output: 'capture',
-      });
-      if (cloned.code !== 0) return null;
+      const failure = yield* boundedNetworkGit('git clone', processes.run({
+        cmd: 'git', args: ['-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir],
+        env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
+      }), options.timeoutMs);
+      if (failure !== undefined) return null;
       const listed = yield* processes.run(lsTree(dir));
       if (listed.code !== 0) return null;
       const treeAt = new Map<string, string>();

@@ -139,7 +139,7 @@ test('checkUpdates never clones a pinned source', async () => {
   const processes = Layer.succeed(Processes, { run: (c: Command) => Effect.sync(() => (commands.push(c), { code: 1, stdout: '' })) });
   const desired = desiredWith([skill('p', 'p/p', pin(SHA)), skill('u', 'u/u')]);
   const result = await Effect.runPromise(checkUpdates(desired).pipe(Effect.provide(Layer.mergeAll(m.layer, processes))));
-  const clones = commands.filter((c) => c.cmd === 'git' && c.args[0] === 'clone');
+  const clones = commands.filter((c) => c.cmd === 'git' && c.args.includes('clone'));
   assert.ok(clones.some((c) => c.args.includes('url-free')));
   assert.ok(!clones.some((c) => c.args.includes('url-pinned')));
   assert.deepEqual(result.current, [{ name: 'p', source: 'p/p' }]);
