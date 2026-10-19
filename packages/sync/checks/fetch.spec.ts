@@ -4,8 +4,8 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { nodeProcesses, Processes, type Command } from '@nortuscc/machine';
-import { fetchTracked, STALL_LIMIT_ARGS } from '../src/index.ts';
+import { nodeProcesses, Processes, STALL_LIMIT_ARGS, type Command } from '@nortuscc/machine';
+import { fetchTracked } from '../src/index.ts';
 
 const UPSTREAM = { remote: 'origin', branch: 'main', ref: 'refs/remotes/origin/main' };
 

@@ -5,14 +5,14 @@ import {
   decodeHosted, IdSchema, normalizeRepoUrl, RepoUrlSchema, SyncRevisionSchema, type SyncRevision,
 } from '@nortuscc/hosted-protocol';
 import {
-  Backups, backupsForRun, canonical, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
+  Backups, backupsForRun, canonical, FETCH_TIMEOUT_MS, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes, STALL_LIMIT_ARGS,
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import { fetchFollowedMain, privateFollowedRepository } from './followed-repository.ts';
 import { gitAuthArgs } from './git-auth.ts';
 import type { FollowedProfile } from './followed.ts';
-import { commitDocuments, commitDocumentsCache, FETCH_TIMEOUT_MS, originUrl, revParse, STALL_LIMIT_ARGS, type CommitDocumentsCache } from './git.ts';
+import { commitDocuments, commitDocumentsCache, originUrl, revParse, type CommitDocumentsCache } from './git.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
 import { overrideOf } from './plan.ts';

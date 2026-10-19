@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
-import { Backups, Fs, MachinePaths, Processes } from '@nortuscc/machine';
-import { AccessDenied, GitFailed, gitAuthArgs, STALL_LIMIT_ARGS } from '@nortuscc/sync';
+import { Backups, Fs, MachinePaths, Processes, STALL_LIMIT_ARGS } from '@nortuscc/machine';
+import { AccessDenied, GitFailed, gitAuthArgs } from '@nortuscc/sync';
 
 export const GIT_TIMEOUT_MS = 120_000;
 export const GIT_OUTPUT_BYTES = 1024 * 1024;

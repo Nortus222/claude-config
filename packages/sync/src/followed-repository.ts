@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { Fs, Processes, type MachinePathsValue } from '@nortuscc/machine';
+import { FETCH_TIMEOUT_MS, Fs, Processes, STALL_LIMIT_ARGS, type MachinePathsValue } from '@nortuscc/machine';
 import { gitAuthArgs, proveReadAccess } from './git-auth.ts';
-import { FETCH_TIMEOUT_MS, STALL_LIMIT_ARGS } from './git.ts';
 import type { FollowedProfile } from './followed.ts';
 import { RevisionUnavailable, type Revision } from './source.ts';
 const unavailable = (revision: Revision, reason: string) => Effect.fail(new RevisionUnavailable({ revision, reason }));

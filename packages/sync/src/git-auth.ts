@@ -1,6 +1,5 @@
 import { Data, Effect } from 'effect';
-import { Processes } from '@nortuscc/machine';
-import { STALL_LIMIT_ARGS } from './git.ts';
+import { Processes, STALL_LIMIT_ARGS } from '@nortuscc/machine';
 
 export const ACCESS_TIMEOUT_MS = 30_000;
 const ACCESS_OUTPUT_BYTES = 64 * 1024;

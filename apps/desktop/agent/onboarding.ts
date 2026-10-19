@@ -4,9 +4,8 @@ import { Effect, Layer } from 'effect';
 import { loadProfile, nodeFiles, requireValid } from '@nortuscc/profile-engine';
 import {
   acquirePidLock, Backups, backupsForRun, Fs, isGitCheckout, machinePaths, nodeFs, nodeProcesses,
-  OverridesStore, overridesStore, parseState, pathsFromEnvironment, Processes, StateStore, stateStore, validMcpRouting,
+  OverridesStore, overridesStore, parseState, pathsFromEnvironment, Processes, STALL_LIMIT_ARGS, StateStore, stateStore, validMcpRouting,
 } from '@nortuscc/machine';
-import { STALL_LIMIT_ARGS } from '@nortuscc/sync';
 
 import { decodeSetupChoices, DEFAULT_REPO_URL, type SetupChoices, type SetupState } from '../shared/setup-protocol.ts';
 export { decodeSetupChoices, decodeSetupState, DEFAULT_REPO_URL, SetupChoicesSchema, SetupStateSchema, type SetupChoices, type SetupState } from '../shared/setup-protocol.ts';

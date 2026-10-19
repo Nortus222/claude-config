@@ -9,8 +9,9 @@ import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
   availableSkills, inspectSource, inspectUpdates, machinePaths, nodeFs, nodeProcesses, planUpdates, skillFolder,
-  sourcesOf, updatableSkills, updateItems, upstreamSkills,
+  sourcesOf, updatableSkills, updateItems, upstreamSkills, type Command,
 } from '../src/index.ts';
+import { hangingGit } from './support/hanging-git.ts';
 
 const skillsMachine = () => {
   const home = mkdtempSync(join(tmpdir(), 'machine-upstream-'));
@@ -260,6 +261,33 @@ test('an exact source is not listed, and an unreachable one is null', async () =
   const pinned = await Effect.runPromise(inspectSource(src.url, ['s/a'], false).pipe(Effect.provide(layer)));
   assert.deepEqual(pinned!.skillPaths, []);
   assert.equal(await Effect.runPromise(inspectSource(pathToFileURL(join(m.home, 'nope')).href, ['s/a'], true).pipe(Effect.provide(layer))), null);
+});
+
+test('inspectSource clones unattended, aborts a stalled transfer, and captures stderr', async () => {
+  const m = skillsMachine();
+  const calls: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    calls.push(command);
+    return { code: 128, stdout: '', stderr: "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com\n" };
+  }) });
+  assert.equal(await Effect.runPromise(inspectSource('https://github.com/o/r.git', ['s/a'], true).pipe(Effect.provide(Layer.mergeAll(m.layer, processes)))), null);
+  const clone = calls.find((c) => c.args.includes('clone'))!;
+  const at = clone.args.indexOf('clone');
+  assert.deepEqual(clone.args.slice(0, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
+  assert.deepEqual(clone.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' });
+  assert.equal(clone.output, 'capture');
+  assert.equal(clone.stderr, 'capture', "git's stderr never reaches the agent log raw");
+});
+
+test('an inspectSource clone that hangs times out as unreachable and its whole process group is killed', { skip: process.platform === 'win32' }, async () => {
+  const m = skillsMachine();
+  const git = hangingGit();
+  const started = Date.now();
+  const found = await Effect.runPromise(inspectSource('https://github.com/o/r.git', ['s/a'], true, { timeoutMs: 2000 })
+    .pipe(Effect.provide(Layer.mergeAll(m.layer, nodeProcesses({ path: git.path })))));
+  assert.equal(found, null);
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(await git.survivors(), [], 'git and its helper are both gone');
 });
 
 test('inspectUpdates turns the plan into skill items', async () => {
