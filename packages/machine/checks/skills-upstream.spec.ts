@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Effect, Layer } from 'effect';
 import type { DesiredConfig } from '@nortuscc/profile-engine';
 import {
   availableSkills, inspectSource, inspectUpdates, machinePaths, nodeFs, nodeProcesses, planUpdates, skillFolder,
-  sourcesOf, updatableSkills, updateItems, upstreamSkills,
+  sourcesOf, updatableSkills, updateItems, upstreamSkills, type Command,
 } from '../src/index.ts';
+import { hangingGit } from './support/hanging-git.ts';
 
 const skillsMachine = () => {
   const home = mkdtempSync(join(tmpdir(), 'machine-upstream-'));
@@ -246,20 +247,57 @@ test('inspectSource reads folder trees and every SKILL.md, and cleans up its clo
   const src = sourceRepo(m.home);
   const layer = Layer.mergeAll(m.layer, nodeProcesses());
   const found = await Effect.runPromise(inspectSource(src.url, ['s/a', 's/missing', '.'], true).pipe(Effect.provide(layer)));
-  assert.equal(found!.trees.get('s/a'), src.tree('s/a'));
-  assert.equal(found!.trees.get('s/missing'), null);
-  assert.equal(found!.trees.get('.'), src.tree(''));
-  assert.deepEqual(found!.skillPaths.sort(), ['s/a/SKILL.md', 's/b/SKILL.md', 's/b/nested/SKILL.md']);
+  assert.ok(typeof found !== 'string', String(found));
+  assert.equal(found.trees.get('s/a'), src.tree('s/a'));
+  assert.equal(found.trees.get('s/missing'), null);
+  assert.equal(found.trees.get('.'), src.tree(''));
+  assert.deepEqual(found.skillPaths.sort(), ['s/a/SKILL.md', 's/b/SKILL.md', 's/b/nested/SKILL.md']);
   assert.deepEqual(readdirSync(join(m.paths.stateRoot, 'tmp')), []);
 });
 
-test('an exact source is not listed, and an unreachable one is null', async () => {
+test('an exact source is not listed, and an unreachable one says why', async () => {
   const m = skillsMachine();
   const src = sourceRepo(m.home);
   const layer = Layer.mergeAll(m.layer, nodeProcesses());
   const pinned = await Effect.runPromise(inspectSource(src.url, ['s/a'], false).pipe(Effect.provide(layer)));
-  assert.deepEqual(pinned!.skillPaths, []);
-  assert.equal(await Effect.runPromise(inspectSource(pathToFileURL(join(m.home, 'nope')).href, ['s/a'], true).pipe(Effect.provide(layer))), null);
+  assert.ok(typeof pinned !== 'string', String(pinned));
+  assert.deepEqual(pinned.skillPaths, []);
+  const why = await Effect.runPromise(inspectSource(pathToFileURL(join(m.home, 'nope')).href, ['s/a'], true).pipe(Effect.provide(layer)));
+  assert.match(String(why), /^git clone failed: .*nope/);
+});
+
+test('inspectSource clones unattended, aborts a stalled transfer, captures stderr, and says why it failed', async () => {
+  const m = skillsMachine();
+  const calls: Command[] = [];
+  const processes = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    calls.push(command);
+    if (command.args.includes('core.sshCommand')) return { code: 0, stdout: 'ssh -i ~/.ssh/work\n' };
+    return { code: 128, stdout: '', stderr: "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com\n" };
+  }) });
+  assert.equal(await Effect.runPromise(inspectSource('https://github.com/o/r.git', ['s/a'], true).pipe(Effect.provide(Layer.mergeAll(m.layer, processes)))),
+    "Couldn't reach github.com: Could not resolve host: github.com");
+  const clone = calls.find((c) => c.args.includes('clone'))!;
+  const at = clone.args.indexOf('clone');
+  assert.deepEqual(clone.args.slice(0, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
+  assert.deepEqual(clone.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work -o BatchMode=yes' },
+    'the configured core.sshCommand is kept, with batch mode added');
+  const config = calls.find((c) => c.args.includes('core.sshCommand'))!;
+  assert.equal(config.cwd, clone.cwd, 'ssh config is read where the clone runs');
+  assert.equal(config.env?.GIT_CEILING_DIRECTORIES, dirname(clone.cwd!), 'and never from a repository above that scratch directory');
+  assert.equal(clone.output, 'capture');
+  assert.equal(clone.stderr, 'capture', "git's stderr never reaches the agent log raw");
+  assert.ok(clone.captureLimit?.stderr !== undefined, 'captured stderr is bounded');
+});
+
+test('an inspectSource clone that hangs times out as unreachable and its whole process group is killed', { skip: process.platform === 'win32' }, async () => {
+  const m = skillsMachine();
+  const git = hangingGit();
+  const started = Date.now();
+  const found = await Effect.runPromise(inspectSource('https://github.com/o/r.git', ['s/a'], true, { timeoutMs: 2000 })
+    .pipe(Effect.provide(Layer.mergeAll(m.layer, nodeProcesses({ path: git.path })))));
+  assert.equal(found, 'git clone timed out after 2 s');
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(await git.survivors(), [], 'git and its helper are both gone');
 });
 
 test('inspectUpdates turns the plan into skill items', async () => {
@@ -289,20 +327,44 @@ test('inspectUpdates turns the plan into skill items', async () => {
   ]);
 });
 
+test('inspectUpdates says why a source it tried could not be reached', async () => {
+  const m = skillsMachine();
+  const layer = Layer.mergeAll(m.layer, nodeProcesses());
+  mkdirSync(join(m.paths.agentsSkills, 'a'), { recursive: true });
+  const url = pathToFileURL(join(m.home, 'nope')).href;
+  writeFileSync(join(m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({
+    skills: { a: { source: 'o/r', sourceUrl: url, skillPath: 's/a/SKILL.md', skillFolderHash: 'old0000' } },
+  }));
+  const desired: DesiredConfig = { files: [], skills: [], integrations: [], allow: {}, issues: [] } as never;
+  const { items, probeErrors } = await Effect.runPromise(inspectUpdates(desired).pipe(Effect.provide(layer)));
+  assert.deepEqual(probeErrors, [], 'an unreachable source is not a probe error');
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.state, 'unknown');
+  assert.match(items[0]!.note ?? '', /^source unreachable: git clone failed: .*nope/);
+});
+
 test('updateItems maps gone, unknown and local, and names current skills by their lock source', () => {
   const desired = { files: [], skills: [], integrations: [], allow: {}, issues: [] } as DesiredConfig;
   const items = updateItems({
     current: [{ name: 'c', source: 'lock/src' }], outdated: [],
     gone: [{ name: 'g', source: 'o/r', path: 'p/g' }],
-    unknown: [{ name: 'u', source: 'o/r' }],
+    unknown: [{ name: 'u', source: 'o/r' }, { name: 'w', source: 'o/w', reason: "Couldn't reach github.com: Timeout was reached" }],
     local: ['mine'], available: [],
   }, desired);
   assert.deepEqual(items, [
     { key: 'skill:c', domain: 'skills', label: 'c', group: 'lock/src', state: 'current', disposition: 'in-sync' },
     { key: 'skill:g', domain: 'skills', label: 'g', group: 'o/r', state: 'gone', disposition: 'apply', note: 'gone upstream' },
     { key: 'skill:u', domain: 'skills', label: 'u', group: 'o/r', state: 'unknown', disposition: 'blocked', note: 'source unreachable' },
+    { key: 'skill:w', domain: 'skills', label: 'w', group: 'o/w', state: 'unknown', disposition: 'blocked', note: "source unreachable: Couldn't reach github.com: Timeout was reached" },
     { key: 'skill:mine', domain: 'skills', label: 'mine', group: '', state: 'local', disposition: 'excluded', note: 'no recorded source' },
   ]);
+});
+
+test('updateItems takes provenance from a manifest name that differs in case from the installed skill', () => {
+  const from = { layer: 'base', source: 'test' } as const;
+  const desired = { files: [], skills: [{ name: 'TDD', source: 'o/r', exact: false, optional: false, install: true, from }], integrations: [], allow: {}, issues: [] } as DesiredConfig;
+  const items = updateItems({ current: [{ name: 'tdd', source: 'o/r' }], outdated: [], gone: [], unknown: [], local: [], available: [] }, desired);
+  assert.deepEqual(items, [{ key: 'skill:tdd', domain: 'skills', label: 'tdd', group: 'o/r', state: 'current', disposition: 'in-sync', from }]);
 });
 
 test('inspectUpdates reports an unreadable store as one probe error and no items', async () => {

@@ -21,7 +21,13 @@ pub const OPERATION_MAX_BYTES: usize = MAX_RECORD;
 const MAX_EXCLUDED: usize = 10_000;
 const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
+// Mirrors LOGIN_PROBE_TIMEOUT_MS in apps/desktop/agent/login-environment.ts; a test keeps them equal.
+// The agent and every helper probe the login shell before any work, so the agent's readiness deadline
+// and every Setup::timeout must exceed it.
+pub(crate) const LOGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALL_GIT_TIMEOUT: Duration = Duration::from_secs(45);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
 // Shared operations may fetch, clone or run gh; match the MCP client's budget so a slow reply does
 // not tear down the connection every screen shares.
@@ -681,6 +687,14 @@ impl Setup {
             Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState, Self::McpConnections => Operation::McpConnections,
         }
     }
+    /// The native deadline for this helper; each leaves room for the login probe and the work after it.
+    pub(crate) fn timeout(self) -> Duration {
+        match self {
+            Self::Paths | Self::State | Self::MaintenanceState => READ_HELPER_TIMEOUT,
+            Self::InstallGit => INSTALL_GIT_TIMEOUT,
+            Self::Startup | Self::Ensure | Self::Restart | Self::Bootstrap | Self::PrepareUpdate | Self::RecoverUpdate | Self::McpConnections => HELPER_TIMEOUT,
+        }
+    }
     fn argument(self) -> &'static str {
         match self {
             Self::Startup => "--startup",
@@ -725,7 +739,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
-    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(10) } else { HELPER_TIMEOUT })
+    run_helper(helper_command(resources, setup, None)?, setup.timeout())
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -750,7 +764,7 @@ fn validate_setup_state(value: Value) -> Result<Value, String> {
     serde_json::to_value(state).map_err(|_| "Invalid setup state".into())
 }
 pub fn desktop_setup_state(resources: &Path) -> Result<Value, String> {
-    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Duration::from_secs(10), None)?)
+    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Setup::State.timeout(), None)?)
 }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -796,16 +810,16 @@ pub fn desktop_startup_cancelled(resources: &Path, app_version: &str, cancel: Ar
     let mut command = helper_command(resources, Setup::Startup, None)?;
     command.stdin(Stdio::piped());
     let input = serde_json::to_vec(&json!({"appVersion":app_version})).map_err(|_| "Invalid startup input")?;
-    decode_startup(run_json_helper_cancellable(command, HELPER_TIMEOUT, Some(input),cancel)?)
+    decode_startup(run_json_helper_cancellable(command, Setup::Startup.timeout(), Some(input),cancel)?)
 }
 pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<PathBuf, String> {
     let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
     let mut command = helper_command(resources, Setup::Bootstrap, None)?;
     command.stdin(Stdio::piped());
-    setup_root(run_json_helper_with_cancel(command, HELPER_TIMEOUT, Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
+    setup_root(run_json_helper_with_cancel(command, Setup::Bootstrap.timeout(), Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
 }
 pub fn install_git(resources: &Path) -> Result<Value, String> {
-    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Duration::from_secs(30), None)?;
+    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Setup::InstallGit.timeout(), None)?;
     if value != json!({"requested":true}) { return Err("Invalid installer result".into()); }
     Ok(value)
 }
@@ -826,22 +840,56 @@ pub fn github_link_command(link: GitHubLink) -> Command {
 }
 pub fn device_login_command() -> Command { github_link_command(GitHubLink::DeviceLogin) }
 pub fn open_device_login() -> Result<Value, String> {
-    run_browser(device_login_command(), Duration::from_secs(5))
+    run_browser(device_login_command(), Duration::from_secs(5), "GitHub")
 }
 pub fn open_github_link(link: GitHubLink) -> Result<Value, String> {
-    run_browser(github_link_command(link), Duration::from_secs(5))
+    run_browser(github_link_command(link), Duration::from_secs(5), "GitHub")
 }
-fn run_browser(mut command: Command, timeout: Duration) -> Result<Value, String> {
-    wait_browser(command.spawn().map_err(|_| "Unable to open GitHub")?, timeout)
+/// The places on disk the renderer may show in Finder. It names a place; it never supplies a path.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RevealPlace { AgentLog, Backups }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealArgs { pub place: RevealPlace }
+/// Where a place lives under the agent's state root (`~/.config/nortuscc` by default).
+pub fn reveal_path(state_root: &Path, place: RevealPlace) -> PathBuf {
+    match place { RevealPlace::AgentLog => state_root.join("agent").join("agent.log"), RevealPlace::Backups => state_root.join("backups") }
 }
-fn wait_browser(mut child: std::process::Child, timeout: Duration) -> Result<Value, String> {
+pub fn reveal_command(path: &Path) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command.arg("-R").arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+}
+/// Selects the place in a Finder window. Off macOS it is refused before `state_root` is looked up; a place
+/// that does not exist yet is refused with what that means.
+pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    reveal_place_on(cfg!(target_os = "macos"), state_root, place)
+}
+fn reveal_place_on(macos: bool, state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    if !macos { return Err("Show in Finder works only on macOS.".into()); }
+    let path = reveal_path(&state_root()?, place);
+    if !path.exists() {
+        return Err(match place {
+            RevealPlace::AgentLog => "The agent log doesn't exist yet. The agent writes it once it has run on this Mac.",
+            RevealPlace::Backups => "There are no backups on this Mac yet.",
+        }.into());
+    }
+    run_browser(reveal_command(&path), Duration::from_secs(5), "Finder")
+}
+fn run_browser(mut command: Command, timeout: Duration, what: &str) -> Result<Value, String> {
+    wait_browser(command.spawn().map_err(|_| format!("Unable to open {what}"))?, timeout, what)
+}
+fn wait_browser(mut child: std::process::Child, timeout: Duration, what: &str) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     let result = (|| {
         loop {
-            if let Some(status) = child.try_wait().map_err(|_| "Unable to open GitHub")? {
-                return if status.success() { Ok(json!({"opened":true})) } else { Err("Unable to open GitHub".into()) };
+            if let Some(status) = child.try_wait().map_err(|_| format!("Unable to open {what}"))? {
+                return if status.success() { Ok(json!({"opened":true})) } else { Err(format!("Unable to open {what}")) };
             }
-            if Instant::now() >= deadline { return Err("Opening GitHub timed out".into()); }
+            if Instant::now() >= deadline { return Err(format!("Opening {what} timed out")); }
             thread::sleep(Duration::from_millis(10));
         }
     })();
@@ -1708,7 +1756,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         let child = command.spawn().unwrap();
         // A valid timeout may expire before the fake program's first instruction.
         let pid = child.id() as i32;
-        assert!(wait_browser(child,Duration::from_millis(100)).unwrap_err().contains("timed out"));
+        assert!(wait_browser(child,Duration::from_millis(100),"GitHub").unwrap_err().contains("timed out"));
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1737,6 +1785,16 @@ printf '%s\n' '{"stateRoot":"/tmp/slow-login-state"}'"#);
         let result = setup_agent(&root, Setup::Paths);
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(result.unwrap(), PathBuf::from("/tmp/slow-login-state"));
+    }
+    #[test]
+    fn every_helper_deadline_outlasts_the_login_probe() {
+        let source = include_str!("../../agent/login-environment.ts");
+        assert!(source.contains(&format!("LOGIN_PROBE_TIMEOUT_MS = {}_000;", LOGIN_PROBE_TIMEOUT.as_secs())), "LOGIN_PROBE_TIMEOUT must mirror the TypeScript probe timeout");
+        for setup in [Setup::Startup, Setup::Ensure, Setup::Restart, Setup::Paths, Setup::State, Setup::Bootstrap, Setup::InstallGit,
+            Setup::PrepareUpdate, Setup::RecoverUpdate, Setup::MaintenanceState, Setup::McpConnections] {
+            assert!(setup.timeout() > LOGIN_PROBE_TIMEOUT, "{} deadline must exceed the login probe", setup.argument());
+        }
+        assert!(READY_TIMEOUT > LOGIN_PROBE_TIMEOUT);
     }
     #[test]
     fn paths_helper_has_no_registration_arguments() {
@@ -1915,6 +1973,27 @@ mod onboarding_bridge_tests {
             assert!(decode_args::<GitHubLinkArgs>(bad).is_err());
         }
     }
+    #[test]
+    fn reveal_names_a_place_under_the_state_root_and_never_takes_a_path() {
+        let root = Path::new("/state");
+        for (args, path) in [(json!({"place":"agentLog"}), "/state/agent/agent.log"), (json!({"place":"backups"}), "/state/backups")] {
+            let args: RevealArgs = decode_args(args).unwrap();
+            assert_eq!(reveal_path(root, args.place), PathBuf::from(path));
+            let command = reveal_command(&reveal_path(root, args.place));
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), vec![std::ffi::OsStr::new("-R"), std::ffi::OsStr::new(path)]);
+        }
+        for bad in [json!({"place":"/etc/passwd"}), json!({"place":"agentLog","path":"/etc"}), json!({"path":"/state"}), json!({})] {
+            assert!(decode_args::<RevealArgs>(bad).is_err());
+        }
+        let missing = std::env::temp_dir().join(format!("nortuscc-reveal-{}", std::process::id()));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::AgentLog).unwrap_err().contains("doesn't exist yet"));
+        assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::Backups).unwrap_err().contains("no backups"));
+        // Off macOS the refusal comes first: the state root is never looked up, and a missing place is not reported.
+        for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
+            assert_eq!(reveal_place_on(false, || panic!("looked up the state root"), place).unwrap_err(), "Show in Finder works only on macOS.");
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1927,7 +2006,7 @@ pub fn mcp_connections(resources: &Path, action: ConnectionAction) -> Result<Val
     let input = serde_json::to_string(&action).map_err(|_| "Invalid connection action")?;
     let mut command = helper_command(resources, Setup::McpConnections, None)?;
     command.stdin(Stdio::piped());
-    let value = run_json_helper(command, HELPER_TIMEOUT, Some(input.into_bytes()))?;
+    let value = run_json_helper(command, Setup::McpConnections.timeout(), Some(input.into_bytes()))?;
     // Host registration/configuration output stays private; only the bounded public schema crosses IPC.
     validate_connections(value)
 }

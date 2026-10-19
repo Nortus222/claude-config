@@ -124,6 +124,11 @@ for (const failure of ['content', 'codex', 'installer'] as const) test(`${failur
   await f.within(s => Effect.gen(function* () { const p = yield* preview(s); const run = yield* s.runs.submit(request(p.planId)); yield* terminal(s, run.runId);
     const done = yield* s.runs.get(run.runId); assert.equal(done.state, 'failed'); assert.equal(done.intentSaved, true); assert.equal(done.installation?.state, 'failed'); assert.deepEqual(done.installation?.nextActions, []);
     if (failure === 'codex') assert.deepEqual(done.installation?.codex, { verified: false, reason: 'disabled' });
+    if (failure === 'installer') {
+      // The installer's exit code reaches the installation message and its own step note.
+      assert.match(done.installation!.message, /^The skills installer failed \(npx exited with 1\); preview the skill again to repair it\. Backups are in ~\/\.config\/nortuscc\/backups$/);
+      assert.ok(done.steps.some(step => step.outcome === 'failed' && step.note === 'npx exited with 1'));
+    }
   }));
 });
 
@@ -135,7 +140,7 @@ test('saved intent receipt failure retains observed physical write and starts no
     const done = yield* s.runs.get(run.runId); assert.equal(done.state, 'interrupted'); assert.equal(done.intentSaved, true); assert.equal(done.installation?.state, 'needsInspection');
     assert.equal(JSON.parse(f.m.read(join(f.m.paths.stateRoot, 'overrides.json'))!).skillAdditions.length, 1);
   })); assert.equal(f.installing(), 0);
-  assert.match(diagnostics, /^apply run [0-9a-f-]+: receipt failed: disk failed\n$/);
+  assert.match(diagnostics, /^apply run ([0-9a-f-]+) \(addSkill\) interrupted: Couldn't save the [^\n]*disk failed[^\n]*\napply run \1: receipt failed: disk failed\n$/);
 });
 
 test('cancellation after saving intent retains declaration and records partial installation', async () => {
@@ -272,8 +277,8 @@ for (const checkpoint of ['before', 'after'] as const) for (const stores of ['hi
       if (saved) assert.deepEqual(JSON.parse(stored!).skillAdditions, [{ source: c.source, name: c.installedName, targets: ['codex'] }]);
       else assert.equal(stored, original);
     })); assert.equal(f.installing(), 0);
-    if (stores === 'both') assert.match(diagnostics, /^apply run [0-9a-f-]+: receipt failed: disk failed\n$/);
-    else assert.equal(diagnostics, '');
+    if (stores === 'both') assert.match(diagnostics, /^apply run ([0-9a-f-]+) \(addSkill\) interrupted: Couldn't save the [^\n]*disk failed[^\n]*\napply run \1: receipt failed: disk failed\n$/);
+    else assert.match(diagnostics, /^apply run [0-9a-f-]+ \(addSkill\) failed: [^\n]+\n$/);
   });
 
 
@@ -349,7 +354,7 @@ test('terminal-only receipt failure keeps saved and native evidence without foll
   } finally {
     if (original) Object.defineProperty(process.stderr, 'write', original); else Reflect.deleteProperty(process.stderr, 'write');
   }
-  assert.match(diagnostics, /^apply run [0-9a-f-]+: receipt failed: disk failed\n$/);
+  assert.match(diagnostics, /^apply run ([0-9a-f-]+) \(addSkill\) interrupted: Couldn't save the [^\n]*disk failed[^\n]*\napply run \1: receipt failed: disk failed\n$/);
   failTerminal = false;
   await f.within(s => Effect.gen(function* () {
     const recovered = yield* s.runs.get(id);

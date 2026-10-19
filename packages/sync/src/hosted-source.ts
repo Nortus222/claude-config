@@ -5,14 +5,14 @@ import {
   decodeHosted, IdSchema, normalizeRepoUrl, RepoUrlSchema, SyncRevisionSchema, type SyncRevision,
 } from '@nortuscc/hosted-protocol';
 import {
-  Backups, backupsForRun, canonical, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes,
+  Backups, backupsForRun, canonical, FETCH_TIMEOUT_MS, Fs, LaunchFailed, machinePaths, nodeFs, nodeProcesses, OverridesStore, overridesStore, parseState, Processes, STALL_LIMIT_ARGS,
   type Decision, type MachinePathsValue,
 } from '@nortuscc/machine';
 import type { Input, MachineOverrides } from '@nortuscc/profile-engine';
 import { fetchFollowedMain, privateFollowedRepository } from './followed-repository.ts';
 import { gitAuthArgs } from './git-auth.ts';
 import type { FollowedProfile } from './followed.ts';
-import { commitDocuments, commitDocumentsCache, FETCH_TIMEOUT_MS, originUrl, revParse, type CommitDocumentsCache } from './git.ts';
+import { commitDocuments, commitDocumentsCache, originUrl, revParse, type CommitDocumentsCache } from './git.ts';
 import { diffItems, itemValues, parseItemId } from './items.ts';
 import { patchItem } from './patch.ts';
 import { overrideOf } from './plan.ts';
@@ -135,7 +135,7 @@ export const hostedSetupSourceLayer = (paths: MachinePathsValue, options: {
       const verifiedRef = `refs/nortuscc/hosted/${scope}/verified/${record.number}-${hash(record)}`;
       const fetchedRef = `refs/nortuscc/hosted/${scope}/candidate/${record.number}`;
       const fetched = yield* Processes.use((p) => p.run({
-        cmd: 'git', args: [...(options.followed ? gitAuthArgs(hooks) : []), '-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
+        cmd: 'git', args: [...(options.followed ? gitAuthArgs(hooks) : []), '-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head', transport, `+refs/tags/${record.tag}:${fetchedRef}`],
         cwd: repo, env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
       })).pipe(Effect.timeoutOption(FETCH_TIMEOUT_MS), Effect.map((result) => result._tag === 'Some' && result.value.code === 0), Effect.catchTag('LaunchFailed', () => Effect.succeed(false)));
       const sha = yield* revParse(repo, fetched ? fetchedRef : verifiedRef);

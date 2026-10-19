@@ -7,7 +7,7 @@ import { rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { FsFailed, nodeProcesses, Processes, StateStore } from '@nortuscc/machine';
-import { FollowedStore, SyncStore, SetupSource, SetupsStore, RevisionUnavailable, followedSetupSourceLayer } from '@nortuscc/sync';
+import { FollowedStore, privateFollowedRepository, SyncStore, SetupSource, SetupsStore, RevisionUnavailable, followedSetupSourceLayer } from '@nortuscc/sync';
 import { startAgent, makeSession, makeHostedRuntime } from '../src/index.ts';
 import { prepareProfileOperation, readProfileOperation } from '../src/operations/profiles.ts';
 import { operationDigest } from '../src/runs.ts';
@@ -235,6 +235,23 @@ test('listing profiles does not fetch', async t => {
     const profiles = yield* session.inspectProfiles({ scope });
     assert.deepEqual(profiles.available.map(profile => profile.name), ['default', 'small']);
     assert.equal(profiles.followed?.profile, 'default');
+  })).pipe(Effect.provide(f.processes)));
+});
+
+for (const cloned of [true, false]) test(`a fresh Mac lists profiles by fetching the followed inventory once (${cloned ? 'empty private clone' : 'no private clone'})`, async t => {
+  const f = await fixture(t);
+  await f.m.run(Effect.scoped(Effect.gen(function* () {
+    // First-run trust records the followed repository (and its private clone) before anything fetched its main.
+    const followed = { repoUrl: url, profile: 'default', setupId: null };
+    yield* (yield* FollowedStore).write(followed);
+    if (cloned) yield* privateFollowedRepository(f.m.paths, followed, { proveAccess: false });
+    const handle = yield* startAgent(() => f.m.domains, { deferStart: true });
+    const session = yield* makeSession(handle, { domains: () => f.m.domains, signal: new AbortController().signal });
+    const profiles = yield* session.inspectProfiles({ scope });
+    assert.deepEqual(profiles.available.map(profile => profile.name), ['default', 'small']);
+    assert.equal(profiles.followed?.profile, 'default');
+    f.network.offline = true;
+    assert.deepEqual((yield* session.inspectProfiles({ scope })).available.map(profile => profile.name), ['default', 'small'], 'a fetched inventory is read without fetching again');
   })).pipe(Effect.provide(f.processes)));
 });
 

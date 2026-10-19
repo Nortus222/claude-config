@@ -61,8 +61,8 @@ export const executeUpdateManifest = (input: {
   const groups = updateManifestGroups({ desired:input.desired.skills,lock:evidence.lock,installed,prunedNames,heldManifestGroups:input.heldManifestGroups,heldItemIds:input.heldItemIds });
   const expected = input.edit.documents.find(document => document.path === MANIFEST_FILE)?.afterSha256
     ?? input.edit.author.files.find(file => file.path === MANIFEST_FILE)?.sha256;
-  if (authorDigest(emitManifest(groups)) !== expected) return yield* Effect.fail(new Error('Observed outcomes differ from the reviewed author proposal; inspect and preview again'));
+  if (authorDigest(emitManifest(groups)) !== expected) return yield* Effect.fail(new Error('Observed outcomes differ from the reviewed author proposal; preview again'));
   if (authorDigest((yield* readSkillLockEvidence).bytes) !== authorDigest(evidence.bytes) || JSON.stringify(yield* installedSkillNames) !== JSON.stringify(installed))
-    return yield* Effect.fail(new Error('Machine update observations changed; inspect and preview again'));
+    return yield* Effect.fail(new Error('Machine update observations changed; preview again'));
   return yield* executeAuthorEdit(input.edit,signal,{ ...observer,pending:key => Effect.andThen(revalidate,observer.pending(key)) });
 });

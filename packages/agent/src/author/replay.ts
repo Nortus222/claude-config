@@ -65,6 +65,7 @@ function apply(documents: Documents, intent: Intent): Record<string, string> {
         const skills = { ...document.skills };
         if (skills[opposite]) skills[opposite] = skills[opposite].map(group => group.source === source
           ? { ...group, names: group.names.filter(name => name !== intent.name) } : group).filter(group => group.source !== source || group.names.length > 0);
+        if (skills[opposite]?.length === 0) delete skills[opposite];
         const selections = [...skills[action] ?? []];
         const index = selections.findIndex(group => group.source === source);
         if (index < 0) selections.push({ source, names: [intent.name] });
@@ -82,6 +83,7 @@ function apply(documents: Documents, intent: Intent): Record<string, string> {
         const opposite = intent.include ? 'remove' : 'add';
         const integrations = { ...document.integrations };
         if (integrations[opposite]) integrations[opposite] = integrations[opposite].filter(id => id !== intent.id);
+        if (integrations[opposite]?.length === 0) delete integrations[opposite];
         if (!integrations[action]?.includes(intent.id)) integrations[action] = [...integrations[action] ?? [], intent.id];
         document.integrations = integrations;
       });

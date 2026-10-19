@@ -10,7 +10,7 @@ import type { MutationObserver } from './history.ts';
 
 export class AuthorUnavailable extends Error {
   readonly _tag = 'AuthorUnavailable';
-  constructor() { super('Author checkout is unavailable or changed; inspect again'); }
+  constructor() { super('Author checkout is unavailable or changed; check for new changes again'); }
 }
 export type AuthorBinding = {
   readonly checkout: string; readonly realCheckout: string; readonly gitDir: string; readonly head: string;

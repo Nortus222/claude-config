@@ -20,7 +20,7 @@ export type PreparedCapture = PreparedAuthorEdit & { readonly report: MachineRep
 type CapturePrivate = { stateDigest: string | null; installedDigest?: string | null; };
 const internals = new WeakMap<PreparedCapture, CapturePrivate>();
 const digestState = (state: unknown) => authorDigest(JSON.stringify(state));
-const failure = () => new FsFailed({ op: 'capture', path: 'configured author checkout', reason: 'Capture inputs changed or could not be written; inspect again' });
+const failure = () => new FsFailed({ op: 'capture', path: 'configured author checkout', reason: 'Capture inputs changed or could not be written; check for new changes again' });
 const noop = { pending: () => Effect.void, committed: () => Effect.void };
 const heldKey = (key: string) => key.includes('#') ? `setting:${key.slice('config:'.length)}` : `file:${configFileId(key)}`;
 

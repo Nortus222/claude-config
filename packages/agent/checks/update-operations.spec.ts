@@ -10,7 +10,7 @@ test('updates have a dedicated bounded read and explicit author authority', () =
 });
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { Fs, FsFailed, Processes, skillsDomain, OverridesStore, type Command } from '@nortuscc/machine';
@@ -22,11 +22,14 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean; unreachable?: (attempt: number) => string } = {}) => {
+ let cloneAttempts = 0;
  const m = agentMachine();
- const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\none\ngone\n`;
- const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest } });
+ const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\n${options.spelled ?? 'one'}\ngone\n`;
+ const pins: Record<string, string> = options.pinned ? { 'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': OLD } }) } : {};
+ const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest, ...pins } });
  m.write(join(setup.dirs['a'.repeat(40)]!,'skills-manifest.txt'),manifest);
+ for (const [file, text] of Object.entries(pins)) m.write(join(setup.dirs['a'.repeat(40)]!,file),text);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest);
  execFileSync('git',['-C',m.paths.repo,'add','.']); execFileSync('git',['-C',m.paths.repo,'-c','user.name=Fixture','-c','user.email=f@f','commit','-qm','fixture']);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest + '# dirty author bytes\n');
@@ -42,7 +45,9 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const processes = yield* Processes;
   const fake: Processes['Service'] = { ...processes, run: command => {
-   if (command.cmd === 'git' && command.args[0] === 'clone') return Effect.succeed({ code: 0, stdout: '', stderr: '' });
+   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.sync(() => options.unreachable
+    ? { code: 128, stdout: '', stderr: options.unreachable(++cloneAttempts) }
+    : { code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
    if (command.cmd === 'git' && command.args[0] === '-c') {
     const names = ['one','two','three'];
@@ -94,6 +99,16 @@ test('bounded updates execute a source-qualified offer read, paginate and reject
   assert.ok(all.items.every(i => i.id === `skill:${i.source}/${i.name}`));
   const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })); assert.notEqual(first.items[0]?.id,next.items[0]?.id);
   f.m.write(f.lockPath,'{"skills":{}}'); assert.equal((yield* Effect.flip(s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })))).code,'UNKNOWN_PLAN');
+ }));
+});
+
+// The installer treats skill names case-insensitively: a manifest `One` installed as `one` keeps its pin policy.
+// The row stays on the installed name, which update and remove act on.
+test('an update row finds its declaration when the manifest name differs in case from the installed skill', async () => {
+ const f = await fixture({ spelled: 'One', pinned: true }); await f.within(s => Effect.gen(function* () {
+  const all = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = all.items.find(i => i.key === 'skill:one')!;
+  assert.deepEqual([one.id, one.name, one.state, one.policy, one.offered], ['skill:owner/repo/one', 'one', 'off-pin', 'source-pin', { kind: 'revision', digest: OLD }]);
  }));
 });
 
@@ -162,6 +177,52 @@ test('addition overlaid on a base declaration with a distinct native selector ne
   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); const row = read.items.find(i => i.name === 'one')!; assert.equal(row.repairRoute,'addition'); assert.match(row.prerequisite!,/resolveSkillCandidate.*previewChange.*applyChange/);
   const p = yield* s.previewChange(update(['skill:one'])); assert.equal(p.plan.steps.length,0); assert.ok(p.plan.skipped.some(row => /native verification/.test(row.reason)));
   const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
+ }));
+});
+
+// The skills domain plans additions by exact name, so a row whose addition differs only in case is legacy work and
+// must pass the legacy native guard rather than be exempted from it. Here a legacy install named `One` (its lock
+// entry under the same name) sits beside the addition `one`, so it has no native selector evidence.
+test('an addition declared in another case does not exempt the installed row from the legacy native guard', async () => {
+ const f = await fixture({ additions: true });
+ renameSync(join(f.m.paths.agentsSkills,'one'),join(f.m.paths.agentsSkills,'One'));
+ await f.within(s => Effect.gen(function* () {
+  const p = yield* s.previewChange(update(['skill:One'])); assert.equal(p.plan.steps.length,0);
+  assert.ok(p.plan.skipped.some(item => item.key === 'skill:One' && /native selector evidence/.test(item.reason)), JSON.stringify(p.plan.skipped));
+  const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
+ }));
+});
+
+test('an unreachable source names only its host on update rows, never a credential or local path', async () => {
+ const f = await fixture({ unreachable: () => "fatal: unable to access 'https://x-access-token:PRIVATE_TOKEN@github.com/owner/repo.git/': error setting certificate file: /Users/x/certs/corp.pem\n" });
+ await f.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = read.items.find(i => i.name === 'one')!;
+  assert.equal(one.state,'unknown');
+  assert.equal(one.reason,"Couldn't reach github.com");
+  assert.doesNotMatch(JSON.stringify(read),/PRIVATE_TOKEN|corp\.pem|\/Users\/x/);
+  assert.ok(read.items.filter(i => i.state !== 'unknown').every(i => !('reason' in i)), 'only unknown rows carry a reason');
+ }));
+ const local = await fixture({ unreachable: () => "fatal: '/Users/x/src/repo' does not appear to be a git repository\n" });
+ await local.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  assert.equal(read.items.find(i => i.name === 'one')!.state,'unknown');
+  assert.ok(read.items.every(i => !('reason' in i)), 'a cause that names no host is not sent');
+  assert.doesNotMatch(JSON.stringify(read),/\/Users\/x/);
+ }));
+});
+
+// curl's tail carries per-attempt timings; rows built from it would never compare equal between a preview and its
+// revalidation, or between pages of one cursor.
+test('an unreachable source whose failure timing changes per attempt keeps update cursors and previews valid', async () => {
+ const f = await fixture({ unreachable: attempt => `fatal: unable to access 'https://github.com/owner/repo.git/': Failed to connect to github.com port 443 after ${75000 + attempt} ms: Timeout was reached\n` });
+ await f.within(s => Effect.gen(function* () {
+  const first = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1 })); assert.ok(first.nextCursor);
+  const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! }));
+  assert.equal(next.items.length,1);
+  assert.ok([...first.items,...next.items].every(i => i.state !== 'unknown' || i.reason === "Couldn't reach github.com"));
+  const p = yield* s.previewChange(update([]));
+  assert.equal((yield* submit(s,p.planId)).state,'succeeded');
  }));
 });
 

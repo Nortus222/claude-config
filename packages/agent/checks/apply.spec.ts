@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { loadProfile, nodeFiles, type DesiredConfig } from '@nortuscc/profile-engine';
-import { backupsForRun, inspect, type MachineReport, type Observed, type StepAction } from '@nortuscc/machine';
+import { backupsForRun, inspect, installerFailure, type MachineReport, type Observed, type StepAction } from '@nortuscc/machine';
 import { autoApply, type AgentDomain, type AutoApplyOutcome } from '../src/index.ts';
 import { agentMachine } from './support/agent-machine.ts';
 
@@ -70,6 +70,19 @@ test('a failed step pauses auto-apply, naming the run', async () => {
   assert.equal(outcome.failed, 1);
   assert.deepEqual(await m.kinds(), ['apply-started', 'apply-finished', 'paused']);
   assert.equal(m.agentJson().paused.runId, outcome.runId);
+});
+
+test('an auto-apply step note from installer output that carries a token is redacted in History', async () => {
+  const m = agentMachine();
+  const output = 'Cloning…\n\x1b[31mfatal: unable to access https://x:ghp_abcdefghijklmnop@github.com/o/r\x1b[0m\n';
+  const leaking: AgentDomain = { ...fakeDomain('config', 'write-file'), run: () => Effect.succeed({ ok: false, note: installerFailure(128, output).note }) };
+  const outcome = await applyWith(m, reportOf(item('config:a')), ['config:a'], [leaking]);
+  assert.ok(outcome.kind === 'ran');
+  const finished = (await m.events()).find((e) => e.kind === 'apply-finished');
+  assert.ok(finished?.kind === 'apply-finished');
+  assert.equal(finished.steps[0]!.note, 'fatal: unable to access https://[redacted]github.com/o/r (npx exited with 128)');
+  const dir = join(m.paths.stateRoot, 'history');
+  assert.doesNotMatch(readdirSync(dir).map((name) => readFileSync(join(dir, name), 'utf8')).join(''), /ghp_|\/\/x:/);
 });
 
 test('a cancelled run is recorded and does not pause', async () => {

@@ -54,7 +54,7 @@ export const sourceReadCache = () => ({
 });
 export type SourceReadCache = ReturnType<typeof sourceReadCache>;
 export type SourceOperation = 'watchSources' | 'inspectSourceDiff' | 'pinImpact' | 'draftChangelog';
-const stale = () => new SessionError('UNKNOWN_PLAN', 'Source observation changed; inspect sources again');
+const stale = () => new SessionError('UNKNOWN_PLAN', 'Source observation changed; check sources again');
 const invalid = () =>
   new SessionError('INVALID_REQUEST', 'Select a declared source and its observed revision and skill identities');
 const digest = (value: unknown) => authorDigest(canonical(value))!;

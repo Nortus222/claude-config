@@ -10,7 +10,7 @@ import { parityObserver, type PreparedParityChange } from './parity.ts';
 
 const digest = (value: unknown) => authorDigest(canonical(value))!;
 const stale = () => new SessionError('UNKNOWN_PLAN', 'Backup inventory changed; preview again');
-const failed = () => new SessionError('INTERNAL', 'Backup retention stopped; inspect History and the recorded run before retrying');
+const failed = (folder?: unknown) => new SessionError('INTERNAL', typeof folder === 'string' ? `Couldn't remove backup ${folder}; preview the cleanup again` : 'Backup cleanup stopped before it finished; preview the cleanup again');
 
 export const readBackupOperation = (
   input: OperationInput<'listBackups'>, generation: number,
@@ -86,7 +86,7 @@ export const prepareBackupOperation = (
       }).pipe(Effect.provideService(HistoryStore, { ...history, append: event => event.kind === 'backups-pruned' ? history.append({ ...event,
         operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId, runId: lifecycle.runId,
       }) : history.append(event) }));
-      if (result.failedId) return yield* Effect.fail(failed());
-    }).pipe(Effect.provideContext(context), Effect.catchCause(() => Effect.fail(failed()))),
+      if (result.failedId) return yield* Effect.fail(failed(result.failedId));
+    }).pipe(Effect.provideContext(context), Effect.catchCause(cause => { const error = Cause.squash(cause); return Effect.fail(error instanceof SessionError && error.code === 'INTERNAL' ? error : failed()); })),
   };
 }).pipe(Effect.catchCause(() => Effect.fail(failed())));

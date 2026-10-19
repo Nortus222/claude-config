@@ -1,19 +1,19 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { Processes, backupsForRun, machinePaths, nodeFs, nodeProcesses, decisionsStore, historyStore, type Command, type Completed, type LaunchFailed } from '@nortuscc/machine';
+import { Processes, backupsForRun, canonical, machinePaths, nodeFs, nodeProcesses, decisionsStore, historyStore, type Command, type Completed, type LaunchFailed } from '@nortuscc/machine';
 import { machineGit } from '@nortuscc/source-watch';
 import { HostedFailure, HostedTransport, MachineTokenStore, hostedStore, makeHostedClient, type HostedRequest, type HostedResponse } from '@nortuscc/hosted-client';
 import { hostedSetupSourceLayer, SetupSource, worktreeDocuments, itemValues } from '@nortuscc/sync';
 import { parseSyncQuery, type RevisionRecord, type SetupRecord } from '@nortuscc/hosted-protocol';
 import { authorWorkspaceLayer, GIT_TIMEOUT_MS } from '../src/author/workspace.ts';
 import { DraftStore, DraftStoreError, draftStore, type Draft } from '../src/author/drafts.ts';
-import { makeAuthorPublisher } from '../src/author/publish.ts';
+import { boundedPreview, makeAuthorPublisher } from '../src/author/publish.ts';
 import { makeAgentRuns, operationDigest, type RunLifecycle } from '../src/runs.ts';
 import { RunStore, RunStoreError, runStore } from '../src/run-store.ts';
 import type { SessionError } from '../src/ipc/session.ts';
@@ -127,6 +127,48 @@ test('publish pushes the previewed diff, tags it and announces each pending prof
   assert.deepEqual(result.publication, { commit, pushed: true, tagged: true, announced: ['base', 'other', 'personal'], pending: [] });
   assert.equal(await f.run(f.drafts.read(draft.id)), undefined);
   assert.equal(f.revisions.length, 3);
+});
+
+test('draft preview names each changed resolved item per affected profile', async t => {
+  const f = await fixture(t);
+  const draft = await f.save([
+    { kind: 'captureFile', profile: 'base', fileId: 'claude:CLAUDE.md', text: 'new\n', choice: { kind: 'updateShared' } },
+    { kind: 'createProfile', profile: 'team', extends: 'other' },
+  ]);
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.deepEqual(preview.affectedProfiles, ['base', 'personal', 'team']);
+  assert.deepEqual(preview.items, [
+    { profile: 'base', itemId: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' },
+    { profile: 'personal', itemId: 'file:claude:CLAUDE.md', kind: 'file', change: 'changed' },
+    ...preview.items.filter(item => item.profile === 'team'),
+  ]);
+  assert.ok(preview.items.some(item => item.profile === 'team' && item.change === 'added'));
+  assert.ok(preview.items.every(item => item.profile !== 'other'));
+  assert.equal(preview.itemsTruncated, undefined);
+  assert.equal(preview.digest, createHash('sha256').update(canonical(preview.diff)).digest('hex'));
+});
+
+test('items stay bounded and say when truncated', async t => {
+  const f = await fixture(t);
+  f.move('skills-manifest.txt', '[owner/many]\n' + Array.from({ length: 1005 }, (_, index) => `skill-${String(index).padStart(4, '0')}`).join('\n') + '\n');
+  const draft = await f.save([{ kind: 'createProfile', profile: 'team', extends: 'base' }]);
+  const preview = await f.run(f.owner.previewDraft(draft.id));
+  assert.equal(preview.items.length, 1000);
+  assert.equal(preview.itemsTruncated, true);
+  assert.deepEqual(preview.affectedProfiles, ['team']);
+  assert.ok(preview.items.every(item => item.profile === 'team' && item.change === 'added'));
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 1_048_576);
+});
+
+test('items with long multi-byte IDs stay within a byte budget beside a full diff', () => {
+  const id = (index: number) => `skill:owner/repo/${'界'.repeat(490)}${String(index).padStart(4, '0')}`;
+  const items = Array.from({ length: 1000 }, (_, index) => ({ profile: 'team', itemId: id(index), kind: 'skill' as const, change: 'added' as const }));
+  const diff = Array.from({ length: 40 }, (_, index) => ({ path: `profiles/p${index}.json`, before: 'é'.repeat(10_000), after: 'ü'.repeat(10_000) }));
+  const preview = boundedPreview({ draftId: randomUUID(), base: 'a'.repeat(40), digest: 'b'.repeat(64), diff, invalid: [], affectedProfiles: ['team'], items });
+  assert.equal(preview.itemsTruncated, true); assert.equal(preview.truncated, true);
+  assert.ok(preview.items.length > 0 && preview.items.length < 1000);
+  assert.deepEqual(preview.items, items.slice(0, preview.items.length));
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 600_000, String(Buffer.byteLength(JSON.stringify(preview))));
 });
 
 test('publish refuses when the replayed diff no longer matches the preview', async t => {

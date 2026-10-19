@@ -2,6 +2,7 @@ import type { ChangePreview, OperationOutput, RunView } from '@nortuscc/agent/op
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 import type { MachineController, ViewState } from './controller.ts';
 import { operation } from './operations.ts';
+import { changeTitle, runCauses } from './copy.ts';
 
 export type SkillChoice = 'on' | 'off' | 'inherit';
 export type SkillRow = Extract<OperationOutput<'inspectIntent'>['items'][number], { kind: 'skill' }>;
@@ -17,6 +18,9 @@ export type SkillsViewState = {
   readonly preview: ChangePreview | null;
   readonly run: RunView | null;
   readonly stale: string | null;
+  // This Mac changed since Skills was read (another run, or a reconnect). An open page reads again as soon
+  // as the Mac is free; until then choices wait, and a busy Mac shows `machine.busy` instead.
+  readonly outdated: boolean;
   readonly error: string | null;
   readonly detail: string;
 };
@@ -25,11 +29,12 @@ const SCOPE = { kind: 'machine' } as const;
 const PAGE_SIZE = 100;
 const MAX_ERROR = 300;
 const BROWSER = 'Open the desktop app to manage skills on this Mac.';
-const CHANGED = 'This Mac changed since Skills was read. Reload Skills to continue.';
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR);
 const live = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const sameSkill = (a: { source: string; name: string }, b: { source: string; name: string }) => a.source === b.source && a.name === b.name;
 const label = { on: 'On', off: 'Off', inherit: 'Default' } as const;
+// How a run that did not succeed ended, in words.
+const ENDED: Partial<Readonly<Record<RunView['state'], string>>> = { failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted', abandoned: 'was abandoned' };
 export const effectiveChoice = (row: SkillRow) => row.choice ?? row.defaultEnabled;
 
 // Only checked, enabled declarations with an existing update route may be selected.
@@ -46,6 +51,7 @@ export function mutationBlocked(machine: ViewState, skills: SkillsViewState, mai
   if (maintenance) return maintenance;
   if (skills.operation) return 'A Skills request is in progress.';
   if (!skills.view) return 'Skills has not been read yet.';
+  if (skills.outdated) return 'Skills is reading this Mac again.';
   return skills.stale;
 }
 
@@ -65,6 +71,8 @@ export class SkillsController {
   private connected: boolean;
   private settledRun: string | null = null;
   private pendingInventory = false;
+  private visible = false;
+  private catchingUp = false;
   private bridge: Bridge | null;
   private machine: MachineController;
   private maintenance: () => string | null;
@@ -75,7 +83,7 @@ export class SkillsController {
     this.session = machine.state.session;
     this.connected = machine.state.connection === 'connected';
     this.state = { native: bridge !== null, view: null, check: null, operation: null, saving: null, selected: [], preview: null, run: null,
-      stale: null, error: null, detail: bridge ? 'Open Skills to read this Mac\'s skills.' : BROWSER };
+      stale: null, outdated: false, error: null, detail: bridge ? 'Open Skills to read this Mac\'s skills.' : BROWSER };
     this.unlistenMachine = machine.subscribe(() => {
       const connected = machine.state.connection === 'connected', reconnect = connected && !this.connected;
       this.connected = connected;
@@ -83,10 +91,11 @@ export class SkillsController {
         this.session = machine.state.session;
         this.epoch++;
         this.refreshFlight = null;
-        this.update({ view: null, check: null, selected: [], preview: null, operation: null, saving: this.state.run ? this.state.saving : null, stale: null, error: null,
+        this.update({ view: null, check: null, selected: [], preview: null, operation: null, saving: this.state.run ? this.state.saving : null, stale: null, outdated: true, error: null,
           detail: 'Reconnect or reload Skills to read this Mac\'s skills.' });
       }
       if (reconnect && this.state.run) void this.refreshRun();
+      this.catchUp();
     });
     this.subscription = bridge ? bridge.subscribe(event => this.receive(event)).then(unlisten => {
       if (this.disposed) unlisten(); else this.unlistenEvents = unlisten;
@@ -130,12 +139,20 @@ export class SkillsController {
       if (this.state.operation !== 'save' && this.state.operation !== 'apply' && !live(this.state.run)
         && (event.event === 'operation-run' || event.status.applying || event.runId)) {
         this.epoch++;
-        this.update({ stale: CHANGED, check: null, selected: [], preview: null, operation: null });
+        this.update({ outdated: true, check: null, selected: [], preview: null, operation: null });
+        this.catchUp();
       }
     }
   }
-  enter() { this.visit++; if (this.ready() && (!this.state.view || this.state.stale)) void this.reload(); }
-  leave() { this.visit++; }
+  // An open page whose read is out of date reads again once nothing else holds this Mac. It waits for the
+  // other handlers of the same event, which may start an inspection that holds this Mac first.
+  private catchUp() {
+    if (this.catchingUp || !this.visible || !this.state.outdated) return;
+    this.catchingUp = true;
+    queueMicrotask(() => { this.catchingUp = false; if (this.visible && this.state.outdated && this.ready()) void this.reload(); });
+  }
+  enter() { this.visit++; this.visible = true; if (this.ready() && (!this.state.view || this.state.stale || this.state.outdated)) void this.reload(); }
+  leave() { this.visit++; this.visible = false; }
 
   private async readInventory(current: ReturnType<SkillsController['current']>) {
     let cursor: string | undefined, generation: string | undefined;
@@ -160,9 +177,9 @@ export class SkillsController {
       const view = await this.readInventory(current);
       if (view) {
         this.pendingInventory = false;
-        this.update({ view, check: null, selected: [], preview: null, stale: null, detail: 'Skills read from this Mac.' });
+        this.update({ view, check: null, selected: [], preview: null, stale: null, outdated: false, detail: 'Skills read from this Mac.' });
       }
-    }, { detail: 'Reading skills on this Mac' });
+    }, { detail: 'Reading skills on this Mac', outdated: false });
   }
   setChoice(source: string, name: string, choice: SkillChoice) {
     if (!this.ready() || this.blocked()) return Promise.resolve();
@@ -206,12 +223,13 @@ export class SkillsController {
         this.update({ run: reply.data });
         if (live(reply.data)) continue;
         if (reply.data.state !== 'succeeded') {
-          this.update({ saving: null, stale: `Run ${reply.data.state}. Reload Skills to confirm the saved choice and machine state.`, check: null, selected: [], detail: `Skills run ${reply.data.state}.` });
+          const ended = `${changeTitle(reply.data.intent.change.kind)} ${ENDED[reply.data.state] ?? 'stopped'}.`, [cause] = runCauses(reply.data);
+          this.update({ saving: null, stale: `${ended}${cause ? ` ${cause}` : ''} Reload Skills to see the saved choice and what is on this Mac.`, check: null, selected: [], detail: ended });
         } else if (this.settledRun !== runId || this.pendingInventory) {
           const firstConfirmation = this.settledRun !== runId;
           this.settledRun = runId;
           const saving = this.state.saving;
-          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Review & apply makes installation changes.` : 'Skill update succeeded. Reload Skills to inspect installation state.';
+          const detail = !firstConfirmation ? this.state.detail : saving ? `Saved ${saving.name}: ${label[saving.choice]}. Apply on Changes makes installation changes.` : 'Skill update succeeded. Reload Skills to see what is installed.';
           this.pendingInventory = true;
           this.update({ saving: null, check: null, selected: [], detail });
           try {
@@ -223,7 +241,7 @@ export class SkillsController {
         }
       } while (flight.dirty && current());
     })().catch(error => {
-      if (current() && this.state.run?.runId === runId) this.update({ error: `Could not read the Skills run: ${text(error)}`, detail: 'Run completion is unconfirmed. Reconnect or reload to inspect the run.' });
+      if (current() && this.state.run?.runId === runId) this.update({ error: `Could not read the Skills run: ${text(error)}`, detail: 'It is not known whether the change finished. Reload Skills to see where it stands, or reconnect the agent in Settings.' });
     }).finally(() => { if (this.refreshFlight === flight) this.refreshFlight = null; });
     this.refreshFlight = flight;
     return flight.promise;

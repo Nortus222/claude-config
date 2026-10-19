@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Deferred, Effect, Fiber, Layer, type Scope } from 'effect';
 import { configDomain, DecisionsStore, integrationsDomain } from '@nortuscc/machine';
@@ -406,6 +406,25 @@ test('a person applies while auto-apply is paused, and a failed step does not pa
   assert.equal(done.failed, 3);
   assert.ok(!(await m.kinds()).includes('paused'));
   assert.equal(m.agentJson().paused.reason, 'test pause');
+});
+
+test('a reconcile run redacts a credential-shaped step note in its progress events and in History', async t => {
+  const leaking: AgentDomain = { ...configDomain, run: () => Effect.succeed({ ok: false, note: 'push https://u:p@ss@github.com/o/r failed: GITHUB_TOKEN=ghsecret123 github_pat_11ABCDEF_xyz' }) };
+  const { m, within, lock } = await sessionMachine({ config: leaking });
+  t.after(() => rmSync(m.root, { recursive: true, force: true }));
+  const events = await within((session) => Effect.gen(function* () {
+    const { planId } = yield* session.preview(yield* configOnly(session));
+    const run = yield* startRun(session, planId, lock);
+    yield* Deferred.await(run.ended);
+    return run.events;
+  }));
+  const finished = events.find((e) => e.type === 'finished');
+  assert.ok(finished?.type === 'finished');
+  assert.equal(finished.note, 'push https://[redacted]github.com/o/r failed: GITHUB_TOKEN=[redacted] [redacted]');
+  const dir = join(m.paths.stateRoot, 'history');
+  const history = readdirSync(dir).map((name) => readFileSync(join(dir, name), 'utf8')).join('');
+  assert.match(history, /GITHUB_TOKEN=\[redacted\]/);
+  assert.doesNotMatch(history + JSON.stringify(events), /ghsecret|github_pat|p@ss|ss@github/);
 });
 
 test('a listener that throws never stops the run: History still brackets it and the lock is released', async t => {

@@ -6,11 +6,12 @@ import type { FsFailed } from '../errors.ts';
 import { Fs } from '../fs.ts';
 import type { Observed } from '../model.ts';
 import { MachinePaths } from '../paths.ts';
+import { networkGit } from '../network-git.ts';
 import { Processes, type Command } from '../processes.ts';
 import { readSkillCandidates, type SkillCandidate, type SkillCandidatesResult } from './candidates.ts';
 import type { SkillLock } from './manifest.ts';
 import { lockRef, offPinNote, pinsBySource, short } from './pins.ts';
-import { additionLockEntry, installedSkillNames, readSkillLockEvidence } from './store.ts';
+import { additionLockEntry, installedSkillNames, matchSkillName, readSkillLockEvidence } from './store.ts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -99,7 +100,8 @@ export type UpdatePlan = {
   current: { name: string; source: string }[];
   outdated: { name: string; source: string; from: string | null; to: string }[];
   gone: { name: string; source: string; path: string }[];
-  unknown: { name: string; source: string }[];
+  // `reason` says, redacted, why the source could not be read, when it was tried.
+  unknown: { name: string; source: string; reason?: string }[];
   local: string[];
   available: { name: string; source: string; tree?: string; adoption?: Pick<SkillCandidate,'source' | 'revision' | 'sourceDir' | 'selectorName' | 'installedName' | 'blob' | 'tree'> }[];
   // Skills whose lock ref disagrees with the pin: a pinned skill at another ref (or none), or an unpinned
@@ -114,6 +116,8 @@ export function planUpdates(input: {
   lock: SkillLock;
   installed: ReadonlyArray<string>;
   remoteTrees: Map<string, Map<string, string | null>>;
+  // Why each source URL that was tried could not be read.
+  unreachable?: ReadonlyMap<string, string>;
   pins?: ReadonlyMap<string, string>;
   additions?: ReadonlySet<string>;
 }): Omit<UpdatePlan, 'available'> {
@@ -146,7 +150,8 @@ export function planUpdates(input: {
     if (!trees) {
       // The source could not be reached at all. Saying "current" here would be
       // a claim we did not verify, so it gets its own state.
-      plan.unknown.push({ name: entry.name, source: entry.source });
+      const reason = input.unreachable?.get(entry.sourceUrl);
+      plan.unknown.push({ name: entry.name, source: entry.source, ...(reason === undefined ? {} : { reason }) });
       continue;
     }
     const remote = trees.get(entry.path) ?? null;
@@ -218,19 +223,24 @@ const lsTree = (dir: string): Command => ({ cmd: 'git', args: ['ls-tree', '-r', 
 
 // One shallow, blob-less clone per source answers both questions: each known folder's tree SHA, and
 // (unless the source is exact) every SKILL.md it offers. ls-tree is silent about missing paths, so a
-// skill gone upstream reads as null without git complaining on the terminal. null: not reachable.
-export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, discover: boolean) =>
+// skill gone upstream reads as null without git complaining on the terminal. A string says, redacted,
+// why the source could not be read, including a clone that runs past `timeoutMs` and is killed. The
+// clone runs unattended, as networkGit does.
+export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, discover: boolean, options: { readonly timeoutMs?: number } = {}): Effect.Effect<
+  Upstream | string, never, Fs | Processes | MachinePaths
+> =>
   Effect.gen(function* () {
     const fs = yield* Fs;
     const processes = yield* Processes;
     const dir = join((yield* MachinePaths).stateRoot, 'tmp', `trees-${randomUUID()}`);
     const body = Effect.gen(function* () {
-      const cloned = yield* processes.run({
-        cmd: 'git', args: ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir], output: 'capture',
-      });
-      if (cloned.code !== 0) return null;
+      // Cloned into an empty directory that exists first, so git runs (and reads ssh config) there.
+      yield* fs.createDirectory(dir, { recursive: true });
+      const failure = yield* networkGit('git clone',
+        { args: ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', '--quiet', sourceUrl, dir], cwd: dir, outsideRepository: true }, options.timeoutMs);
+      if (failure !== undefined) return failure;
       const listed = yield* processes.run(lsTree(dir));
-      if (listed.code !== 0) return null;
+      if (listed.code !== 0) return 'the cloned tree could not be listed';
       const treeAt = new Map<string, string>();
       const skillPaths: string[] = [];
       for (const record of listed.stdout.split('\0').filter(Boolean)) {
@@ -251,7 +261,7 @@ export const inspectSource = (sourceUrl: string, paths: ReadonlyArray<string>, d
       return { trees, skillPaths: discover ? skillPaths : [] } satisfies Upstream;
     });
     return yield* body.pipe(
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.catch((error) => Effect.succeed(error.message)),
       Effect.ensuring(fs.remove(dir).pipe(Effect.ignore)),
     );
   });
@@ -267,10 +277,11 @@ export const checkUpdates = (desired: DesiredConfig, options?: { readonly maxSou
     const additions = new Set(desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
     const pins = pinsBySource(desired);
     const remoteTrees = new Map<string, Map<string, string | null>>();
+    const unreachable = new Map<string, string>();
     const upstreamBySource = new Map<string, { path: string; name: string }[]>();
     for (const check of sourcesOf(updatableSkills(lock, installed, additions).filter((e) => !pins.has(e.source)), exact).slice(0,options?.maxSources)) {
       const found = yield* inspectSource(check.sourceUrl, check.paths, !check.exact);
-      if (!found) continue;
+      if (typeof found === 'string') { unreachable.set(check.sourceUrl, found); continue; }
       remoteTrees.set(check.sourceUrl, found.trees);
       upstreamBySource.set(check.source, upstreamSkills(found.skillPaths));
     }
@@ -292,16 +303,17 @@ export const checkUpdates = (desired: DesiredConfig, options?: { readonly maxSou
         selectorName:exactCandidate.selectorName,installedName:exactCandidate.installedName,blob:exactCandidate.blob,tree:exactCandidate.tree };
       available.push({ ...skill, ...(tree ? { tree } : {}), ...(adoption ? { adoption } : {}) });
     }
-    return { ...planUpdates({ lock, installed, remoteTrees, pins, additions }), available, ...(sourceFailures.length ? { sourceFailures } : {}) };
+    return { ...planUpdates({ lock, installed, remoteTrees, unreachable, pins, additions }), available, ...(sourceFailures.length ? { sourceFailures } : {}) };
   });
 
-// Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names.
+// Skills live in the shared store, so these items carry no target. `from` appears only for a skill the manifest names,
+// in any case; items keep the installed name, which their update and remove commands act on.
 export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[] {
   const declared = new Map(desired.skills.map((s) => [s.name, s]));
   const item = (
     name: string, group: string, state: string, disposition: Observed['disposition'], note?: string,
   ): Observed => {
-    const from = declared.get(name)?.from;
+    const from = declared.get(matchSkillName(declared.keys(), name) ?? name)?.from;
     return {
       key: `skill:${name}`, domain: 'skills', label: name, group, state, disposition,
       ...(note === undefined ? {} : { note }),
@@ -313,7 +325,7 @@ export function updateItems(plan: UpdatePlan, desired: DesiredConfig): Observed[
     ...plan.outdated.map((s) => ({ ...item(s.name, s.source, 'outdated', 'apply', `${short(s.from)} -> ${short(s.to)}`), facts: [`offered-tree:${s.to}`] })),
     ...(plan.offPin ?? []).map((s) => item(s.name, s.source, 'off-pin', 'apply', offPinNote(s.from, s.to))),
     ...plan.gone.map((s) => item(s.name, s.source, 'gone', 'apply', 'gone upstream')),
-    ...plan.unknown.map((s) => item(s.name, s.source, 'unknown', 'blocked', 'source unreachable')),
+    ...plan.unknown.map((s) => item(s.name, s.source, 'unknown', 'blocked', s.reason === undefined ? 'source unreachable' : `source unreachable: ${s.reason}`)),
     ...plan.local.map((name) => item(name, '', 'local', 'excluded', 'no recorded source')),
     ...plan.available.map((s) => ({ ...item(s.name, s.source, 'available', 'excluded', 'available'), ...((s.tree || s.adoption) ? { facts: [...(s.tree ? [`offered-tree:${s.tree}`] : []), ...(s.adoption ? [`native-adoption:${JSON.stringify(s.adoption)}`] : [])] } : {}) })),
   ];
