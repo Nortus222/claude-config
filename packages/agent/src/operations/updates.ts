@@ -21,12 +21,15 @@ const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author ch
 const failed = () => new SessionError('INTERNAL', 'The update did not finish; check for new changes and preview again. Backups are in ~/.config/nortuscc/backups');
 export const ADDITION_REPAIR = 'Resolve this source and skill with resolveSkillCandidate, review previewChange(addSkill), then applyChange for native verification';
 export const LEGACY_NATIVE_PREREQUISITE = 'Exact legacy source and native selector evidence is required; resolveSkillCandidate then previewChange(addSkill) and applyChange';
-// The declaration an update row's skill stands for. The installer treats skill names case-insensitively, so a
-// declared `TDD` may be installed as `tdd`.
+// The declaration an update row's skill stands for, for its pin policy. The installer treats skill names
+// case-insensitively, so a declared `TDD` may be installed as `tdd`.
 const declarationOf = (desired: JobInspection['desired'], label: string) => {
   const name = matchSkillName(desired.skills.map(s => s.name), label);
   return name === undefined ? undefined : desired.skills.find(s => s.name === name);
 };
+// The addition an update row is, matched exactly as the skills domain plans additions: a row whose addition differs only
+// in case is legacy work and takes the legacy guard.
+const additionOf = (desired: JobInspection['desired'], label: string) => desired.skills.find(s => s.name === label && s.targets !== undefined);
 // The unreachable causes an update row may carry: which host could not be reached, or a timeout. git's other
 // lines can name local paths and source URLs, which stay off the wire.
 const WIRE_UNREACHABLE = /^source unreachable: (?:Couldn't reach [^\s:]{1,253}: |git clone timed out after \d+ s$)/;
@@ -48,16 +51,17 @@ export const inspectUpdateOperations = (inspection: JobInspection | undefined, g
     // Local untracked folders have no source-qualified update identity. A row keeps the installed name, which update
     // and remove act on and which the operation schema's lowercase skill names admit, even when its declaration differs in case.
     const declaration = declarationOf(inspection.desired, row.label);
-    const source = row.group || (declaration?.targets !== undefined ? declaration.source : undefined);
+    const additionDeclaration = additionOf(inspection.desired, row.label);
+    const source = row.group || additionDeclaration?.source;
     if (!source) continue;
-    const addition = declaration?.targets !== undefined;
+    const addition = additionDeclaration !== undefined;
     const tree = row.facts?.find(f => /^offered-tree:[a-f0-9]{40}$/.test(f))?.slice(13);
     const revision = row.state === 'off-pin' ? declaration?.pin?.ref : undefined;
     const adoptionPrerequisite = row.state === 'available' && !hasVerifiedAdoption(row);
     const exactLegacy = row.state === 'available' ? hasVerifiedAdoption(row) : additionLockEntry(acceptedLock.success.lock,row.label)?.selectorName === row.label;
     const repairRoute = addition || adoptionPrerequisite ? 'addition' as const : exactLegacy && ['available','off-pin','gone','outdated'].includes(row.state) ? 'reconcile' as const : 'unavailable' as const;
     const item = { id: `skill:${source}/${row.label}`, key: row.key, source, name: row.label,
-      state: row.state as OperationOutput<'inspectUpdates'>['items'][number]['state'], targets: declaration?.targets ?? ['claude', 'codex'] as const,
+      state: row.state as OperationOutput<'inspectUpdates'>['items'][number]['state'], targets: additionDeclaration?.targets ?? ['claude', 'codex'] as const,
       policy: !declaration?.pin ? 'upstream' as const : declaration.pin.from.layer === 'machine' ? 'personal-pin' as const : 'source-pin' as const,
       offered: tree ? { kind: 'tree' as const, digest: tree } : revision && /^[a-f0-9]{40}$/.test(revision) ? { kind: 'revision' as const, digest: revision } : null,
       repairRoute, ...(addition || adoptionPrerequisite ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}),
@@ -97,7 +101,7 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
   if (rows.some(row => change.only.includes(row.key) && row.group && normalizeSkillSource(row.group) !== row.group)) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE',LEGACY_NATIVE_PREREQUISITE));
   const legacy = plan('update', report, selection, [skillsDomain]);
   const selectedRows = report.items.filter(row => change.only.includes(row.key));
-  const invalidLegacy = selectedRows.filter(row => declarationOf(inspection.desired, row.label)?.targets === undefined && (row.state === 'available' ? !hasVerifiedAdoption(row) : ['outdated','gone','off-pin'].includes(row.state) &&
+  const invalidLegacy = selectedRows.filter(row => additionOf(inspection.desired, row.label) === undefined && (row.state === 'available' ? !hasVerifiedAdoption(row) : ['outdated','gone','off-pin'].includes(row.state) &&
     (!additionLockEntry(raw.lock,row.label) || additionLockEntry(raw.lock,row.label)?.selectorName !== row.label || normalizeSkillSource(row.group) !== row.group)));
   const blockedNames = new Set(invalidLegacy.map(row => row.label));
   const blocked = legacy.steps.filter(step => skillNamesOf(step).some(name => blockedNames.has(name)));

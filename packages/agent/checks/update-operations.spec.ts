@@ -10,7 +10,7 @@ test('updates have a dedicated bounded read and explicit author authority', () =
 });
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { Fs, FsFailed, Processes, skillsDomain, OverridesStore, type Command } from '@nortuscc/machine';
@@ -175,6 +175,19 @@ test('addition overlaid on a base declaration with a distinct native selector ne
  await f.within(s => Effect.gen(function* () {
   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); const row = read.items.find(i => i.name === 'one')!; assert.equal(row.repairRoute,'addition'); assert.match(row.prerequisite!,/resolveSkillCandidate.*previewChange.*applyChange/);
   const p = yield* s.previewChange(update(['skill:one'])); assert.equal(p.plan.steps.length,0); assert.ok(p.plan.skipped.some(row => /native verification/.test(row.reason)));
+  const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
+ }));
+});
+
+// The skills domain plans additions by exact name, so a row whose addition differs only in case is legacy work and
+// must pass the legacy native guard rather than be exempted from it. Here a legacy install named `One` (its lock
+// entry under the same name) sits beside the addition `one`, so it has no native selector evidence.
+test('an addition declared in another case does not exempt the installed row from the legacy native guard', async () => {
+ const f = await fixture({ additions: true });
+ renameSync(join(f.m.paths.agentsSkills,'one'),join(f.m.paths.agentsSkills,'One'));
+ await f.within(s => Effect.gen(function* () {
+  const p = yield* s.previewChange(update(['skill:One'])); assert.equal(p.plan.steps.length,0);
+  assert.ok(p.plan.skipped.some(item => item.key === 'skill:One' && /native selector evidence/.test(item.reason)), JSON.stringify(p.plan.skipped));
   const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
  }));
 });
