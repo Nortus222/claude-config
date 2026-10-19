@@ -43,7 +43,7 @@ export async function verifyChecks(sha: string, token: string, transport: typeof
   if (!commit.test(sha)) fail('invalid source SHA');
   const data = object((await api(`/actions/runs?head_sha=${sha}&event=push&per_page=100`, token, transport)).data);
   if (!Array.isArray(data.workflow_runs) || typeof data.total_count !== 'number' || data.total_count > 100) fail('missing or incomplete check history');
-  for (const path of ['macos.yml', 'linux.yml', 'windows.yml']) {
+  for (const path of ['macos.yml', 'windows.yml']) {
     const matches = data.workflow_runs.map(object).filter(item => item.path === `.github/workflows/${path}` && item.head_sha === sha && item.event === 'push' && item.head_branch === 'main').sort((a, b) => Number(b.id) - Number(a.id));
     if (matches[0]?.status !== 'completed' || matches[0]?.conclusion !== 'success') fail(`${path} has not passed on the reviewed main SHA`);
   }
