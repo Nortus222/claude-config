@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option } from 'effect';
-import { Processes, type LaunchFailed } from '@nortuscc/machine';
+import { Processes, type Completed, type LaunchFailed } from '@nortuscc/machine';
+import { redactSecretValues } from '@nortuscc/profile-engine';
 import { readDocuments, type Documents } from './documents.ts';
 import { RevisionUnavailable } from './source.ts';
 
@@ -85,27 +86,54 @@ export const originUrl = (repo: string): Effect.Effect<string | undefined, Launc
 // How long a fetch may take before it is abandoned as failed.
 export const FETCH_TIMEOUT_MS = 120_000;
 
+// git config for a network command: an HTTPS transfer below 1000 bytes/s for 30 s aborts instead of
+// waiting on a dead connection. The caller's timeout still bounds connecting and ssh.
+export const STALL_LIMIT_ARGS: readonly string[] = ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30'];
+
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/]{0,512}@/gi;
+const clean = (text: string) => redactSecretValues(text.slice(0, 1000).replace(URL_USERINFO, '$1')).slice(0, 300);
+
+// One redacted line for a failed network git command, from its captured stderr: which host could
+// not be reached when git or ssh says so, otherwise its fatal or error line.
+const networkFailure = (what: string, result: Pick<Completed, 'code' | 'stderr'>): string => {
+  const lines = (result.stderr ?? '').split('\n').map((line) => line.trim()).filter((line) => line !== '');
+  for (const line of lines) {
+    const https = /^fatal: unable to access '[a-z][a-z0-9+.-]{0,31}:\/\/(?:[^@/'\s]{0,512}@)?([^/:'\s]{1,253})[^']{0,2048}': (.+)$/i.exec(line);
+    const ssh = /^ssh: (?:connect to host (\S{1,253}) port \d+|Could not resolve hostname (\S{1,253}?)): (.+)$/.exec(line);
+    if (https) return `Couldn't reach ${https[1]}: ${clean(https[2]!)}`;
+    if (ssh) return `Couldn't reach ${ssh[1] ?? ssh[2]}: ${clean(ssh[3]!)}`;
+  }
+  const line = lines.find((l) => /^(fatal|error):/.test(l)) ?? lines.find((l) => !/^(warning|hint):/.test(l));
+  return line === undefined ? `${what} exited with code ${result.code}` : `${what} failed: ${clean(line.replace(/^(fatal|error):\s*/, ''))}`;
+};
+
 // Updates the tracked branch's remote-tracking ref only: never the working tree, the index or HEAD.
-// Runs unattended: git, its credential helpers and ssh are told never to prompt, and a fetch still
-// running after `timeoutMs` is killed and answers false. ssh keeps the repository's core.sshCommand;
-// a GIT_SSH_COMMAND already in the environment is replaced, not honoured.
+// Runs unattended: git, its credential helpers and ssh are told never to prompt, a stalled transfer
+// aborts, and a fetch still running after `timeoutMs` has its process group killed. Answers undefined
+// once fetched, otherwise a redacted cause; git's stderr is captured, never passed through.
+// ssh keeps the repository's core.sshCommand; a GIT_SSH_COMMAND already in the environment is
+// replaced, not honoured.
 export const fetchTracked = (
   repo: string,
   upstream: Upstream,
   options: { readonly timeoutMs?: number } = {},
-): Effect.Effect<boolean, LaunchFailed, Processes> =>
-  Effect.gen(function* () {
+): Effect.Effect<string | undefined, LaunchFailed, Processes> => {
+  const what = `git fetch of ${upstream.remote}/${upstream.branch}`;
+  const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
+  return Effect.gen(function* () {
     const configured = yield* git(repo, ['config', '--get', 'core.sshCommand']);
     const ssh = configured.code === 0 && configured.stdout.trim() !== '' ? configured.stdout.trim() : 'ssh';
-    const { code } = yield* Processes.use((p) => p.run({
+    const result = yield* Processes.use((p) => p.run({
       cmd: 'git',
-      args: ['-c', 'credential.interactive=never', 'fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`],
+      args: ['-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--no-tags', upstream.remote, `+refs/heads/${upstream.branch}:${upstream.ref}`],
       cwd: repo,
       env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` },
       output: 'capture',
+      stderr: 'capture',
     }));
-    return code === 0;
+    return result.code === 0 ? undefined : networkFailure(what, result);
   }).pipe(
-    Effect.timeoutOption(options.timeoutMs ?? FETCH_TIMEOUT_MS),
-    Effect.map((fetched) => fetched._tag === 'Some' && fetched.value),
+    Effect.timeoutOption(timeoutMs),
+    Effect.map((fetched) => (fetched._tag === 'Some' ? fetched.value : `${what} timed out after ${timeoutMs / 1000} s`)),
   );
+};

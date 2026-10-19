@@ -6,6 +6,7 @@ import {
   acquirePidLock, Backups, backupsForRun, Fs, isGitCheckout, machinePaths, nodeFs, nodeProcesses,
   OverridesStore, overridesStore, parseState, pathsFromEnvironment, Processes, StateStore, stateStore, validMcpRouting,
 } from '@nortuscc/machine';
+import { STALL_LIMIT_ARGS } from '@nortuscc/sync';
 
 import { decodeSetupChoices, DEFAULT_REPO_URL, type SetupChoices, type SetupState } from '../shared/setup-protocol.ts';
 export { decodeSetupChoices, decodeSetupState, DEFAULT_REPO_URL, SetupChoicesSchema, SetupStateSchema, type SetupChoices, type SetupState } from '../shared/setup-protocol.ts';
@@ -117,7 +118,7 @@ export const bootstrapSetup = async (input: OnboardingInput, rawChoices: SetupCh
       env: { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/usr/bin/false', SSH_ASKPASS: '/usr/bin/false', GCM_INTERACTIVE: 'never' },
       output: 'capture', stderr: 'capture' }).pipe(Effect.flatMap((result) => result.code === 0 ? Effect.succeed(result.stdout)
         : Effect.fail(new Error('setup Git operation failed; check network access and retry'))));
-    yield* git(['clone', '--', DEFAULT_REPO_URL, temp]).pipe(Effect.timeout(input.timeoutMs ?? 120_000));
+    yield* git([...STALL_LIMIT_ARGS, 'clone', '--', DEFAULT_REPO_URL, temp]).pipe(Effect.timeout(input.timeoutMs ?? 120_000));
     if (!isGitCheckout(temp)) return yield* Effect.fail(new Error('cloned repository is not a checkout'));
     const origin = yield* git(['-C', temp, 'remote', 'get-url', 'origin']);
     if (origin.trim() !== DEFAULT_REPO_URL) return yield* Effect.fail(new Error('cloned repository has an unexpected origin'));

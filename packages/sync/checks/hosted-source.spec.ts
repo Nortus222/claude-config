@@ -226,7 +226,9 @@ test('account change during Git verification prevents subsequent Git and snapsho
   const s = fixture(); t.after(() => rmSync(s.root, { recursive: true, force: true })); const r = s.publish();
   s.afterFetch(() => s.account('account-2'));
   fails(await s.source((source) => source.load(r)), 'RevisionUnavailable');
-  assert.equal(s.calls.filter((args) => args.includes('fetch')).length, 1);
+  const fetches = s.calls.filter((args) => args.includes('fetch'));
+  assert.equal(fetches.length, 1);
+  assert.deepEqual(fetches[0]!.slice(fetches[0]!.indexOf('fetch') - 4, fetches[0]!.indexOf('fetch')), ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30'], 'a stalled transfer aborts');
   assert.equal(s.calls.some((args) => args.includes('ls-tree')), false);
 });
 

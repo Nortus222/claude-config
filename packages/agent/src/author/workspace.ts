@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { Context, Effect, Layer } from 'effect';
 import { Backups, Fs, MachinePaths, Processes } from '@nortuscc/machine';
-import { AccessDenied, GitFailed, gitAuthArgs } from '@nortuscc/sync';
+import { AccessDenied, GitFailed, gitAuthArgs, STALL_LIMIT_ARGS } from '@nortuscc/sync';
 
 export const GIT_TIMEOUT_MS = 120_000;
 export const GIT_OUTPUT_BYTES = 1024 * 1024;
@@ -35,7 +35,7 @@ export const authorWorkspaceLayer = (input: { readonly env: Readonly<Record<stri
     GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes', GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C' };
   const failed = (repoUrl: string, reason: string) => new GitFailed({ repoUrl, reason });
   const git = (args: readonly string[], cwd?: string) => processes.run({
-    cmd: 'git', args: [...gitAuthArgs(hooks), ...args], cwd, env, envAllow: [],
+    cmd: 'git', args: [...gitAuthArgs(hooks), ...STALL_LIMIT_ARGS, ...args], cwd, env, envAllow: [],
     output: 'capture', stderr: 'capture', captureLimit: { stdout: GIT_OUTPUT_BYTES, stderr: GIT_OUTPUT_BYTES },
   }).pipe(
     Effect.mapError(error => failed(cwd ?? '', error.reason)),

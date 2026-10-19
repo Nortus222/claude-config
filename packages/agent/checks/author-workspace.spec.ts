@@ -66,6 +66,8 @@ test('fresh resets the private clone to origin/main and never writes the configu
     assert.equal(command.envAllow?.length, 0);
     assert.equal(command.env?.GIT_TERMINAL_PROMPT, '0');
     assert.ok(command.args.some(a => a.startsWith('core.hooksPath=')));
+    assert.ok(command.args.includes('http.lowSpeedLimit=1000') && command.args.includes('http.lowSpeedTime=30'), 'a stalled transfer aborts');
+    assert.equal(command.stderr, 'capture');
   }
 });
 
