@@ -86,11 +86,13 @@ test('pinnedTrees lists a folder at a fetched commit, and says why for a commit 
 
 const UNREACHABLE = "fatal: unable to access 'https://x-access-token:ghs_secret@github.com/o/r.git/': Failed to connect to github.com port 443 after 75004 ms: Timeout was reached\n";
 
-// Every command recorded; the fetch answers `fetched`, everything else succeeds silently.
-const recordingProcesses = (fetched: { code: number; stdout: string; stderr?: string }) => {
+// Every command recorded; the fetch answers `fetched`, `core.sshCommand` answers `sshCommand` (unset
+// without one), and everything else succeeds silently.
+const recordingProcesses = (fetched: { code: number; stdout: string; stderr?: string }, sshCommand?: string) => {
   const calls: Command[] = [];
   const layer = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
     calls.push(command);
+    if (command.args.includes('core.sshCommand')) return sshCommand === undefined ? { code: 1, stdout: '' } : { code: 0, stdout: `${sshCommand}\n` };
     return command.args.includes('fetch') ? fetched : { code: 0, stdout: '' };
   }) });
   return { calls, layer };
@@ -98,16 +100,19 @@ const recordingProcesses = (fetched: { code: number; stdout: string; stderr?: st
 
 test('pinnedTrees fetches unattended, aborts a stalled transfer, and answers a redacted cause', async () => {
   const m = machine();
-  const { calls, layer } = recordingProcesses({ code: 128, stdout: '', stderr: UNREACHABLE });
+  const { calls, layer } = recordingProcesses({ code: 128, stdout: '', stderr: UNREACHABLE }, 'ssh -i ~/.ssh/work');
   const why = await Effect.runPromise(pinnedTrees('https://github.com/o/r.git', SHA, ['skills/tdd'])
     .pipe(Effect.provide(Layer.mergeAll(machinePaths(m.paths), nodeFs, layer))));
   assert.equal(why, "Couldn't reach github.com: Failed to connect to github.com port 443 after 75004 ms: Timeout was reached");
   const fetch = calls.find((c) => c.args.includes('fetch'))!;
   const at = fetch.args.indexOf('fetch');
-  assert.deepEqual(fetch.args.slice(at - 6, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
-  assert.deepEqual(fetch.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' });
+  assert.deepEqual(fetch.args.slice(0, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
+  assert.deepEqual(fetch.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work -o BatchMode=yes' },
+    'the configured core.sshCommand is kept, with batch mode added');
+  assert.equal(calls.find((c) => c.args.includes('core.sshCommand'))!.cwd, fetch.cwd, 'ssh config is read in the fetching repository');
   assert.equal(fetch.output, 'capture');
   assert.equal(fetch.stderr, 'capture', "git's stderr never reaches the agent log raw");
+  assert.ok(fetch.captureLimit?.stderr !== undefined, 'captured stderr is bounded');
 });
 
 test('verifyPinned reports why the pinned commit could not be fetched', async () => {

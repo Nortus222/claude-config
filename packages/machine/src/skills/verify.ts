@@ -3,7 +3,7 @@ import { extname, join } from 'node:path';
 import { Effect } from 'effect';
 import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
-import { boundedNetworkGit, STALL_LIMIT_ARGS } from '../network-git.ts';
+import { networkGit } from '../network-git.ts';
 import { Processes } from '../processes.ts';
 import { lockRef, short } from './pins.ts';
 import { normalizeSkillSource } from '@nortuscc/profile-engine';
@@ -64,7 +64,8 @@ export const compareInstall = (pinned: ReadonlyArray<TreeEntry>, installed: Read
 };
 
 // Fetches `sha` from `url` by id into a temporary blobless repo and lists each folder's tree, the folder taken
-// literally, never as a glob ('.' is the whole tree). The fetch runs unattended, and is killed after `timeoutMs`.
+// literally, never as a glob ('.' is the whole tree). The fetch runs unattended as networkGit does, and is killed
+// after `timeoutMs`.
 // A string says, redacted, why the trees could not be read: the commit could not be fetched or is not `sha`.
 export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<string>, options: { readonly timeoutMs?: number } = {}): Effect.Effect<
   Map<string, TreeEntry[]> | string, never, Fs | Processes | MachinePaths
@@ -75,10 +76,7 @@ export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<str
   const git = (...args: string[]) => processes.run({ cmd: 'git', args, output: 'capture' });
   const body = Effect.gen(function* () {
     if ((yield* git('init', '--quiet', dir)).code !== 0) return 'git init failed';
-    const failure = yield* boundedNetworkGit('git fetch', processes.run({
-      cmd: 'git', args: ['-C', dir, '-c', 'credential.interactive=never', ...STALL_LIMIT_ARGS, 'fetch', '--quiet', '--depth', '1', '--filter=blob:none', '--', url, sha],
-      env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }, output: 'capture', stderr: 'capture',
-    }), options.timeoutMs);
+    const failure = yield* networkGit('git fetch', { args: ['fetch', '--quiet', '--depth', '1', '--filter=blob:none', '--', url, sha], cwd: dir }, options.timeoutMs);
     if (failure !== undefined) return failure;
     const fetched = yield* git('-C', dir, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}');
     if (fetched.code !== 0 || fetched.stdout.trim() !== sha) return `the fetched commit is not ${short(sha)}`;

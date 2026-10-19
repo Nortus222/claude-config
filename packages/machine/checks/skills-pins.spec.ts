@@ -143,7 +143,7 @@ test('checkUpdates never clones a pinned source', async () => {
   assert.ok(clones.some((c) => c.args.includes('url-free')));
   assert.ok(!clones.some((c) => c.args.includes('url-pinned')));
   assert.deepEqual(result.current, [{ name: 'p', source: 'p/p' }]);
-  assert.deepEqual(result.unknown, [{ name: 'u', source: 'u/u' }]);
+  assert.deepEqual(result.unknown, [{ name: 'u', source: 'u/u', reason: 'git clone exited with code 1' }]);
 });
 
 test('planUpdates classifies pinned skills by their lock ref without a remote tree', () => {
