@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
@@ -90,6 +90,44 @@ test('a hanging shell times out and falls back to the inherited PATH', unixShell
   assert.ok(Date.now() - started < 3000);
   assert.equal(result.env.PATH, '/inherited');
   assert.match(result.error!, /timed out/);
+});
+
+test('the default timeout tolerates slow rc files and names the app environment fallback', unixShell, async () => {
+  const shell = script('default-timeout', '/bin/sleep 30');
+  let scheduled: number | undefined;
+  const result = await probeLoginEnvironment({ env: { SHELL: shell, PATH: '/inherited' },
+    scheduleTimeout: (callback, ms) => { scheduled = ms; setImmediate(callback); return () => {}; } });
+  assert.equal(scheduled, 15000);
+  assert.equal(result.env.PATH, '/inherited');
+  assert.match(result.error!, /timed out after 15000 ms; using the app's environment$/);
+});
+
+test('a successful probe remembers only PATH, privately, and a later timeout uses it', unixShell, async () => {
+  // privateFile refuses symlinked ancestors, and macOS's tmpdir is one.
+  const pathFile = join(realpathSync(mkdtempSync(join(dir, 'remembered-'))), 'agent', 'login-path');
+  const good = script('remember', 'PATH=/opt/conda/bin:/usr/bin\nAPI_TOKEN=secret\nexport PATH API_TOKEN\n/bin/sh -c "$2"');
+  const first = await probeLoginEnvironment({ env: { SHELL: good, PATH: '/inherited' }, pathFile });
+  assert.equal(first.error, undefined);
+  assert.equal(readFileSync(pathFile, 'utf8'), '/opt/conda/bin:/usr/bin');
+  assert.equal(statSync(pathFile).mode & 0o777, 0o600);
+
+  const hang = script('remember-hang', '/bin/sleep 30');
+  const later = await probeLoginEnvironment({ env: { SHELL: hang, PATH: '/inherited', KEEP: 'me' }, pathFile, timeoutMs: 200 });
+  assert.deepEqual(later.env, { SHELL: hang, PATH: '/opt/conda/bin:/usr/bin', KEEP: 'me' });
+  assert.match(later.error!, /timed out after 200 ms; using the PATH from the last successful read$/);
+  assert.equal(readFileSync(pathFile, 'utf8'), '/opt/conda/bin:/usr/bin', 'a failed probe keeps the remembered PATH');
+
+  const silent = await probeLoginEnvironment({ env: { SHELL: script('remember-silent', 'exit 0'), PATH: '/inherited' }, pathFile });
+  assert.equal(silent.env.PATH, '/opt/conda/bin:/usr/bin');
+  assert.match(silent.error!, /no environment; using the PATH from the last successful read$/);
+});
+
+test('without a remembered PATH a failed probe says it uses the app environment', unixShell, async () => {
+  const pathFile = join(realpathSync(mkdtempSync(join(dir, 'unremembered-'))), 'agent', 'login-path');
+  const result = await probeLoginEnvironment({ env: { SHELL: script('unremembered', 'exit 0'), PATH: '/inherited' }, pathFile });
+  assert.equal(result.env.PATH, '/inherited');
+  assert.match(result.error!, /no environment; using the app's environment$/);
+  assert.equal(existsSync(pathFile), false);
 });
 
 test('probe timing distinguishes shell readiness from a stalled runtime and joins cleanup once', unixShell, async () => {

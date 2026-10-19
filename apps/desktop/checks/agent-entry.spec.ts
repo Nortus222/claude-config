@@ -72,6 +72,24 @@ test('paths helper emits safe phase timings while keeping its one-record stdout 
   assert.deepEqual(f.commands, [], 'read-only helper does not register services');
 });
 
+test('a helper whose login probe times out uses the PATH remembered under the state root', {
+  skip: process.platform === 'win32' ? 'requires POSIX shell scripts' : false, timeout: 10000,
+}, async (t) => {
+  const f = fixture(t);
+  const good = join(f.home, 'good-login-shell');
+  const hang = join(f.home, 'hanging-login-shell');
+  writeFileSync(good, '#!/bin/sh\nPATH=/remembered/bin:/usr/bin\nAPI_TOKEN=secret\nexport PATH API_TOKEN\nexec /bin/sh -c "$2"\n'); chmodSync(good, 0o755);
+  writeFileSync(hang, '#!/bin/sh\n/bin/sleep 30\n'); chmodSync(hang, 0o755);
+  const seen: Array<{ PATH?: string }> = [];
+  const run = (shell: string) => runDesktopEntry({ ...f.input, args: ['--paths'], env: { ...f.input.env, SHELL: shell },
+    probe: async input => { const result = await probeLoginEnvironment({ ...input, timeoutMs: 1000 }); seen.push(result.env); return result; } });
+  assert.equal(await run(good), 0);
+  assert.equal(readFileSync(join(realpathSync(f.stateRoot), 'agent', 'login-path'), 'utf8'), '/remembered/bin:/usr/bin');
+  assert.equal(await run(hang), 0);
+  assert.equal(seen[1]!.PATH, '/remembered/bin:/usr/bin');
+  assert.match(f.stderr.join(''), /timed out after 1000 ms; using the PATH from the last successful read/);
+});
+
 test('the ensure helper resolves recorded checkout from login environment and prints exactly one result', async (t) => {
   const f = fixture(t);
   // The shipped tool directories; this helper never probes Git, so the host's tools there cannot reach fake Processes.
