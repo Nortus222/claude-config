@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { LaunchFailed, NETWORK_STDERR_BYTES, networkFailure, networkGit, nodeProcesses, Processes, type Command } from '../src/index.ts';
+import { LaunchFailed, NETWORK_OUTPUT_BYTES, networkFailure, networkGit, nodeProcesses, Processes, type Command } from '../src/index.ts';
 
 // Records every command; `core.sshCommand` answers `sshCommand`, or exit 1 (unset) without one. The
 // network command itself answers `ran`.
@@ -33,8 +33,8 @@ test('networkGit keeps the configured core.sshCommand and adds batch mode to it'
   assert.deepEqual(run.args, ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30', 'fetch', 'origin']);
   assert.equal(run.output, 'capture');
   assert.equal(run.stderr, 'capture');
-  assert.deepEqual(run.captureLimit, { stdout: NETWORK_STDERR_BYTES, stderr: NETWORK_STDERR_BYTES });
-  assert.equal(NETWORK_STDERR_BYTES, 64 * 1024);
+  assert.deepEqual(run.captureLimit, { stdout: NETWORK_OUTPUT_BYTES, stderr: NETWORK_OUTPUT_BYTES });
+  assert.equal(NETWORK_OUTPUT_BYTES, 64 * 1024);
 });
 
 test('without configured ssh, networkGit runs plain ssh in batch mode', async () => {

@@ -107,6 +107,9 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
     const width = labelWidth(detailed.map((o) => o.label));
     for (const o of detailed) lines.push(formatRow(o.label, o.state, `${o.note}  ${o.group}`, width));
   }
+  // Why each unreachable source failed, once per source: its skills share the cause.
+  const causes = new Map(unknown.flatMap((u) => u.note?.startsWith(UNREACHABLE_NOTE) ? [[u.group, u.note.slice(UNREACHABLE_NOTE.length)] as const] : []));
+  if (causes.size) lines.push('', ...[...causes].map(([source, cause]) => `  ${source}: ${cause}`));
   // A count row alone leaves a `gone` skill with no next step, and `Run:
   // nortuscc update` excludes `gone` skills by construction. The footer names
   // its skills rather than saying "them": it prints directly below the
@@ -115,9 +118,6 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
   // step), not a manual remove followed by `capture`, whose shrink guard
   // would refuse.
   // `--check` mode still needs it, since no picker opens there.
-  // Why each unreachable source failed, once per source: its skills share the cause.
-  const causes = new Map(unknown.flatMap((u) => u.note?.startsWith(UNREACHABLE_NOTE) ? [[u.group, u.note.slice(UNREACHABLE_NOTE.length)] as const] : []));
-  if (causes.size) lines.push('', ...[...causes].map(([source, cause]) => `  ${source}: ${cause}`));
   if (gone.length) {
     lines.push(
       '',

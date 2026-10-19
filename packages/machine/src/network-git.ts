@@ -11,7 +11,7 @@ export const FETCH_TIMEOUT_MS = 120_000;
 export const STALL_LIMIT_ARGS: readonly string[] = ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30'];
 
 // How much output a network git command may write to each stream before it is stopped as failed.
-export const NETWORK_STDERR_BYTES = 64 * 1024;
+export const NETWORK_OUTPUT_BYTES = 64 * 1024;
 
 // Userinfo runs to its last @ before the path. Linear: the text is capped at 1000 characters first,
 // and each scheme's scan stops at the next slash.
@@ -45,7 +45,7 @@ export const boundedNetworkGit = <E, R>(what: string, run: Effect.Effect<Complet
 // Runs `git <args>` in `cwd` against the network, unattended and bounded. git, credential helpers and
 // ssh never prompt: ssh keeps the core.sshCommand configured where `cwd` is (its repository's, or system
 // and global config outside one) with batch mode added, and replaces any GIT_SSH_COMMAND in the
-// environment. A stalled HTTPS transfer aborts, output past NETWORK_STDERR_BYTES or a run past
+// environment. A stalled HTTPS transfer aborts, output past NETWORK_OUTPUT_BYTES or a run past
 // `timeoutMs` stops its process group, and stderr is captured, never shown. Answers undefined when it
 // succeeded, otherwise a redacted one-line cause; fails only when git cannot be launched.
 export const networkGit = (
@@ -64,9 +64,9 @@ export const networkGit = (
       env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` },
       output: 'capture',
       stderr: 'capture',
-      captureLimit: { stdout: NETWORK_STDERR_BYTES, stderr: NETWORK_STDERR_BYTES },
+      captureLimit: { stdout: NETWORK_OUTPUT_BYTES, stderr: NETWORK_OUTPUT_BYTES },
     });
-    const overflowed = `${what} failed: its output exceeded ${NETWORK_STDERR_BYTES / 1024} KiB`;
+    const overflowed = `${what} failed: its output exceeded ${NETWORK_OUTPUT_BYTES / 1024} KiB`;
     return yield* boundedNetworkGit(what, run, timeoutMs).pipe(
       Effect.catchIf((error) => error.reason === 'capture byte limit exceeded', () => Effect.succeed(overflowed)),
     );
