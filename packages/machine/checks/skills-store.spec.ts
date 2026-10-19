@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import {
   addCommand, agentSkillsDirs, installedSkillNames, machinePaths, nodeFs, Processes, readExposure, readSkillLock,
-  installerFailure, removeCommand, runInstaller, skillExposure, updateCommand, type Command,
+  installerFailure, matchSkillName, removeCommand, runInstaller, skillExposure, updateCommand, type Command,
 } from '../src/index.ts';
 
 const skillsMachine = () => {
@@ -103,6 +103,17 @@ test('skillExposure splits exposed, partial and missing', () => {
   assert.deepEqual(skillExposure({ names: ['a'], targets: ['claude'], list: {} }), { exposed: [], partial: [], missing: ['a'] });
   // An agent outside the selection never makes a skill partial.
   assert.deepEqual(skillExposure({ names: ['a'], targets: ['claude'], list: { claude: ['a'], codex: [] } }), { exposed: ['a'], partial: [], missing: [] });
+});
+
+test('skillExposure finds a name an agent lists in another case', () => {
+  assert.deepEqual(skillExposure({ names: ['TDD'], targets: ['claude'], list: { claude: ['tdd'] } }), { exposed: ['TDD'], partial: [], missing: [] });
+});
+
+test('matchSkillName prefers an exact name, folds case otherwise, and finds none for an ambiguous fold', () => {
+  assert.equal(matchSkillName(['tdd', 'want'], 'TDD'), 'tdd');
+  assert.equal(matchSkillName(['tdd', 'TDD'], 'TDD'), 'TDD');
+  assert.equal(matchSkillName(['tdd', 'TDD'], 'Tdd'), undefined);
+  assert.equal(matchSkillName(['want'], 'TDD'), undefined);
 });
 
 test('installer argv: variadic names, explicit agents, global and non-interactive', () => {

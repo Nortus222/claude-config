@@ -22,11 +22,13 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean } = {}) => {
  const m = agentMachine();
- const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\none\ngone\n`;
- const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest } });
+ const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\n${options.spelled ?? 'one'}\ngone\n`;
+ const pins: Record<string, string> = options.pinned ? { 'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': OLD } }) } : {};
+ const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest, ...pins } });
  m.write(join(setup.dirs['a'.repeat(40)]!,'skills-manifest.txt'),manifest);
+ for (const [file, text] of Object.entries(pins)) m.write(join(setup.dirs['a'.repeat(40)]!,file),text);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest);
  execFileSync('git',['-C',m.paths.repo,'add','.']); execFileSync('git',['-C',m.paths.repo,'-c','user.name=Fixture','-c','user.email=f@f','commit','-qm','fixture']);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest + '# dirty author bytes\n');
@@ -94,6 +96,16 @@ test('bounded updates execute a source-qualified offer read, paginate and reject
   assert.ok(all.items.every(i => i.id === `skill:${i.source}/${i.name}`));
   const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })); assert.notEqual(first.items[0]?.id,next.items[0]?.id);
   f.m.write(f.lockPath,'{"skills":{}}'); assert.equal((yield* Effect.flip(s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! })))).code,'UNKNOWN_PLAN');
+ }));
+});
+
+// The installer treats skill names case-insensitively: a manifest `One` installed as `one` keeps its pin policy.
+// The row stays on the installed name, which update and remove act on.
+test('an update row finds its declaration when the manifest name differs in case from the installed skill', async () => {
+ const f = await fixture({ spelled: 'One', pinned: true }); await f.within(s => Effect.gen(function* () {
+  const all = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = all.items.find(i => i.key === 'skill:one')!;
+  assert.deepEqual([one.id, one.name, one.state, one.policy, one.offered], ['skill:owner/repo/one', 'one', 'off-pin', 'source-pin', { kind: 'revision', digest: OLD }]);
  }));
 });
 

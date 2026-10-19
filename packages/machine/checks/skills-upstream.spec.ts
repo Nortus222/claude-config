@@ -305,6 +305,13 @@ test('updateItems maps gone, unknown and local, and names current skills by thei
   ]);
 });
 
+test('updateItems takes provenance from a manifest name that differs in case from the installed skill', () => {
+  const from = { layer: 'base', source: 'test' } as const;
+  const desired = { files: [], skills: [{ name: 'TDD', source: 'o/r', exact: false, optional: false, install: true, from }], integrations: [], allow: {}, issues: [] } as DesiredConfig;
+  const items = updateItems({ current: [{ name: 'tdd', source: 'o/r' }], outdated: [], gone: [], unknown: [], local: [], available: [] }, desired);
+  assert.deepEqual(items, [{ key: 'skill:tdd', domain: 'skills', label: 'tdd', group: 'o/r', state: 'current', disposition: 'in-sync', from }]);
+});
+
 test('inspectUpdates reports an unreadable store as one probe error and no items', async () => {
   const m = skillsMachine();
   mkdirSync(join(m.paths.agentsSkills, '..'), { recursive: true });

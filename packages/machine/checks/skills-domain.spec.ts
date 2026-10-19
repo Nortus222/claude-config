@@ -76,6 +76,40 @@ test('a manifest skill installed from a different source still counts as present
   assert.deepEqual(report.items.map((i) => [i.key, i.state]), [['skill:thing', 'ok']]);
 });
 
+// The installer treats skill names case-insensitively, so a manifest `TDD` is the installed `tdd`. Items keep the
+// manifest's spelling: that is the name the profile, the item id and the install command use.
+test('a manifest name that differs in case from the installed skill is present, not a missing and extra pair', async () => {
+  const m = skillsMachine();
+  mkdirSync(join(m.paths.agentsSkills, 'tdd'), { recursive: true });
+  mkdirSync(join(m.paths.claude, 'skills', 'tdd'), { recursive: true });
+  writeLock(m.paths, { tdd: { source: 'o/r' } });
+  const desired = desiredWith([skill('TDD', 'o/r'), skill('want', 'o/r')]);
+  const inspected = await m.run(inspectSkills(desired));
+  assert.deepEqual(inspected.items.map((i) => [i.key, i.label, i.group, i.state, i.disposition]), [
+    ['skill:TDD', 'TDD', 'o/r', 'ok', 'in-sync'],
+    ['skill:want', 'want', 'o/r', 'missing', 'apply'],
+  ]);
+  const p = plan('apply', { desired, ...inspected }, selectAll, [skillsDomain]);
+  assert.deepEqual(p.steps.map((s) => [s.key, s.touches]), [['skills:install:o/r', ['skills/want']]]);
+});
+
+test('a manifest name that differs in case from its skill is judged against that skill\'s lock ref and agent links', async () => {
+  const m = skillsMachine();
+  const [at, other] = ['a'.repeat(40), 'b'.repeat(40)];
+  mkdirSync(join(m.paths.agentsSkills, 'tdd'), { recursive: true });
+  mkdirSync(join(m.paths.agentsSkills, 'Grill'), { recursive: true });
+  writeLock(m.paths, { tdd: { source: 'o/r', ref: at }, Grill: { source: 'o/r', ref: other } });
+  const pinned = { pin: { ref: at, from: { layer: 'pin', source: 'skill-pins.json' } } } as Partial<ResolvedSkill>;
+  const inspected = await m.run(inspectSkills(desiredWith([skill('TDD', 'o/r', pinned), skill('grill', 'o/r', pinned)])));
+  // Claude has neither link; Codex reads the store. Link items carry the manifest's spelling too.
+  assert.deepEqual(inspected.items.map((i) => [i.key, i.label, i.state]), [
+    ['skill:TDD', 'TDD', 'ok'],
+    ['skill:grill', 'grill', 'off-pin'],
+    ['skill-link:claude:TDD', 'TDD', 'unlinked'],
+    ['skill-link:claude:grill', 'grill', 'unlinked'],
+  ]);
+});
+
 test('a non-string lock source is not a source: the skill is local', async () => {
   const m = skillsMachine();
   mkdirSync(join(m.paths.agentsSkills, 'odd'), { recursive: true });
@@ -441,6 +475,15 @@ test('the expose step re-adds a declared skill an agent cannot load', async () =
   const result = finished(events, 'skills:expose')!;
   assert.equal(result.outcome, 'ok');
   assert.equal(result.note, 're-exposed 1 skill(s) to claude-code');
+});
+
+test('the expose step re-adds a declared skill whose manifest name differs in case, under its installed name', async () => {
+  const m = runMachine();
+  m.install('tdd', 'o/r', false);
+  const r = report([], [skill('TDD', 'o/r')]);
+  const events = await m.go(exposeOnly(), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill tdd --agent claude-code --global --yes']);
+  assert.equal(finished(events, 'skills:expose')!.note, 're-exposed 1 skill(s) to claude-code');
 });
 
 test('an unreadable agent directory is not a reason to reinstall', async (t) => {

@@ -11,15 +11,21 @@ import type { Processes } from '../processes.ts';
 import { SKILL_AGENTS, addCommand, missingSkillsNote, removeCommand, runInstaller, updateCommand } from './installer.ts';
 import { MANIFEST_FILE, emitManifest, groupsOf, manifestOutcome, sourceOf, updateManifestGroups } from './manifest.ts';
 import { lockRef, offPinNote, pinnedSource, pinsBySource, short, splitPinned } from './pins.ts';
-import { additionLockEntry, installedSkillNames, readExposure, readSkillLock, readSkillLockEvidence, skillLockPath, skillExposure } from './store.ts';
+import { additionLockEntry, installedSkillNames, matchSkillName, readExposure, readSkillLock, readSkillLockEvidence, sameSkillName, skillLockPath, skillExposure } from './store.ts';
 import { hasVerifiedAdoption } from './upstream.ts';
 import { verifyPinned } from './verify.ts';
 
 const STORE_UNREADABLE = 'store unreadable';
 
+// The lock key for a requested skill name: the installer may record `--skill TDD` as `tdd`.
+const lockKeyOf = (skills: Readonly<Record<string, unknown>>, name: string): string | undefined =>
+  matchSkillName(Object.keys(skills), name);
+
 // What the machine holds for the skills domain: declared skills, installed-but-undeclared ones,
 // and a per-agent item for each installed skill an agent cannot load. A pinned skill whose lock
 // records another ref (or none) is `off-pin`; an unpinned skill's recorded ref is ignored.
+// A declared name matches its installed skill as the installer does, ignoring case; a declared
+// skill's items keep the declared spelling.
 export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   { items: Observed[]; probeErrors: string[] },
   never,
@@ -32,12 +38,14 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
   let installed: string[] = [];
   if (listed._tag === 'Success') installed = listed.success;
   else probeErrors.push(`could not read ${store}: check skill store access and permissions`);
-  const present = new Set(installed);
 
   const items: Observed[] = [];
+  // Declared names and the installed names they match, so neither is also reported as undeclared. A disabled
+  // skill claims only its exact name: its ownership check is exact, so a case-variant copy stays visible.
   const declared = new Set<string>();
-  const okSkills: { name: string; source: string }[] = [];
+  const okSkills: { name: string; installedAs: string; source: string; targets?: ReadonlyArray<Target> }[] = [];
   for (const skill of desired.skills) {
+    const installedAs = matchSkillName(installed, skill.name);
     declared.add(skill.name);
     const base = { key: `skill:${skill.name}`, domain: 'skills', label: skill.name, group: skill.source, from: skill.from } as const;
     // An unlistable store says nothing about what is installed; reading it as missing would reinstall everything.
@@ -50,9 +58,10 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
         : ownership.kind === 'owned'
           ? { ...base, state: 'disabled', disposition: 'apply', note: 'disable pending' }
           : { ...base, state: 'missing', disposition: 'excluded', note: 'disabled on this machine' });
-    } else if (present.has(skill.name)) {
-      okSkills.push({ name: skill.name, source: skill.source });
-      const recorded = lockRef(skill.targets ? additionLockEntry(lock, skill.name)?.meta : lock.skills[skill.name]);
+    } else if (installedAs !== undefined) {
+      declared.add(installedAs);
+      okSkills.push({ name: skill.name, installedAs, source: skill.source, targets: skill.targets });
+      const recorded = lockRef(skill.targets ? additionLockEntry(lock, skill.name)?.meta : lock.skills[lockKeyOf(lock.skills, installedAs) ?? installedAs]);
       if (skill.pin && recorded !== skill.pin.ref) {
         items.push({ ...base, state: 'off-pin', disposition: 'apply', note: offPinNote(recorded, skill.pin.ref) });
       } else {
@@ -79,14 +88,14 @@ export const inspectSkills = (desired: DesiredConfig): Effect.Effect<
     probeErrors.push(...exposure.errors);
     // An agent whose directory could not be read has no list; it is a probe error, never "sees nothing".
     const readable = TARGETS.filter((t) => exposure.list[t] !== undefined);
-    const { partial, missing } = skillExposure({ names: okSkills.map((s) => s.name), targets: readable, list: exposure.list });
+    const { partial, missing } = skillExposure({ names: okSkills.map((s) => s.installedAs), targets: readable, list: exposure.list });
     const lacking = new Map<string, ReadonlyArray<string>>([
       ...partial.map((p) => [p.name, p.missing] as const),
       ...missing.map((name) => [name, readable] as const),
     ]);
-    for (const { name, source } of okSkills) {
+    for (const { name, installedAs, source, targets } of okSkills) {
       for (const target of TARGETS) {
-        if (!lacking.get(name)?.includes(target) || !(desired.skills.find(s => s.name === name)?.targets ?? TARGETS).includes(target)) continue;
+        if (!lacking.get(installedAs)?.includes(target) || !(targets ?? TARGETS).includes(target)) continue;
         items.push({
           key: `skill-link:${target}:${name}`, domain: 'skills', target, label: name, group: source,
           state: 'unlinked', disposition: 'apply', note: `not loadable by ${SKILL_AGENTS[target]}`,
@@ -188,15 +197,6 @@ const skillSteps = (items: ReadonlyArray<Observed>, selection: Selection, kind: 
     reason: 'Resolve and preview this skill addition to repair or update it with native verification' }))] };
 };
 
-// The lock key for a requested skill name. The installer matches `--skill` names case-insensitively but records
-// each skill under its own name, so `TDD` may land as `tdd`; an exact key wins, and an ambiguous fold finds none.
-const lockKeyOf = (skills: Readonly<Record<string, unknown>>, name: string): string | undefined => {
-  if (name in skills) return name;
-  const folded = Object.keys(skills).filter((key) => key.toLowerCase() === name.toLowerCase());
-  return folded.length === 1 ? folded[0] : undefined;
-};
-const sameName = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
 // Copies each named store folder, under the name its lock records, to the run's backups before the installer touches it.
 const preserveAll = (requested: ReadonlyArray<string>) => Effect.gen(function* () {
   const paths = yield* MachinePaths;
@@ -218,7 +218,7 @@ const addSkills = (source: string, installSource: string, names: ReadonlyArray<s
   Effect.gen(function* () {
     const before = (yield* readSkillLock).skills;
     const ran = yield* runInstaller(addCommand({ source: installSource, skills: names, targets }), source, pin);
-    if (!ran.ok) return { ok: false, note: ran.note ?? '', landed: [] as string[], missing: names.filter((n) => ran.missing?.some((m) => sameName(m, n))) };
+    if (!ran.ok) return { ok: false, note: ran.note ?? '', landed: [] as string[], missing: names.filter((n) => ran.missing?.some((m) => sameSkillName(m, n))) };
     const after = (yield* readSkillLock).skills;
     const landed = names.filter((n) => {
       const key = lockKeyOf(after, n);
@@ -272,19 +272,20 @@ const addUnpinned = (source: string, skills: ReadonlyArray<string>, targets: Rea
 // Re-adds every scoped skill a readable target cannot load, at its source's pin when it has one.
 // An unreadable target is reported, never repaired.
 const reExpose = (step: Step, report: MachineReport, scopedRemoval = false) => Effect.gen(function* () {
-  const installed = new Set(yield* installedSkillNames);
+  const installed = yield* installedSkillNames;
   const additions = new Set(report.desired.skills.filter(s => s.targets !== undefined).map(s => s.name));
   const disabled = new Set(report.desired.skills.filter(s => !s.install && s.from.layer === 'machine').map(s => s.name));
-  const scope = sortedUnique(scopedRemoval ? skillNamesOf(step) : [...report.desired.skills.map(s => s.name),...skillNamesOf(step)])
-    .filter(n => installed.has(n) && !additions.has(n) && !disabled.has(n));
+  // Installed names, which a declared name may differ from in case.
+  const scope = sortedUnique((scopedRemoval ? skillNamesOf(step) : [...report.desired.skills.map(s => s.name),...skillNamesOf(step)])
+    .filter(n => !additions.has(n) && !disabled.has(n)).flatMap(n => matchSkillName(installed, n) ?? []));
   const lock = yield* readSkillLock;
   const pins = pinsBySource(report.desired);
   const exposure = yield* readExposure(step.targets ?? TARGETS);
   const readable = (step.targets ?? TARGETS).filter((t) => exposure.list[t] !== undefined);
   const bySource = new Map<string, string[]>();
   for (const name of scope) {
-    const source = sourceOf(lock.skills[name]);
-    if (!source || readable.every(t => exposure.list[t]!.includes(name))) continue;
+    const source = sourceOf(lock.skills[lockKeyOf(lock.skills, name) ?? name]);
+    if (!source || readable.every(t => matchSkillName(exposure.list[t]!, name) !== undefined)) continue;
     bySource.set(source, [...(bySource.get(source) ?? []), name]);
   }
   let ok = true;
