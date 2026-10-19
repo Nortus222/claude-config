@@ -21,7 +21,11 @@ pub const OPERATION_MAX_BYTES: usize = MAX_RECORD;
 const MAX_EXCLUDED: usize = 10_000;
 const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
+// The agent and every helper probe the login shell first, for up to 15 s (LOGIN_PROBE_TIMEOUT_MS in
+// agent/login-environment.ts); these deadlines leave room for that probe and the work after it.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALL_GIT_TIMEOUT: Duration = Duration::from_secs(45);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
 // Shared operations may fetch, clone or run gh; match the MCP client's budget so a slow reply does
 // not tear down the connection every screen shares.
@@ -725,7 +729,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
-    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { Duration::from_secs(10) } else { HELPER_TIMEOUT })
+    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { READ_HELPER_TIMEOUT } else { HELPER_TIMEOUT })
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -750,7 +754,7 @@ fn validate_setup_state(value: Value) -> Result<Value, String> {
     serde_json::to_value(state).map_err(|_| "Invalid setup state".into())
 }
 pub fn desktop_setup_state(resources: &Path) -> Result<Value, String> {
-    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Duration::from_secs(10), None)?)
+    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, READ_HELPER_TIMEOUT, None)?)
 }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -805,7 +809,7 @@ pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<Path
     setup_root(run_json_helper_with_cancel(command, HELPER_TIMEOUT, Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
 }
 pub fn install_git(resources: &Path) -> Result<Value, String> {
-    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Duration::from_secs(30), None)?;
+    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, INSTALL_GIT_TIMEOUT, None)?;
     if value != json!({"requested":true}) { return Err("Invalid installer result".into()); }
     Ok(value)
 }
