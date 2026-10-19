@@ -32,7 +32,6 @@ improve-codebase-architecture
 pr
 prototype
 research
-resolving-merge-conflicts
 retro
 setup-matt-pocock-skills
 tdd
