@@ -43,6 +43,7 @@ export type OperationSetup = {
   readonly source?: SetupSource['Service'];
 };
 export type AgentHandle = {
+  readonly authorClient?: import('@nortuscc/hosted-client').HostedClient;
   readonly operationDomains?: AgentDomains;
   readonly profileHosted?: HostedRuntime['profileHosted'];
   readonly signInFlow?: HostedRuntime['signInFlow'];
@@ -75,6 +76,9 @@ export type AgentHandle = {
   // before the job's requests are answered, so it is not ordered relative to their replies.
   // The cause identifies the latest caused request in that job's batch, if any.
   readonly onStatus: (listener: (status: AgentStatus, cause?: TriggerCause) => void) => () => void;
+  // Calls the onStatus listeners again with the latest status, without a job, so they re-read what
+  // changes outside jobs (whether a run is applying). Nothing happens before the first job.
+  readonly announce?: (cause?: TriggerCause) => Effect.Effect<void>;
   // Runs `effect` while no scheduled job runs, holding the next one back until it ends, so a job
   // run outside the scheduler never overlaps one.
   readonly exclusive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
@@ -154,7 +158,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
     const mutation = <A, E>(effect: Effect.Effect<A, E>, invalidate = true, localDecision = false) =>
       Effect.scoped(Effect.andThen(acquireApplyLock, mutateJob(effect, invalidate, localDecision))).pipe(Effect.provideService(MachinePaths, paths),
         Effect.catchTag('LockHeld', () => Effect.fail(new SessionError('BUSY', 'An apply is running'))),
-        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Claude Config before changing the machine'))));
+        Effect.catchTag('MaintenancePending', () => Effect.fail(new SessionError('BUSY', 'Desktop update recovery is pending; open Nortuscc before changing the machine'))));
     const hosted = options.hosted;
     const setups = yield* SetupsStore;
     const selectOperationSetup = (setupId: string): Effect.Effect<OperationSetup, unknown> =>
@@ -205,6 +209,7 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
       generation: Effect.gen(function* () { return generation + (hosted ? yield* hosted.generation : 0); }),
       ...(hosted ? {
         profileHosted: hosted.profileHosted,
+        authorClient: hosted.authorClient,
         signInFlow: hosted.signInFlow,
         freshInspection: hosted.inspectPrimary,
         afterPerson: hosted.afterPerson,
@@ -221,6 +226,14 @@ export const startAgent = (domains: AgentDomains, options: { readonly signal?: A
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+      announce: (cause) => Effect.flatMap(Ref.get(latest), (status) => Effect.sync(() => {
+        if (status === undefined) return;
+        for (const listener of listeners) {
+          try {
+            listener(status, cause);
+          } catch {}
+        }
+      })),
       exclusive: (effect) => jobs.withPermit(effect),
     };
     if (hosted) yield* Effect.forkScoped(Effect.forever(Effect.gen(function* () {

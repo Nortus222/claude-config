@@ -12,16 +12,16 @@ const guidance = {
 };
 export function ConnectionsView({ state, controller }: { state: ConnectionsViewState; controller: ConnectionsController }) {
   const checking = state.operation?.action === 'inspect';
-  return <section className="mcp-connections" aria-label="Coding agent connections" aria-busy={state.pending}>
-    <div className="mcp-connections-head">
+  return <section className="card mcp-connections" aria-label="Coding agent connections" aria-busy={state.pending}>
+    <div className="card-head mcp-connections-head">
       <div><h2>Coding agent connections</h2><p>Use Nortuscc from Codex or Claude Code through MCP.</p></div>
       <button disabled={!state.available || state.pending} onClick={() => void controller.refresh()}>{checking ? 'Checking…' : 'Refresh'}</button>
     </div>
-    {!state.available ? <p className="mcp-connections-notice" role="status">Connect the local app agent to check and manage connections.</p> : null}
-    {state.detail ? <div className="mcp-connections-error" role="alert"><p>{state.detail}</p>
+    {!state.available ? <p className="notice mcp-connections-notice" role="status">Connect the local app agent to check and manage connections.</p> : null}
+    {state.detail ? <div className="alert mcp-connections-error" role="alert"><p>{state.detail}</p>
       <button disabled={!state.available || state.pending} onClick={() => void controller.refresh()}>Check again</button>
     </div> : null}
-    {(['codex', 'claude'] as const).map(target => {
+    <div className="rows">{(['codex', 'claude'] as const).map(target => {
       const name = target === 'codex' ? 'Codex' : 'Claude Code';
       const connection = state.connections.find(c => c.target === target);
       const routing = connection?.routing;
@@ -49,12 +49,12 @@ export function ConnectionsView({ state, controller }: { state: ConnectionsViewS
         : `Add this app’s tools to ${name}.`;
       const primaryAction = cleanup || connection?.registration === 'configured' && !repair ? 'disconnect' : 'connect';
       const primaryLabel = !connection ? 'Check status' : cleanup ? 'Retry cleanup' : unavailable ? 'Unavailable' : repair ? 'Repair' : primaryAction === 'disconnect' ? 'Disconnect' : 'Connect';
-      return <article className="mcp-connections-host" aria-label={name} key={target}>
+      return <article className="row mcp-connections-host" aria-label={name} key={target}>
         <span className="mcp-connections-mark" aria-hidden="true">{target === 'codex' ? 'C' : '✳'}</span>
         <div className="mcp-connections-copy"><div className="mcp-connections-name"><h3>{name}</h3>
-          <span role="status" className={`mcp-connections-badge ${status === 'Configured' ? 'is-configured' : cleanup || conflict || repair || unverified ? 'needs-attention' : ''}`}>{status}</span>
+          <span role="status" className={`pill mcp-connections-badge ${status === 'Configured' ? 'is-configured' : cleanup || conflict || repair || unverified ? 'needs-attention' : ''}`}>{status}</span>
         </div><p>{summary}</p></div>
-        {conflict ? null : <button className={`mcp-connections-action ${primaryAction === 'connect' && !unavailable ? 'is-primary' : ''}`}
+        {conflict ? null : <button className={`mcp-connections-action${primaryAction === 'connect' && !unavailable ? ' primary' : ''}`}
           disabled={connection ? disabled || unavailable : !state.available || state.pending}
           onClick={() => void (!connection ? controller.refresh() : controller[primaryAction](target))}>
           {busy === 'connect' ? repair ? 'Repairing…' : 'Connecting…' : busy === 'disconnect' ? cleanup ? 'Cleaning up…' : 'Disconnecting…' : primaryLabel}
@@ -76,7 +76,7 @@ export function ConnectionsView({ state, controller }: { state: ConnectionsViewS
           {conflict || repair ? <button disabled={disabled || unavailable} onClick={() => void controller.disconnect(target)}>{busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}</button> : null}
         </details> : null}
       </article>;
-    })}
-    <p className="mcp-connections-foot">Connections are configured on this Mac. The background agent keeps working when this window is closed.</p>
+    })}</div>
+    <p className="row-sub mcp-connections-foot">Connections are configured on this Mac. The background agent keeps working when this window is closed.</p>
   </section>;
 }

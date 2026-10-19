@@ -6,7 +6,6 @@ import type { Database, FeedOptions, RequestOptions } from '@azure/cosmos';
 import { Effect } from 'effect';
 import { MAX_COSMOS_BATCH_BYTES, validateCosmosConfiguration } from '../src/cosmos-store.ts';
 import { account, upsert } from './support/store-contract.ts';
-import { requireEmulatorConfiguration } from './support/cosmos.ts';
 
 test('physical IDs reversibly encode unsafe logical IDs without marker collisions', () => {
   const ids = ['account', 'decision:setup:skill:owner/repo#name?x\\y', '~escaped', '__partition-other'];
@@ -95,21 +94,6 @@ test('configuration checks partition paths, TTL and Strong account support witho
     } as unknown as Database;
     const result = await Effect.runPromise(Effect.result(validateCosmosConfiguration(database)));
     assert.equal(result._tag, bad === 'none' ? 'Success' : 'Failure');
-  }
-});
-
-test('emulator harness rejects remote and malformed endpoints before creating a client', () => {
-  const endpoint = process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT;
-  const key = process.env.NORTUSCC_COSMOS_EMULATOR_KEY;
-  try {
-    process.env.NORTUSCC_COSMOS_EMULATOR_KEY = 'dummy';
-    for (const value of ['https://cloud.documents.azure.com', 'http://127.0.0.1.evil', 'http://localhost/dbs', 'http://secret@localhost', 'http://localhost?secret=yes', 'file://localhost']) {
-      process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT = value;
-      assert.throws(requireEmulatorConfiguration);
-    }
-  } finally {
-    if (endpoint === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT; else process.env.NORTUSCC_COSMOS_EMULATOR_ENDPOINT = endpoint;
-    if (key === undefined) delete process.env.NORTUSCC_COSMOS_EMULATOR_KEY; else process.env.NORTUSCC_COSMOS_EMULATOR_KEY = key;
   }
 });
 

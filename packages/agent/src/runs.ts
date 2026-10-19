@@ -3,6 +3,9 @@ import { Effect, Semaphore } from 'effect';
 import type { OperationProgress as Progress, ParityAcceptance, ParityRunEvidence } from './operations/index.ts';
 import { decodeOperationInput, decodeRunView, type RunView, type ChangePreview, type OperationChange } from './operations/index.ts';
 import { MAX_RUN_BYTES, RunStore, validSignInFlow, type RunActor, type RunReceipt } from './run-store.ts';
+import { describe, failedStepsMessage, redact, safeMessage } from './operations/safety.ts';
+
+const RUN_RECEIPT_HEADROOM_BYTES = 4096;
 
 export class RunError extends Error {
   readonly code: string;
@@ -34,6 +37,9 @@ export type RunLifecycle = {
   readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition'], parity?: ParityAcceptance) => Effect.Effect<void, RunError>;
   readonly bindSignInFlow: (flow: string) => Effect.Effect<void, RunError>;
   readonly parity: (update: ParityRunEvidence) => Effect.Effect<void, RunError>;
+  readonly ghCode: (challenge: RunView['ghCode']) => Effect.Effect<void, RunError>;
+  readonly publication: (update: NonNullable<RunView['publication']>) => Effect.Effect<void, RunError>;
+  readonly publicationResult: (result: typeof import('./operations/schemas.ts').PublicationResultSchema.Type) => Effect.Effect<void, RunError>;
   readonly addition: (update: Pick<RunView, 'intentSaved' | 'intentState' | 'installation'>) => Effect.Effect<void, RunError>;
   readonly progress: (progress: Progress) => Effect.Effect<void, RunError>;
   readonly finished: (progress: { readonly type: 'failed'; readonly message: string } | Extract<Progress, { type: 'done' | 'cancelled' }>) => Effect.Effect<void, RunError>;
@@ -41,11 +47,16 @@ export type RunLifecycle = {
 const bounded = (text: string, limit = 500) => [...text].slice(0, limit).join('');
 const error = (cause: unknown): RunError => cause instanceof RunError ? cause : new RunError('RUN_FAILED', bounded(cause instanceof Error ? cause.message : String(cause)));
 const copy = <T>(value: T): T => structuredClone(value);
+const AGAIN = 'check for new changes and preview again';
+// One line per run that ends failed or interrupted, with its whole redacted cause; stderr is agent.log.
+const logEnded = (receipt: RunReceipt, state: string, cause: string) => {
+  try { process.stderr.write(`apply run ${receipt.view.runId} (${receipt.view.intent.change.kind}) ${state}: ${safeMessage(cause, 4000)}\n`); } catch {}
+};
 // Attribution comes from the immutable receipt owner, including older receipts without a view actor.
-const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor });
+const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor, ...(receipt.view.ghCode && receipt.view.result ? { ghCode: null } : {}) });
 // Push notifications contain no device challenge. Read the current display through get/list.
 const notificationView = (receipt: RunReceipt): RunView => {
-  const view = publicView(receipt);
+  const view = { ...publicView(receipt), ...(receipt.view.ghCode ? { ghCode: null } : {}) };
   if (view.parity?.kind === 'signIn' && view.parity.signIn) {
     const challenge = view.parity.signIn;
     return { ...view, parity: { ...view.parity, signIn: {
@@ -90,11 +101,20 @@ export const makeAgentRuns = (driver: {
       signIn: { kind: 'signIn', state, expiresAt: parity.signIn.expiresAt },
     } }) };
   };
-  const persist = (receipt: RunReceipt) => store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
-    receipts.set(receipt.view.runId, copy(receipt));
-    requests.set(receipt.view.intent.requestId, receipt.view.runId);
-    publish(receipt);
-  })));
+  // Only a running receipt names a step in flight.
+  const settled = (receipt: RunReceipt): RunReceipt => {
+    if (receipt.view.state === 'running' || receipt.view.current === undefined) return receipt;
+    const { current: _current, ...view } = receipt.view;
+    return { ...receipt, view: view as RunView };
+  };
+  const persist = (written: RunReceipt) => Effect.suspend(() => {
+    const receipt = settled(written);
+    return store.write(receipt).pipe(Effect.mapError(error), Effect.andThen(Effect.sync(() => {
+      receipts.set(receipt.view.runId, copy(receipt));
+      requests.set(receipt.view.intent.requestId, receipt.view.runId);
+      publish(receipt);
+    })));
+  });
   const invalidChallenge = (receipt: RunReceipt, restart = false) => Effect.gen(function* () {
     const challenge = receipt.view.parity?.kind === 'signIn' ? receipt.view.parity.signIn : undefined;
     if (challenge?.state !== 'awaiting-user') return undefined;
@@ -132,9 +152,10 @@ export const makeAgentRuns = (driver: {
     sequence = Math.max(sequence, receipt.sequence);
     if (receipts.has(receipt.view.runId) || requests.has(receipt.view.intent.requestId)) return yield* Effect.fail(new RunError('RUN_FAILED', 'Duplicate receipt identity'));
     const incomplete = receipt.view.state === 'accepted' || receipt.view.state === 'running';
-    const recovered: RunReceipt = incomplete ? { ...receipt, view: decodeRunView({ ...receipt.view, state: 'interrupted', ...(receipt.view.parity ? { parity: { ...receipt.view.parity, state: 'needsInspection' as const } } : {}), ...(receipt.view.intent.skillAddition ? { installation: { ...receipt.view.installation, state: 'needsInspection' as const, message: 'Agent stopped; inspect saved intent and installed files before retrying', sharedStore: { codexScans: true as const, visibility: 'shared' as const }, nextActions: [] } } : {}), result: {
-      status: 'interrupted', message: receipt.inFlight ? bounded(`Agent stopped while applying ${receipt.inFlight}; inspect before trying again`) : 'Agent stopped before the run finished; inspect before trying again',
+    const recovered: RunReceipt = incomplete ? { ...receipt, view: decodeRunView({ ...receipt.view, ...(receipt.view.ghCode ? { ghCode: null } : {}), state: 'interrupted', ...(receipt.view.parity ? { parity: { ...receipt.view.parity, state: 'needsInspection' as const } } : {}), ...(receipt.view.intent.skillAddition ? { installation: { ...receipt.view.installation, state: 'needsInspection' as const, message: 'The agent stopped during the skill installation; preview the skill again to repair it', sharedStore: { codexScans: true as const, visibility: 'shared' as const }, nextActions: [] } } : {}), result: {
+      status: 'interrupted', message: receipt.inFlight ? bounded(`The agent stopped while applying ${receipt.inFlight}; ${AGAIN}`) : `The agent stopped before the run finished; ${AGAIN}`,
     } }) } : receipt;
+    if (incomplete && recovered.view.result && 'message' in recovered.view.result) logEnded(recovered, 'interrupted', recovered.view.result.message);
     receipts.set(receipt.view.runId, copy(recovered));
     requests.set(receipt.view.intent.requestId, receipt.view.runId);
     if (recovered.view.parity?.kind === 'signIn' && recovered.view.parity.signIn) yield* scrub(receipt.view.runId, true);
@@ -163,6 +184,8 @@ export const makeAgentRuns = (driver: {
       const runId = randomUUID();
       let noteLimit = 500;
       let durabilityFailed = false;
+      let durabilityCause: string | undefined;
+      const durability = (cause: unknown) => Effect.sync(() => { durabilityFailed = true; durabilityCause ??= describe(cause); });
       const lifecycle: RunLifecycle = {
         runId, requestId: input.requestId, actor: input.actor,
         accepted: (change, keys, skillAddition, parity) => Effect.gen(function* () {
@@ -173,7 +196,7 @@ export const makeAgentRuns = (driver: {
           // Reserve room for all outcomes and remaining keys before accepting any work.
           const largest = { ...view, steps: keys.map(key => ({ key, outcome: 'cancelled', note: '' })), result: { status: 'cancelled', remaining: keys } };
           yield* Effect.try({ try: () => decodeRunView(largest), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
-          if (Buffer.byteLength(JSON.stringify(largest)) > 256 * 1024) return yield* Effect.fail(new RunError('INVALID_INPUT', 'The plan is too large for a run receipt'));
+          if (Buffer.byteLength(JSON.stringify(largest)) > MAX_RUN_BYTES - RUN_RECEIPT_HEADROOM_BYTES) return yield* Effect.fail(new RunError('INVALID_INPUT', 'The plan is too large for a run receipt'));
           noteLimit = Math.min(500, Math.floor(64 * 1024 / Math.max(1, keys.length) / 4));
           yield* save({ version: 1, sequence: ++sequence, actor: input.actor, view, inFlight: null });
         }),
@@ -184,7 +207,7 @@ export const makeAgentRuns = (driver: {
             return yield* Effect.fail(new RunError('INVALID_INPUT', 'Invalid sign-in flow binding'));
           }
           yield* save({ ...receipt, signInFlow: flow });
-        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        }).pipe(Effect.tapError(durability)),
         parity: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
           const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, parity: copy(update), ...(update.kind === 'machineIntent' ? { intentSaved: update.intentState === 'saved', intentState: update.intentState } : {}) }), catch: () => new RunError('INVALID_INPUT', 'Invalid operation evidence') });
@@ -198,44 +221,75 @@ export const makeAgentRuns = (driver: {
             || receipt.view.parity?.committedKeys.some(key => !update.committedKeys.includes(key))
             || receipt.view.parity?.backupIds.some(id => !update.backupIds.includes(id))) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Operation evidence contradicts acceptance'));
           const updated = { ...receipt, view };
-          if (Buffer.byteLength(JSON.stringify(updated)) > MAX_RUN_BYTES - 4096) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Operation evidence is too large for a run receipt'));
+          if (Buffer.byteLength(JSON.stringify(updated)) > MAX_RUN_BYTES - RUN_RECEIPT_HEADROOM_BYTES) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Operation evidence is too large for a run receipt'));
           // An observed commit survives a failed receipt write and cannot be replayed by a retry.
           receipts.set(runId, copy(updated)); publish(updated);
           yield* save(updated);
-        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        }).pipe(Effect.tapError(durability)),
+        ghCode: ghCode => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          if (receipt.view.intent.change.kind !== 'ghLogin') return yield* Effect.fail(new RunError('INVALID_INPUT', 'Not a GitHub login run'));
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, ghCode }), catch: () => new RunError('INVALID_INPUT', 'Invalid GitHub challenge') });
+          yield* save({ ...receipt, view });
+        }),
+        publication: update => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, publication: copy(update) }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication evidence') });
+          if (receipt.view.publication?.commit && receipt.view.publication.commit !== update.commit) return yield* Effect.fail(new RunError('INVALID_INPUT', 'Publication commit cannot change'));
+          const updated = { ...receipt, view };
+          receipts.set(runId, copy(updated)); publish(updated);
+          yield* save(updated);
+        }).pipe(Effect.tapError(durability)),
+        publicationResult: result => Effect.gen(function* () {
+          const receipt = yield* find(runId);
+          const view = yield* Effect.try({ try: () => decodeRunView({ ...receipt.view, state: result.status === 'succeeded' ? 'succeeded' : result.status === 'interrupted' ? 'interrupted' : 'failed', result }), catch: () => new RunError('INVALID_INPUT', 'Invalid publication result') });
+          yield* save({ ...receipt, view, inFlight: null });
+          if (result.status !== 'succeeded') logEnded(receipt, view.state, result.message);
+        }),
         addition: update => Effect.gen(function* () {
           const receipt = yield* find(runId);
           const updated = { ...receipt, view: { ...receipt.view, ...copy(update) } };
           receipts.set(runId, copy(updated)); publish(updated);
           yield* save(updated);
-        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        }).pipe(Effect.tapError(durability)),
         progress: progress => Effect.gen(function* () {
           const receipt = yield* find(runId);
-          if (progress.type === 'started') yield* save({ ...receipt, inFlight: progress.step.key, view: { ...receipt.view, state: 'running' } });
+          if (progress.type === 'started') yield* save({ ...receipt, inFlight: progress.step.key, view: { ...receipt.view, state: 'running', current: { key: progress.step.key, summary: bounded(progress.step.summary, noteLimit) } } });
           if (progress.type === 'finished') {
-            const committed: RunReceipt = { ...receipt, inFlight: null, view: { ...receipt.view, steps: [...receipt.view.steps, {
-              key: progress.key, outcome: progress.outcome, note: bounded(progress.note, noteLimit),
+            const { current: _current, ...view } = receipt.view;
+            const committed: RunReceipt = { ...receipt, inFlight: null, view: { ...view, steps: [...receipt.view.steps, {
+              key: progress.key, outcome: progress.outcome, note: bounded(redact(progress.note), noteLimit),
             }] } };
             // Keep observed evidence available even when its durable write fails. The run stops.
             receipts.set(runId, copy(committed));
             yield* save(committed);
           }
-        }).pipe(Effect.tapError(() => Effect.sync(() => { durabilityFailed = true; }))),
+        }).pipe(Effect.tapError(durability)),
         finished: progress => Effect.gen(function* () {
           const receipt = yield* find(runId);
-          const result: NonNullable<RunView['result']> = durabilityFailed ? { status: 'interrupted', message: 'Run receipt could not be saved; inspect the machine before trying again' } : progress.type === 'failed' ? { status: 'failed', message: bounded(progress.message) }
+          if (!durabilityFailed && receipt.view.publication?.pushed && receipt.view.result?.status === 'succeeded') {
+            if (progress.type === 'failed') yield* save({ ...receipt, view: { ...receipt.view, result: { ...receipt.view.result, message: bounded(`${receipt.view.result.message}. ${progress.message}`) } } });
+            return;
+          }
+          if (!durabilityFailed && receipt.view.publication && receipt.view.result !== null
+            && (receipt.view.result.status !== 'succeeded' || progress.type === 'done')) return;
+          const result: NonNullable<RunView['result']> = durabilityFailed ? { status: 'interrupted', message: safeMessage(`Couldn't save the run record${durabilityCause ? `: ${durabilityCause}` : ''}; ${AGAIN}`) }
+            : progress.type === 'failed' ? { status: 'failed', message: safeMessage(progress.message) }
             : progress.type === 'cancelled' ? { status: 'cancelled', remaining: [...progress.remaining] }
             : { status: 'done', ok: progress.ok, failed: progress.failed };
-          const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status;
+          const state: RunView['state'] = result.status === 'done' ? result.failed > 0 ? 'failed' : 'succeeded' : result.status === 'needs-preview' ? 'failed' : result.status;
           const ended = { ...receipt, inFlight: result.status === 'done' || result.status === 'cancelled' ? null : receipt.inFlight, view: { ...receipt.view, state, result } };
-          yield* save(ended).pipe(Effect.catch(cause => {
+          const why = progress.type === 'failed' && !durabilityFailed ? progress.message
+            : 'message' in result ? result.message : failedStepsMessage(receipt.view.steps) ?? `${progress.type === 'done' ? progress.failed : 0} step(s) failed`;
+          yield* save(ended).pipe(Effect.tap(() => Effect.sync(() => { if (state === 'failed' || state === 'interrupted') logEnded(ended, state, why); })), Effect.catch(cause => {
             const interrupted: RunReceipt = { ...ended, view: decodeRunView({ ...ended.view, state: 'interrupted', ...(ended.view.parity ? { parity: { ...ended.view.parity, state: 'needsInspection' as const } } : {}), ...(ended.view.intent.skillAddition ? {
-              installation: { ...ended.view.installation, state: 'needsInspection', message: 'The final receipt could not be saved; inspect saved intent and installed files before retrying',
+              installation: { ...ended.view.installation, state: 'needsInspection', message: 'The final run record could not be saved; preview the skill again to repair it',
                 sharedStore: { codexScans: true, visibility: 'shared' }, nextActions: [] },
             } : {}), result: {
-              status: 'interrupted', message: 'The final receipt could not be saved; inspect the machine before trying again',
+              status: 'interrupted', message: safeMessage(`Couldn't save the final run record: ${describe(cause)}; ${AGAIN}`),
             } }) };
             receipts.set(runId, interrupted); publish(interrupted);
+            logEnded(interrupted, 'interrupted', `Couldn't save the final run record: ${describe(cause)}`);
             return Effect.fail(cause);
           }));
         }),

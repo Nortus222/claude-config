@@ -148,9 +148,14 @@ test('partial config execution preserves the first committed key and same-reques
     assert.ok(failed); assert.equal(done.state, 'failed'); assert.equal(done.parity?.state, 'needsInspection');
     assert.deepEqual(done.parity?.committedKeys, [C]); assert.deepEqual(done.parity?.remainingKeys, [X]); assert.ok(done.parity?.backupIds.length);
     assert.equal(f.m.read(join(f.m.paths.claude, 'CLAUDE.md')), '# Claude\n');
-    assert.doesNotMatch(JSON.stringify(done), /PRIVATE_EXCEPTION_BODY/);
-  }), { fs: fs => ({ ...fs, writeTextAtomic: (path, text) => path === join(f.m.paths.codex, 'AGENTS.md') ? Effect.suspend(() => { failed = true; return Effect.fail(new FsFailed({ op: 'write', path, reason: 'PRIVATE_EXCEPTION_BODY' })); }) : fs.writeTextAtomic(path, text) }) });
-  assert.doesNotMatch(JSON.stringify(await f.m.events()), /PRIVATE_EXCEPTION_BODY/);
+    // The failed step's real cause reaches the run message, its note and History; credentials do not.
+    assert.equal(done.result?.status, 'failed');
+    assert.match(done.result && 'message' in done.result ? done.result.message : '', /^Couldn't apply config:codex:AGENTS\.md: write \S+AGENTS\.md: EACCES: permission denied token \[redacted\]$/);
+    assert.match(done.steps.find(step => step.key === X)?.note ?? '', /AGENTS\.md: EACCES: permission denied/);
+    assert.doesNotMatch(JSON.stringify(done), /ghp_/);
+  }), { fs: fs => ({ ...fs, writeTextAtomic: (path, text) => path === join(f.m.paths.codex, 'AGENTS.md') ? Effect.suspend(() => { failed = true; return Effect.fail(new FsFailed({ op: 'write', path, reason: 'EACCES: permission denied token ghp_abcdefghijklmnop' })); }) : fs.writeTextAtomic(path, text) }) });
+  const history = JSON.stringify(await f.m.events());
+  assert.match(history, /EACCES: permission denied/); assert.doesNotMatch(history, /ghp_/);
 });
 
 const routingFixture = () => {
@@ -175,17 +180,17 @@ test('a routing release committed before restoration failure remains recoverable
     assert.equal(writes, 1); assert.equal(done.state, 'failed'); assert.equal(done.parity?.state, 'needsInspection');
     assert.deepEqual(done.parity?.committedKeys, [C]); assert.deepEqual(done.parity?.remainingKeys, []); assert.ok(done.parity!.backupIds.length);
     assert.equal(JSON.parse(f.m.read(join(f.m.paths.stateRoot, 'state.json'))!).mcpRouting.files['claude:CLAUDE.md'].state, 'released');
-    assert.doesNotMatch(JSON.stringify(done), /PRIVATE_ROUTING_EXCEPTION/);
+    assert.match(JSON.stringify(done.result), /Couldn't apply config:claude:CLAUDE\.md: write \S+CLAUDE\.md: ROUTING_EXCEPTION/);
     assert.equal(f.m.read(join(f.m.paths.backups, done.parity!.backupIds[0]!, 'claude', 'uninstall', 'CLAUDE.md')), '# mine\n' + MCP_ROUTING_BYTES);
     return done;
-  }), { fs: fs => ({ ...fs, writeTextAtomic: (path, text) => path === f.path ? Effect.suspend(() => { writes++; return Effect.fail(new FsFailed({ op: 'write', path, reason: 'PRIVATE_ROUTING_EXCEPTION' })); }) : fs.writeTextAtomic(path, text) }) });
+  }), { fs: fs => ({ ...fs, writeTextAtomic: (path, text) => path === f.path ? Effect.suspend(() => { writes++; return Effect.fail(new FsFailed({ op: 'write', path, reason: 'ROUTING_EXCEPTION' })); }) : fs.writeTextAtomic(path, text) }) });
   await f.within(session => Effect.gen(function* () {
     const recovered = yield* session.runs.get(saved.runId);
     assert.deepEqual(recovered.parity, saved.parity); assert.equal(recovered.state, 'failed');
     const same = yield* session.runs.submit({ planId: saved.intent.planId, requestId: saved.intent.requestId, inputDigest: saved.intent.inputDigest, actor: 'mcp' });
     assert.equal(same.runId, saved.runId); assert.equal(writes, 1);
   }));
-  assert.doesNotMatch(JSON.stringify(await f.m.events()), /PRIVATE_ROUTING_EXCEPTION/);
+  assert.match(JSON.stringify(await f.m.events()), /ROUTING_EXCEPTION/);
 });
 
 test('every projected owner identity and destination is checked before retaining an action', async () => {

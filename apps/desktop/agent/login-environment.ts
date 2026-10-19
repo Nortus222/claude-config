@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { Effect } from 'effect';
+import { privateFile } from '@nortuscc/machine';
 import type { StartupDiagnostics, StartupPhase, StartupStatus } from './startup-diagnostics.ts';
 
 export type LoginEnvironment = { readonly env: Readonly<Record<string, string>>; readonly error?: string };
@@ -103,11 +105,25 @@ const capture = (shell: string, script: string, env: Readonly<Record<string, str
 export const loginShell = (env: Readonly<Record<string, string | undefined>>): string =>
   env.SHELL && isAbsolute(env.SHELL) ? env.SHELL : '/bin/zsh';
 
+// Interactive rc files that run conda, nvm or oh-my-zsh can take several seconds on a cold start;
+// 15 s is three times the old limit. LOGIN_PROBE_TIMEOUT in src-tauri/src/host.rs mirrors it, and a
+// Rust test requires every native helper and readiness deadline to exceed it.
+export const LOGIN_PROBE_TIMEOUT_MS = 15_000;
+
+// Only PATH is remembered: the full login environment can hold secrets.
+const rememberPath = (file: string | undefined, path: string | undefined) =>
+  file && path ? Effect.runPromise(privateFile(file).write(path)).catch(() => undefined) : Promise.resolve();
+const rememberedPath = (file: string | undefined) =>
+  file ? Effect.runPromise(privateFile(file).read()).then(path => path || undefined, () => undefined) : Promise.resolve(undefined);
+
 // Reads the environment once from the user's login shell, so installers and MCP prerequisites see
-// what a terminal sees. Failures fall back to inherited values; cancellation rejects after cleanup.
+// what a terminal sees. A success remembers its PATH in `pathFile`; failures fall back to inherited
+// values with that remembered PATH, if any. Cancellation rejects after cleanup.
 export async function probeLoginEnvironment(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly timeoutMs?: number;
+  // A 0600 file holding the last successful login PATH; absent disables remembering.
+  readonly pathFile?: string;
   readonly runtime?: string;
   readonly scheduleTimeout?: ScheduleTimeout;
   readonly onProgress?: StartupDiagnostics['record'];
@@ -118,14 +134,19 @@ export async function probeLoginEnvironment(input: {
   const progress: StartupDiagnostics['record'] = (phase, status) => {
     try { input.onProgress?.(phase, status); } catch {}
   };
+  const fallBack = async (reason: string): Promise<LoginEnvironment> => {
+    const path = await rememberedPath(input.pathFile);
+    return path === undefined ? { env: fallback, error: `${reason}; using the app's environment` }
+      : { env: { ...fallback, PATH: path }, error: `${reason}; using the PATH from the last successful read` };
+  };
   try {
-    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? 5000, progress, input.signal, input.scheduleTimeout));
+    const found = parse(await capture(shell, script(input.runtime ?? process.execPath), input.env, input.timeoutMs ?? LOGIN_PROBE_TIMEOUT_MS, progress, input.signal, input.scheduleTimeout));
     input.signal?.throwIfAborted();
-    if (found) return { env: found };
-    return { env: fallback, error: `login shell ${shell} reported no environment; using the app's` };
+    if (found) { await rememberPath(input.pathFile, found.PATH); return { env: found }; }
+    return await fallBack(`login shell ${shell} reported no environment`);
   } catch (err) {
     if (input.signal?.aborted) throw new DOMException('Login environment probe cancelled', 'AbortError');
-    return { env: fallback, error: `could not read the environment from login shell ${shell}: ${err instanceof Error ? err.message : String(err)}` };
+    return await fallBack(`could not read the environment from login shell ${shell}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -136,6 +157,18 @@ const executable = (path: string) => {
   } catch {
     return false;
   }
+};
+
+// Where Homebrew installs command-line tools such as gh on Apple silicon and Intel Macs.
+export const MACOS_TOOL_DIRECTORIES = ['/opt/homebrew/bin', '/usr/local/bin'] as const;
+
+// A login service may get launchd's PATH, or a login shell that sets up Homebrew only in a file the probe
+// does not read or that timed out. Appends each missing tool directory after the login PATH's own entries.
+export const withToolDirectories = (env: Readonly<Record<string, string>>, directories: ReadonlyArray<string>): Record<string, string> => {
+  const path = env.PATH ?? '';
+  const entries = path.split(':');
+  const missing = directories.filter((directory) => !entries.includes(directory));
+  return missing.length === 0 ? { ...env } : { ...env, PATH: [...(path === '' ? [] : [path]), ...missing].join(':') };
 };
 
 // One probe failure per tool that is not an executable file on `path`.

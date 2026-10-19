@@ -50,7 +50,7 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['inspectProfiles','inspectShareLink','listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
@@ -78,7 +78,7 @@ test('intent and machine inspection wire results preserve profile origins and is
   const from = { layer: 'profile', source: 'profiles/personal.json' };
   const intent = { generation: 'g', nextCursor: null, items: [
     { kind: 'skill', source: 'owner/skills', name: 'review', choice: null, defaultEnabled: true, enabled: true, from, declaredFrom: from, targets: ['codex'], policy: 'upstream' },
-    { kind: 'issue', ...from, message: 'Configuration input is invalid; inspect the owning document in the app' },
+    { kind: 'issue', ...from, message: 'Configuration input is invalid; fix the owning document and reload' },
   ] };
   assert.deepEqual(decodeOperationOutput('inspectIntent', intent), intent);
   const inspection = {

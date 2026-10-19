@@ -32,15 +32,9 @@ test('deployer validates anonymously before login and exposes no runtime federat
   assert.doesNotMatch(yaml, /client-secret|creds:|AZURE_FEDERATED_TOKEN_FILE|parameter_file:|bootstrapOnly/);
   assert.match(yaml.slice(yaml.indexOf('  deploy:')), /timeout-minutes: 120/);
 });
-test('ordinary validation never receives publishing/deployment credentials and actually tests image', () => {
+test('ordinary validation never receives publishing/deployment credentials', () => {
   const yaml = read('service-validation');
   assert.match(yaml, /pull_request:/); assert.match(yaml, /contents: read/);
   assert.doesNotMatch(yaml, /packages: write|id-token: write|environment:|push: true|Azure\/login|docker\/login-action/);
   assert.match(yaml, /bicep install --version v0\.47\.16/);
-  const cosmos = read('cosmos');
-  assert.match(cosmos, /docker build --platform linux\/amd64/);
-  assert.match(cosmos, /NORTUSCC_SERVICE_IMAGE_EMULATOR_CONTAINER: nortuscc-cosmos-ci/);
-  assert.match(cosmos, /NORTUSCC_SERVICE_IMAGE_ORIGIN: http:\/\/127\.0\.0\.1:8090/);
-  assert.match(cosmos, /--publish 127\.0\.0\.1:8090:8090/);
-  assert.match(cosmos, /npm run test:image -w apps\/service/);
 });

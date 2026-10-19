@@ -29,6 +29,17 @@ test('sorted unique batches deduplicate across restart and recurrence', async (t
   assert.equal(await Effect.runPromise(n.get('unknown')), undefined);
 });
 
+test('incoming items notify as incoming changes from the profile', async (t) => {
+  const f = fixture(t); const n = await f.create(); const seen: Notification[] = [];
+  n.setConnected((v) => ({ timeoutMs: 15, deliver: Effect.sync(() => { seen.push(v); return true; }) }));
+  await Effect.runPromise(n.notify(status([item('a')])));
+  await Effect.runPromise(n.notify(status([item('a'), item('b'), item('b')])));
+  assert.deepEqual(seen.map(({ title, body }) => ({ title, body })), [
+    { title: 'Incoming changes', body: '1 change from your profile needs review' },
+    { title: 'Incoming changes', body: '2 changes from your profile need review' },
+  ]);
+});
+
 test('held items notify on every policy and ready items only on notify', async (t) => {
   for (const policy of ['manual', 'notify', 'auto-apply'] as const) {
     const f = fixture(t); const seen: Notification[] = []; const n = await f.create();

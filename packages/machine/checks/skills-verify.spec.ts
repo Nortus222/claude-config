@@ -2,14 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
 import type { DesiredConfig, ResolvedSkill } from '@nortuscc/profile-engine';
 import {
-  backupsForRun, bundledScripts, compareInstall, execute, machinePaths, nodeFs, nodeFileIntegrity, nodeProcesses, pinnedTrees, plan, selectAll, skillsDomain,
-  type MachineReport, type Observed, type Plan, type Progress, type TreeEntry,
+  backupsForRun, bundledScripts, compareInstall, execute, machinePaths, nodeFs, nodeFileIntegrity, nodeProcesses, pinnedTrees, plan, Processes, selectAll, skillsDomain,
+  verifyPinned, type Command, type MachineReport, type Observed, type Plan, type Progress, type TreeEntry,
 } from '../src/index.ts';
 import { fakeInstaller, readLock, skillSource } from './support/skills-source.ts';
+import { hangingGit } from './support/hanging-git.ts';
 
 const SHA = 'a'.repeat(40);
 
@@ -66,18 +67,77 @@ test('compareInstall skips what the installer does not copy and accepts derefere
 
 // ---- pinnedTrees: real git ----
 
-test('pinnedTrees lists a folder at a fetched commit, and is null for a commit the source lacks', async () => {
+test('pinnedTrees lists a folder at a fetched commit, and says why for a commit the source lacks', async () => {
   const m = machine();
   const src = skillSource(m.home);
   const first = src.commit({ 'skills/tdd/SKILL.md': 'one', 'skills/tdd/scripts/run.sh': { text: 'x', mode: 0o755 }, 'other/x': 'x' });
   src.commit({ 'skills/tdd/SKILL.md': 'two' });
   const layer = Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeFileIntegrity, nodeProcesses());
   const run = <A>(e: Effect.Effect<A, never, any>) => Effect.runPromise(e.pipe(Effect.provide(layer)) as Effect.Effect<A>);
-  const trees = (await run(pinnedTrees(src.url, first, ['skills/tdd', '.'])))!;
+  const trees = await run(pinnedTrees(src.url, first, ['skills/tdd', '.']));
+  assert.ok(trees instanceof Map, String(trees));
   assert.deepEqual(trees.get('skills/tdd')!.map((e) => [e.mode, e.path]), [['100644', 'SKILL.md'], ['100755', 'scripts/run.sh']]);
   assert.deepEqual(trees.get('.')!.map((e) => e.path), ['other/x', 'skills/tdd/SKILL.md', 'skills/tdd/scripts/run.sh']);
-  assert.equal(await run(pinnedTrees(src.url, SHA, ['skills/tdd'])), null);
+  const missing = await run(pinnedTrees(src.url, SHA, ['skills/tdd']));
+  assert.equal(typeof missing, 'string');
+  assert.match(missing as string, /^git fetch failed: /);
   assert.deepEqual(readdirSync(join(m.paths.stateRoot, 'tmp')), []);
+});
+
+const UNREACHABLE = "fatal: unable to access 'https://x-access-token:ghs_secret@github.com/o/r.git/': Failed to connect to github.com port 443 after 75004 ms: Timeout was reached\n";
+
+// Every command recorded; the fetch answers `fetched`, `core.sshCommand` answers `sshCommand` (unset
+// without one), and everything else succeeds silently.
+const recordingProcesses = (fetched: { code: number; stdout: string; stderr?: string }, sshCommand?: string) => {
+  const calls: Command[] = [];
+  const layer = Layer.succeed(Processes, { run: (command: Command) => Effect.sync(() => {
+    calls.push(command);
+    if (command.args.includes('core.sshCommand')) return sshCommand === undefined ? { code: 1, stdout: '' } : { code: 0, stdout: `${sshCommand}\n` };
+    return command.args.includes('fetch') ? fetched : { code: 0, stdout: '' };
+  }) });
+  return { calls, layer };
+};
+
+test('pinnedTrees fetches unattended, aborts a stalled transfer, and answers a redacted cause', async () => {
+  const m = machine();
+  const { calls, layer } = recordingProcesses({ code: 128, stdout: '', stderr: UNREACHABLE }, 'ssh -i ~/.ssh/work');
+  const why = await Effect.runPromise(pinnedTrees('https://github.com/o/r.git', SHA, ['skills/tdd'])
+    .pipe(Effect.provide(Layer.mergeAll(machinePaths(m.paths), nodeFs, layer))));
+  assert.equal(why, "Couldn't reach github.com: Failed to connect to github.com port 443 after 75004 ms: Timeout was reached");
+  const fetch = calls.find((c) => c.args.includes('fetch'))!;
+  const at = fetch.args.indexOf('fetch');
+  assert.deepEqual(fetch.args.slice(0, at), ['-c', 'credential.interactive=never', '-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30']);
+  assert.deepEqual(fetch.env, { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/work -o BatchMode=yes' },
+    'the configured core.sshCommand is kept, with batch mode added');
+  assert.equal(calls.find((c) => c.args.includes('core.sshCommand'))!.cwd, fetch.cwd, 'ssh config is read in the fetching repository');
+  assert.equal(fetch.output, 'capture');
+  assert.equal(fetch.stderr, 'capture', "git's stderr never reaches the agent log raw");
+  assert.ok(fetch.captureLimit?.stderr !== undefined, 'captured stderr is bounded');
+});
+
+test('verifyPinned reports why the pinned commit could not be fetched', async () => {
+  const m = machine();
+  mkdirSync(dirname(m.paths.agentsSkills), { recursive: true });
+  writeFileSync(join(dirname(m.paths.agentsSkills), '.skill-lock.json'), JSON.stringify({ skills: {
+    tdd: { source: 'o/r', sourceUrl: 'https://github.com/o/r.git', skillPath: 'skills/tdd/SKILL.md', ref: SHA },
+  } }));
+  const { layer } = recordingProcesses({ code: 128, stdout: '', stderr: UNREACHABLE });
+  const { failed } = await Effect.runPromise(verifyPinned({ source: 'o/r', sha: SHA, names: ['tdd'] })
+    .pipe(Effect.provide(Layer.mergeAll(machinePaths(m.paths), nodeFs, layer))));
+  assert.deepEqual(failed.get('tdd'), ["could not fetch aaaaaaa: Couldn't reach github.com: Failed to connect to github.com port 443 after 75004 ms: Timeout was reached"]);
+});
+
+test('a pinned fetch that hangs times out and its whole process group is killed', { skip: process.platform === 'win32' }, async () => {
+  const m = machine();
+  const git = hangingGit();
+  const started = Date.now();
+  const why = await Effect.runPromise(pinnedTrees('https://github.com/o/r.git', SHA, ['skills/tdd'], { timeoutMs: 2000 })
+    .pipe(Effect.provide(Layer.mergeAll(machinePaths(m.paths), nodeFs, nodeProcesses({ path: git.path })))));
+  assert.equal(why, 'git fetch timed out after 2 s');
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(await git.survivors(), [], 'git and its helper are both gone');
+  const tmp = join(m.paths.stateRoot, 'tmp');
+  assert.deepEqual(existsSync(tmp) ? readdirSync(tmp) : [], []);
 });
 
 // ---- end to end through execute ----

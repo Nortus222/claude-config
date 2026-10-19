@@ -280,7 +280,7 @@ export const serveIpc = (input: {
         : decodeOverrides((() => { try { return JSON.parse(overrideText); } catch { return null; } })(), 'overrides.json');
       const pending = yield* fs.exists(join(input.paths.stateRoot, 'agent/pending-update.json'));
       const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
-      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; inspect and repair the overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
+      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; repair the machine overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
       return projectContext({ app, agent: { version: input.agentVersion, protocol: PROTOCOL_VERSION },
         targets: choices.issues.length ? [] : (choices.value.manageConfig === false ? [] : choices.value.configTargets ?? (inspection ? TARGETS : [])),
         setups: hosted?.enabled ? { state: 'available', items: hosted.setups.map(s => ({setupId:s.setupId, trusted: trustedSetups?.some(t => t.setupId === s.setupId && t.accountId === hosted.accountId) ?? false, revision:s.latestRevision})) }
@@ -344,6 +344,15 @@ export const serveIpc = (input: {
           }
           let result: unknown;
           switch (request.operation) {
+            case 'authorProfiles': result = yield* session.authorProfiles(request.input); break;
+            case 'machineFile': result = yield* session.machineFile(request.input); break;
+            case 'authorFile': result = yield* session.authorFile(request.input); break;
+            case 'upstreams': result = yield* session.upstreams(request.input); break;
+            case 'discoverUpstream': result = yield* session.discoverUpstream(request.input); break;
+            case 'upstreamSkill': result = yield* session.upstreamSkill(request.input); break;
+            case 'drafts': result = yield* session.drafts(request.input); break;
+            case 'draftPreview': result = yield* session.draftPreview(request.input); break;
+            case 'ghState': result = yield* session.ghState(request.input); break;
             case 'listBackups': result = yield* session.listBackups(request.input); break;
             case 'agentStatus': result = yield* session.agentStatus(request.input); break;
             case 'accountState': result = yield* session.accountState(request.input); break;

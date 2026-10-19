@@ -33,8 +33,15 @@ struct Owner {
     app: tauri::AppHandle,
     review: Arc<notifications::ReviewRoute>,
     startup: Arc<startup::Startup>,
+    /// The agent state root of the last connection, so Show in Finder needs no helper while connected.
+    state_root: Mutex<Option<PathBuf>>,
 }
 impl Owner {
+    /// The agent state root: the connected one, else the fixed read-only helper's answer.
+    fn state_root(&self) -> Result<PathBuf, String> {
+        if let Some(root) = self.state_root.lock().unwrap().clone() { return Ok(root); }
+        host::setup_agent(&self.resources, Setup::Paths)
+    }
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<(Agent, bool), String> {
         let trace = startup_diagnostics::trace(setup.operation());
         let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
@@ -62,6 +69,7 @@ impl Owner {
             event["generation"] = json!(generation);
             let _ = app.emit("machine-agent", event);
         }), operation, cancel)?;
+        *self.state_root.lock().unwrap() = Some(state_root.to_path_buf());
         let owner = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Ok(delivery) = receive.recv() {
@@ -266,14 +274,6 @@ async fn inspect_machine(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, S
     dispatch(owner, Request::Inspect).await
 }
 #[tauri::command]
-async fn preview_plan(owner: tauri::State<'_, Arc<Owner>>, exclude: Vec<String>) -> Result<Value, String> { dispatch(owner, Request::Preview { exclude }).await }
-#[tauri::command]
-async fn apply_plan(owner: tauri::State<'_, Arc<Owner>>, plan_id: String) -> Result<Value, String> { dispatch(owner, Request::Apply { plan_id }).await }
-#[tauri::command]
-async fn cancel_apply(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
-    dispatch(owner, Request::Cancel).await
-}
-#[tauri::command]
 async fn restart_agent(owner: tauri::State<'_, Arc<Owner>>) -> Result<Value, String> {
     let owner = owner.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;let updates=owner.startup.coordinator()?; restart_with_completion(&owner.session, &owner.lifecycle, |g| owner.connect(g, Setup::Restart), ||updates.recovered())}).await.map_err(|e| e.to_string())?
@@ -367,8 +367,26 @@ async fn install_git(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::R
     tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;mutating_helper_response(&owner.session,&owner.lifecycle,|| host::install_git(&owner.resources))}).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
+async fn open_github_link(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::GitHubLinkArgs = native_args(request)?; let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {owner.startup.wait()?;helper_response(&owner.session,&owner.lifecycle,|| host::open_github_link(args.link))}).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
 async fn open_device_login(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
     let _: host::EmptyArgs = native_args(request)?; helper_dispatch(owner, |_| host::open_device_login()).await
+}
+/// Shows the agent log or the backups folder in Finder; the host resolves the path from the state root.
+/// It works after a failed startup too, since the state root is known without a connection and the log
+/// matters most then.
+#[tauri::command]
+async fn reveal_place(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc::Request<'_>) -> Result<Value, String> {
+    let args: host::RevealArgs = native_args(request)?; let owner=owner.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Settled, so a connection's state root is recorded; whether startup succeeded doesn't matter here.
+        let _ = owner.startup.wait();
+        let generation = { let current=owner.session.lock().unwrap(); if current.closed {return Err("App connection closed".into());} current.generation };
+        Ok(json!({"generation":generation,"data":host::reveal_place(|| owner.state_root(), args.place)?}))
+    }).await.map_err(|e|e.to_string())?
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields,rename_all="camelCase")]
@@ -564,6 +582,7 @@ fn main() {
                 let owner = Arc::new(Owner {
                     session: Mutex::new(Session { agent: None, generation: 1, error: Some("Checking local setup state".into()), closed: false, initial_setup: None }),
                     lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),startup:setup_startup.clone(),
+                    state_root: Mutex::new(None),
                 });
                 app.manage(owner.clone());
                 trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
@@ -571,7 +590,7 @@ fn main() {
                 Ok(())
             })
         })
-        .invoke_handler(tauri::generate_handler![operation, get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, preview_plan, apply_plan, cancel_apply, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
+        .invoke_handler(tauri::generate_handler![operation, get_operation_run, list_operation_runs, agent_generation, agent_status, inspect_machine, restart_agent, take_review_request, desktop_setup_state, setup_desktop, install_git, mcp_connections, hosted_state, sign_in, sign_out, sync_now, trust_setup, machine_settings, set_policy, resume_agent, open_device_login, open_github_link, reveal_place,update_state,check_update,download_update,cancel_update,install_update,update_preferences])
         .build(tauri::generate_context!()).expect("Unable to build the app")
         .run_return(|app, event| {
             if matches!(event,tauri::RunEvent::Ready) {startup_diagnostics::trace(Operation::AppStartup).record(Phase::RuntimeReady,startup_diagnostics::Status::Completed,None);}

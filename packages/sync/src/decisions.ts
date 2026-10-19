@@ -38,6 +38,8 @@ export type SyncDecisionInput = {
   holds: Holds;
   decisions: readonly Decision[];
   now: Date;
+  // A batch owner's single fresh observation of `source`; each decision otherwise observes afresh.
+  observed?: SyncObservation;
 };
 export type PreparedSyncDecision = {
   change: SyncDecisionChange;
@@ -89,6 +91,7 @@ export const observeSyncSource = (source: SetupSource['Service'], decisions: rea
     if (knownHead === undefined && canonical((yield* source.fetch).head) !== canonical(head)) return yield* Effect.fail(refused());
     return { head, offered, effective, before, after, beforeValues, afterValues, profile, changes, offers };
   });
+export type SyncObservation = Effect.Success<ReturnType<typeof observeSyncSource>>;
 export const prepareSyncDecision = (
   input: SyncDecisionInput,
 ): Effect.Effect<PreparedSyncDecision, unknown, Fs | Processes | MachinePaths> =>
@@ -98,14 +101,15 @@ export const prepareSyncDecision = (
       return yield* Effect.fail(refused());
     const independentIntegrations = input.validation === 'cli-independent-integrations' && change.setupId === LOCAL_SETUP
       && change.revision.kind === 'local' && parseItemId(change.itemId)?.kind !== 'integration';
-    const observed = yield* observeSyncSource(source, input.decisions, independentIntegrations);
+    const observed = input.observed ?? (yield* observeSyncSource(source, input.decisions, independentIntegrations));
     const offeredItem = observed.offers.find((item) => item.itemId === change.itemId);
     // An existing local hold can be released even when both snapshots omit its item.
     const releaseLocalHold =
       typeof observed.head === 'string' && change.action === 'release' && Object.hasOwn(input.holds, change.itemId);
     const head = offeredItem?.revision ?? (releaseLocalHold ? observed.head : undefined);
     if (head === undefined) return yield* Effect.fail(refused());
-    yield* source.load(head);
+    // The observation already loaded and verified its own head.
+    if (canonical(head) !== canonical(observed.head)) yield* source.load(head);
     const local = typeof head === 'string';
     if (
       local

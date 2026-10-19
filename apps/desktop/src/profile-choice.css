@@ -1,0 +1,13 @@
+/* First-run profile choice: one row per profile with its Follow button. */
+.profile-choice-list {
+  list-style: none;
+}
+.profile-choice-list small {
+  display: block;
+}
+.profile-choice-list .pill {
+  justify-self: start;
+}
+.profile-choice-view .card {
+  width: 100%;
+}

@@ -81,6 +81,8 @@ test('bootstrap clones fixed origin, records choices with backups, and retry pre
   assert.equal(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'), policy);
   const clone = f.commands.find((c) => c.args.includes('clone'))!;
   assert.ok(clone.args.includes('core.hooksPath=/dev/null'));
+  assert.deepEqual(clone.args.slice(clone.args.indexOf('clone') - 4, clone.args.indexOf('clone')), ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30'], 'a stalled transfer aborts');
+  assert.equal(clone.stderr, 'capture');
   assert.equal(clone.env?.GIT_TERMINAL_PROMPT, '0');
   assert.ok(readdirSync(join(f.stateRoot, 'backups')).length > 0);
   const before = readFileSync(join(f.stateRoot, 'state.json'), 'utf8');

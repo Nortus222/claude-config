@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, statSync } from 'node:fs';
-import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
+import { loadNamedProfile, loadProfile, nodeFiles } from '@nortuscc/profile-engine';
 import { RunStore, RunStoreError, type RunReceipt } from '../src/run-store.ts';
 import { AgentSkillInstaller } from '../src/skill-installer.ts';
 import { join } from 'node:path';
@@ -41,6 +41,30 @@ test('effective read pages refuse old generations and intent apply recovers the 
   })), fixture.source);
 });
 
+
+test('intent reads and previews resolve the followed named profile, not the repository root', async () => {
+  const m = agentMachine();
+  const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n';
+  const named = { 'profiles/base.json': '{}', 'profiles/personal.json': json({ extends: 'base', files: { 'claude:CLAUDE.md': 'claude/personal.md' } }), 'claude/personal.md': '# personal\n' };
+  const fixture = setupFixture(join(m.root, 'setup'), { appliedFiles: named, headFiles: named });
+  await m.run(Effect.scoped(Effect.gen(function* () {
+    const store = yield* OverridesStore;
+    const compose = <T extends { repo: string }>(snapshot: T) => Effect.gen(function* () {
+      return { ...snapshot, desired: yield* loadNamedProfile(snapshot.repo, 'personal', { overrides: yield* store.read }).pipe(Effect.provide(nodeFiles)) };
+    }).pipe(Effect.orDie);
+    const source: SetupSource['Service'] = { ...fixture.service, profile: 'personal', current: fixture.service.current.pipe(Effect.flatMap(compose)), load: revision => fixture.service.load(revision).pipe(Effect.flatMap(compose)), effective: decisions => fixture.service.effective(decisions).pipe(Effect.flatMap(value => Effect.map(compose(value.effective), effective => ({ ...value, effective })))) };
+    yield* Effect.gen(function* () {
+      const handle = yield* startAgent(() => [], { deferStart: true });
+      const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [] });
+      yield* session.inspect('mcp');
+      const page = yield* session.inspectIntent(decodeOperationInput('inspectIntent', { section: 'files' }));
+      const claude = page.items.find(item => item.kind === 'file' && item.id === 'claude:CLAUDE.md');
+      assert.ok(claude && 'from' in claude); assert.equal(claude.from.source, 'profiles/personal.json');
+      const preview = yield* session.previewChange({ kind: 'machineIntent', patch: { kind: 'manageConfig', action: 'set', value: false } });
+      assert.equal(preview.change.kind, 'machineIntent');
+    }).pipe(Effect.provideService(SetupSource, source));
+  })), fixture.source);
+});
 
 type Injection = { fs?: (fs: Fs['Service']) => Fs['Service']; state?: (state: StateStore['Service']) => StateStore['Service']; receipt?: (r: RunReceipt) => boolean; history?: boolean; overrides?: (store: OverridesStore['Service']) => OverridesStore['Service']; inspection?: (value: JobInspection) => JobInspection; paths?: (paths: MachinePaths['Service']) => MachinePaths['Service'] };
 const finishIntent = (session: AgentSession, id: string) => Effect.callback<void>(resume => {
@@ -153,7 +177,9 @@ for (const failure of ['receipt', 'history', 'both'] as const) test(`saved inten
       const done = yield* f.apply(session, { kind: 'machineIntent', patch: { kind: 'setting', fileId: 'claude:settings.json', key: 'theme', action: 'set', value: 'light' } });
       assert.equal(done.state, failure === 'history' ? 'failed' : 'interrupted'); assert.equal(done.intentSaved, true); assert.equal(done.intentState, 'saved'); assert.equal(done.parity?.state, 'needsInspection'); assert.deepEqual(done.parity?.committedKeys, ['intent:overrides']); assert.ok(done.parity!.backupIds.length > 0); assert.equal(writes, 1);
     }), { receipt: failure !== 'history' ? r => r.view.intentSaved : undefined, history: failure !== 'receipt', overrides: real => ({ ...real, write: (...args) => { writes++; return real.write(...args); } }) });
-    assert.deepEqual(stderr, []);
+    // One agent.log line names the run, its kind and the redacted cause.
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, failure === 'history' ? /^apply run [0-9a-f-]+ \(machineIntent\) failed: .*injected failure\n$/ : /^apply run [0-9a-f-]+ \(machineIntent\) interrupted: Couldn't save the .*injected receipt failure.*\n$/);
   } finally { process.stderr.write = previous; }
 });
 test('stale overrides or malformed known documents refuse before writing', async () => {

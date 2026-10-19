@@ -21,15 +21,24 @@ import { recordedRun } from '../apply.ts';
 import { observedHostedItems } from '../hosted-status.ts';
 import { decodeOperationOutput, SETUP_TEXT_MAX_BYTES, type OperationPlan, type OperationInput, type SetupApplyChange, type SetupReview } from './index.ts';
 import { parityObserver, type PreparedParityChange } from './parity.ts';
+import { describe, failedStepsMessage, redact, safeMessage } from './safety.ts';
 
 const SETUP_INSPECT_TIMEOUT = '20 seconds';
 const SETUP_PREVIEW_MAX_BYTES = 65_536;
 const SETUP_REVIEW_MAX_BYTES = MAX_RECORD_BYTES - 4096;
 const digest = (value: unknown) => authorDigest(canonical(value))!;
 const stale = () => new SessionError('UNKNOWN_PLAN', 'Setup choices changed; review and preview again');
-const mapError = (cause: Cause.Cause<unknown>) => {
+// Session refusals pass through; a timeout says so; anything else is unavailable input.
+export const setupFailure = (cause: Cause.Cause<unknown>) => {
   const error = Cause.squash(cause);
-  return Effect.fail(error instanceof SessionError ? error : new SessionError('INSPECT_FAILED', 'Setup inputs are unavailable; review again'));
+  return Effect.fail(error instanceof SessionError ? error
+    : Cause.isTimeoutError(error) ? new SessionError('INSPECT_FAILED', `Reading the setup timed out after ${SETUP_INSPECT_TIMEOUT}; try again`)
+    : new SessionError('INSPECT_FAILED', 'Setup inputs are unavailable; review again'));
+};
+// An apply-time failure keeps its own cause: session refusals pass through, anything else says what stopped.
+const applyFailure = (cause: Cause.Cause<unknown>) => {
+  const error = Cause.squash(cause);
+  return Effect.fail(error instanceof SessionError ? error : new SessionError('INTERNAL', safeMessage(`Couldn't finish applying the setup: ${describe(error)}`)));
 };
 const select = (handle: AgentHandle, setupId: string) => Effect.gen(function* () {
   const selected = yield* (handle.selectOperationSetup?.(setupId) ?? Effect.fail(new SessionError('APP_UNAVAILABLE', 'Setup selection is unavailable')));
@@ -135,7 +144,7 @@ export const readSetupReview = (handle: AgentHandle, input: OperationInput<'setu
     if (Buffer.byteLength(JSON.stringify(result())) > SETUP_REVIEW_MAX_BYTES)
       return yield* Effect.fail(new SessionError('OVERSIZED', 'Setup review identity inventory exceeds the record limit'));
     return decodeOperationOutput('setupReview', result());
-  }).pipe(Effect.timeout(SETUP_INSPECT_TIMEOUT), Effect.catchCause(mapError));
+  }).pipe(Effect.timeout(SETUP_INSPECT_TIMEOUT), Effect.catchCause(setupFailure));
 
 export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange, generation: number): Effect.Effect<PreparedParityChange, SessionError, AgentServices> =>
   Effect.gen(function* () {
@@ -160,7 +169,7 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
         const offer = input.observed.offers.find(item => item.itemId === choice.itemId);
         const revision = offer ? revisionOf(offer.revision) : change.revision;
         prepared.push(yield* prepareSyncDecision({ source: input.selected.source, change: { kind: 'syncDecision', setupId: change.setupId, revision, ...choice },
-          overrides: input.overrides.value, holds: input.holds, decisions: input.decisions, now, deferComposition: true }));
+          overrides: input.overrides.value, holds: input.holds, decisions: input.decisions, now, deferComposition: true, observed: input.observed }));
       }
       let nextOverrides = input.overrides.value;
       const nextHolds = { ...input.holds };
@@ -248,10 +257,11 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
               yield* checkpoint();
               const index = event.index + keys.length;
               yield* lifecycle.progress(event.type === 'started' ? { ...event, index, total: publicPlan.steps.length, step: publicPlan.steps[index]! }
-                : { ...event, index, total: publicPlan.steps.length, note: event.outcome === 'ok' ? 'Machine effect observed' : 'Machine effect incomplete; inspect backups' });
+                : { ...event, index, total: publicPlan.steps.length, note: event.outcome === 'ok' ? 'Machine effect observed' : redact(event.note) || 'Step did not complete' });
             }),
           });
-          if (ran.result !== 'done' || signal.aborted || ran.steps.some(step => step.outcome !== 'ok')) return yield* Effect.fail(new SessionError('INTERNAL', 'Setup machine plan stopped; inspect recorded effects'));
+          if (ran.result !== 'done' || signal.aborted || ran.steps.some(step => step.outcome !== 'ok'))
+            return yield* Effect.fail(new SessionError('INTERNAL', failedStepsMessage(ran.steps) ?? 'Setup apply cancelled'));
           if (settles) {
             yield* observer.pending('sync:applied');
             const head = first.input.observed.head;
@@ -293,6 +303,6 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
             yield* observer.committed('sync:applied');
           }
         }).pipe(Effect.provide(backupsForRun(at).pipe(Layer.provideMerge(machinePaths(first.jobPaths)))));
-      }).pipe(Effect.provideContext(context), Effect.catchCause(mapError)),
+      }).pipe(Effect.provideContext(context), Effect.catchCause(applyFailure)),
     } satisfies PreparedParityChange;
-  }).pipe(Effect.catchCause(mapError));
+  }).pipe(Effect.catchCause(setupFailure));

@@ -10,7 +10,7 @@ test('updates have a dedicated bounded read and explicit author authority', () =
 });
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { Fs, FsFailed, Processes, skillsDomain, OverridesStore, type Command } from '@nortuscc/machine';
@@ -22,11 +22,14 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean; unreachable?: (attempt: number) => string } = {}) => {
+ let cloneAttempts = 0;
  const m = agentMachine();
- const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\none\ngone\n`;
- const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest } });
+ const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\n${options.spelled ?? 'one'}\ngone\n`;
+ const pins: Record<string, string> = options.pinned ? { 'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': OLD } }) } : {};
+ const setup = setupFixture(join(m.root,'snapshot'),{ headFiles: { 'skills-manifest.txt': manifest, ...pins } });
  m.write(join(setup.dirs['a'.repeat(40)]!,'skills-manifest.txt'),manifest);
+ for (const [file, text] of Object.entries(pins)) m.write(join(setup.dirs['a'.repeat(40)]!,file),text);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest);
  execFileSync('git',['-C',m.paths.repo,'add','.']); execFileSync('git',['-C',m.paths.repo,'-c','user.name=Fixture','-c','user.email=f@f','commit','-qm','fixture']);
  m.write(join(m.paths.repo,'skills-manifest.txt'),manifest + '# dirty author bytes\n');
@@ -42,7 +45,9 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const processes = yield* Processes;
   const fake: Processes['Service'] = { ...processes, run: command => {
-   if (command.cmd === 'git' && command.args[0] === 'clone') return Effect.succeed({ code: 0, stdout: '', stderr: '' });
+   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.sync(() => options.unreachable
+    ? { code: 128, stdout: '', stderr: options.unreachable(++cloneAttempts) }
+    : { code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
    if (command.cmd === 'git' && command.args[0] === '-c') {
     const names = ['one','two','three'];
@@ -97,6 +102,16 @@ test('bounded updates execute a source-qualified offer read, paginate and reject
  }));
 });
 
+// The installer treats skill names case-insensitively: a manifest `One` installed as `one` keeps its pin policy.
+// The row stays on the installed name, which update and remove act on.
+test('an update row finds its declaration when the manifest name differs in case from the installed skill', async () => {
+ const f = await fixture({ spelled: 'One', pinned: true }); await f.within(s => Effect.gen(function* () {
+  const all = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = all.items.find(i => i.key === 'skill:one')!;
+  assert.deepEqual([one.id, one.name, one.state, one.policy, one.offered], ['skill:owner/repo/one', 'one', 'off-pin', 'source-pin', { kind: 'revision', digest: OLD }]);
+ }));
+});
+
 test('machine-only selected updates, adoption and scoped prune preserve snapshot and dirty author bytes', async () => {
  const f = await fixture(); const author = f.m.read(join(f.m.paths.repo,'skills-manifest.txt')); const snapshot = f.m.read(join(f.setup.dirs['b'.repeat(40)]!,'skills-manifest.txt'));
  await f.within(s => Effect.gen(function* () {
@@ -109,34 +124,32 @@ test('machine-only selected updates, adoption and scoped prune preserve snapshot
  const folder = readdirSync(f.m.paths.backups)[0]!; assert.match(f.m.read(join(f.m.paths.backups,folder,'skill-lock.json'))!,/gone/); assert.equal(f.m.read(join(f.m.paths.backups,folder,'claude/skills/one/SKILL.md')),'# old one\n');
 });
 
-test('explicit author update backs up dirty bytes and writes only the reviewed result', async () => {
+test('author manifest updates are retired without installer or checkout effects', async () => {
  const f = await fixture(); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'));
  await f.within(s => Effect.gen(function* () {
-  const p = yield* s.previewChange(update(['skill:gone','skill:two'],true)); assert.ok('authorManifest' in p && p.authorManifest?.documents.length === 1); assert.doesNotMatch(JSON.stringify(p),/dirty author bytes/);
-  const run = yield* submit(s,p.planId); assert.equal(run.state,'succeeded'); assert.ok(run.parity?.committedKeys.includes('skills:manifest'));
+  assert.equal((yield* Effect.flip(s.previewChange(update(['skill:gone','skill:two'],true)))).code, 'INVALID_REQUEST');
+  assert.equal(f.calls.length, 0);
  }));
- assert.match(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/one\ntwo/); assert.doesNotMatch(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/gone/);
- const folder = readdirSync(f.m.paths.backups)[0]!; assert.equal(f.m.read(join(f.m.paths.backups,folder,'author/skills-manifest.txt')),before);
+ assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')), before);
 });
 
-test('partial installer outcomes refuse changed author proposals and retain machine and recovery facts', async () => {
- for (const failure of ['before','after','author'] as const) {
+test('partial machine installer outcomes retain recovery facts without author writes', async () => {
+ for (const failure of ['before','after'] as const) {
   const f = await fixture({ fail: failure }); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt')); let runId = ''; let committed: readonly string[] = [];
   await f.within(s => Effect.gen(function* () {
-   const p = yield* s.previewChange(update(['skill:two'],true)); const run = yield* submit(s,p.planId,failure); runId = run.runId; committed = run.parity?.committedKeys ?? []; assert.equal(run.state,'failed',failure); assert.ok(run.parity?.backupIds.length);
+   const p = yield* s.previewChange(update(['skill:two'])); const run = yield* submit(s,p.planId,failure); runId = run.runId; committed = run.parity?.committedKeys ?? []; assert.equal(run.state,'failed',failure); assert.ok(run.parity?.backupIds.length);
    assert.doesNotMatch(JSON.stringify(run),/PRIVATE/);
-   if (failure === 'before') assert.ok(!run.parity?.committedKeys.includes('skills:manifest'));
-   if (failure === 'after') assert.ok(run.parity?.committedKeys.includes('skills:manifest'));
+   assert.ok(!run.parity?.committedKeys.includes('skills:manifest'));
   }));
-  if (failure !== 'after') assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
+  assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
   const callCount = f.calls.length; await f.within(s => Effect.gen(function* () { const recovered = yield* s.runs.get(runId); assert.equal(recovered.state,'failed'); assert.deepEqual(recovered.parity?.committedKeys,committed); assert.equal(f.calls.length,callCount); }));
  }
 });
 
-test('author bytes, holds and native lock changes invalidate previews; unreadable lock never becomes absence', async () => {
- for (const changed of ['author','lock','holds'] as const) {
+test('holds and native lock changes invalidate previews; unreadable lock never becomes absence', async () => {
+ for (const changed of ['lock','holds'] as const) {
   const f = await fixture(); await f.within(s => Effect.gen(function* () {
-   const p = yield* s.previewChange(update(['skill:two'],true)); f.m.write(changed === 'author' ? join(f.m.paths.repo,'skills-manifest.txt') : changed === 'lock' ? f.lockPath : join(f.m.paths.stateRoot,'sync.json'),'{}');
+   const p = yield* s.previewChange(update(['skill:two'])); f.m.write(changed === 'lock' ? f.lockPath : join(f.m.paths.stateRoot,'sync.json'),'{}');
    assert.equal((yield* Effect.flip(s.runs.submit({ planId: p.planId,requestId: changed,inputDigest: operationDigest(p.planId),actor:'mcp' }))).code,'UNKNOWN_PLAN'); assert.equal(f.calls.length,0);
   }));
  }
@@ -152,7 +165,7 @@ test('unsupported native mapping refuses before effects; author false needs no u
 
 test('scoped prune never claims a completed global prune when another native agent retains shared content', async () => {
  const f = await fixture({ retained: true }); const before = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:gone'],true)); const run = yield* submit(s,p.planId); assert.equal(run.state,'failed'); assert.ok(!run.parity?.committedKeys.includes('skills:remove')); assert.ok(!run.parity?.committedKeys.includes('skills:manifest')); }));
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:gone'])); const run = yield* submit(s,p.planId); assert.equal(run.state,'failed'); assert.ok(!run.parity?.committedKeys.includes('skills:remove')); assert.ok(!run.parity?.committedKeys.includes('skills:manifest')); }));
  assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true); assert.equal(existsSync(join(f.m.paths.claude,'skills/gone')),false); assert.equal(f.m.read(join(f.m.paths.repo,'skills-manifest.txt')),before);
  assert.ok(f.calls.every(c => c.args[1] === 'skills@1.7.2'));
 });
@@ -167,10 +180,56 @@ test('addition overlaid on a base declaration with a distinct native selector ne
  }));
 });
 
-test('explicit author update preserves a held declaration and exact source discovery never offers adoption', async () => {
+// The skills domain plans additions by exact name, so a row whose addition differs only in case is legacy work and
+// must pass the legacy native guard rather than be exempted from it. Here a legacy install named `One` (its lock
+// entry under the same name) sits beside the addition `one`, so it has no native selector evidence.
+test('an addition declared in another case does not exempt the installed row from the legacy native guard', async () => {
+ const f = await fixture({ additions: true });
+ renameSync(join(f.m.paths.agentsSkills,'one'),join(f.m.paths.agentsSkills,'One'));
+ await f.within(s => Effect.gen(function* () {
+  const p = yield* s.previewChange(update(['skill:One'])); assert.equal(p.plan.steps.length,0);
+  assert.ok(p.plan.skipped.some(item => item.key === 'skill:One' && /native selector evidence/.test(item.reason)), JSON.stringify(p.plan.skipped));
+  const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
+ }));
+});
+
+test('an unreachable source names only its host on update rows, never a credential or local path', async () => {
+ const f = await fixture({ unreachable: () => "fatal: unable to access 'https://x-access-token:PRIVATE_TOKEN@github.com/owner/repo.git/': error setting certificate file: /Users/x/certs/corp.pem\n" });
+ await f.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = read.items.find(i => i.name === 'one')!;
+  assert.equal(one.state,'unknown');
+  assert.equal(one.reason,"Couldn't reach github.com");
+  assert.doesNotMatch(JSON.stringify(read),/PRIVATE_TOKEN|corp\.pem|\/Users\/x/);
+  assert.ok(read.items.filter(i => i.state !== 'unknown').every(i => !('reason' in i)), 'only unknown rows carry a reason');
+ }));
+ const local = await fixture({ unreachable: () => "fatal: '/Users/x/src/repo' does not appear to be a git repository\n" });
+ await local.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  assert.equal(read.items.find(i => i.name === 'one')!.state,'unknown');
+  assert.ok(read.items.every(i => !('reason' in i)), 'a cause that names no host is not sent');
+  assert.doesNotMatch(JSON.stringify(read),/\/Users\/x/);
+ }));
+});
+
+// curl's tail carries per-attempt timings; rows built from it would never compare equal between a preview and its
+// revalidation, or between pages of one cursor.
+test('an unreachable source whose failure timing changes per attempt keeps update cursors and previews valid', async () => {
+ const f = await fixture({ unreachable: attempt => `fatal: unable to access 'https://github.com/owner/repo.git/': Failed to connect to github.com port 443 after ${75000 + attempt} ms: Timeout was reached\n` });
+ await f.within(s => Effect.gen(function* () {
+  const first = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1 })); assert.ok(first.nextCursor);
+  const next = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 1,cursor: first.nextCursor! }));
+  assert.equal(next.items.length,1);
+  assert.ok([...first.items,...next.items].every(i => i.state !== 'unknown' || i.reason === "Couldn't reach github.com"));
+  const p = yield* s.previewChange(update([]));
+  assert.equal((yield* submit(s,p.planId)).state,'succeeded');
+ }));
+});
+
+test('machine-only updates preserve held author declarations and exact sources never offer adoption', async () => {
  const f = await fixture(); f.m.write(join(f.m.paths.repo,'skills-manifest.txt'),'[owner/repo]\none\ngone\nheld\n');
  f.m.write(join(f.m.paths.stateRoot,'sync.json'),JSON.stringify({ version:1, held: { 'skill:owner/repo/held': H } }));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'],true)); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'])); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
  assert.match(f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!,/held/);
  const exact = await fixture({ exact: true }); await exact.within(s => Effect.gen(function* () { const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); assert.ok(!read.items.some(i => i.state === 'available')); yield* Effect.flip(s.previewChange(update(['skill:two']))); assert.equal(exact.calls.length,0); }));
 });
@@ -179,8 +238,8 @@ test('explicit author update preserves a held declaration and exact source disco
 test('a held skill absent from the author stays absent even when installed locally', async () => {
  const f = await fixture(); f.m.write(join(f.m.paths.repo,'skills-manifest.txt'),'[owner/repo]\none\n');
  f.m.write(join(f.m.paths.stateRoot,'sync.json'),JSON.stringify({ version:1, held: { 'skill:owner/repo/gone': H } }));
- await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'],true)); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
- const author = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!; assert.match(author,/one\ntwo/); assert.doesNotMatch(author,/gone/); assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true);
+ await f.within(s => Effect.gen(function* () { const p = yield* s.previewChange(update(['skill:two'])); assert.equal((yield* submit(s,p.planId)).state,'succeeded'); }));
+ const author = f.m.read(join(f.m.paths.repo,'skills-manifest.txt'))!; assert.equal(author,'[owner/repo]\none\n'); assert.doesNotMatch(author,/gone/); assert.equal(existsSync(join(f.m.paths.agentsSkills,'gone')),true);
 });
 
 

@@ -379,62 +379,12 @@ npm test -w apps/service
 npm test -w packages/hosted-protocol
 npm run typecheck -w apps/service
 npm run typecheck -w packages/hosted-protocol
-# Requires the explicitly configured local emulator.
-npm run test:cosmos -w apps/service
 ```
 
 Checks use an actual loopback HTTP listener, fake upstream GitHub, an injected
 clock, isolated memory Stores and Store fault/barrier wrappers. They do not sign
 in to production, install a native service or touch a person's home. Cloud Cosmos,
 real OAuth, managed identity/RBAC, deployment and LIVE acceptance are unverified.
-
-For the tested local vNext release, run a fresh task-owned container and volume.
-The pinned image digest is EN20260907; all published ports are loopback and telemetry
-and explorer are disabled. Choose unique names and unused ports for another task.
-Do not change an existing container's settings or remove another task's volume.
-
-```bash
-docker volume create ncc-hosted-runtime-20261008-data
-docker run -d --name ncc-hosted-runtime-20261008 \
-  -p 127.0.0.1:18081:8081 -p 127.0.0.1:18080:8080 \
-  -e ENABLE_TELEMETRY=false -e ENABLE_EXPLORER=false \
-  -v ncc-hosted-runtime-20261008-data:/data \
-  mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
-curl --fail http://127.0.0.1:18080/ready
-export NORTUSCC_COSMOS_EMULATOR_ENDPOINT=http://127.0.0.1:18081
-export NORTUSCC_COSMOS_EMULATOR_KEY=bG9jYWwtZW11bGF0b3Itb25seQ==
-npm run test:cosmos -w apps/service
-```
-
-Wait for the readiness endpoint before testing. The key above is a local dummy SDK
-key, not an Azure credential. This command sets `NORTUSCC_COSMOS_REQUIRED=1`, fails
-on missing configuration and must finish with zero skipped tests. The harness
-creates and deletes only unique `nortuscc-test-*` databases; it leaves the owned
-container/volume for the operator. No production resources are created. For local
-executable startup, first create a local database with the exact containers above,
-then set `NORTUSCC_SERVICE_LOCAL_EMULATOR=true`, `NORTUSCC_SERVICE_EMULATOR_KEY`
-and the three required service variables. An actual executable sign-in still uses
-GitHub; integration checks instead inject fake upstream transport.
-
-Configured Cosmos checks use the actual local vNext emulator and fresh SDK clients
-after service restart. They run the shared Store, authentication and metadata
-recovery contracts, force multiple query pages, and observe TTL with wall time.
-SDK doubles test boundary error mapping separately and are labeled unit checks.
-The harness rejects remote endpoints before creating a client and provisions only
-isolated task-owned databases. The dedicated emulator command fails if configuration
-is missing; ordinary package checks explicitly skip emulator scenarios when absent.
-Set `NORTUSCC_COSMOS_EMULATOR_ENDPOINT` to literal loopback HTTP/HTTPS and
-`NORTUSCC_COSMOS_EMULATOR_KEY` to the emulator's local SDK key.
-
-The tested EN20260907 image advertises Eventual consistency. The harness permits an
-explicit `localEmulator: true` validation exemption only for loopback while retaining
-Strong request headers. This is not evidence of cloud distributed consistency. Its
-TTL worker runs on a five-minute background cycle; local query and point APIs can
-retain expired items until that purge, unlike Microsoft's documented cloud query
-visibility. Observation test budgets do not promise a retention deadline. vNext
-does not enforce authentication or request-unit limits, and collection updates are
-no-ops; these checks do not establish production authorization, RU behavior or
-configuration migration. [Microsoft emulator documentation](https://learn.microsoft.com/en-us/azure/cosmos-db/emulator-linux).
 
 `checks/client-integration.spec.ts` additionally connects the merged hosted client
 and agent to that listener through the actual `httpTransport`. Its fetch adapter
@@ -453,11 +403,30 @@ and account isolation. Hook registration still does not establish byte adoption 
 a person copies their inert fixture text. The tests establish local service/client
 interoperability; they do not establish production or native desktop acceptance.
 
-`checks/cosmos-runtime.spec.ts` runs the complete existing three-client contracts
-through `startServiceRuntime`, production Cosmos resources and the production
-GitHub adapter with recording fake transport. It checks same-port restarts with
-fresh SDK clients, owned idempotent disposal, startup claim recovery, periodic
-failure/readiness/retry and strict liveness. Existing embedded-memory/direct-core
-checks remain. These are LOCAL runtime integration results, not LIVE acceptance.
-The natural TTL test retains its 360-second observation budget without changing
-the emulator's five-minute worker.
+The Cosmos Store adapter is covered only by SDK-double unit checks
+(`checks/cosmos-store.spec.ts`, `checks/cosmos-expiry-unit.spec.ts`). No check runs
+the Cosmos emulator, Docker or the built image, so real Cosmos paging, TTL,
+consistency, production runtime restarts and image startup are unverified locally
+and in CI.
+
+For local executable startup against the Linux vNext emulator, run a fresh
+task-owned container and volume. The pinned image digest is EN20260907; all
+published ports are loopback and telemetry and explorer are disabled.
+
+```bash
+docker volume create ncc-hosted-runtime-20261008-data
+docker run -d --name ncc-hosted-runtime-20261008 \
+  -p 127.0.0.1:18081:8081 -p 127.0.0.1:18080:8080 \
+  -e ENABLE_TELEMETRY=false -e ENABLE_EXPLORER=false \
+  -v ncc-hosted-runtime-20261008-data:/data \
+  mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
+curl --fail http://127.0.0.1:18080/ready
+```
+
+Create a local database with the exact containers above, then set
+`NORTUSCC_SERVICE_LOCAL_EMULATOR=true`, `NORTUSCC_SERVICE_EMULATOR_KEY` (the dummy
+local SDK key `bG9jYWwtZW11bGF0b3Itb25seQ==`, not an Azure credential) and the three
+required service variables. The emulator advertises Eventual consistency, so emulator
+mode exempts only the Strong account check for a loopback endpoint; it is not evidence
+of cloud behavior. An actual executable sign-in still uses GitHub.
+[Microsoft emulator documentation](https://learn.microsoft.com/en-us/azure/cosmos-db/emulator-linux).

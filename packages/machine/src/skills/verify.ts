@@ -3,6 +3,7 @@ import { extname, join } from 'node:path';
 import { Effect } from 'effect';
 import { Fs } from '../fs.ts';
 import { MachinePaths } from '../paths.ts';
+import { networkGit } from '../network-git.ts';
 import { Processes } from '../processes.ts';
 import { lockRef, short } from './pins.ts';
 import { normalizeSkillSource } from '@nortuscc/profile-engine';
@@ -63,24 +64,26 @@ export const compareInstall = (pinned: ReadonlyArray<TreeEntry>, installed: Read
 };
 
 // Fetches `sha` from `url` by id into a temporary blobless repo and lists each folder's tree, the folder taken
-// literally, never as a glob ('.' is the whole tree).
-// null: the commit could not be fetched or is not `sha`.
-export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<string>): Effect.Effect<
-  Map<string, TreeEntry[]> | null, never, Fs | Processes | MachinePaths
+// literally, never as a glob ('.' is the whole tree). The fetch runs unattended as networkGit does, and is killed
+// after `timeoutMs`.
+// A string says, redacted, why the trees could not be read: the commit could not be fetched or is not `sha`.
+export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<string>, options: { readonly timeoutMs?: number } = {}): Effect.Effect<
+  Map<string, TreeEntry[]> | string, never, Fs | Processes | MachinePaths
 > => Effect.gen(function* () {
   const fs = yield* Fs;
   const processes = yield* Processes;
   const dir = join((yield* MachinePaths).stateRoot, 'tmp', `pin-${randomUUID()}`);
   const git = (...args: string[]) => processes.run({ cmd: 'git', args, output: 'capture' });
   const body = Effect.gen(function* () {
-    if ((yield* git('init', '--quiet', dir)).code !== 0) return null;
-    if ((yield* git('-C', dir, 'fetch', '--quiet', '--depth', '1', '--filter=blob:none', '--', url, sha)).code !== 0) return null;
+    if ((yield* git('init', '--quiet', dir)).code !== 0) return 'git init failed';
+    const failure = yield* networkGit('git fetch', { args: ['fetch', '--quiet', '--depth', '1', '--filter=blob:none', '--', url, sha], cwd: dir }, options.timeoutMs);
+    if (failure !== undefined) return failure;
     const fetched = yield* git('-C', dir, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}');
-    if (fetched.code !== 0 || fetched.stdout.trim() !== sha) return null;
+    if (fetched.code !== 0 || fetched.stdout.trim() !== sha) return `the fetched commit is not ${short(sha)}`;
     const trees = new Map<string, TreeEntry[]>();
     for (const folder of new Set(folders)) {
       const listed = yield* git('-C', dir, '--literal-pathspecs', 'ls-tree', '-r', '-z', sha, ...(folder === '.' ? [] : ['--', `${folder}/`]));
-      if (listed.code !== 0) return null;
+      if (listed.code !== 0) return `${folder} could not be listed`;
       const entries: TreeEntry[] = [];
       for (const record of listed.stdout.split('\0').filter(Boolean)) {
         // Split at the first tab only: with -z a path is not quoted and may itself hold a tab.
@@ -94,7 +97,7 @@ export const pinnedTrees = (url: string, sha: string, folders: ReadonlyArray<str
     return trees;
   });
   return yield* body.pipe(
-    Effect.catch(() => Effect.succeed(null)),
+    Effect.catch(() => Effect.succeed('git could not run')),
     Effect.ensuring(fs.remove(dir).pipe(Effect.ignore)),
   );
 });
@@ -155,8 +158,8 @@ export const verifyPinned = (input: { source: string; sha: string; names: Readon
   if (folders.size === 0) return { failed, scripts };
   const trees = yield* pinnedTrees(url, input.sha, [...folders.values()]);
   for (const [name, folder] of folders) {
-    if (!trees) {
-      failed.set(name, [`could not fetch ${short(input.sha)}`]);
+    if (typeof trees === 'string') {
+      failed.set(name, [`could not fetch ${short(input.sha)}: ${trees}`]);
       continue;
     }
     const pinned = trees.get(folder) ?? [];

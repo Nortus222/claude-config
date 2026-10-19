@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer, Stream } from 'effect';
@@ -74,6 +74,40 @@ test('a manifest skill installed from a different source still counts as present
   writeLock(m.paths, { thing: { source: 'z/z' } });
   const report = await m.run(inspectSkills(desiredWith([skill('thing', 'a/b')])));
   assert.deepEqual(report.items.map((i) => [i.key, i.state]), [['skill:thing', 'ok']]);
+});
+
+// The installer treats skill names case-insensitively, so a manifest `TDD` is the installed `tdd`. Items keep the
+// manifest's spelling: that is the name the profile, the item id and the install command use.
+test('a manifest name that differs in case from the installed skill is present, not a missing and extra pair', async () => {
+  const m = skillsMachine();
+  mkdirSync(join(m.paths.agentsSkills, 'tdd'), { recursive: true });
+  mkdirSync(join(m.paths.claude, 'skills', 'tdd'), { recursive: true });
+  writeLock(m.paths, { tdd: { source: 'o/r' } });
+  const desired = desiredWith([skill('TDD', 'o/r'), skill('want', 'o/r')]);
+  const inspected = await m.run(inspectSkills(desired));
+  assert.deepEqual(inspected.items.map((i) => [i.key, i.label, i.group, i.state, i.disposition]), [
+    ['skill:TDD', 'TDD', 'o/r', 'ok', 'in-sync'],
+    ['skill:want', 'want', 'o/r', 'missing', 'apply'],
+  ]);
+  const p = plan('apply', { desired, ...inspected }, selectAll, [skillsDomain]);
+  assert.deepEqual(p.steps.map((s) => [s.key, s.touches]), [['skills:install:o/r', ['skills/want']]]);
+});
+
+test('a manifest name that differs in case from its skill is judged against that skill\'s lock ref and agent links', async () => {
+  const m = skillsMachine();
+  const [at, other] = ['a'.repeat(40), 'b'.repeat(40)];
+  mkdirSync(join(m.paths.agentsSkills, 'tdd'), { recursive: true });
+  mkdirSync(join(m.paths.agentsSkills, 'Grill'), { recursive: true });
+  writeLock(m.paths, { tdd: { source: 'o/r', ref: at }, Grill: { source: 'o/r', ref: other } });
+  const pinned = { pin: { ref: at, from: { layer: 'pin', source: 'skill-pins.json' } } } as Partial<ResolvedSkill>;
+  const inspected = await m.run(inspectSkills(desiredWith([skill('TDD', 'o/r', pinned), skill('grill', 'o/r', pinned)])));
+  // Claude has neither link; Codex reads the store. Link items carry the manifest's spelling too.
+  assert.deepEqual(inspected.items.map((i) => [i.key, i.label, i.state]), [
+    ['skill:TDD', 'TDD', 'ok'],
+    ['skill:grill', 'grill', 'off-pin'],
+    ['skill-link:claude:TDD', 'TDD', 'unlinked'],
+    ['skill-link:claude:grill', 'grill', 'unlinked'],
+  ]);
 });
 
 test('a non-string lock source is not a source: the skill is local', async () => {
@@ -235,9 +269,12 @@ const readLock = (paths: MachinePathsValue): Record<string, Record<string, unkno
   existsSync(lockFile(paths)) ? JSON.parse(readFileSync(lockFile(paths), 'utf8')).skills : {};
 
 // A `Processes` that records every Command and simulates `npx -y skills <verb> …` on the temp store,
-// lock and ~/.claude/skills. `behaviour.fail` names a verb that exits 1 instead of doing anything.
-const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+// lock and ~/.claude/skills. `behaviour.fail` names a verb that exits 1 instead of doing anything; `behaviour.named`
+// gives the source's own spelling of a skill, which `add` matches case-insensitively and records, as the real one does.
+type Behaviour = { readonly fail?: 'add' | 'update' | 'remove'; readonly gone?: ReadonlyArray<string>; readonly named?: ReadonlyArray<string> };
+const fakeInstaller = (paths: MachinePathsValue, behaviour: Behaviour = {}) => {
   const commands: Command[] = [];
+  let stamp = 0;
   const layer = Layer.succeed(Processes, {
     run: (command: Command) => Effect.sync(() => {
       commands.push(command);
@@ -263,9 +300,15 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
       } else if (verb === 'add') {
         const [source] = positional;
         const agents = valuesOf('--agent');
-        for (const n of valuesOf('--skill')) {
+        // Like the real installer (skills 1.5–1.7): when no requested name matches it exits 1 naming them all;
+        // otherwise it installs the matches, skips the rest and exits 0. Every add stamps the lock entry.
+        const requested = valuesOf('--skill');
+        const matching = requested.filter((n) => !behaviour.gone?.includes(n))
+          .map((n) => behaviour.named?.find((own) => own.toLowerCase() === n.toLowerCase()) ?? n);
+        if (!matching.length) return { code: 1, stdout: `\x1b[31m■\x1b[39m  No matching skills found for: ${requested.join(', ')}\n●  Available skills:\n│    - want\n` };
+        for (const n of matching) {
           mkdirSync(join(paths.agentsSkills, n), { recursive: true });
-          lock[n] = { source };
+          lock[n] = { source, updatedAt: `t${++stamp}` };
           if (agents.includes('claude-code')) mkdirSync(join(paths.claude, 'skills', n), { recursive: true });
         }
       } else {
@@ -279,7 +322,7 @@ const fakeInstaller = (paths: MachinePathsValue, behaviour: { readonly fail?: 'a
   return { commands, layer };
 };
 
-const runMachine = (behaviour: { readonly fail?: 'add' | 'update' | 'remove' } = {}) => {
+const runMachine = (behaviour: Behaviour = {}) => {
   const m = skillsMachine();
   mkdirSync(m.paths.repo, { recursive: true });
   const installer = fakeInstaller(m.paths, behaviour);
@@ -356,6 +399,53 @@ test('--target claude installs for claude-code only', async () => {
   assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill want --agent claude-code --global --yes']);
 });
 
+// The installer exits 0 and skips the names it lacks; the step reads which ones the add wrote.
+test('a skill gone from its source fails by name while the rest of the batch installs', async () => {
+  const m = runMachine({ gone: ['resolving-merge-conflicts', 'zoom-out'] });
+  const r = report(['want', 'resolving-merge-conflicts', 'zoom-out'].map((n) => item(n, 'missing', 'apply', 'mattpocock/skills')),
+    ['want', 'resolving-merge-conflicts', 'zoom-out'].map((n) => skill(n, 'mattpocock/skills')));
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add mattpocock/skills --skill resolving-merge-conflicts want zoom-out --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:mattpocock/skills')!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, "mattpocock/skills no longer has resolving-merge-conflicts, zoom-out. Remove them from your profile's skills, then apply again. Installed 1 other skill(s).");
+  assert.ok(existsSync(join(m.paths.agentsSkills, 'want')));
+});
+
+// The owner's incident: the only requested skill was deleted upstream, so the installer exited 1 naming it.
+test('a step whose every skill is gone from its source names them from the installer\'s exit-1 output', async () => {
+  const m = runMachine({ gone: ['resolving-merge-conflicts'] });
+  const r = report([item('resolving-merge-conflicts', 'missing', 'apply', 'mattpocock/skills')], [skill('resolving-merge-conflicts', 'mattpocock/skills')]);
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add mattpocock/skills --skill resolving-merge-conflicts --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:mattpocock/skills')!;
+  assert.equal(step.outcome, 'failed');
+  assert.equal(step.note, "mattpocock/skills no longer has resolving-merge-conflicts. Remove it from your profile's skills, then apply again.");
+});
+
+// The installer matches `--skill TDD` to the source's `tdd` and records `tdd`; that is an install, not a gap.
+test('a profile name that differs in case from the installed skill installs, and its folder is backed up first', async () => {
+  const m = runMachine({ named: ['tdd'] });
+  m.install('tdd');
+  const r = report([item('TDD', 'missing', 'apply'), item('want', 'missing', 'apply')], [skill('TDD', 'o/r'), skill('want', 'o/r')]);
+  const events = await m.go(plan('apply', r, { ...selectAll, targets: ['claude'] }, [skillsDomain]), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill TDD want --agent claude-code --global --yes']);
+  const step = finished(events, 'skills:install:o/r')!;
+  assert.deepEqual([step.outcome, step.note], ['ok', '']);
+  const done = events.at(-1) as Extract<Progress, { type: 'done' }>;
+  assert.deepEqual(readdirSync(join(done.backups!, 'skills')), ['tdd']);
+  assert.deepEqual(Object.keys(readLock(m.paths)).sort(), ['tdd', 'want']);
+});
+
+test('a skill name the installer would split or read as a flag fails the step before it runs', async () => {
+  const m = runMachine();
+  const r = report([item('two words', 'missing', 'apply')], [skill('two words', 'o/r')]);
+  const step = finished(await m.go(plan('apply', r, selectAll, [skillsDomain]), r), 'skills:install:o/r')!;
+  assert.equal(step.outcome, 'failed');
+  assert.match(step.note, /Skill name "two words" can't be installed: skill names have no spaces/);
+  assert.deepEqual(m.argv(), []);
+});
+
 // Issue #104: an off-pin skill whose pin was removed is reinstalled by a ref-less `add`, which replaces its folder.
 test('an unpinned install backs up the skill folders it replaces', async () => {
   const m = runMachine();
@@ -385,6 +475,15 @@ test('the expose step re-adds a declared skill an agent cannot load', async () =
   const result = finished(events, 'skills:expose')!;
   assert.equal(result.outcome, 'ok');
   assert.equal(result.note, 're-exposed 1 skill(s) to claude-code');
+});
+
+test('the expose step re-adds a declared skill whose manifest name differs in case, under its installed name', async () => {
+  const m = runMachine();
+  m.install('tdd', 'o/r', false);
+  const r = report([], [skill('TDD', 'o/r')]);
+  const events = await m.go(exposeOnly(), r);
+  assert.deepEqual(m.argv(), ['npx -y skills add o/r --skill tdd --agent claude-code --global --yes']);
+  assert.equal(finished(events, 'skills:expose')!.note, 're-exposed 1 skill(s) to claude-code');
 });
 
 test('an unreadable agent directory is not a reason to reinstall', async (t) => {

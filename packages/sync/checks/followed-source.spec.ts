@@ -65,6 +65,8 @@ test('following from Git applies the fetched main of the private clone without r
   assert.equal(existsSync(f.paths.repo), false);
   const fetch = f.calls.find(args => args.includes('fetch'))!;
   assert.ok(fetch.includes('credential.helper=!gh auth git-credential'));
+  const at = fetch.indexOf('fetch');
+  assert.deepEqual(fetch.slice(at - 4, at), ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=30'], 'a stalled transfer aborts');
 });
 
 test('following through a setup applies only announced revisions', async t => {
