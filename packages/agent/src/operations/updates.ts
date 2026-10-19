@@ -15,7 +15,7 @@ import type { JobInspection } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { decodeOperationInput, decodeOperationOutput, type OperationChange, type OperationInput, type OperationOutput, type ParityRunEvidence } from './index.ts';
 import type { PreparedParityChange } from './parity.ts';
-import { safeOwnerString } from './safety.ts';
+import { safeMessage, safeOwnerString } from './safety.ts';
 const digest = (value: unknown) => authorDigest(canonical(value))!;
 const stale = () => new SessionError('UNKNOWN_PLAN', 'Update inputs or author checkout changed; preview again');
 const failed = () => new SessionError('INTERNAL', 'The update did not finish; check for new changes and preview again. Backups are in ~/.config/nortuscc/backups');
@@ -27,6 +27,9 @@ const declarationOf = (desired: JobInspection['desired'], label: string) => {
   const name = matchSkillName(desired.skills.map(s => s.name), label);
   return name === undefined ? undefined : desired.skills.find(s => s.name === name);
 };
+// The unreachable causes an update row may carry: which host could not be reached, or a timeout. git's other
+// lines can name local paths and source URLs, which stay off the wire.
+const WIRE_UNREACHABLE = /^source unreachable: (?:Couldn't reach [^\s:]{1,253}: |git clone timed out after \d+ s$)/;
 const observedUpdates = (desired: JobInspection['desired']) => inspectUpdates(desired,{ maxSources: 8, verifyAdoption: true }).pipe(Effect.timeout('20 seconds'));
 
 export const inspectUpdateOperations = (inspection: JobInspection | undefined, generation: number, input: OperationInput<'inspectUpdates'>): Effect.Effect<OperationOutput<'inspectUpdates'>, SessionError, AgentServices> => Effect.gen(function* () {
@@ -57,7 +60,8 @@ export const inspectUpdateOperations = (inspection: JobInspection | undefined, g
       state: row.state as OperationOutput<'inspectUpdates'>['items'][number]['state'], targets: declaration?.targets ?? ['claude', 'codex'] as const,
       policy: !declaration?.pin ? 'upstream' as const : declaration.pin.from.layer === 'machine' ? 'personal-pin' as const : 'source-pin' as const,
       offered: tree ? { kind: 'tree' as const, digest: tree } : revision && /^[a-f0-9]{40}$/.test(revision) ? { kind: 'revision' as const, digest: revision } : null,
-      repairRoute, ...(addition || adoptionPrerequisite ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}) };
+      repairRoute, ...(addition || adoptionPrerequisite ? { prerequisite: ADDITION_REPAIR } : repairRoute === 'unavailable' && ['outdated', 'gone', 'off-pin'].includes(row.state) ? { prerequisite: LEGACY_NATIVE_PREREQUISITE } : {}),
+      ...(row.state === 'unknown' && row.note && WIRE_UNREACHABLE.test(row.note) ? { reason: safeMessage(row.note) } : {}) };
     if ([item.id,item.key,item.source,item.name].some(v => !safeOwnerString(v))) return { generation: String(generation), items: [], nextCursor: null, unavailable: true, limitReason: 'unsafe-owner-data' as const };
     items.push(item);
   }

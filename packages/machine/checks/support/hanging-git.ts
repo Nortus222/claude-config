@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // A fake `git` on PATH: `network` commands (fetch, clone) start a helper process, as git-remote-https
-// would, record both pids and hang; any other command exits 0. Never touches the network.
+// would, record both pids and hang; `init <dir>` creates the directory, as the real one would, and any
+// other command exits 0. Never touches the network.
 export const hangingGit = (network: ReadonlyArray<string> = ['fetch', 'clone']) => {
   const bin = mkdtempSync(join(tmpdir(), 'machine-hanging-git-'));
   const pids = join(bin, 'pids');
@@ -11,6 +12,7 @@ export const hangingGit = (network: ReadonlyArray<string> = ['fetch', 'clone']) 
     '#!/usr/bin/env node',
     "const { spawn } = require('node:child_process');",
     "const { appendFileSync } = require('node:fs');",
+    "if (process.argv[2] === 'init') { require('node:fs').mkdirSync(process.argv.at(-1), { recursive: true }); process.exit(0); }",
     `if (!${JSON.stringify(network)}.some(verb => process.argv.includes(verb))) process.exit(0);`,
     "const helper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' });",
     `appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n' + helper.pid + '\\n');`,

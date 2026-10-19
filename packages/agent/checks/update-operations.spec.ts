@@ -22,7 +22,7 @@ import { operationDigest } from '../src/runs.ts';
 import { agentMachine } from './support/agent-machine.ts';
 import { setupFixture } from './support/setup-fixture.ts';
 const H = 'b'.repeat(40); const OLD = 'a'.repeat(40);
-const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean } = {}) => {
+const fixture = async (options: { additions?: boolean; exact?: boolean; author?: boolean; fail?: 'before' | 'after' | 'author' | 'lock'; mapping?: boolean; retained?: boolean; missingNative?: boolean; adoptionNames?: Readonly<Record<string,string>>; metadataCleanup?: boolean; spelled?: string; pinned?: boolean; unreachable?: boolean } = {}) => {
  const m = agentMachine();
  const manifest = `[owner/repo]${options.exact ? ' exact' : ''}\n${options.spelled ?? 'one'}\ngone\n`;
  const pins: Record<string, string> = options.pinned ? { 'skill-pins.json': JSON.stringify({ version: 1, pins: { 'owner/repo': OLD } }) } : {};
@@ -44,7 +44,9 @@ const fixture = async (options: { additions?: boolean; exact?: boolean; author?:
  const within = <A,E>(body: (s: AgentSession) => Effect.Effect<A,E>) => m.run(Effect.scoped(Effect.gen(function* () {
   const fs = yield* Fs; const processes = yield* Processes;
   const fake: Processes['Service'] = { ...processes, run: command => {
-   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.succeed({ code: 0, stdout: '', stderr: '' });
+   if (command.cmd === 'git' && command.args.includes('credential.interactive=never') && command.args.includes('clone')) return Effect.succeed(options.unreachable
+    ? { code: 128, stdout: '', stderr: "fatal: unable to access 'https://x-access-token:PRIVATE_TOKEN@github.com/owner/repo.git/': Could not resolve host: github.com\n" }
+    : { code: 0, stdout: '', stderr: '' });
    if (command.cmd === 'git' && command.args[0] === 'ls-tree') return Effect.succeed({ code: 0, stdout: ['one','two','three'].map(n => `040000 tree ${H}\ts/${n}\0` + `100644 blob ${H}\ts/${n}/SKILL.md\0`).join(''), stderr: '' });
    if (command.cmd === 'git' && command.args[0] === '-c') {
     const names = ['one','two','three'];
@@ -174,6 +176,17 @@ test('addition overlaid on a base declaration with a distinct native selector ne
   const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{})); const row = read.items.find(i => i.name === 'one')!; assert.equal(row.repairRoute,'addition'); assert.match(row.prerequisite!,/resolveSkillCandidate.*previewChange.*applyChange/);
   const p = yield* s.previewChange(update(['skill:one'])); assert.equal(p.plan.steps.length,0); assert.ok(p.plan.skipped.some(row => /native verification/.test(row.reason)));
   const run = yield* submit(s,p.planId); assert.equal(run.installation,undefined); assert.equal(f.calls.length,0);
+ }));
+});
+
+test('an unreachable source says why on its update rows, redacted', async () => {
+ const f = await fixture({ unreachable: true }); await f.within(s => Effect.gen(function* () {
+  const read = yield* s.inspectUpdates(decodeOperationInput('inspectUpdates',{ limit: 100 }));
+  const one = read.items.find(i => i.name === 'one')!;
+  assert.equal(one.state,'unknown');
+  assert.equal(one.reason,"Source unreachable: Couldn't reach github.com: Could not resolve host: github.com");
+  assert.doesNotMatch(JSON.stringify(read),/PRIVATE_TOKEN/);
+  assert.ok(read.items.filter(i => i.state !== 'unknown').every(i => !('reason' in i)), 'only unknown rows carry a reason');
  }));
 });
 

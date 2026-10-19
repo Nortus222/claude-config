@@ -58,6 +58,8 @@ export function parseFlags(args: string[]): UpdateFlags {
 
 const inState = (items: ReadonlyArray<Observed>, state: string) => items.filter((i) => i.state === state);
 const labels = (items: ReadonlyArray<Observed>) => items.map((i) => i.label).join(', ');
+// An unknown item's note, before the cause updateItems appends when the source was tried.
+const UNREACHABLE_NOTE = 'source unreachable: ';
 
 // 1 when the run failed, the machine could not be read, a gone skill was left in place, a skill was
 // left off its pin, or a source could not be checked.
@@ -113,6 +115,9 @@ export function reportLines(items: ReadonlyArray<Observed>): string[] {
   // step), not a manual remove followed by `capture`, whose shrink guard
   // would refuse.
   // `--check` mode still needs it, since no picker opens there.
+  // Why each unreachable source failed, once per source: its skills share the cause.
+  const causes = new Map(unknown.flatMap((u) => u.note?.startsWith(UNREACHABLE_NOTE) ? [[u.group, u.note.slice(UNREACHABLE_NOTE.length)] as const] : []));
+  if (causes.size) lines.push('', ...[...causes].map(([source, cause]) => `  ${source}: ${cause}`));
   if (gone.length) {
     lines.push(
       '',
