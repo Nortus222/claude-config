@@ -21,8 +21,10 @@ pub const OPERATION_MAX_BYTES: usize = MAX_RECORD;
 const MAX_EXCLUDED: usize = 10_000;
 const MAX_KEY: usize = 500;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(2);
-// The agent and every helper probe the login shell first, for up to 15 s (LOGIN_PROBE_TIMEOUT_MS in
-// agent/login-environment.ts); these deadlines leave room for that probe and the work after it.
+// Mirrors LOGIN_PROBE_TIMEOUT_MS in apps/desktop/agent/login-environment.ts; a test keeps them equal.
+// The agent and every helper probe the login shell before any work, so the agent's readiness deadline
+// and every Setup::timeout must exceed it.
+pub(crate) const LOGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_GIT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -685,6 +687,14 @@ impl Setup {
             Self::PrepareUpdate => Operation::PrepareUpdate, Self::RecoverUpdate => Operation::RecoverUpdate, Self::MaintenanceState => Operation::MaintenanceState, Self::McpConnections => Operation::McpConnections,
         }
     }
+    /// The native deadline for this helper; each leaves room for the login probe and the work after it.
+    pub(crate) fn timeout(self) -> Duration {
+        match self {
+            Self::Paths | Self::State | Self::MaintenanceState => READ_HELPER_TIMEOUT,
+            Self::InstallGit => INSTALL_GIT_TIMEOUT,
+            Self::Startup | Self::Ensure | Self::Restart | Self::Bootstrap | Self::PrepareUpdate | Self::RecoverUpdate | Self::McpConnections => HELPER_TIMEOUT,
+        }
+    }
     fn argument(self) -> &'static str {
         match self {
             Self::Startup => "--startup",
@@ -729,7 +739,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
-    run_helper(helper_command(resources, setup, None)?, if matches!(setup, Setup::Paths) { READ_HELPER_TIMEOUT } else { HELPER_TIMEOUT })
+    run_helper(helper_command(resources, setup, None)?, setup.timeout())
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -754,7 +764,7 @@ fn validate_setup_state(value: Value) -> Result<Value, String> {
     serde_json::to_value(state).map_err(|_| "Invalid setup state".into())
 }
 pub fn desktop_setup_state(resources: &Path) -> Result<Value, String> {
-    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, READ_HELPER_TIMEOUT, None)?)
+    validate_setup_state(run_json_helper(helper_command(resources, Setup::State, None)?, Setup::State.timeout(), None)?)
 }
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -800,16 +810,16 @@ pub fn desktop_startup_cancelled(resources: &Path, app_version: &str, cancel: Ar
     let mut command = helper_command(resources, Setup::Startup, None)?;
     command.stdin(Stdio::piped());
     let input = serde_json::to_vec(&json!({"appVersion":app_version})).map_err(|_| "Invalid startup input")?;
-    decode_startup(run_json_helper_cancellable(command, HELPER_TIMEOUT, Some(input),cancel)?)
+    decode_startup(run_json_helper_cancellable(command, Setup::Startup.timeout(), Some(input),cancel)?)
 }
 pub fn bootstrap_desktop(resources: &Path, choices: SetupChoices) -> Result<PathBuf, String> {
     let input = serde_json::to_vec(&choices).map_err(|_| "Invalid setup choices")?;
     let mut command = helper_command(resources, Setup::Bootstrap, None)?;
     command.stdin(Stdio::piped());
-    setup_root(run_json_helper_with_cancel(command, HELPER_TIMEOUT, Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
+    setup_root(run_json_helper_with_cancel(command, Setup::Bootstrap.timeout(), Some(input), BOOTSTRAP_CANCEL_TIMEOUT)?)
 }
 pub fn install_git(resources: &Path) -> Result<Value, String> {
-    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, INSTALL_GIT_TIMEOUT, None)?;
+    let value = run_json_helper(helper_command(resources, Setup::InstallGit, None)?, Setup::InstallGit.timeout(), None)?;
     if value != json!({"requested":true}) { return Err("Invalid installer result".into()); }
     Ok(value)
 }
@@ -1777,6 +1787,16 @@ printf '%s\n' '{"stateRoot":"/tmp/slow-login-state"}'"#);
         assert_eq!(result.unwrap(), PathBuf::from("/tmp/slow-login-state"));
     }
     #[test]
+    fn every_helper_deadline_outlasts_the_login_probe() {
+        let source = include_str!("../../agent/login-environment.ts");
+        assert!(source.contains(&format!("LOGIN_PROBE_TIMEOUT_MS = {}_000;", LOGIN_PROBE_TIMEOUT.as_secs())), "LOGIN_PROBE_TIMEOUT must mirror the TypeScript probe timeout");
+        for setup in [Setup::Startup, Setup::Ensure, Setup::Restart, Setup::Paths, Setup::State, Setup::Bootstrap, Setup::InstallGit,
+            Setup::PrepareUpdate, Setup::RecoverUpdate, Setup::MaintenanceState, Setup::McpConnections] {
+            assert!(setup.timeout() > LOGIN_PROBE_TIMEOUT, "{} deadline must exceed the login probe", setup.argument());
+        }
+        assert!(READY_TIMEOUT > LOGIN_PROBE_TIMEOUT);
+    }
+    #[test]
     fn paths_helper_has_no_registration_arguments() {
         let root = resources(r#"[ "$#" = 2 ] || exit 9
 [ "$2" = --paths ] || exit 8
@@ -1986,7 +2006,7 @@ pub fn mcp_connections(resources: &Path, action: ConnectionAction) -> Result<Val
     let input = serde_json::to_string(&action).map_err(|_| "Invalid connection action")?;
     let mut command = helper_command(resources, Setup::McpConnections, None)?;
     command.stdin(Stdio::piped());
-    let value = run_json_helper(command, HELPER_TIMEOUT, Some(input.into_bytes()))?;
+    let value = run_json_helper(command, Setup::McpConnections.timeout(), Some(input.into_bytes()))?;
     // Host registration/configuration output stays private; only the bounded public schema crosses IPC.
     validate_connections(value)
 }

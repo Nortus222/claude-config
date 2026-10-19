@@ -106,7 +106,8 @@ export const loginShell = (env: Readonly<Record<string, string | undefined>>): s
   env.SHELL && isAbsolute(env.SHELL) ? env.SHELL : '/bin/zsh';
 
 // Interactive rc files that run conda, nvm or oh-my-zsh can take several seconds on a cold start;
-// 15 s is three times the old limit and stays inside every native helper and readiness deadline.
+// 15 s is three times the old limit. LOGIN_PROBE_TIMEOUT in src-tauri/src/host.rs mirrors it, and a
+// Rust test requires every native helper and readiness deadline to exceed it.
 export const LOGIN_PROBE_TIMEOUT_MS = 15_000;
 
 // Only PATH is remembered: the full login environment can hold secrets.

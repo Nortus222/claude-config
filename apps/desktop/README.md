@@ -231,8 +231,10 @@ waiting commands refuse and late publication is fenced. The owned worker is join
 event loop returns, outside UI callbacks. Closing leaves a successfully launched persistent agent
 running. Forced kills and crashes can still bypass cleanup. The first renderer setup read consumes the initial display snapshot once; subsequent reads
 are fresh, and restart, bootstrap or Git installation invalidate it. Explicit lifecycle actions retain
-their existing helpers and locks. The read-only paths and setup-state helpers and native readiness
-have 30-second outer deadlines, allowing the 15-second login-shell probe and bounded overhead to finish.
+their existing helpers and locks. Every helper and the agent probe the login shell first, for up to
+15 seconds, so every native deadline exceeds that: the read-only paths, setup-state and
+maintenance-state helpers and native readiness have 30 seconds, Git installation 45, and lifecycle,
+update and connection helpers 120. `Setup::timeout` in `src-tauri/src/host.rs` owns these deadlines.
 A successful probe remembers only its PATH, in the private file `agent/login-path` under the state
 root; a later timeout or failure uses the app's environment with that PATH, and its message says which.
 
