@@ -204,9 +204,10 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       const processes = input.processes ?? nodeProcesses({ env, inherit: 'stderr' });
       if (arg !== undefined) {
         if (platform !== 'darwin' && platform !== 'linux' && platform !== 'win32') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
-        // The Windows app owns its agent (ADR 0040): ensure and restart register nothing and report the
-        // state root the host connects under. App updates stay macOS-only. Maintenance state and MCP
-        // connections are platform-neutral file and host-CLI work, so they run as elsewhere.
+        // The Windows app owns its agent (ADR 0040): the Rust host starts and restarts its agent child, so
+        // ensure and restart only report the state root it connects under. App updates stay macOS-only.
+        // Maintenance state runs as elsewhere; MCP connections may be inspected and removed, but App MCP
+        // cannot start on Windows yet, so connecting a host is refused there.
         if (platform === 'win32') {
           if (arg === '--ensure' || arg === '--restart') { stdout(JSON.stringify({ stateRoot: paths.stateRoot }) + '\n'); return 0; }
           if (arg === '--prepare-update' || arg === '--recover-update') return yield* Effect.fail(new Error('desktop app updates are not supported on Windows'));
@@ -221,6 +222,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
             const action = yield* Effect.tryPromise({ try: () => readConnectionAction(input.stdin ?? process.stdin), catch: () => new Error('Invalid connection action') }).pipe(Effect.timeout(5000));
             const connectionInput = { home, appPath: appPath! };
             if (action.action === 'inspect') return yield* inspectConnections(connectionInput);
+            if (action.action === 'connect' && platform === 'win32') return yield* Effect.fail(new Error('App MCP is not supported on Windows yet'));
             return { connections: [yield* (action.action === 'connect' ? connectHost : disconnectHost)({ ...connectionInput, target: action.target })] };
           }
           if (arg === '--maintenance-state') return yield* maintenanceState(lifecycleInput);

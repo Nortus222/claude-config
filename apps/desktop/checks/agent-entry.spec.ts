@@ -704,6 +704,25 @@ test('on Windows ensure and restart report the state root without registering, a
   }
 });
 
+test('on Windows MCP connections can be inspected but connecting a host is refused before any registration', async t => {
+  for (const action of [{ action: 'connect', target: 'claude' }, { action: 'connect', target: 'codex' }, { action: 'inspect' }]) {
+    const f = fixture(t); const seen: Command[] = [];
+    const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { seen.push(command); return { code: 1, stdout: '', stderr: 'unavailable' }; }) });
+    const stdin = async function* () { yield JSON.stringify(action); };
+    const code = await runDesktopEntry({ ...windowsInput(f, '--mcp-connections'), processes, stdin: stdin() });
+    if (action.action === 'connect') {
+      assert.equal(code, 1, action.target);
+      assert.match(f.stderr.join(''), /App MCP is not supported on Windows yet/);
+      assert.deepEqual(seen, [], 'no host CLI runs, so no mcp add');
+      assert.equal(existsSync(join(f.stateRoot, 'mcp-connections.json')), false);
+    } else {
+      assert.equal(code, 0, f.stderr.join(''));
+      assert.ok(Array.isArray(JSON.parse(f.stdout.at(-1)!).connections));
+      assert.equal(seen.some(c => c.args.includes('add')), false);
+    }
+  }
+});
+
 test('on Windows app updates stay unsupported', async t => {
   for (const arg of ['--prepare-update', '--recover-update']) {
     const f = fixture(t);

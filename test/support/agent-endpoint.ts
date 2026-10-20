@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AGENT_PIPE_FILE, newPipeName } from '@nortuscc/sync';
 
-// A fresh temporary directory short enough to hold a Unix socket: under /tmp off Windows, where the
-// endpoint is a pipe and the path length does not matter.
+// A fresh temporary directory: under /tmp off Windows (socket path limit); on Windows under %TEMP%,
+// since the endpoint is a pipe.
 export const shortTempDir = (prefix: string): string =>
   mkdtempSync(process.platform === 'win32' ? join(tmpdir(), prefix) : `/tmp/${prefix}`);
 
