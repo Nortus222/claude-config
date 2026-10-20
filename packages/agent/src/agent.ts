@@ -261,7 +261,8 @@ export type AgentLifecycleStatus = 'started' | 'completed' | 'failed' | 'cancell
 // interrupted, `signal` aborts or, with `ipc`, a client sends `shutdown`; each closes the agent,
 // cancelling an in-flight auto-apply. A pid lock makes it the only agent per state root: a second
 // fails LockHeld before touching state, logs or the socket. The caller builds the per-job `domains`
-// factory and `source` at the same boundary as `paths`, and decides `ipc` (default off). Optional
+// factory and `source` at the same boundary as `paths`, and decides `ipc` (default off) and the
+// `platform` that picks its endpoint (default this process's). Optional
 // `logOutput` captures both streams after the lock; `onStarted` runs once logging is ready.
 // `onLifecycle` observes fixed phase boundaries best effort; a thrown observer never changes the
 // result. `stopped` runs after scoped cleanup, including IPC closure and pid-lock release.
@@ -278,6 +279,7 @@ export const runAgent = (input: {
   readonly sourceEnv?: Readonly<Record<string,string|undefined>>;
   readonly skillInstaller?: Layer.Layer<AgentSkillInstaller>;
   readonly ipc?: boolean;
+  readonly platform?: NodeJS.Platform;
   readonly notifications?: { readonly platform: string; readonly timeoutMs?: number };
   readonly logOutput?: AgentLogOutput;
   readonly onStarted?: () => void;
@@ -325,7 +327,7 @@ export const runAgent = (input: {
       // IPC finalizers register later and therefore finish before this observation; the scheduler
       // and pid lock close afterward. A failed initialization may never register file cleanup.
       yield* Effect.addFinalizer(() => ipcReady ? observe('ipc_closed', 'completed') : Effect.void);
-      yield* phase('ipc', serveIpc({ paths: input.paths, handle, session, agentVersion: input.agentVersion, appRuntime: input.appRuntime, notifier, onShutdown: () => shutdown.abort() }));
+      yield* phase('ipc', serveIpc({ paths: input.paths, platform: input.platform ?? process.platform, handle, session, agentVersion: input.agentVersion, appRuntime: input.appRuntime, notifier, onShutdown: () => shutdown.abort() }));
       ipcReady = true;
     }
     yield* Effect.forkScoped(observe('first_job', 'started').pipe(Effect.andThen(handle.request('start')),

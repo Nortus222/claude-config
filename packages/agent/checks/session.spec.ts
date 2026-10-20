@@ -182,7 +182,7 @@ test('an interrupted run does not block a new apply', async () => {
   await f.within((session, agent) => Effect.gen(function* () {
     assert.equal((yield* session.runs.get('interrupted-run')).state, 'interrupted');
     const preview = yield* session.preview(yield* configOnly(session));
-    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => {} });
+    yield* serveIpc({ paths: f.m.paths, platform: process.platform, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => {} });
     const result = yield* Effect.promise(async () => {
       const connection = await connectAgent(f.m.paths, { client: 'app' });
       try {
@@ -208,7 +208,7 @@ test('abandonRun is exposed to the app and mcp clients', async () => {
   await f.m.run(AgentStateStore.use(store => store.update(state => ({ ...state, installedBy: 'app', agentVersion, appPath }))));
   for (const client of ['app', 'mcp']) await f.m.run(RunStore.use(store => store.write({ ...seedInterruptedRun(client), sequence: client === 'app' ? 1 : 2 })));
   await f.within((session, agent) => Effect.gen(function* () {
-    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion,
+    yield* serveIpc({ paths: f.m.paths, platform: process.platform, handle: agent, session, agentVersion,
       appRuntime: { version: '0.1.6', runtimeId: agentVersion, appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath }, onShutdown: () => {} });
     yield* Effect.promise(async () => {
       for (const client of ['app', 'mcp'] as const) {

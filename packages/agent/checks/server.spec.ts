@@ -9,6 +9,7 @@ import {
   AgentStateStore, makeNotifier, makeSession, MAX_RECORD_BYTES, runAgent, serveIpc, SetupSource, SetupsStore, startAgent, ServeFailed,
   type AgentDomain, type AgentDomains, type AgentStatus, type Notifier,
 } from '../src/index.ts';
+import { AGENT_PIPE_FILE, agentEndpoint } from '@nortuscc/sync';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
 
@@ -94,7 +95,8 @@ type Options = {
 };
 
 // A trusted machine whose head adds two accepted settings keys, as in the session spec, under a
-// short temp root for its socket.
+// short temp root for its socket. `endpointFile` is what the agent writes once it listens: the
+// socket itself, or agent.pipe on Windows.
 const prepare = async (options: Options = {}) => {
   const m = agentMachine('/tmp');
   const fixture = setupFixture(join(m.root, 'setup'), {
@@ -111,14 +113,14 @@ const prepare = async (options: Options = {}) => {
   const source = starting === undefined ? fixture.source
     : Layer.succeed(SetupSource, { ...fixture.service, fetch: Effect.andThen(Deferred.await(starting), fixture.service.fetch) });
   const dir = join(m.paths.stateRoot, 'agent');
-  return { m, fixture, domains, source, dir, socketPath: join(dir, 'agent.sock'), tokenPath: join(dir, 'agent.token') };
+  return { m, fixture, domains, source, dir, endpointFile: join(dir, process.platform === 'win32' ? AGENT_PIPE_FILE : 'agent.sock'), tokenPath: join(dir, 'agent.token') };
 };
 
 // `prepare`'s machine served on its socket. `open` connects and says hello. The agent, the session
 // and the server run in a scope the test closes; unless `starting` holds it back, the start job has
 // finished before this answers.
 const serverMachine = async (options: Options = {}) => {
-  const { m, domains, source, dir, socketPath, tokenPath } = await prepare(options);
+  const { m, domains, source, dir, endpointFile, tokenPath } = await prepare(options);
   const notifier = typeof options.notifier === 'function' ? await options.notifier(m) : options.notifier;
   let shutdowns = 0;
   const scope = Scope.makeUnsafe();
@@ -126,15 +128,20 @@ const serverMachine = async (options: Options = {}) => {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      notifier, ...(options.notificationTimeoutMs === null ? {} : { notificationTimeoutMs: options.notificationTimeoutMs ?? 80 }), paths: m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
+      notifier, ...(options.notificationTimeoutMs === null ? {} : { notificationTimeoutMs: options.notificationTimeoutMs ?? 80 }), paths: m.paths, platform: process.platform, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => void shutdowns++,
       ...(options.handshakeMs === undefined ? {} : { handshakeMs: options.handshakeMs }),
     });
     if (options.starting === undefined) while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
-  }).pipe(Scope.provide(scope)), source);
+  }).pipe(Scope.provide(scope)), source).catch(async (error) => {
+    // An open scope keeps the agent's fibers alive, so a failed start would hang the run.
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    throw error;
+  });
+  const endpoint = agentEndpoint(dir, process.platform);
   const token = readFileSync(tokenPath, 'utf8');
   const clients: Array<Client> = [];
   const open = async (client: 'app' | 'cli' = 'app') => {
-    const c = await connect(socketPath);
+    const c = await connect(endpoint);
     clients.push(c);
     const hello = await ask(c, { command: 'hello', token, client });
     assert.equal(hello.ok, true, JSON.stringify(hello));
@@ -144,7 +151,7 @@ const serverMachine = async (options: Options = {}) => {
     for (const c of clients) c.socket.destroy();
     await Effect.runPromise(Scope.close(scope, Exit.void));
   };
-  return { m, dir, socketPath, tokenPath, token, notifier, open, clients, close, shutdowns: () => shutdowns };
+  return { m, dir, endpoint, endpointFile, tokenPath, token, notifier, open, clients, close, shutdowns: () => shutdowns };
 };
 
 const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof serverMachine>>) => Promise<void>) => {
@@ -173,47 +180,48 @@ const blockedShutdown = async (s: Awaited<ReturnType<typeof serverMachine>>) => 
   return { c, id };
 };
 
-test('a state root too deep for a socket path fails clearly before listening', async () => {
+// Unix socket specifics: path length, a leftover socket file, file modes.
+const unixOnly = { skip: process.platform === 'win32' ? 'Unix socket specifics' : false };
+const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows named pipe' };
+
+test('a state root too deep for a socket path fails clearly before listening', unixOnly, async () => {
   const m = agentMachine();
   const deep = { ...m.paths, stateRoot: join(m.root, 'd'.repeat(120)) };
   const handle = { onStatus: () => () => {} } as never;
-  const exit = await m.run(Effect.exit(Effect.scoped(serveIpc({ paths: deep, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} }))));
+  const exit = await m.run(Effect.exit(Effect.scoped(serveIpc({ paths: deep, platform: process.platform, handle, session: {} as never, agentVersion: '0', onShutdown: () => {} }))));
   assert.ok(Exit.isFailure(exit));
   const error = exit.cause.reasons.map((r) => (r._tag === 'Fail' ? r.error : undefined)).find((e) => e !== undefined);
   assert.ok(error instanceof ServeFailed);
   assert.match(error.message, /socket path .* too long/);
 });
 
-const unixOnly = {
-  skip: process.platform === 'win32' ? 'ADR 0019: Windows IPC is unsupported' : false,
-};
 
-test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', unixOnly, async () => {
+test('hello with the right token answers the agent; a wrong token or no hello is UNAUTHORIZED and closes', async () => {
   await withServer({}, async (s) => {
-    const good = await connect(s.socketPath);
+    const good = await connect(s.endpoint);
     const hello = await ask(good, { command: 'hello', token: s.token, client: 'app' });
     assert.deepEqual(hello, { version: 3, id: hello.id, ok: true, result: { agentVersion: '9.9.9', protocol: 3, policy: 'notify', paused: null } });
     good.socket.destroy();
 
-    const wrong = await connect(s.socketPath);
+    const wrong = await connect(s.endpoint);
     const refused = await ask(wrong, { command: 'hello', token: 'x'.repeat(s.token.length), client: 'cli' });
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, 'UNAUTHORIZED');
     await wrong.closed;
 
-    const short = await connect(s.socketPath);
+    const short = await connect(s.endpoint);
     const shorter = await ask(short, { command: 'hello', token: 'abc', client: 'app' });
     assert.equal(shorter.error.code, 'UNAUTHORIZED');
     await short.closed;
 
-    const early = await connect(s.socketPath);
+    const early = await connect(s.endpoint);
     const before = await ask(early, { command: 'status' });
     assert.equal(before.error.code, 'UNAUTHORIZED');
     await early.closed;
   });
 });
 
-test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a usable connection, a path as a key is UNKNOWN_KEY', unixOnly, async () => {
+test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a usable connection, a path as a key is UNKNOWN_KEY', async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const extra = await ask(c, { command: 'status', path: '/etc' });
@@ -234,7 +242,7 @@ test('unknown fields are INVALID_REQUEST, an oversized record is OVERSIZED on a 
   });
 });
 
-test('status, setPolicy, resume and decide answer the resulting status', unixOnly, async () => {
+test('status, setPolicy, resume and decide answer the resulting status', async () => {
   await withServer({ paused: true }, async (s) => {
     const c = await s.open();
     const status = await ask(c, { command: 'status' });
@@ -257,7 +265,7 @@ test('status, setPolicy, resume and decide answer the resulting status', unixOnl
   });
 });
 
-test('a multi-item decide records every decision and runs one job', unixOnly, async () => {
+test('a multi-item decide records every decision and runs one job', async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     await ask(c, { command: 'status' });
@@ -274,7 +282,7 @@ test('a multi-item decide records every decision and runs one job', unixOnly, as
   });
 });
 
-test('history answers newest first, at most limit, before a cursor', unixOnly, async () => {
+test('history answers newest first, at most limit, before a cursor', async () => {
   await withServer({}, async (s) => {
     const old = ['2020-01-01', '2020-01-02', '2020-01-03'].map((day) =>
       JSON.stringify({ v: 1, at: `${day}T00:00:00.000Z`, kind: 'resumed', actor: 'cli', reason: day }));
@@ -305,7 +313,7 @@ const historyPage = async (c: Client, before: { at: string; seq: number }, limit
   return response.result;
 };
 
-test('history pages every same-millisecond event with exclusive cursors and reports exhaustion', unixOnly, async () => {
+test('history pages every same-millisecond event with exclusive cursors and reports exhaustion', async () => {
   await withServer({}, async (s) => {
     const at = '2020-01-02T00:00:00.000Z';
     historyFixture(s, '2020-01', [
@@ -327,7 +335,7 @@ test('history pages every same-millisecond event with exclusive cursors and repo
   });
 });
 
-test('same-millisecond appends between history pages do not repeat or skip existing events', unixOnly, async () => {
+test('same-millisecond appends between history pages do not repeat or skip existing events', async () => {
   await withServer({}, async (s) => {
     const at = '2020-01-02T00:00:00.000Z';
     historyFixture(s, '2020-01', [{ at, reason: 'first' }, { at, reason: 'second' }, { at, reason: 'third' }]);
@@ -346,7 +354,7 @@ test('same-millisecond appends between history pages do not repeat or skip exist
   });
 });
 
-test('history cursors survive a clock rollback append into an older month', unixOnly, async () => {
+test('history cursors survive a clock rollback append into an older month', async () => {
   await withServer({}, async (s) => {
     historyFixture(s, '2020-01', [{ at: '2020-01-01T00:00:00.000Z', reason: 'january' }]);
     historyFixture(s, '2020-02', [
@@ -364,7 +372,7 @@ test('history cursors survive a clock rollback append into an older month', unix
   });
 });
 
-test('history groups equivalent timestamp instants and skips invalid timestamps', unixOnly, async () => {
+test('history groups equivalent timestamp instants and skips invalid timestamps', async () => {
   await withServer({}, async (s) => {
     historyFixture(s, '2020-01', [
       { at: '2020-01-02T00:00:00Z', reason: 'utc' },
@@ -383,7 +391,7 @@ test('history groups equivalent timestamp instants and skips invalid timestamps'
   });
 });
 
-test('status from a scheduled inspection has no run id', unixOnly, async () => {
+test('status from a scheduled inspection has no run id', async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     const subscribed = await ask(watcher, { command: 'subscribe' });
@@ -400,7 +408,7 @@ test('status from a scheduled inspection has no run id', unixOnly, async () => {
   });
 });
 
-test('apply answers started, then streams progress to the client and to subscribers', unixOnly, async () => {
+test('apply answers started, then streams progress to the client and to subscribers', async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     await ask(watcher, { command: 'subscribe' });
@@ -426,7 +434,7 @@ test('apply answers started, then streams progress to the client and to subscrib
   });
 });
 
-test('an apply whose plan changed since the preview answers stale with the new preview', unixOnly, async () => {
+test('an apply whose plan changed since the preview answers stale with the new preview', async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const inspected = await ask(c, { command: 'inspect' });
@@ -447,28 +455,30 @@ test('an apply whose plan changed since the preview answers stale with the new p
   });
 });
 
-test('a silent client does not block another; the directory is 0700, the socket and token 0600', unixOnly, async () => {
+test('a silent client does not block another; the directory is 0700, the socket and token 0600', async () => {
   await withServer({}, async (s) => {
-    const silent = await connect(s.socketPath);
+    const silent = await connect(s.endpoint);
     silent.sendRaw('{"version":3');
     const c = await s.open('cli');
     assert.equal((await ask(c, { command: 'status' })).ok, true);
-    assert.equal(statSync(s.dir).mode & 0o777, 0o700);
-    assert.equal(statSync(s.socketPath).mode & 0o777, 0o600);
-    assert.equal(statSync(s.tokenPath).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(s.dir).mode & 0o777, 0o700);
+      assert.equal(statSync(s.endpoint).mode & 0o777, 0o600);
+      assert.equal(statSync(s.tokenPath).mode & 0o777, 0o600);
+    }
     assert.match(s.token, /^[A-Za-z0-9_-]{43}$/);
   });
 });
 
-test('a connection that sends no complete record in time is closed', unixOnly, async () => {
+test('a connection that sends no complete record in time is closed', async () => {
   await withServer({ handshakeMs: 50 }, async (s) => {
-    const silent = await connect(s.socketPath);
+    const silent = await connect(s.endpoint);
     await silent.closed;
     assert.deepEqual(silent.records, []);
   });
 });
 
-test('shutdown answers, then calls onShutdown', unixOnly, async () => {
+test('shutdown answers, then calls onShutdown', async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     const reply = await ask(c, { command: 'shutdown' });
@@ -482,7 +492,7 @@ test('shutdown answers, then calls onShutdown', unixOnly, async () => {
   });
 });
 
-test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', unixOnly, async () => {
+test('shutdown bounds a blocked reply even after refused follow-up traffic, and calls onShutdown once', async () => {
   await withServer({}, async (s) => {
     const { c, id } = await blockedShutdown(s);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -499,24 +509,24 @@ test('shutdown bounds a blocked reply even after refused follow-up traffic, and 
   });
 });
 
-test('closing the scope cancels a blocked shutdown callback', unixOnly, async () => {
+test('closing the scope cancels a blocked shutdown callback', async () => {
   await withServer({}, async (s) => {
     const { c } = await blockedShutdown(s);
     await s.close();
     await c.closed;
     await new Promise((resolve) => setTimeout(resolve, 1100));
     assert.equal(s.shutdowns(), 0, 'shutdown ran after its scope was closed');
-    assert.equal(existsSync(s.socketPath), false);
+    assert.equal(existsSync(s.endpointFile), false);
     assert.equal(existsSync(s.tokenPath), false);
   });
 });
 
-test('closing the scope closes connections and removes the socket and token', unixOnly, async () => {
+test('closing the scope closes connections and removes the socket and token', async () => {
   const s = await serverMachine();
   const c = await s.open();
   await s.close();
   await c.closed;
-  assert.equal(existsSync(s.socketPath), false);
+  assert.equal(existsSync(s.endpointFile), false);
   assert.equal(existsSync(s.tokenPath), false);
 });
 
@@ -527,12 +537,41 @@ test('a leftover socket is replaced', unixOnly, async () => {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'agent.sock'), 'stale');
   await m.run(Effect.scoped(Effect.gen(function* () {
-    yield* serveIpc({ paths: m.paths, handle, session: { onProgress: () => () => {}, runs: { onChange: () => () => {} } } as never, agentVersion: '0', onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, platform: process.platform, handle, session: { onProgress: () => () => {}, runs: { onChange: () => () => {} } } as never, agentVersion: '0', onShutdown: () => {} });
     assert.equal(statSync(join(dir, 'agent.sock')).isSocket(), true);
   })));
 });
 
-test('status before the first job answers NO_REPORT at once, without waiting for a job', unixOnly, async () => {
+test('on Windows each start listens on a fresh pipe named in agent.pipe, replacing a stale one, removed on close', windowsOnly, async () => {
+  const m = agentMachine();
+  const handle = { onStatus: () => () => {} } as never;
+  const session = { onProgress: () => () => {}, runs: { onChange: () => () => {} } } as never;
+  const dir = join(m.paths.stateRoot, 'agent');
+  const pipeFile = join(dir, AGENT_PIPE_FILE);
+  const stale = `\\\\.\\pipe\\nortuscc-agent-${'0'.repeat(32)}\n`;
+  const names: string[] = [];
+  for (let start = 0; start < 2; start++) {
+    // The second start finds the agent.pipe a crashed agent would leave.
+    if (start === 1) writeFileSync(pipeFile, stale);
+    await m.run(Effect.scoped(Effect.gen(function* () {
+      yield* serveIpc({ paths: m.paths, platform: 'win32', handle, session, agentVersion: '0', onShutdown: () => {}, handshakeMs: 50 });
+      const content = readFileSync(pipeFile, 'utf8');
+      assert.match(content, /^\\\\\.\\pipe\\nortuscc-agent-[0-9a-f]{32}\n$/);
+      assert.notEqual(content, stale);
+      const name = agentEndpoint(dir, 'win32');
+      names.push(name);
+      // The named pipe accepts at once; a client that sends nothing gets nothing and is closed.
+      const silent = yield* Effect.promise(() => connect(name));
+      yield* Effect.promise(() => silent.closed);
+      assert.deepEqual(silent.records, []);
+    })));
+    assert.equal(existsSync(pipeFile), false, 'agent.pipe outlived its server');
+    assert.equal(existsSync(join(dir, 'agent.token')), false, 'agent.token outlived its server');
+  }
+  assert.notEqual(names[0], names[1]);
+});
+
+test('status before the first job answers NO_REPORT at once, without waiting for a job', async () => {
   const starting = Deferred.makeUnsafe<void>();
   await withServer({ starting }, async (s) => {
     const c = await s.open('cli');
@@ -551,7 +590,7 @@ test('status before the first job answers NO_REPORT at once, without waiting for
 
 const pendingKeys = (status: Wire) => status.pending.map((p: Wire) => p.key);
 
-test('after an apply, a status event and the status reply no longer list the applied items', unixOnly, async () => {
+test('after an apply, a status event and the status reply no longer list the applied items', async () => {
   await withServer({}, async (s) => {
     const watcher = await s.open();
     await ask(watcher, { command: 'subscribe' });
@@ -573,15 +612,15 @@ test('after an apply, a status event and the status reply no longer list the app
   });
 });
 
-test('shutdown mid-apply answers, cancels the run, releases apply.lock and removes the socket and token', unixOnly, async () => {
+test('shutdown mid-apply answers, cancels the run, releases apply.lock and removes the socket and token', async () => {
   // Each step takes a while, so the run is still going when shutdown arrives.
   const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Effect.sleep('200 millis'), configDomain.run(step, report)) };
-  const { m, domains, source, socketPath, tokenPath } = await prepare({ config: slow });
+  const { m, domains, source, dir, endpointFile, tokenPath } = await prepare({ config: slow });
   const fiber = Effect.runFork(runAgent({ paths: m.paths, domains, source, agentVersion: '1.0.0', ipc: true }));
   let c: Client | undefined;
   try {
-    for (let i = 0; i < 500 && !existsSync(socketPath); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-    c = await connect(socketPath);
+    for (let i = 0; i < 500 && !existsSync(endpointFile); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    c = await connect(agentEndpoint(dir, process.platform));
     assert.equal((await ask(c, { command: 'hello', token: readFileSync(tokenPath, 'utf8'), client: 'cli' })).ok, true);
     const inspected = await ask(c, { command: 'inspect' });
     assert.equal(inspected.ok, true, JSON.stringify(inspected));
@@ -600,7 +639,7 @@ test('shutdown mid-apply answers, cancels the run, releases apply.lock and remov
     const finished = (await m.events()).filter((e) => e.kind === 'apply-finished');
     assert.equal(finished.length, 1);
     assert.ok(finished[0]?.kind === 'apply-finished' && finished[0].result === 'cancelled', JSON.stringify(finished));
-    assert.equal(existsSync(socketPath), false);
+    assert.equal(existsSync(endpointFile), false);
     assert.equal(existsSync(tokenPath), false);
   } finally {
     c?.socket.destroy();
@@ -608,7 +647,7 @@ test('shutdown mid-apply answers, cancels the run, releases apply.lock and remov
   }
 });
 
-test('status observes an automatic apply lock rather than the cached job report', unixOnly, async () => {
+test('status observes an automatic apply lock rather than the cached job report', async () => {
   await withServer({}, async (s) => {
     const c = await s.open();
     assert.equal((await ask(c, { command: 'status' })).result.applying, false);
@@ -622,7 +661,7 @@ test('status observes an automatic apply lock rather than the cached job report'
   });
 });
 
-test('status observes a manual apply while its first step is blocked and becomes idle after completion', unixOnly, async () => {
+test('status observes a manual apply while its first step is blocked and becomes idle after completion', async () => {
   const started = Deferred.makeUnsafe<void>();
   const release = Deferred.makeUnsafe<void>();
   const slow: AgentDomain = { ...configDomain, run: (step, report) => Effect.andThen(Deferred.succeed(started, undefined), Effect.andThen(Deferred.await(release), configDomain.run(step, report))) };
@@ -641,7 +680,7 @@ test('status observes a manual apply while its first step is blocked and becomes
   });
 });
 
-test('real notifier gives a healthy second app its own posting budget and persists delivery', unixOnly, async (t) => {
+test('real notifier gives a healthy second app its own posting budget and persists delivery', async (t) => {
   let fallbacks = 0;
   const createNotifier = (m: ReturnType<typeof agentMachine>) => m.run(makeNotifier({ platform: 'linux', timeoutMs: 150 }).pipe(
     Effect.provideService(Processes, { run: () => Effect.sync(() => { fallbacks++; return { code: 1, stdout: '' }; }) }),
@@ -678,7 +717,7 @@ test('real notifier gives a healthy second app its own posting budget and persis
   });
 });
 
-test('notification delivery binds fresh receipts to one authenticated app and falls through on refusal', unixOnly, async () => {
+test('notification delivery binds fresh receipts to one authenticated app and falls through on refusal', async () => {
   const notification = { id: 'a'.repeat(64), title: 'Review', body: 'Held items' };
   let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(notification), receipt: () => 'launch-receipt', acknowledge: (_id, _ok, receipt) => receipt === 'launch-receipt', setConnected: (value) => { deliver = value; } };
@@ -707,7 +746,7 @@ test('notification delivery binds fresh receipts to one authenticated app and fa
   });
 });
 
-test('notification disconnect and timeout reject late ACK and try the next app', unixOnly, async () => {
+test('notification disconnect and timeout reject late ACK and try the next app', async () => {
   const notification = { id: 'b'.repeat(64), title: 'Review', body: 'Held items' };
   let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
@@ -732,7 +771,7 @@ test('notification disconnect and timeout reject late ACK and try the next app',
   });
 });
 
-test('a connected ACK past its deadline is rejected before its timer runs', unixOnly, async () => {
+test('a connected ACK past its deadline is rejected before its timer runs', async () => {
   const notification = { id: 'c'.repeat(64), title: 'Review', body: 'Held items' };
   let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
@@ -752,7 +791,7 @@ test('a connected ACK past its deadline is rejected before its timer runs', unix
   });
 });
 
-test('the default app posting budget accepts native completion after one second', unixOnly, async () => {
+test('the default app posting budget accepts native completion after one second', async () => {
   const notification = { id: 'd'.repeat(64), title: 'Review', body: 'Held items' };
   let deliver: Parameters<Notifier['setConnected']>[0];
   const notifier: Notifier = { notify: () => Effect.void, get: () => Effect.succeed(undefined), receipt: () => undefined, acknowledge: () => false, setConnected: (value) => { deliver = value; } };
@@ -768,7 +807,7 @@ test('the default app posting budget accepts native completion after one second'
   });
 });
 
-test('legacy local-decision recovery still refuses a changed setup identity over the socket', unixOnly, async () => {
+test('legacy local-decision recovery still refuses a changed setup identity over the socket', async () => {
   await withServer({}, async s => {
     const c = await s.open();
     const inspected = await ask(c, { command: 'inspect' });
@@ -782,7 +821,7 @@ test('legacy local-decision recovery still refuses a changed setup identity over
     assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
   });
 });
-test('shared previews remain invalid after local decisions over the socket', unixOnly, async () => {
+test('shared previews remain invalid after local decisions over the socket', async () => {
   await withServer({}, async s => {
     const c = await s.open();
     await ask(c, { command: 'inspect' });
@@ -794,7 +833,7 @@ test('shared previews remain invalid after local decisions over the socket', uni
     assert.deepEqual(JSON.parse(s.m.read(join(s.m.paths.claude, 'settings.json'))!), { theme: 'dark' });
   });
 });
-test('a policy mutation after local decisions still invalidates a legacy preview', unixOnly, async () => {
+test('a policy mutation after local decisions still invalidates a legacy preview', async () => {
   await withServer({}, async s => {
     const c = await s.open();
     await ask(c, { command: 'inspect' });

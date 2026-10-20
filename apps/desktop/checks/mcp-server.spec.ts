@@ -209,7 +209,7 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boole
       Effect.provideService(Fs, { ...fs, remove: path => path.startsWith(m.paths.backups + '/') && ++pruneAttempts === inputs.failPruneAt
         ? Effect.fail(new FsFailed({ op: 'remove', path, reason: 'PRIVATE-PRUNE-ERROR' })) : fs.remove(path) }),
     );
-    yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, platform: process.platform, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), source);
   return { m, metadataPatches, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); assert.equal(existsSync(m.root),false); } };

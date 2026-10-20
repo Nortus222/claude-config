@@ -2,7 +2,7 @@ import { projectHistoryEvent } from '../operations/history.ts';
 import { HostedFailure } from '@nortuscc/hosted-client';
 import { disabledHostedState } from '../hosted.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { Cause, Data, Effect, FiberSet, Schema } from 'effect';
@@ -13,7 +13,7 @@ import type { Notifier, Notification } from '../notifier.ts';
 import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
 import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
-import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
+import { AGENT_PIPE_FILE, SetupsStore, newPipeName, revisionCommit, revisionSetupId } from '@nortuscc/sync';
 import { operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema } from '../operations/index.ts';
 import { operationDigest, RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
@@ -39,7 +39,7 @@ const REFUSED_MS = 1000;
 // How long shutdown may wait for its reply to reach a client that never reads.
 const SHUTDOWN_MS = 1000;
 // sun_path holds 104 bytes on macOS and the BSDs and 108 on Linux, including the terminating NUL.
-const MAX_SOCKET_PATH = process.platform === 'linux' ? 107 : 103;
+const maxSocketPath = (platform: NodeJS.Platform) => platform === 'linux' ? 107 : 103;
 
 type Client = 'app' | 'cli' | 'mcp';
 type Connection = {
@@ -77,11 +77,14 @@ const digest = (text: string) => createHash('sha256').update(text).digest();
 const idOf = (raw: unknown) =>
   typeof raw === 'object' && raw !== null && 'id' in raw && typeof raw.id === 'string' && raw.id.length > 0 && raw.id.length <= 100 ? raw.id : 'invalid';
 
-// Serves protocol v3 on <stateRoot>/agent/agent.sock until the scope closes. Writes a fresh token
-// first; the caller holds agent.lock, so a socket already there is stale and replaced. Closing the
-// scope closes the server and every connection and removes the socket and the token.
+// Serves protocol v3 until the scope closes: on <stateRoot>/agent/agent.sock, or on Windows on a
+// fresh named pipe whose name it writes to agent/agent.pipe once listening (ADR 0040). Writes a
+// fresh token first; the caller holds agent.lock, so a socket or agent.pipe already there is stale
+// and replaced. Closing the scope closes the server and every connection and removes the socket or
+// agent.pipe, and the token.
 export const serveIpc = (input: {
   readonly paths: MachinePathsValue;
+  readonly platform: NodeJS.Platform;
   readonly handle: AgentHandle;
   readonly session: AgentSession;
   readonly agentVersion: string;
@@ -94,12 +97,16 @@ export const serveIpc = (input: {
   Effect.gen(function* () {
     const { handle, session } = input;
     const dir = join(input.paths.stateRoot, 'agent');
-    const socketPath = join(dir, 'agent.sock');
+    const pipe = input.platform === 'win32';
+    // The endpoint is the address `listen` takes; `endpointFile` is what clients find it by.
+    const endpoint = pipe ? newPipeName() : join(dir, 'agent.sock');
+    const endpointFile = pipe ? join(dir, AGENT_PIPE_FILE) : endpoint;
     const tokenPath = join(dir, 'agent.token');
-    const length = Buffer.byteLength(socketPath);
-    if (length > MAX_SOCKET_PATH) {
+    const length = Buffer.byteLength(endpoint);
+    const max = maxSocketPath(input.platform);
+    if (!pipe && length > max) {
       return yield* Effect.fail(new ServeFailed({
-        reason: `the socket path ${socketPath} is ${length} bytes, too long for a Unix socket (at most ${MAX_SOCKET_PATH})`,
+        reason: `the socket path ${endpoint} is ${length} bytes, too long for a Unix socket (at most ${max})`,
       }));
     }
 
@@ -110,14 +117,15 @@ export const serveIpc = (input: {
       await chmod(dir, 0o700);
     });
     yield* Effect.addFinalizer(() =>
-      Effect.promise(() => Promise.all([rm(socketPath, { force: true }), rm(tokenPath, { force: true })]).then(() => {}, () => {})));
+      Effect.promise(() => Promise.all([rm(endpointFile, { force: true }), rm(tokenPath, { force: true })]).then(() => {}, () => {})));
+    const writePrivate = (path: string, text: string) => attempt(`write ${path}`, async () => {
+      await writeFile(path, text, { mode: 0o600 });
+      await chmod(path, 0o600);
+    });
     const token = randomBytes(32).toString('base64url');
     const expected = digest(token);
-    yield* attempt(`write ${tokenPath}`, async () => {
-      await writeFile(tokenPath, token, { mode: 0o600 });
-      await chmod(tokenPath, 0o600);
-    });
-    yield* attempt(`remove ${socketPath}`, () => rm(socketPath, { force: true }));
+    yield* writePrivate(tokenPath, token);
+    yield* attempt(`remove ${endpointFile}`, () => rm(endpointFile, { force: true }));
 
     // Handlers run in this scope: closing it interrupts any still running.
     const run = yield* FiberSet.makeRuntime<AgentServices>();
@@ -595,13 +603,19 @@ export const serveIpc = (input: {
         server.close(() => resume(Effect.void));
       }));
     yield* Effect.callback<void, ServeFailed>((resume) => {
-      const onError = (error: Error) => resume(Effect.fail(new ServeFailed({ reason: `listen on ${socketPath}: ${error.message}` })));
+      const onError = (error: Error) => resume(Effect.fail(new ServeFailed({ reason: `listen on ${endpoint}: ${error.message}` })));
       server.once('error', onError);
-      server.listen(socketPath, () => {
+      server.listen(endpoint, () => {
         server.off('error', onError);
         resume(Effect.void);
       });
     });
     server.on('error', () => {});
-    yield* attempt(`chmod ${socketPath}`, () => chmod(socketPath, 0o600));
+    // A pipe name is published only once listening, so a client never finds a name nobody holds,
+    // and by rename, so a client never reads it half-written.
+    if (pipe) {
+      const partial = `${endpointFile}.partial`;
+      yield* writePrivate(partial, `${endpoint}\n`);
+      yield* attempt(`write ${endpointFile}`, () => rename(partial, endpointFile));
+    } else yield* attempt(`chmod ${endpoint}`, () => chmod(endpoint, 0o600));
   });
