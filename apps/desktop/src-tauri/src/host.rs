@@ -562,7 +562,7 @@ impl Agent {
     pub fn connect_ready(state_root: &Path, emit: Emit, operation: Operation) -> Result<Self, String> {
         Self::connect_ready_observed(state_root, emit, READY_TIMEOUT, startup_diagnostics::current(), operation)
     }
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn connect_ready_timeout(state_root: &Path, emit: Emit, timeout: Duration) -> Result<Self, String> {
         Self::connect_ready_observed(state_root, emit, timeout, None, Operation::Ensure)
     }
@@ -1173,9 +1173,16 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
+    #[cfg(windows)]
+    pub(crate) use crate::pipe::server::Listener;
+    /// A fake agent endpoint in `<agent>`: `agent.sock` on Unix.
     #[cfg(unix)]
-    use std::os::unix::net::{UnixListener, UnixStream};
+    pub(crate) struct Listener(std::os::unix::net::UnixListener);
     #[cfg(unix)]
+    impl Listener {
+        pub fn bind(agent: &Path) -> Self { Self(std::os::unix::net::UnixListener::bind(agent.join("agent.sock")).unwrap()) }
+        pub fn accept(&mut self) -> Stream { self.0.accept().unwrap().0 }
+    }
     pub(crate) struct Fixture { pub root: PathBuf, worker: Option<thread::JoinHandle<()>> }
     pub(crate) fn scratch() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1187,11 +1194,9 @@ pub(crate) mod fixtures {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::canonicalize(root).unwrap()
     }
-    #[cfg(unix)]
-    pub(crate) struct Wire { reader: BufReader<UnixStream>, writer: UnixStream }
-    #[cfg(unix)]
+    pub(crate) struct Wire { reader: BufReader<Stream>, writer: Stream }
     impl Wire {
-        pub fn new(socket: UnixStream) -> Self {
+        pub fn new(socket: Stream) -> Self {
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             Self { reader: BufReader::new(socket.try_clone().unwrap()), writer: socket }
         }
@@ -1217,23 +1222,20 @@ pub(crate) mod fixtures {
     }
     pub(crate) fn hello_result() -> Value { json!({"agentVersion":"fake-v1","protocol":3,"policy":"manual","paused":null}) }
     pub(crate) fn status() -> Value { json!({"at":"now","policy":"manual","paused":null,"trusted":true,"applying":false,"pending":[],"drift":[],"conflicts":[],"probeErrors":[],"counts":{"pending":0,"held":0,"ready":0,"drift":0}}) }
-    #[cfg(unix)]
     impl Fixture {
         pub fn new(handle: impl FnOnce(Wire) + Send + 'static) -> Self {
             let root = scratch();
             let agent = root.join("agent");
             std::fs::create_dir(&agent).unwrap();
             std::fs::write(agent.join("agent.token"), "token-a\n").unwrap();
-            let listener = UnixListener::bind(agent.join("agent.sock")).unwrap();
-            let worker = thread::spawn(move || { let (socket, _) = listener.accept().unwrap(); handle(Wire::new(socket)); });
+            let mut listener = Listener::bind(&agent);
+            let worker = thread::spawn(move || handle(Wire::new(listener.accept())));
             Self { root, worker: Some(worker) }
         }
         pub fn connect(&self, emit: Emit) -> Agent { Agent::connect(&self.root, emit).unwrap() }
         pub fn finish(mut self) { self.worker.take().unwrap().join().unwrap(); }
     }
-    #[cfg(unix)]
     impl Drop for Fixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
-    #[cfg(unix)]
     pub(crate) fn idle_agent() -> (Agent, Fixture) {
         let fixture = Fixture::new(|mut wire| {
             wire.handshake();
@@ -1247,9 +1249,18 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod socket_tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
     use super::fixtures::*;
+    /// Lets a large request block on backpressure: a 1 KiB send buffer on Unix; the Windows fixture's
+    /// inbound pipe buffer is already 1 KiB.
+    fn small_send_buffer(agent: &Agent) {
+        #[cfg(unix)] {
+            use std::os::fd::AsRawFd;
+            let socket = agent.inner.socket.lock().unwrap();
+            let size: libc::c_int = 1024;
+            assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
+        }
+        #[cfg(windows)] let _ = agent;
+    }
     #[test]
     fn hello_is_strict_and_requires_all_fields() {
         for value in [
@@ -1304,7 +1315,6 @@ mod socket_tests {
         assert!(Request::Apply { plan_id: String::new() }.record("1").is_err());
         assert!(Request::Apply { plan_id: "x".repeat(101) }.record("1").is_err());
     }
-    #[cfg(unix)]
     #[test]
     fn connects_as_app_subscribes_and_disconnects_without_shutdown() {
         let (agent, fixture) = idle_agent();
@@ -1313,7 +1323,6 @@ mod socket_tests {
         drop(agent);
         fixture.finish();
     }
-    #[cfg(unix)]
     #[test]
     fn semantic_subscription_negotiates_without_hiding_other_errors() {
         for refusal in [None, Some("INVALID_REQUEST"), Some("UNAUTHORIZED")] {
@@ -1342,15 +1351,14 @@ mod socket_tests {
             fixture.finish();
         }
     }
-    #[cfg(unix)]
     #[test]
     fn every_connection_reads_the_fresh_token() {
         let root = scratch(); let dir = root.join("agent"); std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("agent.token"), "first").unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(dir.join("agent.sock")).unwrap();
+        let mut listener = Listener::bind(&dir);
         let worker = thread::spawn(move || {
             for token in ["first", "second"] {
-                let (socket, _) = listener.accept().unwrap(); let mut wire = Wire::new(socket);
+                let mut wire = Wire::new(listener.accept());
                 let hello = wire.next().unwrap(); assert_eq!(hello["token"], token); assert_eq!(hello["client"], "app"); wire.reply(&hello, hello_result());
                 let subscribe = wire.next().unwrap(); wire.reply(&subscribe, json!({"subscribed":true}));
                 assert!(wire.next().is_none());
@@ -1361,7 +1369,6 @@ mod socket_tests {
         drop(Agent::connect(&root, Arc::new(|_| {})).unwrap());
         worker.join().unwrap(); std::fs::remove_dir_all(root).unwrap();
     }
-    #[cfg(unix)]
     #[test]
     fn wrong_token_and_incompatible_hello_fail_closed_without_retry() {
         for incompatible in [false, true] {
@@ -1376,7 +1383,6 @@ mod socket_tests {
             fixture.finish();
         }
     }
-    #[cfg(unix)]
     #[test]
     fn status_progress_and_application_errors_are_forwarded() {
         let fixture = Fixture::new(|mut wire| {
@@ -1398,7 +1404,6 @@ mod socket_tests {
         let events = events.lock().unwrap(); assert_eq!(events[0]["event"], "status"); assert_eq!(events[1]["progress"]["type"], "done"); drop(events);
         drop(agent); fixture.finish();
     }
-    #[cfg(unix)]
     #[test]
     fn disconnect_rejects_all_pending_requests_and_never_retries() {
         let (received, all) = mpsc::channel();
@@ -1416,20 +1421,15 @@ mod socket_tests {
         assert!(agent.request(Request::Cancel).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
-    #[cfg(unix)]
     #[test]
     fn disconnect_interrupts_a_writer_blocked_by_backpressure() {
-        use std::os::fd::AsRawFd;
         let (release, held) = mpsc::channel();
         let fixture = Fixture::new(move |mut wire| {
             wire.handshake(); held.recv().unwrap();
             wire.discard_until_close();
         });
         let agent = Arc::new(fixture.connect(Arc::new(|_| {})));
-        let socket = agent.inner.socket.lock().unwrap();
-        let size: libc::c_int = 1024;
-        assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
-        drop(socket);
+        small_send_buffer(&agent);
         let writing = agent.clone();
         let writer = thread::spawn(move || writing.request(Request::Preview { exclude: vec!["x".repeat(50); MAX_EXCLUDED] }));
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1442,10 +1442,8 @@ mod socket_tests {
         drop(agent); fixture.finish();
         assert!(timely, "Closing the app must interrupt a blocked socket writer");
     }
-    #[cfg(unix)]
     #[test]
     fn slow_drain_cannot_extend_request_write_deadline() {
-        use std::os::fd::AsRawFd;
         let fixture = Fixture::new(|mut wire| {
             wire.handshake();
             let mut buffer = [0u8; 1024];
@@ -1459,10 +1457,7 @@ mod socket_tests {
             }
         });
         let agent = fixture.connect(Arc::new(|_| {}));
-        let socket = agent.inner.socket.lock().unwrap();
-        let size: libc::c_int = 1024;
-        assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
-        drop(socket);
+        small_send_buffer(&agent);
         let start = Instant::now();
         let result = agent.request_timeout(Request::Preview { exclude: vec!["x".repeat(500); 128] }, Duration::from_millis(100));
         let elapsed = start.elapsed();
@@ -1476,7 +1471,6 @@ mod socket_tests {
         assert!(disconnected, "A timed-out request must close the connection");
         assert!(elapsed < Duration::from_millis(500), "Slow drain extended a 100ms deadline to {elapsed:?}");
     }
-    #[cfg(unix)]
     #[test]
     fn queued_request_deadline_includes_waiting_for_the_writer() {
         let (release, held) = mpsc::channel();
@@ -1484,10 +1478,7 @@ mod socket_tests {
             wire.handshake(); held.recv().unwrap(); wire.discard_until_close();
         });
         let agent = Arc::new(fixture.connect(Arc::new(|_| {})));
-        let socket = agent.inner.socket.lock().unwrap();
-        let size: libc::c_int = 1024;
-        assert_eq!(unsafe { libc::setsockopt(socket.as_ref().unwrap().as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF, (&size as *const libc::c_int).cast(), std::mem::size_of_val(&size) as libc::socklen_t) }, 0);
-        drop(socket);
+        small_send_buffer(&agent);
         let writing = agent.clone();
         let writer = thread::spawn(move || writing.request(Request::Preview { exclude: vec!["x".repeat(500); 128] }));
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1503,7 +1494,6 @@ mod socket_tests {
         assert!(elapsed < Duration::from_millis(500), "Writer wait extended a 60ms deadline to {elapsed:?}");
         assert!(pending_empty && disconnected);
     }
-    #[cfg(unix)]
     #[test]
     fn completed_and_refused_requests_cancel_their_deadline_watchdog() {
         for refused in [false, true] {
@@ -1526,7 +1516,6 @@ mod socket_tests {
             drop(agent); fixture.finish();
         }
     }
-    #[cfg(unix)]
     #[test]
     fn command_timeout_closes_socket_and_rejects_future_requests() {
         let fixture = Fixture::new(|mut wire| { wire.handshake(); assert_eq!(wire.next().unwrap()["command"], "inspect"); assert!(wire.next().is_none()); });
@@ -1535,7 +1524,6 @@ mod socket_tests {
         assert!(agent.request(Request::Cancel).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
-    #[cfg(unix)]
     #[test]
     fn malformed_oversized_and_unknown_field_output_reject_pending_requests() {
         for bytes in [b"{broken\n".to_vec(), vec![b'x'; MAX_RECORD], b"{\"version\":3,\"event\":\"status\",\"status\":{},\"extra\":true}\n".to_vec()] {
@@ -1545,7 +1533,6 @@ mod socket_tests {
             drop(agent); fixture.finish();
         }
     }
-    #[cfg(unix)]
     #[test]
     fn invalid_status_reply_disconnects_fail_closed() {
         let fixture = Fixture::new(|mut wire| {
@@ -1561,7 +1548,6 @@ mod socket_tests {
         assert!(rejected, "Invalid status must be reported as a protocol refusal: {result:?}");
         assert!(disconnected, "Invalid status must close the connection");
     }
-    #[cfg(unix)]
     #[test]
     fn peer_exit_rejects_pending_requests() {
         let fixture = Fixture::new(|mut wire| { wire.handshake(); wire.next().unwrap(); });
@@ -1569,7 +1555,6 @@ mod socket_tests {
         assert!(agent.request(Request::Inspect).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
-    #[cfg(unix)]
     #[test]
     fn readiness_diagnostics_distinguish_authenticated_success_from_timeout() {
         use crate::startup_diagnostics::{Diagnostics, Operation, Status};
@@ -1585,22 +1570,20 @@ mod socket_tests {
         assert_eq!(records[1]["status"], json!(Status::Completed)); assert_eq!(records[3]["status"], json!(Status::TimedOut));
         assert_eq!(records[3]["operation"], json!(Operation::Restart)); assert!(records[3]["durationMs"].as_u64().unwrap() >= 20);
     }
-    #[cfg(unix)]
     #[test]
     fn readiness_waits_for_a_delayed_token_and_socket_boundedly() {
         let root = scratch(); let dir = root.join("agent"); std::fs::create_dir(&dir).unwrap(); let delayed = dir.clone();
         let worker = thread::spawn(move || {
             thread::sleep(Duration::from_millis(80));
             std::fs::write(delayed.join("agent.token"), "token-a").unwrap();
-            let listener = std::os::unix::net::UnixListener::bind(delayed.join("agent.sock")).unwrap();
-            let (socket, _) = listener.accept().unwrap(); let mut wire = Wire::new(socket); wire.handshake(); assert!(wire.next().is_none());
+            let mut listener = Listener::bind(&delayed);
+            let mut wire = Wire::new(listener.accept()); wire.handshake(); assert!(wire.next().is_none());
         });
         drop(Agent::connect_ready_timeout(&root, Arc::new(|_| {}), Duration::from_secs(1)).unwrap());
         worker.join().unwrap();
         let start = Instant::now(); assert!(Agent::connect_ready_timeout(&root, Arc::new(|_| {}), Duration::from_millis(70)).is_err()); assert!(start.elapsed() < Duration::from_millis(250));
         std::fs::remove_dir_all(root).unwrap();
     }
-    #[cfg(unix)]
     #[test]
     fn readiness_deadline_also_bounds_subscribe() {
         let fixture = Fixture::new(|mut wire| {
@@ -1614,7 +1597,6 @@ mod socket_tests {
         fixture.finish();
         assert!(bounded, "Readiness must bound the entire handshake, including subscribe");
     }
-    #[cfg(unix)]
     #[test]
     fn hello_wait_is_bounded() {
         let fixture = Fixture::new(|mut wire| { wire.next().unwrap(); assert!(wire.next().is_none()); });
