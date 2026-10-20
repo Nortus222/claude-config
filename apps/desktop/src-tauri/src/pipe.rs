@@ -7,7 +7,7 @@ use std::{
     ptr::{null, null_mut},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::*,
@@ -78,11 +78,19 @@ impl Pipe {
         };
         let error = unsafe { GetLastError() };
         if started == 0 && error != ERROR_IO_PENDING { return failure(error, ended); }
-        let wait = timeout.map_or(INFINITE, |t| (t.as_millis().max(1)).min(u128::from(INFINITE - 1)) as u32);
+        // Waits can wake up to a clock tick early, so time out only once the deadline has passed.
+        let deadline = timeout.map(|t| Instant::now() + t);
         let mut count = 0;
-        if unsafe { GetOverlappedResultEx(self.handle(), &overlapped, &mut count, wait, 0) } != 0 { return Ok(count as usize); }
-        let error = unsafe { GetLastError() };
-        if error != WAIT_TIMEOUT { return failure(error, ended); }
+        loop {
+            let wait = match deadline.map(|end| end.saturating_duration_since(Instant::now())) {
+                None => INFINITE,
+                Some(left) if left.is_zero() => break,
+                Some(left) => left.as_nanos().div_ceil(1_000_000).min(u128::from(INFINITE - 1)) as u32,
+            };
+            if unsafe { GetOverlappedResultEx(self.handle(), &overlapped, &mut count, wait, 0) } != 0 { return Ok(count as usize); }
+            let error = unsafe { GetLastError() };
+            if error != WAIT_TIMEOUT { return failure(error, ended); }
+        }
         unsafe { CancelIoEx(self.handle(), &overlapped); GetOverlappedResult(self.handle(), &overlapped, &mut count, 1) };
         Err(io::ErrorKind::TimedOut.into())
     }
@@ -204,7 +212,7 @@ pub(crate) mod server {
 #[cfg(test)]
 mod tests {
     use super::{server::*, *};
-    use std::{io::{Read, Write}, sync::mpsc, time::Instant};
+    use std::{io::{Read, Write}, sync::mpsc};
     use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 
     fn agent_dir() -> std::path::PathBuf {
