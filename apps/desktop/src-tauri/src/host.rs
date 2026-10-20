@@ -38,7 +38,7 @@ const BUN: &str = "bun";
 #[cfg(windows)]
 const BUN: &str = "bun.exe";
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The agent endpoint: a stream that clones, bounds writes and shuts down every clone at once.
 #[cfg(unix)]

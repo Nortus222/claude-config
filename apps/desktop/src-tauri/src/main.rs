@@ -11,6 +11,8 @@ mod display_name_categories;
 mod notifications;
 #[cfg(windows)]
 mod pipe;
+#[cfg(windows)]
+mod agent_child;
 use host::{Agent, Request, Setup};
 use startup_diagnostics::{Operation, Phase};
 use serde_json::{json, Value};
@@ -37,6 +39,9 @@ struct Owner {
     startup: Arc<startup::Startup>,
     /// The agent state root of the last connection, so Show in Finder needs no helper while connected.
     state_root: Mutex<Option<PathBuf>>,
+    /// The app-owned agent process; Windows has no login service.
+    #[cfg(windows)]
+    child: agent_child::AgentChild,
 }
 impl Owner {
     /// The agent state root: the connected one, else the fixed read-only helper's answer.
@@ -52,6 +57,8 @@ impl Owner {
             if result.is_err() {self.startup.coordinator()?.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
             result?
         } else {host::setup_agent(&self.resources, setup)?};
+        #[cfg(windows)]
+        self.child.ensure(&self.resources, &state_root, matches!(setup, Setup::Restart))?;
         self.connect_from_root(generation, &state_root, setup.operation()).map(|agent| (agent, recovered))
     }
     fn connect_from_root(self: &Arc<Self>, generation: u64, state_root: &std::path::Path, operation: Operation) -> Result<Agent, String> {
@@ -235,7 +242,11 @@ fn run_startup(owner: Arc<Owner>, source: Result<Option<Arc<dyn updates::UpdateS
             _=>{},
         }
         let connected=startup_connection(&owner.session,&owner.lifecycle,&owner.startup,context,coordinator,
-            |g,root|owner.connect_from_root_cancelled(g,root,Operation::AppStartup,Some(cancel)));
+            |g,root|{
+                #[cfg(windows)]
+                owner.child.ensure(&owner.resources, root, false)?;
+                owner.connect_from_root_cancelled(g,root,Operation::AppStartup,Some(cancel))
+            });
         if let Err(error)=connected {
             let mut current=owner.session.lock().unwrap();
             if !current.closed && current.generation<=2 {current.error=Some(error);}
@@ -604,6 +615,8 @@ fn main() {
                     session: Mutex::new(Session { agent: None, generation: 1, error: Some("Checking local setup state".into()), closed: false, initial_setup: None }),
                     lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),startup:setup_startup.clone(),
                     state_root: Mutex::new(None),
+                    #[cfg(windows)]
+                    child: agent_child::AgentChild::new(app.path().app_log_dir().ok().map(|directory| directory.join("agent-child.log"))),
                 });
                 app.manage(owner.clone());
                 trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
@@ -619,6 +632,8 @@ fn main() {
                 if let Some(owner) = app.try_state::<Arc<Owner>>() {
                     close(&owner.session);
                     owner.startup.close();
+                    #[cfg(windows)]
+                    owner.child.close();
                 }
             }
         });
