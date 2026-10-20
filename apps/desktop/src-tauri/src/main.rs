@@ -9,6 +9,8 @@ mod update_service;
 mod updater_transport;
 mod display_name_categories;
 mod notifications;
+#[cfg(windows)]
+mod pipe;
 use host::{Agent, Request, Setup};
 use startup_diagnostics::{Operation, Phase};
 use serde_json::{json, Value};

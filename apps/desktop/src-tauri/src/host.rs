@@ -50,22 +50,10 @@ mod transport {
     }
     pub fn shutdown(stream: &Stream) { let _ = stream.shutdown(Shutdown::Both); }
 }
-/// No Windows endpoint yet: every connect is unreachable, so the stream is never constructed.
 #[cfg(windows)]
 mod transport {
-    use std::{io, path::Path, time::Duration};
-    pub enum Stream {}
-    impl Stream {
-        pub fn try_clone(&self) -> io::Result<Self> { match *self {} }
-        pub fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> { match *self {} }
-    }
-    impl io::Read for Stream { fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { match *self {} } }
-    impl io::Write for Stream {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> { match *self {} }
-        fn flush(&mut self) -> io::Result<()> { match *self {} }
-    }
-    pub fn connect(_: &Path) -> Result<Stream, String> { Err("UNREACHABLE: Windows transport not implemented".into()) }
-    pub fn shutdown(stream: &Stream) { match *stream {} }
+    pub use crate::pipe::{connect, Pipe as Stream};
+    pub fn shutdown(stream: &Stream) { stream.shutdown(); }
 }
 use transport::Stream;
 

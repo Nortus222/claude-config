@@ -24,6 +24,9 @@ sha2 = "=0.10.9"
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.183"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.5"
 block2 = "=0.6.2"
