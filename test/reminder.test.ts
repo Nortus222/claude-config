@@ -1,20 +1,20 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MachinePathsValue } from '@nortuscc/machine';
 import { connectAgent, type AgentConnection } from '../src/agent-client.ts';
+import { listenAgent, shortTempDir } from './support/agent-endpoint.ts';
 import { reminder, remindAfter } from '../src/reminder.ts';
 
 // reminder against a minimal protocol v3 server in this process; no real home or agent is touched.
-const skip = process.platform === 'win32' ? 'the agent serves no socket on Windows' : false;
 const TOKEN = 'the-token';
 
 const send = (socket: Socket, record: unknown) => socket.write(JSON.stringify(record) + '\n');
 
 async function serve(counts: { pending: number; held: number; ready?: number }, delayMs = 0) {
-  const stateRoot = mkdtempSync('/tmp/nac-');
+  const stateRoot = shortTempDir('nac-');
   const dir = join(stateRoot, 'agent');
   mkdirSync(dir);
   writeFileSync(join(dir, 'agent.token'), TOKEN);
@@ -38,7 +38,7 @@ async function serve(counts: { pending: number; held: number; ready?: number }, 
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(join(dir, 'agent.sock'), resolve));
+  await listenAgent(server, dir);
   const paths: MachinePathsValue = {
     repo: stateRoot, claude: stateRoot, codex: stateRoot, codexOpenRouter: stateRoot, agentsSkills: stateRoot, stateRoot, backups: stateRoot,
   };
@@ -56,7 +56,7 @@ const run = async (paths: MachinePathsValue, extra: { connect?: typeof connectAg
   return lines;
 };
 
-test('reminder prints the plural line when pending and held items wait', { skip }, async () => {
+test('reminder prints the plural line when pending and held items wait', async () => {
   const f = await serve({ pending: 2, held: 1, ready: 1 });
   try {
     assert.deepEqual(await run(f.paths), ['2 items wait for you: run nortuscc agent review']);
@@ -65,7 +65,7 @@ test('reminder prints the plural line when pending and held items wait', { skip 
   }
 });
 
-test('reminder prints the singular line for one item', { skip }, async () => {
+test('reminder prints the singular line for one item', async () => {
   const f = await serve({ pending: 1, held: 1 });
   try {
     assert.deepEqual(await run(f.paths), ['1 item waits for you: run nortuscc agent review']);
@@ -74,7 +74,7 @@ test('reminder prints the singular line for one item', { skip }, async () => {
   }
 });
 
-test('reminder ignores pending items nobody has to decide on', { skip }, async () => {
+test('reminder ignores pending items nobody has to decide on', async () => {
   const f = await serve({ pending: 3, held: 0, ready: 0 });
   try {
     assert.deepEqual(await run(f.paths), []);
@@ -83,7 +83,7 @@ test('reminder ignores pending items nobody has to decide on', { skip }, async (
   }
 });
 
-test('reminder prints nothing when nothing waits', { skip }, async () => {
+test('reminder prints nothing when nothing waits', async () => {
   const f = await serve({ pending: 0, held: 0 });
   try {
     assert.deepEqual(await run(f.paths), []);
@@ -93,7 +93,7 @@ test('reminder prints nothing when nothing waits', { skip }, async () => {
 });
 
 test('reminder prints nothing when no agent answers', async () => {
-  const stateRoot = mkdtempSync('/tmp/nac-');
+  const stateRoot = shortTempDir('nac-');
   try {
     const paths = { repo: stateRoot, claude: stateRoot, codex: stateRoot, codexOpenRouter: stateRoot, agentsSkills: stateRoot, stateRoot, backups: stateRoot };
     assert.deepEqual(await run(paths), []);
@@ -102,7 +102,7 @@ test('reminder prints nothing when no agent answers', async () => {
   }
 });
 
-test('reminder prints nothing, within the budget, when the agent is slow', { skip }, async () => {
+test('reminder prints nothing, within the budget, when the agent is slow', async () => {
   const f = await serve({ pending: 3, held: 0 }, 1000);
   try {
     const started = Date.now();
@@ -121,7 +121,7 @@ test('reminder swallows a connect that throws and one that never settles', async
   assert.ok(Date.now() - started < 500);
 });
 
-test('remindAfter asks only after status on a terminal, and survives failing paths', { skip }, async () => {
+test('remindAfter asks only after status on a terminal, and survives failing paths', async () => {
   const f = await serve({ pending: 1, held: 1 });
   try {
     const attempt = async (verb: string | undefined, interactive: boolean, paths = async () => f.paths) => {

@@ -91,7 +91,7 @@ const waitForHealth = async (input: LifecycleInput, options: Pick<MaintenanceOpt
     signal.throwIfAborted();
     let conn: AgentConnection | undefined;
     try {
-      conn = await (options.connect ?? (() => connectAgent(input.paths, { client: 'app', timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) })))();
+      conn = await (options.connect ?? (() => connectAgent(input.paths, { client: 'app', platform: input.target.platform, timeoutMs: Math.max(1, Math.min(5000, deadline - Date.now())) })))();
       signal.throwIfAborted();
       if (conn.hello.protocol !== 3 || conn.hello.agentVersion !== input.agentVersion) throw new Error('replacement agent health identity mismatch');
       return;
@@ -133,7 +133,7 @@ export const prepareUpdate = (input: LifecycleInput, options: MaintenanceOptions
     || unit !== renderLaunchAgent(input.target.label ?? LAUNCH_AGENT_LABEL, program)) throw new Error('app-owned service registration does not match this bundle');
   const identity = yield* installedIdentity(input);
   if (identity.appVersion !== versions.fromVersion) throw new Error('installed app version does not match update');
-  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(input.paths, { client: 'app' }))));
+  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(input.paths, { client: 'app', platform: input.target.platform }))));
   let conn: AgentConnection | undefined;
   if (opened._tag === 'Success') { conn = opened.success; if (conn.hello.agentVersion !== input.agentVersion || conn.hello.protocol !== 3) { conn.close(); throw new Error('running agent is not the app-owned runtime'); } }
   else if (!(opened.failure instanceof AgentUnavailable) || liveLockHolder(join(input.paths.stateRoot, 'agent/agent.lock')) !== undefined) return yield* Effect.fail(opened.failure);

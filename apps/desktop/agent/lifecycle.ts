@@ -153,7 +153,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   const previousUnit = yield* fs.readText(unitPath(target));
   const registered = previousMarker?.trim() === marker;
   const unitMatches = previousUnit === rendered;
-  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(paths, { client: 'app' }))));
+  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(paths, { client: 'app', platform: target.platform }))));
   let conn: AgentConnection | undefined;
   if (opened._tag === 'Success') conn = opened.success;
   else {
