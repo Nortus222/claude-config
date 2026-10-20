@@ -1,16 +1,31 @@
-use crate::{host::{self, Setup}, updates::{Handoff, Maintenance}};
+use crate::updates::{Handoff, Maintenance};
+#[cfg(unix)]
+use crate::host::{self, Setup};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 use std::{
-    io::{Read, Write}, os::fd::AsRawFd, path::{Path, PathBuf},
+    path::{Path, PathBuf},
+    sync::{atomic::AtomicBool, Arc},
+};
+#[cfg(unix)]
+use std::{
+    io::{Read, Write}, os::fd::AsRawFd,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc}, thread::{self, JoinHandle},
+    sync::{atomic::Ordering, mpsc}, thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+#[cfg(unix)]
 const MAX_RECORD: usize = 16_384;
+#[cfg(unix)]
 const SESSION_TIMEOUT: Duration = Duration::from_secs(180);
+#[cfg(unix)]
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(5);
+#[cfg(windows)]
+const UNSUPPORTED: &str = "Updates are not supported on Windows";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all="camelCase")]
@@ -18,7 +33,7 @@ pub struct MaintenanceState {
     pub pending: bool, pub phase: Option<String>, pub from_version: Option<String>,
     pub to_version: Option<String>, pub backup_path: Option<PathBuf>, pub diagnostic: Option<String>,
 }
-pub struct NativeHelper { resources: PathBuf }
+pub struct NativeHelper { #[cfg_attr(windows, allow(dead_code))] resources: PathBuf }
 impl NativeHelper { pub fn new(resources: PathBuf) -> Self { Self { resources } } }
 fn version(value: &str) -> Result<semver::Version, String> {
     let parsed = semver::Version::parse(value).map_err(|_| "Invalid maintenance version")?;
@@ -30,11 +45,17 @@ fn version(value: &str) -> Result<semver::Version, String> {
 fn absolute(path: &Path) -> bool {
     path.is_absolute() && path.to_str().is_some_and(|p| !p.chars().any(char::is_control))
 }
+#[cfg(unix)]
 impl Maintenance for NativeHelper {
     fn prepare(&self, from: &str, to: &str, cancel: Arc<AtomicBool>) -> Result<Box<dyn Handoff>, String> {
         self.prepare_with_timeout(from, to, cancel, Setup::PrepareUpdate.timeout(), SESSION_TIMEOUT)
     }
 }
+#[cfg(windows)]
+impl Maintenance for NativeHelper {
+    fn prepare(&self, _: &str, _: &str, _: Arc<AtomicBool>) -> Result<Box<dyn Handoff>, String> { Err(UNSUPPORTED.into()) }
+}
+#[cfg(unix)]
 impl NativeHelper {
     fn prepare_with_timeout(&self, from: &str, to: &str, cancel: Arc<AtomicBool>, ready: Duration, total: Duration) -> Result<Box<dyn Handoff>, String> {
         if version(to)? <= version(from)? { return Err("Maintenance version must increase".into()); }
@@ -53,7 +74,9 @@ impl NativeHelper {
         Ok(Box::new(NativeHandoff { session, installing: false, terminal: false }))
     }
 }
+#[cfg(unix)]
 struct NativeHandoff { session: Session, installing: bool, terminal: bool }
+#[cfg(unix)]
 impl NativeHandoff {
     fn action(&mut self, action: &str, expected: Value, terminal: bool) -> Result<(), String> {
         self.action_with_input(json!({"action":action}),expected,terminal)
@@ -70,6 +93,7 @@ impl NativeHandoff {
         result
     }
 }
+#[cfg(unix)]
 impl Handoff for NativeHandoff {
     fn begin_install(&mut self) -> Result<(), String> {
         if self.installing { return Err("Maintenance installation already began".into()); }
@@ -83,9 +107,15 @@ impl Handoff for NativeHandoff {
     fn abort(&mut self) -> Result<(), String> { self.action("abort", json!({"aborted":true}), true) }
 }
 
+#[cfg(unix)]
 pub fn maintenance_state(resources: &Path) -> Result<MaintenanceState, String> {
     let value = one_shot(resources, Setup::MaintenanceState, None, Setup::MaintenanceState.timeout())?;
     validate_maintenance_state(value)
+}
+/// Windows has no app-update maintenance, so nothing is ever pending and ensure/restart proceed.
+#[cfg(windows)]
+pub fn maintenance_state(_: &Path) -> Result<MaintenanceState, String> {
+    Ok(MaintenanceState { pending: false, phase: None, from_version: None, to_version: None, backup_path: None, diagnostic: None })
 }
 pub(crate) fn validate_maintenance_state(value: Value) -> Result<MaintenanceState, String> {
     let keys = ["pending","phase","fromVersion","toVersion","backupPath","diagnostic"];
@@ -110,6 +140,9 @@ pub(crate) fn validate_maintenance_state(value: Value) -> Result<MaintenanceStat
     if !valid { return Err("Inconsistent maintenance state".into()); }
     Ok(state)
 }
+#[cfg(windows)]
+pub fn recover(_: &Path, _: &str) -> Result<PathBuf, String> { Err(UNSUPPORTED.into()) }
+#[cfg(unix)]
 pub fn recover(resources: &Path, compiled_version: &str) -> Result<PathBuf, String> {
     version(compiled_version)?;
     let value = one_shot(resources, Setup::RecoverUpdate, Some(json!({"appVersion":compiled_version})), Setup::RecoverUpdate.timeout())?;
@@ -121,6 +154,7 @@ pub fn recover(resources: &Path, compiled_version: &str) -> Result<PathBuf, Stri
     if !absolute(&result.state_root) || (!result.recovered && result.interrupted) { return Err("Invalid maintenance recovery".into()); }
     Ok(result.state_root)
 }
+#[cfg(unix)]
 fn one_shot(resources: &Path, setup: Setup, input: Option<Value>, timeout: Duration) -> Result<Value, String> {
     let mut command = host::helper_command(resources, setup, None)?;
     if input.is_some() { command.stdin(Stdio::piped()); }
@@ -130,6 +164,7 @@ fn one_shot(resources: &Path, setup: Setup, input: Option<Value>, timeout: Durat
     session.finish()?;
     Ok(value)
 }
+#[cfg(unix)]
 fn nonblocking(fd: i32) -> Result<(), String> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd,libc::F_SETFL,flags | libc::O_NONBLOCK) } < 0 {
@@ -137,12 +172,15 @@ fn nonblocking(fd: i32) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(unix)]
 type Record = Result<Option<Value>, String>;
 /// Owns the child and bounded pipe readers until terminal exit or cooperative cancellation.
+#[cfg(unix)]
 struct Session {
     child: Child, input: Option<ChildStdin>, records: mpsc::Receiver<Record>,
     readers: Vec<JoinHandle<()>>, stop: Arc<AtomicBool>, deadline: Instant, closed: bool,
 }
+#[cfg(unix)]
 impl Session {
     fn spawn(mut command: Command, timeout: Duration) -> Result<Self, String> {
         let child = command.spawn().map_err(|_| "Cannot start maintenance helper")?;
@@ -235,7 +273,9 @@ impl Session {
         self.closed = true;
     }
 }
+#[cfg(unix)]
 impl Drop for Session { fn drop(&mut self) { self.shutdown(); } }
+#[cfg(unix)]
 fn read_records(mut stdout: impl Read, send: mpsc::SyncSender<Record>, stop: Arc<AtomicBool>) {
     let mut buffer = [0u8;4096]; let mut line = Vec::new();
     while !stop.load(Ordering::SeqCst) {
@@ -257,7 +297,19 @@ fn read_records(mut stdout: impl Read, send: mpsc::SyncSender<Record>, stop: Arc
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn maintenance_is_never_pending_and_updates_are_refused() {
+        let resources = Path::new("unused");
+        assert!(!maintenance_state(resources).unwrap().pending);
+        assert_eq!(recover(resources, "0.1.0").unwrap_err(), UNSUPPORTED);
+        assert_eq!(NativeHelper::new(resources.into()).prepare("0.1.0", "0.2.0", Arc::new(AtomicBool::new(false))).err().unwrap(), UNSUPPORTED);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
  use super::*;
  use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::Ordering, thread, time::{Duration,Instant}};

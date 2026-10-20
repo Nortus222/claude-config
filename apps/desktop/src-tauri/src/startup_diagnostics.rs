@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::{
-    fs::File, io::{self, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     os::{fd::{AsRawFd, FromRawFd}, unix::fs::MetadataExt},
-    path::{Path, Component as PathComponent},
+    path::Component as PathComponent,
+};
+use std::{
+    fs::File, io::{self, Write},
+    path::Path,
     sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -91,18 +96,23 @@ impl Trace {
     }
 }
 
+#[cfg(unix)]
 struct PrivateLog { directory: File, file: File }
 fn unsafe_storage() -> io::Error { io::Error::other("Unsafe diagnostic storage") }
+#[cfg(unix)]
 fn c_name(name: &str) -> io::Result<std::ffi::CString> { std::ffi::CString::new(name).map_err(|_| unsafe_storage()) }
+#[cfg(unix)]
 fn open_at(directory: &File, name: &str, flags: i32, mode: u32) -> io::Result<File> {
     let name = c_name(name)?;
     let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW, mode as libc::c_uint) };
     if fd < 0 { return Err(io::Error::last_os_error()); } Ok(unsafe { File::from_raw_fd(fd) })
 }
+#[cfg(unix)]
 fn private_file(file: &File) -> io::Result<()> {
     let m = file.metadata()?;
     if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.nlink() != 1 || m.mode() & 0o077 != 0 || m.len() > MAX_LOG as u64 { return Err(unsafe_storage()); } Ok(())
 }
+#[cfg(unix)]
 impl PrivateLog {
     fn open(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() { return Err(unsafe_storage()); }
@@ -170,12 +180,33 @@ impl PrivateLog {
         self.file.write_all(line.as_bytes())
     }
 }
+/// A plain append-only log in the app log directory; it restarts empty once it would exceed the cap.
+#[cfg(windows)]
+struct PrivateLog { path: std::path::PathBuf, file: File }
+#[cfg(windows)]
+impl PrivateLog {
+    fn open(path: &Path) -> io::Result<Self> {
+        if !path.is_absolute() { return Err(unsafe_storage()); }
+        std::fs::create_dir_all(path)?;
+        let path = path.join("startup.log");
+        let file = std::fs::OpenOptions::new().append(true).create(true).open(&path)?;
+        Ok(Self { path, file })
+    }
+    fn write(&mut self, record: &Record) -> io::Result<()> {
+        let line = format!("{PREFIX}{}\n", serde_json::to_string(record)?);
+        // An append-only handle cannot truncate; appends continue at the emptied file's end.
+        if self.file.metadata()?.len() + line.len() as u64 > MAX_LOG as u64 { File::create(&self.path)?; }
+        self.file.write_all(line.as_bytes())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host::fixtures::scratch;
-    use std::{fs, os::unix::fs::{PermissionsExt, symlink}, sync::{Arc, Mutex}, time::Duration};
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{fs, sync::{Arc, Mutex}, time::Duration};
 
     fn record() -> Record {
         parse_record(br#"[nortuscc-startup] {"v":1,"component":"helper","pid":7,"startedAt":11,"seq":1,"elapsedMs":2,"phase":"login_probe","status":"timed_out","durationMs":2,"operation":"ensure"}"#).unwrap()
@@ -235,6 +266,7 @@ mod tests {
         assert_eq!(records[1].seq, records[0].seq + 1);
         assert!(!serde_json::to_string(&*records).unwrap().contains("SECRET"));
     }
+    #[cfg(unix)]
     #[test]
     fn private_retention_backs_up_before_truncating_and_limits_archives() {
         let root = scratch(); let directory = root.join("logs");
@@ -248,6 +280,7 @@ mod tests {
         assert_eq!(storage.file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         drop(storage); fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn unsafe_storage_preserves_active_file_and_foreign_targets() {
         let root = scratch(); let target = root.join("target"); fs::write(&target, "SECRET").unwrap();
@@ -260,6 +293,7 @@ mod tests {
         assert_eq!(storage.file.metadata().unwrap().len(), MAX_LOG as u64); assert_eq!(fs::read_to_string(target).unwrap(), "SECRET");
         drop(storage); fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn independent_writers_refuse_concurrent_retention_without_waiting() {
         let root = scratch(); let directory = root.join("logs");
@@ -275,6 +309,7 @@ mod tests {
         assert!(next.file.metadata().unwrap().len() <= MAX_LOG as u64);
         drop(next); fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn hardlinked_public_and_interrupted_backup_storage_is_refused_without_truncation() {
         let root = scratch(); let public = root.join("public"); fs::create_dir(&public).unwrap();
@@ -285,6 +320,18 @@ mod tests {
         fs::write(directory.join(".startup.log.backup"), "prior backup").unwrap();
         assert!(log.write(&record()).is_err()); assert_eq!(log.file.metadata().unwrap().len(), MAX_LOG as u64);
         assert_eq!(fs::read_to_string(directory.join(".startup.log.backup")).unwrap(), "prior backup");
+        drop(log); fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_log_appends_records_and_restarts_at_the_cap() {
+        let root = scratch(); let directory = root.join("logs");
+        let mut log = PrivateLog::open(&directory).unwrap();
+        log.write(&record()).unwrap(); log.write(&record()).unwrap();
+        assert_eq!(fs::read_to_string(directory.join("startup.log")).unwrap().lines().filter(|line| parse_record(line.as_bytes()).is_some()).count(), 2);
+        fs::OpenOptions::new().write(true).open(directory.join("startup.log")).unwrap().set_len(MAX_LOG as u64).unwrap(); log.write(&record()).unwrap();
+        assert!(fs::metadata(directory.join("startup.log")).unwrap().len() < MAX_LOG as u64);
+        assert!(PrivateLog::open(Path::new("relative")).is_err());
         drop(log); fs::remove_dir_all(root).unwrap();
     }
     #[test]

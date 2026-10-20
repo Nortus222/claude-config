@@ -93,9 +93,12 @@ impl ReviewRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::host::{fixtures::Fixture};
     use serde_json::json;
+    #[cfg(unix)]
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    #[cfg(unix)]
     #[test]
     fn hidden_mode_fetches_without_subscribe_and_acknowledges_only_post_result() {
         for delivered in [true, false] {
@@ -128,6 +131,7 @@ mod tests {
         assert_eq!(notify_argument(&["--notify".into(),"a".repeat(64)]).unwrap(),Some("a".repeat(64)));
         for args in [vec!["--notify=bad".into()],vec!["--notify-extra".into()],vec!["--notify".into()],vec!["--notify".into(),"oops".into()],vec!["--notify".into(),"a".repeat(64),"extra".into()],vec!["extra".into(),"--notify".into(),"a".repeat(64)]] { assert!(notify_argument(&args).is_err()); }
     }
+    #[cfg(unix)]
     #[test]
     fn stale_delivery_never_posts_or_acknowledges() {
         let fixture = Fixture::new(|mut wire| { wire.handshake(); assert!(wire.next().is_none()); });

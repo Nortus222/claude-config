@@ -4,8 +4,6 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
-    net::Shutdown,
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -35,6 +33,41 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const BOOTSTRAP_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 type Pending = HashMap<String, mpsc::Sender<Result<Value, String>>>;
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
+#[cfg(unix)]
+const BUN: &str = "bun";
+#[cfg(windows)]
+const BUN: &str = "bun.exe";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The agent endpoint: a stream that clones, bounds writes and shuts down every clone at once.
+#[cfg(unix)]
+mod transport {
+    use std::{net::Shutdown, os::unix::net::UnixStream, path::Path};
+    pub type Stream = UnixStream;
+    pub fn connect(directory: &Path) -> Result<Stream, String> {
+        UnixStream::connect(directory.join("agent.sock")).map_err(|e| format!("UNREACHABLE: Agent socket: {e}"))
+    }
+    pub fn shutdown(stream: &Stream) { let _ = stream.shutdown(Shutdown::Both); }
+}
+/// No Windows endpoint yet: every connect is unreachable, so the stream is never constructed.
+#[cfg(windows)]
+mod transport {
+    use std::{io, path::Path, time::Duration};
+    pub enum Stream {}
+    impl Stream {
+        pub fn try_clone(&self) -> io::Result<Self> { match *self {} }
+        pub fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> { match *self {} }
+    }
+    impl io::Read for Stream { fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { match *self {} } }
+    impl io::Write for Stream {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> { match *self {} }
+        fn flush(&mut self) -> io::Result<()> { match *self {} }
+    }
+    pub fn connect(_: &Path) -> Result<Stream, String> { Err("UNREACHABLE: Windows transport not implemented".into()) }
+    pub fn shutdown(stream: &Stream) { match *stream {} }
+}
+use transport::Stream;
 
 /// The agent validates shared operation inputs; legacy requests use fixed public arguments.
 pub enum Request {
@@ -433,8 +466,8 @@ fn bounded_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
     }
 }
 struct Inner {
-    socket: Mutex<Option<UnixStream>>,
-    control: UnixStream,
+    socket: Mutex<Option<Stream>>,
+    control: Stream,
     pending: Mutex<Pending>,
     alive: AtomicBool,
     next_id: AtomicU64,
@@ -444,7 +477,7 @@ impl Inner {
     fn disconnect(&self, reason: &str) {
         if self.alive.swap(false, Ordering::SeqCst) {
             // This handle interrupts a blocked writer before taking its mutex.
-            let _ = self.control.shutdown(Shutdown::Both);
+            transport::shutdown(&self.control);
             self.socket.lock().unwrap().take();
             for (_, sender) in self.pending.lock().unwrap().drain() {
                 let _ = sender.send(Err(reason.into()));
@@ -474,7 +507,7 @@ impl Agent {
         let directory = state_root.join("agent");
         let token = std::fs::read_to_string(directory.join("agent.token")).map_err(|e| format!("UNREACHABLE: Agent token: {e}"))?;
         let token = token.trim().to_string();
-        let socket = UnixStream::connect(directory.join("agent.sock")).map_err(|e| format!("UNREACHABLE: Agent socket: {e}"))?;
+        let socket = transport::connect(&directory)?;
         let reader = socket.try_clone().map_err(|e| e.to_string())?;
         let control = socket.try_clone().map_err(|e| e.to_string())?;
         let inner = Arc::new(Inner {
@@ -541,7 +574,7 @@ impl Agent {
     pub fn connect_ready(state_root: &Path, emit: Emit, operation: Operation) -> Result<Self, String> {
         Self::connect_ready_observed(state_root, emit, READY_TIMEOUT, startup_diagnostics::current(), operation)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn connect_ready_timeout(state_root: &Path, emit: Emit, timeout: Duration) -> Result<Self, String> {
         Self::connect_ready_observed(state_root, emit, timeout, None, Operation::Ensure)
     }
@@ -665,6 +698,7 @@ impl Drop for Agent {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(windows, allow(dead_code))] // Update maintenance helpers are macOS-only.
 pub enum Setup {
     Startup,
     Ensure,
@@ -718,7 +752,7 @@ struct SetupResult {
 }
 const ISOLATED_CONFIG_VARS: [&str; 4] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "ZDOTDIR"];
 pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>) -> Result<Command, String> {
-    let bun = resources.join("bun");
+    let bun = resources.join(BUN);
     let script = resources.join("agent.mjs");
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
@@ -734,8 +768,10 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
             if key.to_string_lossy().starts_with("NORTUSCC_") { command.env_remove(key); }
         }
     }
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; command.process_group(0); }
+    #[cfg(windows)]
+    { use std::os::windows::process::CommandExt; command.creation_flags(CREATE_NO_WINDOW); }
     Ok(command)
 }
 pub fn setup_agent(resources: &Path, setup: Setup) -> Result<PathBuf, String> {
@@ -800,7 +836,7 @@ pub(crate) fn decode_startup(value: Value) -> Result<StartupContext, String> {
     if !valid { return Err("Inconsistent startup context".into()); }
     Ok(StartupContext { state_root: fields.state_root, setup, maintenance, outcome: fields.outcome })
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn desktop_startup(resources: &Path, app_version: &str) -> Result<StartupContext,String> {
     desktop_startup_cancelled(resources,app_version,Arc::new(AtomicBool::new(false)))
 }
@@ -832,10 +868,13 @@ pub enum GitHubLink { DeviceLogin, InstallCli }
 pub struct GitHubLinkArgs { pub link: GitHubLink }
 pub fn github_link_command(link: GitHubLink) -> Command {
     let url = match link { GitHubLink::DeviceLogin => "https://github.com/login/device", GitHubLink::InstallCli => "https://cli.github.com/" };
+    #[cfg(unix)]
     let mut command = Command::new("/usr/bin/open");
+    #[cfg(windows)]
+    let mut command = Command::new("explorer.exe");
     command.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; command.process_group(0); }
     command
 }
 pub fn device_login_command() -> Command { github_link_command(GitHubLink::DeviceLogin) }
@@ -856,6 +895,7 @@ pub struct RevealArgs { pub place: RevealPlace }
 pub fn reveal_path(state_root: &Path, place: RevealPlace) -> PathBuf {
     match place { RevealPlace::AgentLog => state_root.join("agent").join("agent.log"), RevealPlace::Backups => state_root.join("backups") }
 }
+#[cfg(unix)]
 pub fn reveal_command(path: &Path) -> Command {
     let mut command = Command::new("/usr/bin/open");
     command.arg("-R").arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -863,13 +903,22 @@ pub fn reveal_command(path: &Path) -> Command {
     command.process_group(0);
     command
 }
-/// Selects the place in a Finder window. Off macOS it is refused before `state_root` is looked up; a place
-/// that does not exist yet is refused with what that means.
-pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
-    reveal_place_on(cfg!(target_os = "macos"), state_root, place)
+/// Explorer selects a file in its folder and opens a directory itself.
+#[cfg(windows)]
+pub fn reveal_command(path: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("explorer.exe");
+    if path.is_dir() { command.arg(path); } else { command.raw_arg(format!("/select,\"{}\"", path.display())); }
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
 }
-fn reveal_place_on(macos: bool, state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
-    if !macos { return Err("Show in Finder works only on macOS.".into()); }
+/// Selects the place in a Finder or Explorer window. Elsewhere it is refused before `state_root` is looked
+/// up; a place that does not exist yet is refused with what that means.
+pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    reveal_place_on(cfg!(any(target_os = "macos", windows)), state_root, place)
+}
+fn reveal_place_on(supported: bool, state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
+    if !supported { return Err("Show in Finder works only on macOS.".into()); }
     let path = reveal_path(&state_root()?, place);
     if !path.exists() {
         return Err(match place {
@@ -887,13 +936,15 @@ fn wait_browser(mut child: std::process::Child, timeout: Duration, what: &str) -
     let result = (|| {
         loop {
             if let Some(status) = child.try_wait().map_err(|_| format!("Unable to open {what}"))? {
-                return if status.success() { Ok(json!({"opened":true})) } else { Err(format!("Unable to open {what}")) };
+                // Explorer exits 1 even after it opened the target, so only its launch is checked.
+                return if status.success() || cfg!(windows) { Ok(json!({"opened":true})) } else { Err(format!("Unable to open {what}")) };
             }
             if Instant::now() >= deadline { return Err(format!("Opening {what} timed out")); }
             thread::sleep(Duration::from_millis(10));
         }
     })();
     if result.is_err() {
+        #[cfg(unix)]
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
         let _ = child.kill(); let _ = child.wait();
     }
@@ -960,7 +1011,7 @@ fn forward_helper_stderr(reader: &mut impl BufRead, diagnostics: Option<&Diagnos
         }
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn wait_json_helper(child: std::process::Child, timeout: Duration, input: Option<Vec<u8>>, cancel_timeout: Duration) -> Result<Value, String> {
     wait_json_helper_observed(child, timeout, input, cancel_timeout, None)
 }
@@ -1021,6 +1072,10 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
     if result.is_err() {
         // Cancel-aware helpers finalize their detached children before the bounded escalation.
         // Explicit legacy lifecycle helpers keep their existing termination contract.
+        // Windows has no graceful signal or process group: the helper alone is killed.
+        #[cfg(windows)]
+        let _ = cancel_timeout;
+        #[cfg(unix)]
         if !cancel_timeout.is_zero() && child.try_wait().ok().flatten().is_none() {
             unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM); }
             let cancel_deadline = Instant::now() + cancel_timeout;
@@ -1031,6 +1086,7 @@ fn wait_json_helper_observed_cancelled(mut child: std::process::Child, timeout: 
         }
         // Also close any inherited pipes held by children in the helper's group.
         // A forced kill or crash cannot run finalizers for children in separate groups.
+        #[cfg(unix)]
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
         let _ = child.kill(); let _ = child.wait();
     }
@@ -1129,15 +1185,23 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    #[cfg(unix)]
+    use std::os::unix::net::{UnixListener, UnixStream};
+    #[cfg(unix)]
     pub(crate) struct Fixture { pub root: PathBuf, worker: Option<thread::JoinHandle<()>> }
     pub(crate) fn scratch() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let root = PathBuf::from(format!("/tmp/ncc-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
+        let name = format!("ncc-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+        #[cfg(unix)]
+        let root = PathBuf::from("/tmp").join(name);
+        #[cfg(windows)]
+        let root = std::env::temp_dir().join(name);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::canonicalize(root).unwrap()
     }
+    #[cfg(unix)]
     pub(crate) struct Wire { reader: BufReader<UnixStream>, writer: UnixStream }
+    #[cfg(unix)]
     impl Wire {
         pub fn new(socket: UnixStream) -> Self {
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -1165,6 +1229,7 @@ pub(crate) mod fixtures {
     }
     pub(crate) fn hello_result() -> Value { json!({"agentVersion":"fake-v1","protocol":3,"policy":"manual","paused":null}) }
     pub(crate) fn status() -> Value { json!({"at":"now","policy":"manual","paused":null,"trusted":true,"applying":false,"pending":[],"drift":[],"conflicts":[],"probeErrors":[],"counts":{"pending":0,"held":0,"ready":0,"drift":0}}) }
+    #[cfg(unix)]
     impl Fixture {
         pub fn new(handle: impl FnOnce(Wire) + Send + 'static) -> Self {
             let root = scratch();
@@ -1178,7 +1243,9 @@ pub(crate) mod fixtures {
         pub fn connect(&self, emit: Emit) -> Agent { Agent::connect(&self.root, emit).unwrap() }
         pub fn finish(mut self) { self.worker.take().unwrap().join().unwrap(); }
     }
+    #[cfg(unix)]
     impl Drop for Fixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+    #[cfg(unix)]
     pub(crate) fn idle_agent() -> (Agent, Fixture) {
         let fixture = Fixture::new(|mut wire| {
             wire.handshake();
@@ -1192,6 +1259,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod socket_tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::fd::AsRawFd;
     use super::fixtures::*;
     #[test]
@@ -1248,6 +1316,7 @@ mod socket_tests {
         assert!(Request::Apply { plan_id: String::new() }.record("1").is_err());
         assert!(Request::Apply { plan_id: "x".repeat(101) }.record("1").is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn connects_as_app_subscribes_and_disconnects_without_shutdown() {
         let (agent, fixture) = idle_agent();
@@ -1256,6 +1325,7 @@ mod socket_tests {
         drop(agent);
         fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn semantic_subscription_negotiates_without_hiding_other_errors() {
         for refusal in [None, Some("INVALID_REQUEST"), Some("UNAUTHORIZED")] {
@@ -1284,6 +1354,7 @@ mod socket_tests {
             fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn every_connection_reads_the_fresh_token() {
         let root = scratch(); let dir = root.join("agent"); std::fs::create_dir(&dir).unwrap();
@@ -1302,6 +1373,7 @@ mod socket_tests {
         drop(Agent::connect(&root, Arc::new(|_| {})).unwrap());
         worker.join().unwrap(); std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn wrong_token_and_incompatible_hello_fail_closed_without_retry() {
         for incompatible in [false, true] {
@@ -1316,6 +1388,7 @@ mod socket_tests {
             fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn status_progress_and_application_errors_are_forwarded() {
         let fixture = Fixture::new(|mut wire| {
@@ -1337,6 +1410,7 @@ mod socket_tests {
         let events = events.lock().unwrap(); assert_eq!(events[0]["event"], "status"); assert_eq!(events[1]["progress"]["type"], "done"); drop(events);
         drop(agent); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn disconnect_rejects_all_pending_requests_and_never_retries() {
         let (received, all) = mpsc::channel();
@@ -1354,6 +1428,7 @@ mod socket_tests {
         assert!(agent.request(Request::Cancel).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn disconnect_interrupts_a_writer_blocked_by_backpressure() {
         use std::os::fd::AsRawFd;
@@ -1379,6 +1454,7 @@ mod socket_tests {
         drop(agent); fixture.finish();
         assert!(timely, "Closing the app must interrupt a blocked socket writer");
     }
+    #[cfg(unix)]
     #[test]
     fn slow_drain_cannot_extend_request_write_deadline() {
         use std::os::fd::AsRawFd;
@@ -1412,6 +1488,7 @@ mod socket_tests {
         assert!(disconnected, "A timed-out request must close the connection");
         assert!(elapsed < Duration::from_millis(500), "Slow drain extended a 100ms deadline to {elapsed:?}");
     }
+    #[cfg(unix)]
     #[test]
     fn queued_request_deadline_includes_waiting_for_the_writer() {
         let (release, held) = mpsc::channel();
@@ -1438,6 +1515,7 @@ mod socket_tests {
         assert!(elapsed < Duration::from_millis(500), "Writer wait extended a 60ms deadline to {elapsed:?}");
         assert!(pending_empty && disconnected);
     }
+    #[cfg(unix)]
     #[test]
     fn completed_and_refused_requests_cancel_their_deadline_watchdog() {
         for refused in [false, true] {
@@ -1460,6 +1538,7 @@ mod socket_tests {
             drop(agent); fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn command_timeout_closes_socket_and_rejects_future_requests() {
         let fixture = Fixture::new(|mut wire| { wire.handshake(); assert_eq!(wire.next().unwrap()["command"], "inspect"); assert!(wire.next().is_none()); });
@@ -1468,6 +1547,7 @@ mod socket_tests {
         assert!(agent.request(Request::Cancel).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn malformed_oversized_and_unknown_field_output_reject_pending_requests() {
         for bytes in [b"{broken\n".to_vec(), vec![b'x'; MAX_RECORD], b"{\"version\":3,\"event\":\"status\",\"status\":{},\"extra\":true}\n".to_vec()] {
@@ -1477,6 +1557,7 @@ mod socket_tests {
             drop(agent); fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn invalid_status_reply_disconnects_fail_closed() {
         let fixture = Fixture::new(|mut wire| {
@@ -1492,6 +1573,7 @@ mod socket_tests {
         assert!(rejected, "Invalid status must be reported as a protocol refusal: {result:?}");
         assert!(disconnected, "Invalid status must close the connection");
     }
+    #[cfg(unix)]
     #[test]
     fn peer_exit_rejects_pending_requests() {
         let fixture = Fixture::new(|mut wire| { wire.handshake(); wire.next().unwrap(); });
@@ -1499,6 +1581,7 @@ mod socket_tests {
         assert!(agent.request(Request::Inspect).unwrap_err().contains("disconnected"));
         drop(agent); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn readiness_diagnostics_distinguish_authenticated_success_from_timeout() {
         use crate::startup_diagnostics::{Diagnostics, Operation, Status};
@@ -1514,6 +1597,7 @@ mod socket_tests {
         assert_eq!(records[1]["status"], json!(Status::Completed)); assert_eq!(records[3]["status"], json!(Status::TimedOut));
         assert_eq!(records[3]["operation"], json!(Operation::Restart)); assert!(records[3]["durationMs"].as_u64().unwrap() >= 20);
     }
+    #[cfg(unix)]
     #[test]
     fn readiness_waits_for_a_delayed_token_and_socket_boundedly() {
         let root = scratch(); let dir = root.join("agent"); std::fs::create_dir(&dir).unwrap(); let delayed = dir.clone();
@@ -1528,6 +1612,7 @@ mod socket_tests {
         let start = Instant::now(); assert!(Agent::connect_ready_timeout(&root, Arc::new(|_| {}), Duration::from_millis(70)).is_err()); assert!(start.elapsed() < Duration::from_millis(250));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn readiness_deadline_also_bounds_subscribe() {
         let fixture = Fixture::new(|mut wire| {
@@ -1541,6 +1626,7 @@ mod socket_tests {
         fixture.finish();
         assert!(bounded, "Readiness must bound the entire handshake, including subscribe");
     }
+    #[cfg(unix)]
     #[test]
     fn hello_wait_is_bounded() {
         let fixture = Fixture::new(|mut wire| { wire.next().unwrap(); assert!(wire.next().is_none()); });
@@ -1553,8 +1639,11 @@ mod socket_tests {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+    #[cfg(unix)]
     use super::fixtures::scratch;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     fn resources(source: &str) -> PathBuf {
         let root = scratch();
         std::fs::write(root.join("agent.mjs"), "unused fake helper entry").unwrap();
@@ -1562,10 +1651,12 @@ mod helper_tests {
         std::fs::set_permissions(root.join("bun"), std::fs::Permissions::from_mode(0o700)).unwrap();
         root
     }
+    #[cfg(unix)]
     fn startup_record(outcome: &str) -> Value {
         let pending = matches!(outcome, "recovered" | "recovery_failed");
         json!({"stateRoot":"/tmp/login-state","setup":{"needsSetup":outcome=="needs_setup","repo":if outcome=="needs_setup" {Value::Null} else {json!("/tmp/checkout")},"gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"},"maintenance":if pending {json!({"pending":true,"phase":"awaiting-health","fromVersion":"0.1.1","toVersion":"0.1.2","backupPath":"/tmp/backup","diagnostic":null})} else {json!({"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null})},"outcome":outcome})
     }
+    #[cfg(unix)]
     #[test]
     fn startup_close_interrupts_authenticated_readiness_without_stopping_service() {
         let (entered,held)=mpsc::channel();
@@ -1579,6 +1670,7 @@ mod helper_tests {
         assert!(result.is_err());
         assert!(elapsed<Duration::from_millis(500),"Cancellation must interrupt hello wait: {elapsed:?}");
     }
+    #[cfg(unix)]
     #[test]
     fn startup_context_rejects_malformed_and_inconsistent_records() {
         for outcome in ["needs_setup","ready","recovered","ensure_failed","recovery_failed"] {
@@ -1604,6 +1696,7 @@ mod helper_tests {
         let mut diagnostic=ready.clone();diagnostic["maintenance"]["diagnostic"]=json!("arbitrary error");invalid.push(diagnostic);
         for record in invalid {assert!(decode_startup(record.clone()).is_err(), "accepted {record}");}
     }
+    #[cfg(unix)]
     #[test]
     fn startup_helper_uses_only_fixed_native_argv_and_version_input() {
         let record=startup_record("ensure_failed");
@@ -1621,6 +1714,7 @@ printf '%s\n' called >> calls"#,record);
         assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap(),"called\n");
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn helper_diagnostics_forward_only_safe_records_and_preserve_stdout_on_failure_or_timeout() {
         use crate::startup_diagnostics::{Diagnostics, Operation, Phase, Status};
@@ -1654,6 +1748,7 @@ printf '{"stateRoot":"/tmp/fake-state"}\n'"#, Status::Completed),
         forward_helper_stderr(&mut std::io::Cursor::new(input.into_bytes()), Some(&diagnostics));
         assert_eq!(records.lock().unwrap().len(), 1);
     }
+    #[cfg(unix)]
     #[test]
     fn bootstrap_outer_timeout_joins_detached_git_and_removes_only_its_owned_directory_and_lock() {
         struct Fixture { root: PathBuf, child: Option<std::process::Child> }
@@ -1714,6 +1809,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert!(!recorded, "failed clone recorded setup authority");
         assert_eq!(unrelated, "owner data");
     }
+    #[cfg(unix)]
     #[test]
     fn bootstrap_escalates_and_joins_a_helper_that_ignores_graceful_cancellation() {
         let root = resources("exec /bin/sleep 30");
@@ -1734,6 +1830,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(!alive, "helper survived hard escalation");
     }
+    #[cfg(unix)]
     #[test]
     fn first_run_helpers_use_fixed_arguments_and_bounded_json_stdin() {
         let root = resources(r#"case "$2" in
@@ -1748,6 +1845,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert!(run_json_helper(helper_command(&root, Setup::State, None).unwrap(),Duration::from_secs(1),Some(vec![b'x';4097])).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn explicit_browser_execution_is_bounded_and_joins_only_its_owned_child() {
         let root = resources("/bin/sleep 0.2\nexec /bin/sleep 30");
@@ -1760,6 +1858,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn helper_output_is_one_complete_bounded_record() {
         for output in ["printf '%s' '{}'", "printf '%s\\n' '{}\n{}'", "dd if=/dev/zero bs=1048576 count=1 2>/dev/null"] {
@@ -1777,6 +1876,7 @@ fs.renameSync({owned:?} + '.tmp', {owned:?});
         assert_eq!(unsafe {libc::kill(pid,0)},-1);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn paths_caller_allows_a_slow_valid_login_probe_to_finish() {
         let root = resources(r#"[ "$2" = --paths ] || exit 8
@@ -1796,6 +1896,7 @@ printf '%s\n' '{"stateRoot":"/tmp/slow-login-state"}'"#);
         }
         assert!(READY_TIMEOUT > LOGIN_PROBE_TIMEOUT);
     }
+    #[cfg(unix)]
     #[test]
     fn paths_helper_has_no_registration_arguments() {
         let root = resources(r#"[ "$#" = 2 ] || exit 9
@@ -1804,6 +1905,7 @@ printf '%s\n' '{"stateRoot":"/tmp/read-only-state"}'"#);
         assert_eq!(run_helper(helper_command(&root,Setup::Paths,None).unwrap(),Duration::from_secs(1)).unwrap(),PathBuf::from("/tmp/read-only-state"));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn fixed_helper_arguments_and_strict_output_determine_the_state_root() {
         let root = resources(r#"[ "$1" = "$PWD/agent.mjs" ] || exit 9
@@ -1822,6 +1924,7 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
             std::fs::remove_dir_all(root).unwrap();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn nonzero_helper_and_timeout_leave_no_running_child() {
         let root = resources("exit 3");
@@ -1835,6 +1938,7 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn startup_close_gracefully_joins_owned_helper_and_pipe_children() {
         let root=resources("trap 'printf cancelled > cancelled; exit 0' TERM\n/bin/sleep 30 &\nprintf '%s' \"$$\" > pid\nwait");
@@ -1851,6 +1955,7 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         assert!(graceful,"Startup close must permit SIGTERM finalization");
         assert!(error.contains("cancelled"));
     }
+    #[cfg(unix)]
     #[test]
     fn isolated_helper_removes_config_and_runtime_overrides() {
         let root = resources(r#"[ "$HOME" = "$PWD/home" ] || exit 2
@@ -1868,6 +1973,7 @@ printf '%s\n' '{"stateRoot":"/tmp/fake-state"}'"#);
         assert!(run_helper(command, Duration::from_secs(1)).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn inherited_stdout_from_a_descendant_is_also_bounded() {
         let root = resources("/bin/sleep 30 &\nprintf '%s\\n' '{\"stateRoot\":\"/tmp/fake-state\"}'");
@@ -1906,6 +2012,10 @@ mod notification_tests {
 #[cfg(test)]
 mod onboarding_bridge_tests {
     use super::*;
+    #[cfg(unix)]
+    const OPENER: &str = "/usr/bin/open";
+    #[cfg(windows)]
+    const OPENER: &str = "explorer.exe";
     #[test]
     fn account_requests_use_only_strict_public_values() {
         let record: Value = serde_json::from_str(&Request::SignIn { name: Some("My Mac".into()), report_status: Some(false) }.record("1").unwrap()).unwrap();
@@ -1948,6 +2058,7 @@ mod onboarding_bridge_tests {
         assert!(decode_args::<SetupArgs>(json!({"configTargets":["codex"]})).is_ok());
         assert!(decode_args::<SignInArgs>(json!({})).is_ok());
         assert!(decode_args::<MachineArgs>(json!({"patch":{"reportStatus":false}})).is_ok());
+        #[cfg(unix)]
         assert_eq!(setup_root(json!({"stateRoot":"/tmp/owned"})).unwrap(),PathBuf::from("/tmp/owned"));
     }
     #[test]
@@ -1958,7 +2069,7 @@ mod onboarding_bridge_tests {
         assert!(validate_setup_state(json!({"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://evil.invalid"})).is_err());
         assert!(validate_setup_state(json!({"needsSetup":true,"repo":null,"gitAvailable":false,"canInstallGit":true,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git","path":"/tmp"})).is_err());
         let command = device_login_command();
-        assert_eq!(command.get_program(), "/usr/bin/open");
+        assert_eq!(command.get_program(), OPENER);
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["https://github.com/login/device"]);
     }
     #[test]
@@ -1966,7 +2077,7 @@ mod onboarding_bridge_tests {
         for (link, url) in [(json!({"link":"deviceLogin"}), "https://github.com/login/device"), (json!({"link":"installCli"}), "https://cli.github.com/")] {
             let args: GitHubLinkArgs = decode_args(link).unwrap();
             let command = github_link_command(args.link);
-            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(command.get_program(), OPENER);
             assert_eq!(command.get_args().collect::<Vec<_>>(), vec![url]);
         }
         for bad in [json!({"link":"https://evil.invalid"}), json!({"link":"deviceLogin","url":"https://evil.invalid"}), json!({"url":"https://github.com/login/device"}), json!({})] {
@@ -1980,8 +2091,14 @@ mod onboarding_bridge_tests {
             let args: RevealArgs = decode_args(args).unwrap();
             assert_eq!(reveal_path(root, args.place), PathBuf::from(path));
             let command = reveal_command(&reveal_path(root, args.place));
-            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(command.get_program(), OPENER);
+            #[cfg(unix)]
             assert_eq!(command.get_args().collect::<Vec<_>>(), vec![std::ffi::OsStr::new("-R"), std::ffi::OsStr::new(path)]);
+        }
+        #[cfg(windows)]
+        {
+            let backups = std::env::temp_dir();
+            assert_eq!(reveal_command(&backups).get_args().collect::<Vec<_>>(), vec![backups.as_os_str()]);
         }
         for bad in [json!({"place":"/etc/passwd"}), json!({"place":"agentLog","path":"/etc"}), json!({"path":"/state"}), json!({})] {
             assert!(decode_args::<RevealArgs>(bad).is_err());
@@ -2037,6 +2154,7 @@ fn validate_connections(value: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn connection_helper_delivers_actions_and_validates_public_results() {
         use std::os::unix::fs::PermissionsExt;
@@ -2085,7 +2203,7 @@ printf '%s\n' '{}'
     fn connection_helper_derives_current_executable_and_has_no_renderer_argv() {
         let root = std::env::temp_dir().join(format!("nortuscc-connection-command-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("bun"), "fixture").unwrap();
+        std::fs::write(root.join(BUN), "fixture").unwrap();
         std::fs::write(root.join("agent.mjs"), "fixture").unwrap();
         let command = helper_command(&root, Setup::McpConnections, None).unwrap();
         let args: Vec<_> = command.get_args().map(|arg|arg.to_os_string()).collect();
