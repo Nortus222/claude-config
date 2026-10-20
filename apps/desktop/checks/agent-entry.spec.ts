@@ -123,10 +123,7 @@ test('entry rejects resource version errors and arbitrary arguments before regis
   assert.deepEqual(f.commands, []);
 });
 
-test('foreground resource agent serves app hello and survives disconnect until shutdown', {
-  skip: process.platform === 'win32' ? 'Windows agent IPC is unsupported (ADR 0019)' : false,
-  timeout: 10000,
-}, async (t) => {
+test('foreground resource agent serves app hello and survives disconnect until shutdown', { timeout: 10000 }, async (t) => {
   const f = fixture(t);
   const controller = new AbortController();
   t.after(() => controller.abort());
@@ -308,9 +305,7 @@ test('helper argv rejects missing, relative, extra and control-character app pat
   assert.deepEqual(f.commands, []);
 });
 
-test('foreground hosted opt-in comes from login environment and invalid URL keeps IPC available', {
-  skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
-}, async (t) => {
+test('foreground hosted opt-in comes from login environment and invalid URL keeps IPC available', { timeout: 10000 }, async (t) => {
   const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
   const running = runDesktopEntry({ ...f.input, env: { ...f.input.env, NORTUSCC_DESKTOP_LOCAL_ONLY: undefined }, args: [], signal: controller.signal,
     probe: async () => ({ env: { HOME: f.home, PATH: '/fake', NORTUSCC_STATE_DIR: f.stateRoot, NORTUSCC_HOSTED_URL: 'http://invalid/v1' } }) });
@@ -446,9 +441,7 @@ fs.renameSync(${JSON.stringify(pidFile + '.tmp')}, ${JSON.stringify(pidFile)});\
   assert.equal(existsSync(join(f.stateRoot, 'state.json')), false);
 });
 
-test('the desktop default enables signed-out account controls without signing in, trusting or contacting the service', {
-  skip: process.platform === 'win32' ? 'Unix IPC only' : false, timeout: 10000,
-}, async (t) => {
+test('the desktop default enables signed-out account controls without signing in, trusting or contacting the service', { timeout: 10000 }, async (t) => {
   const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
   let requests = 0;
   const running = runDesktopEntry({ ...f.input, args: [], env: { ...f.input.env, NORTUSCC_DESKTOP_LOCAL_ONLY: undefined },
@@ -677,6 +670,50 @@ test('startup maintenance read failure preserves the resolved root and setup wit
   assert.ok(f.commands.every(c => c.cmd === '/usr/bin/xcode-select'));
 });
 
+// The Windows app owns its agent (ADR 0040): helpers never register a login service there.
+const windowsInput = (f: ReturnType<typeof fixture>, arg: string) => ({ ...f.input, platform: 'win32' as const,
+  args: [arg, '--app', join(f.home, 'Nortuscc', 'Nortuscc.exe')] });
+const registers = (f: ReturnType<typeof fixture>) => f.commands.filter(c => !(c.cmd === 'git' && c.args[0] === '--version'));
+
+test('on Windows startup reports ready without registering a service or repairing connections', async t => {
+  const f = fixture(t);
+  assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0, f.stderr.join(''));
+  const result = startupResult(f);
+  assert.equal(result.outcome, 'ready'); assert.equal(result.stateRoot, f.stateRoot);
+  assert.equal(result.setup.needsSetup, false); assert.equal(result.maintenance.pending, false);
+  assert.deepEqual(registers(f), [], 'no scheduler, service manager or MCP host command');
+  for (const name of ['agent.json', 'app-service.json']) assert.equal(existsSync(join(f.stateRoot, 'agent', name)), false, name);
+});
+
+test('on Windows startup with a pending update still refuses recovery', async t => {
+  const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent'));
+  writeFileSync(join(f.stateRoot, 'agent/pending-update.json'), '{invalid');
+  assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0);
+  assert.equal(startupResult(f).outcome, 'recovery_failed');
+  assert.deepEqual(registers(f), []);
+});
+
+test('on Windows ensure and restart report the state root without registering, and maintenance reads as idle', async t => {
+  for (const arg of ['--ensure', '--restart', '--maintenance-state']) {
+    const f = fixture(t);
+    assert.equal(await runDesktopEntry(windowsInput(f, arg)), 0, `${arg}: ${f.stderr.join('')}`);
+    assert.deepEqual(JSON.parse(f.stdout.at(-1)!), arg === '--maintenance-state'
+      ? { pending: false, phase: null, fromVersion: null, toVersion: null, backupPath: null, diagnostic: null } : { stateRoot: f.stateRoot }, arg);
+    assert.deepEqual(registers(f), [], arg);
+    assert.equal(existsSync(join(f.stateRoot, 'agent', 'app-service.json')), false, arg);
+  }
+});
+
+test('on Windows app updates stay unsupported', async t => {
+  for (const arg of ['--prepare-update', '--recover-update']) {
+    const f = fixture(t);
+    const stdin = async function* () { yield '{"fromVersion":"1.0.0","toVersion":"1.1.0"}\n'; };
+    assert.equal(await runDesktopEntry({ ...windowsInput(f, arg), stdin: stdin() }), 1, arg);
+    assert.match(f.stderr.join(''), /not supported on Windows/, arg);
+    assert.deepEqual(registers(f), [], arg);
+  }
+});
+
 test('startup recovery verifies replacement health before clearing its journal and preserves user state', {
   skip: process.platform === 'win32' ? 'requires Unix agent IPC (ADR 0019)' : false, timeout: 10000,
 }, async t => {
@@ -754,7 +791,7 @@ test('startup refuses an unsafe recorded checkout before service commands or sta
   assert.equal(records.some(r => r.phase === 'runtime_metadata' || r.phase === 'maintenance_state' || r.phase === 'lifecycle'), false);
 });
 
-test('the installed app service accepts late registration and advertises real runtime metadata and machine target choices to MCP', {skip:process.platform === 'win32', timeout:10000}, async t => {
+test('the installed app service accepts late registration and advertises real runtime metadata and machine target choices to MCP', {timeout:10000}, async t => {
   const f=fixture(t); const controller=new AbortController(); t.after(() => controller.abort());
   const resources=join(f.home,'Nortuscc.app/Contents/Resources/agent-runtime'); mkdirSync(resources,{recursive:true});
   writeFileSync(join(resources,'runtime.json'),JSON.stringify({agentVersion:'bundle-hash',appVersion:'0.1.6',target:'darwin-arm64'}));
@@ -780,6 +817,26 @@ test('the installed app service accepts late registration and advertises real ru
     await assert.rejects(conn.request({command:'operation',operation:'inspect',input:{}}),error => error instanceof AgentError && error.code==='APP_UNAVAILABLE');
     assert.ok(f.commands.every(command=>command.cmd!=='launchctl'));
   } finally {conn?.close();controller.abort();assert.equal(await running,0);}
+});
+
+// MCP itself stays macOS-only, so the Windows app directory is not yet observable over IPC.
+test('on Windows the app service serves IPC with the installed runtime metadata', { timeout: 10000 }, async t => {
+  const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
+  const install = join(f.home, 'Nortuscc'); const resources = join(install, 'agent-runtime'); mkdirSync(resources, { recursive: true });
+  writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash', appVersion: '0.1.6', target: 'windows-x64' }));
+  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+  writeFileSync(join(f.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null,
+    installedBy: 'app', agentVersion: 'bundle-hash', appPath: join(install, 'Nortuscc.exe') }));
+  const running = runDesktopEntry({ ...f.input, platform: 'win32', args: [], resources, signal: controller.signal });
+  let conn: AgentConnection | undefined; const until = Date.now() + 5000;
+  while (!conn && Date.now() < until) {
+    try { conn = await connectAgent(f.paths, { client: 'mcp', runtimeId: 'bundle-hash', timeoutMs: 100 }); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+  }
+  try {
+    assert.ok(conn, f.stderr.join(''));
+    assert.deepEqual(conn.hello.app, { ownership: 'app', version: '0.1.6', runtimeId: 'bundle-hash' });
+    assert.ok(f.commands.every(c => c.cmd === 'git'), 'no scheduler or service manager');
+  } finally { conn?.close(); controller.abort(); assert.equal(await running, 0); }
 });
 
 test('a corrupt followed store leaves the agent running with the setup source unavailable', { timeout: 10000 }, async t => {

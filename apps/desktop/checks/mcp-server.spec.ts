@@ -21,6 +21,7 @@ import { operation } from '../src/operations.ts';
 import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
+import { listenAgent } from '../../../test/support/agent-endpoint.ts';
 
 // The app MCP entry refuses to start off macOS, so every case that launches it runs on macOS only.
 const test = process.platform === 'darwin' ? nodeTest : nodeTest.skip;
@@ -441,7 +442,7 @@ test('malformed replies and private failure codes are redacted and an identical-
       }
     });
   });
-  await new Promise<void>(done => server.listen(join(root, 'agent/agent.sock'), done));
+  await listenAgent(server, join(root, 'agent'));
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(done => server.close(() => done())); });
   const client = open(process.execPath, root); t.after(client.close); await client.initialize();
   const reply = await client.call('getRun', { runId: 'r' });
