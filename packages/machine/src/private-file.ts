@@ -10,6 +10,7 @@ const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === 'EN
 const info = (path: string) => lstat(path).catch((error) => { if (absent(error)) return undefined; throw error; });
 
 // Fixed ACL helper uses stdin for the path and action, never for file contents.
+// It writes only owner and DACL through SetAccessControl; Set-Acl would also write the SACL and need SeSecurityPrivilege.
 const windowsAclHelper = `
 $ErrorActionPreference = 'Stop'
 try {
@@ -30,7 +31,7 @@ try {
     $inherit = if ($entry.PSIsContainer) { [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [Security.AccessControl.InheritanceFlags]::None }
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
     $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $target -AclObject $acl
+    $entry.SetAccessControl($acl)
   } elseif ($inputValue.action -ne 'check') { exit 1 }
   $acl = Get-Acl -LiteralPath $target
   $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))

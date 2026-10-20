@@ -40,3 +40,12 @@ test('private-file interruption waits for helper cleanup and removes its staging
   await assert.rejects(lstat(path), { code: 'ENOENT' });
   assert.deepEqual(await readdir(join(directory, 'agent')), []);
 });
+
+test('private-file write twice over the same protected directory succeeds on Windows', { skip: process.platform !== 'win32' }, async (t) => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'machine-private-')));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = privateFile(join(directory, 'agent', 'machine-token'));
+  await Effect.runPromise(file.write('first'));
+  await Effect.runPromise(file.write('second'));
+  assert.equal(await Effect.runPromise(file.read()), 'second');
+});
