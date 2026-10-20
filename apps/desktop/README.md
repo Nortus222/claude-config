@@ -450,3 +450,14 @@ an intact expected bundle and fresh protocol/runtime health before clearing pend
 journal also refuses recovery while the native installer PID lives or liveness cannot be proved;
 PID reuse can conservatively require owner inspection. Recovery retains backups and machine state
 without promising automatic app rollback or crash-proof cleanup.
+
+## Windows (local, unsigned)
+
+Resources for a local win32-x64 build need Bun on PATH (or `DESKTOP_BUN_RUNTIME`) and Bun's `LICENSE.md` from the matching `bun-v<version>` tag:
+
+```
+gh api "repos/oven-sh/bun/contents/LICENSE.md?ref=bun-v1.3.14" -H "Accept: application/vnd.github.raw" > LICENSE.md
+DESKTOP_BUN_LICENSE=<path to LICENSE.md> npm run resources --workspace apps/desktop
+```
+
+This writes `src-tauri/resources/win32-x64/` (`bun.exe`, `agent.mjs`, `mcp.mjs`, `runtime.json`, licenses). App MCP stays macOS-only. `scripts/verify-runtime.mjs` checks finished macOS `.app` bundles only.
