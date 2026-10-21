@@ -838,25 +838,32 @@ test('the installed app service accepts late registration and advertises real ru
   } finally {conn?.close();controller.abort();assert.equal(await running,0);}
 });
 
-// MCP itself stays macOS-only, so the Windows app directory is not yet observable over IPC.
-test('on Windows the app service serves IPC with the installed runtime metadata', { timeout: 10000 }, async t => {
-  const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
-  const install = join(f.home, 'Nortuscc'); const resources = join(install, 'agent-runtime'); mkdirSync(resources, { recursive: true });
-  writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash', appVersion: '0.1.6', target: 'windows-x64' }));
-  mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
-  writeFileSync(join(f.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null,
-    installedBy: 'app', agentVersion: 'bundle-hash', appPath: join(install, 'Nortuscc.exe') }));
-  const running = runDesktopEntry({ ...f.input, platform: 'win32', args: [], resources, signal: controller.signal });
-  let conn: AgentConnection | undefined; const until = Date.now() + 5000;
-  while (!conn && Date.now() < until) {
-    try { conn = await connectAgent(f.paths, { client: 'mcp', runtimeId: 'bundle-hash', timeoutMs: 100 }); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
-  }
-  try {
-    assert.ok(conn, f.stderr.join(''));
-    assert.deepEqual(conn.hello.app, { ownership: 'app', version: '0.1.6', runtimeId: 'bundle-hash' });
-    assert.ok(f.commands.every(c => c.cmd === 'git'), 'no scheduler or service manager');
-  } finally { conn?.close(); controller.abort(); assert.equal(await running, 0); }
-});
+// App MCP on Windows authenticates against the install directory and the win32-x64 runtime only.
+for (const target of ['win32-x64', 'darwin-arm64'] as const) {
+  test(`on Windows the app service ${target === 'win32-x64' ? 'offers' : 'refuses'} MCP operations for a ${target} runtime`, { timeout: 10000 }, async t => {
+    const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
+    const install = join(f.home, 'Nortuscc'); const resources = join(install, 'agent-runtime'); mkdirSync(resources, { recursive: true });
+    writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash', appVersion: '0.1.6', target }));
+    mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+    writeFileSync(join(f.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null,
+      installedBy: 'app', agentVersion: 'bundle-hash', appPath: join(install, 'Nortuscc.exe') }));
+    const running = runDesktopEntry({ ...f.input, platform: 'win32', args: [], resources, signal: controller.signal });
+    let conn: AgentConnection | undefined; const until = Date.now() + 5000;
+    while (!conn && Date.now() < until) {
+      try { conn = await connectAgent(f.paths, { client: 'mcp', runtimeId: 'bundle-hash', timeoutMs: 100 }); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+    }
+    try {
+      assert.ok(conn, f.stderr.join(''));
+      assert.deepEqual(conn.hello.app, { ownership: 'app', version: '0.1.6', runtimeId: 'bundle-hash' });
+      assert.equal(conn.hello.operations?.available, target === 'win32-x64', conn.hello.operations?.reason);
+      if (target === 'win32-x64') {
+        const context = await conn.request<any>({ command: 'operation', operation: 'getContext', input: {} });
+        assert.equal(context.capabilities.applyChange.available, true);
+      }
+      assert.ok(f.commands.every(c => c.cmd === 'git'), 'no scheduler, service manager or notification launch');
+    } finally { conn?.close(); controller.abort(); assert.equal(await running, 0); }
+  });
+}
 
 test('a corrupt followed store leaves the agent running with the setup source unavailable', { timeout: 10000 }, async t => {
   const f = fixture(t);

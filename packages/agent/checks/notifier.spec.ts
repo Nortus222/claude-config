@@ -99,6 +99,16 @@ test('registered app payload and ACK waiter exist before launch; open exit alone
   assert.equal(notifier.acknowledge(commands[0]!.args.at(-1)!, true, 'expired'), false);
 });
 
+// The Windows app posts no notifications, so a registered app executable is never launched for one.
+test('on Windows a registered app is not launched to notify', async (t) => {
+  const commands: Command[] = [];
+  const f = fixture(t, 'win32', (c) => Effect.sync(() => { commands.push(c); return { code: 0, stdout: '' }; }));
+  await f.m.run(AgentStateStore.use((s) => s.update((v) => ({ ...v, installedBy: 'app', appPath: join(f.m.root, 'Nortuscc', 'Nortuscc.exe') }))));
+  const n = await f.create();
+  await Effect.runPromise(n.notify(status([item('x')])));
+  assert.deepEqual(commands, []);
+});
+
 test('connected refusal or timeout falls through to Linux; successful delivery deduplicates', async (t) => {
   for (const timeout of [false, true]) {
     const calls: Command[] = []; const f = fixture(t, 'linux', (c) => Effect.sync(() => { calls.push(c); return { code: 0, stdout: '' }; }));

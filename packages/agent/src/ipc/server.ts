@@ -253,7 +253,7 @@ export const serveIpc = (input: {
       const runtime = input.appRuntime;
       let reason: string | undefined;
       if (!runtime || state.installedBy !== 'app') reason = 'Open the installed desktop app to configure its background agent.';
-      else if (runtime.platform !== 'darwin' || runtime.target !== 'darwin-arm64') reason = 'MCP requires the supported macOS arm64 desktop runtime.';
+      else if (!(runtime.platform === 'darwin' && runtime.target === 'darwin-arm64') && !(runtime.platform === 'win32' && runtime.target === 'win32-x64')) reason = 'MCP requires the supported macOS arm64 or Windows x64 desktop runtime.';
       else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath === undefined || dirname(state.appPath) !== runtime.appDirectory) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
       else if (expectedRuntimeId !== undefined && expectedRuntimeId !== runtime.runtimeId) reason = 'The client runtime does not match the app; reconnect through the installed desktop app.';
       else {
