@@ -944,7 +944,8 @@ for (const target of ['win32-x64', 'darwin-arm64'] as const) {
 // The Windows app never takes over a CLI-installed agent, so it names the way to hand the agent over.
 for (const platform of ['win32', 'darwin'] as const) {
   test(`on ${platform} an app connecting to a CLI-installed agent is told how to proceed`, {
-    timeout: 10000, skip: platform === 'darwin' && process.platform !== 'darwin' ? 'requires macOS agent IPC' : false,
+    // The agent's endpoint and wording follow this host's platform, so each case runs on its own OS.
+    timeout: 10000, skip: platform !== process.platform ? `requires ${platform === 'win32' ? 'Windows' : 'macOS'} agent IPC` : false,
   }, async t => {
     const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
     const resources = join(f.home, 'Nortuscc', 'agent-runtime'); mkdirSync(resources, { recursive: true });
