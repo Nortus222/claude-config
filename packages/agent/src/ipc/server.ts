@@ -78,9 +78,9 @@ const idOf = (raw: unknown) =>
   typeof raw === 'object' && raw !== null && 'id' in raw && typeof raw.id === 'string' && raw.id.length > 0 && raw.id.length <= 100 ? raw.id : 'invalid';
 
 // Serves protocol v3 until the scope closes: on <stateRoot>/agent/agent.sock, or on Windows on a
-// fresh named pipe whose name it writes to agent/agent.pipe once listening (ADR 0040). Writes a
-// fresh token first; the caller holds agent.lock, so a socket or agent.pipe already there is stale
-// and replaced. Closing the scope closes the server and every connection and removes the socket or
+// fresh named pipe whose name it writes to agent/agent.pipe once listening (ADR 0040). The caller
+// holds agent.lock, so a socket or agent.pipe already there is stale: it is removed first, then a
+// fresh token is written. Closing the scope closes the server and every connection and removes the socket or
 // agent.pipe, and the token.
 export const serveIpc = (input: {
   readonly paths: MachinePathsValue;
