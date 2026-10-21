@@ -960,7 +960,7 @@ for (const platform of ['win32', 'darwin'] as const) {
       assert.ok(conn, f.stderr.join(''));
       assert.equal(conn.hello.operations?.available, false);
       assert.equal(conn.hello.operations?.reason, platform === 'win32'
-        ? 'The command-line tool manages this agent; run `nortuscc agent uninstall` to hand it to the desktop app.'
+        ? 'The command-line tool manages this agent; run `nortuscc agent uninstall`, then restart the agent from the desktop app or reopen the app.'
         : 'Open the installed desktop app to configure its background agent.');
     } finally { conn?.close(); controller.abort(); assert.equal(await running, 0); }
   });

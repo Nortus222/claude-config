@@ -253,7 +253,7 @@ export const serveIpc = (input: {
       const runtime = input.appRuntime;
       let reason: string | undefined;
       // The Windows app never takes over a CLI-installed agent (ADR 0040), so it names the hand-over instead.
-      if (input.platform === 'win32' && state.installedBy === 'cli') reason = 'The command-line tool manages this agent; run `nortuscc agent uninstall` to hand it to the desktop app.';
+      if (input.platform === 'win32' && state.installedBy === 'cli') reason = 'The command-line tool manages this agent; run `nortuscc agent uninstall`, then restart the agent from the desktop app or reopen the app.';
       else if (!runtime || state.installedBy !== 'app') reason = 'Open the installed desktop app to configure its background agent.';
       else if (!(runtime.platform === 'darwin' && runtime.target === 'darwin-arm64') && !(runtime.platform === 'win32' && runtime.target === 'win32-x64')) reason = 'MCP requires the supported macOS arm64 or Windows x64 desktop runtime.';
       else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath === undefined || dirname(state.appPath) !== runtime.appDirectory) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
