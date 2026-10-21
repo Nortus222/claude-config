@@ -89,6 +89,9 @@ pub enum Request {
     SubscribeOperations,
     Notification { notification_id: String },
     NotificationAck { notification_id: String, receipt: String, delivered: bool },
+    /// Only the Windows app stops its own agent child.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Shutdown,
 }
 impl Request {
     fn command(&self) -> &'static str {
@@ -111,6 +114,7 @@ impl Request {
             Self::Subscribe | Self::SubscribeOperations => "subscribe",
             Self::Notification { .. } => "notification",
             Self::NotificationAck { .. } => "notificationAck",
+            Self::Shutdown => "shutdown",
         }
     }
     fn timeout(&self) -> Duration {
@@ -2097,7 +2101,7 @@ mod onboarding_bridge_tests {
             assert!(reveal_place_on(true, || Ok(missing.clone()), place).unwrap_err().contains(here));
         }
         assert_eq!(REVEALER, if cfg!(windows) { "File Explorer" } else { "Finder" });
-        // Off macOS the refusal comes first: the state root is never looked up, and a missing place is not reported.
+        // Off macOS and Windows the refusal comes first: the state root is never looked up, and a missing place is not reported.
         for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
             assert_eq!(reveal_place_on(false, || panic!("looked up the state root"), place).unwrap_err(), "Show in Finder works only on macOS.");
         }

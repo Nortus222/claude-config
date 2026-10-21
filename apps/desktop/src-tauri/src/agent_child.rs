@@ -1,5 +1,5 @@
 //! Windows has no login service: the app owns its agent as a child in a kill-on-close Job Object.
-use crate::host::{Agent, CREATE_NO_WINDOW};
+use crate::host::{Agent, Request, CREATE_NO_WINDOW};
 use std::{
     fs::OpenOptions,
     os::windows::process::CommandExt,
@@ -18,6 +18,8 @@ use windows_sys::Win32::{
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long stopping may wait for a graceful shutdown before it kills the agent.
+const RETIRE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A Job Object that kills every process in it when its last handle closes.
 struct Job(HANDLE);
@@ -47,9 +49,34 @@ impl Job {
 impl Drop for Job { fn drop(&mut self) { unsafe { CloseHandle(self.0) }; } }
 
 /// A running agent child; dropping it kills the agent, then its job closes over any descendants.
-struct Owned { child: Child, _job: Job }
+struct Owned { child: Child, _job: Job, state_root: PathBuf }
 impl Drop for Owned {
     fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+}
+impl Owned {
+    /// Stops the agent so its own cleanup removes `agent.pipe` and `agent.token` and releases `agent.lock`:
+    /// a bounded `shutdown` request, then the kill in `drop` if it has not exited. A child that already
+    /// exited (e.g. on a lock held by a CLI agent) asks nothing, so that agent is left alone.
+    fn retire(mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let state_root = self.state_root.clone();
+            shut_down_within(Instant::now() + RETIRE_TIMEOUT, |deadline| ask_shutdown(&state_root, deadline), || !matches!(self.child.try_wait(), Ok(None)));
+        }
+    }
+}
+/// Hello with the agent's token, then `shutdown`, both before `deadline`; true once the agent accepted.
+fn ask_shutdown(state_root: &Path, deadline: Instant) -> bool {
+    Agent::connect_notification(state_root, deadline).and_then(|agent| agent.request_before(Request::Shutdown, deadline)).is_ok()
+}
+/// Asks for a shutdown, then polls `exited` until `deadline`. False when the request failed or the process
+/// outlived the deadline: the caller must kill it.
+fn shut_down_within(deadline: Instant, ask: impl FnOnce(Instant) -> bool, mut exited: impl FnMut() -> bool) -> bool {
+    if !ask(deadline) { return false; }
+    loop {
+        if exited() { return true; }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+    }
 }
 
 struct Slot<T> { owned: Option<T>, closed: bool }
@@ -68,25 +95,27 @@ pub struct AgentChild { slot: Mutex<Slot<Owned>>, log: Option<PathBuf> }
 impl AgentChild {
     /// `log` receives the child's stdout and stderr; without one they are discarded.
     pub fn new(log: Option<PathBuf>) -> Self { Self { slot: Mutex::new(Slot { owned: None, closed: false }), log } }
-    /// Makes an agent reachable at `state_root`: a reachable one (e.g. a foreground CLI agent) is kept
-    /// unless restarting. Readiness is the caller's `connect_ready`.
+    /// Keeps an agent already reachable at `state_root` (e.g. a foreground CLI agent); otherwise, or on
+    /// restart, spawns the app's own. A restart cannot replace a CLI agent: the new child exits on the lock
+    /// that agent holds, which keeps serving. Readiness is the caller's `connect_ready`.
     pub fn ensure(&self, resources: &Path, state_root: &Path, restart: bool) -> Result<(), String> {
         let reachable = || Agent::connect_notification(state_root, Instant::now() + PROBE_TIMEOUT).map(|agent| agent.disconnect()).is_ok();
-        ensure_with(&mut self.slot.lock().unwrap(), restart, reachable, || spawn(resources, self.log.as_deref()))
+        ensure_with(&mut self.slot.lock().unwrap(), restart, reachable, || spawn(resources, state_root, self.log.as_deref()))
     }
-    /// Kills the owned agent so a helper sees its lock released; a later `ensure` spawns anew.
+    /// Stops the owned agent (`Owned::retire`) so a helper sees its lock released; a later `ensure` spawns anew.
     pub fn stop(&self) {
         let owned = stop_with(&mut self.slot.lock().unwrap());
-        drop(owned);
+        if let Some(owned) = owned { owned.retire(); }
     }
-    /// Kills the owned agent and refuses later spawns. The agent's apply is pause-safe (ADR 0011).
+    /// Stops the owned agent and refuses later spawns. Shutdown and kill both cancel an apply, which is
+    /// pause-safe (ADR 0011).
     pub fn close(&self) {
         let owned = { let mut slot = self.slot.lock().unwrap(); slot.closed = true; slot.owned.take() };
-        drop(owned);
+        if let Some(owned) = owned { owned.retire(); }
     }
 }
 
-fn spawn(resources: &Path, log: Option<&Path>) -> Result<Owned, String> {
+fn spawn(resources: &Path, state_root: &Path, log: Option<&Path>) -> Result<Owned, String> {
     let bun = resources.join("bun.exe");
     let script = resources.join("agent.mjs");
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
@@ -100,7 +129,7 @@ fn spawn(resources: &Path, log: Option<&Path>) -> Result<Owned, String> {
     // The child runs briefly outside the job until assigned; std cannot spawn it suspended.
     let mut child = command.spawn().map_err(|e| format!("Cannot start the agent: {e}"))?;
     if let Err(error) = job.assign(&child) { let _ = child.kill(); let _ = child.wait(); return Err(error); }
-    Ok(Owned { child, _job: job })
+    Ok(Owned { child, _job: job, state_root: state_root.to_path_buf() })
 }
 fn output(log: Option<&Path>) -> (Stdio, Stdio) {
     let file = log.and_then(|path| {
@@ -173,13 +202,45 @@ mod tests {
         assert_eq!(*log.borrow(), ["terminate old", "spawn new"]);
     }
     #[test]
-    fn spawning_requires_the_bundled_runtime() {
-        let missing = std::env::temp_dir().join(format!("nortuscc-agent-child-{}", std::process::id()));
-        assert!(spawn(&missing, None).err().unwrap().starts_with("Missing bundled agent"));
-        assert!(spawn(Path::new("relative"), None).err().unwrap().starts_with("Missing bundled agent"));
+    fn retiring_asks_for_shutdown_then_waits_for_exit() {
+        let log = RefCell::new(Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exited = shut_down_within(deadline, |given| { assert_eq!(given, deadline); log.borrow_mut().push("shutdown"); true },
+            || { log.borrow_mut().push("poll"); log.borrow().len() == 3 });
+        assert!(exited, "An agent that exits in time needs no kill");
+        assert_eq!(*log.borrow(), ["shutdown", "poll", "poll"]);
     }
     #[test]
-    fn closing_the_job_kills_its_process_tree() {
+    fn retiring_falls_back_to_a_kill_when_refused_or_late() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(!shut_down_within(deadline, |_| false, || panic!("A refused shutdown is not waited for")));
+        let deadline = Instant::now() + Duration::from_millis(100);
+        assert!(!shut_down_within(deadline, |_| true, || false));
+        assert!(Instant::now() >= deadline && Instant::now() < deadline + Duration::from_secs(1), "The wait is bounded by the deadline");
+    }
+    #[test]
+    fn the_shutdown_request_says_hello_with_the_token_then_shutdown() {
+        let fixture = crate::host::fixtures::Fixture::new(|mut wire| {
+            let hello = wire.next().unwrap();
+            assert_eq!((hello["command"].as_str(), hello["token"].as_str()), (Some("hello"), Some("token-a")));
+            wire.reply(&hello, crate::host::fixtures::hello_result());
+            let shutdown = wire.next().unwrap();
+            assert_eq!(shutdown["command"], "shutdown");
+            wire.reply(&shutdown, serde_json::json!({"shutdown":true}));
+        });
+        assert!(ask_shutdown(&fixture.root, Instant::now() + RETIRE_TIMEOUT));
+        let root = fixture.root.clone();
+        fixture.finish();
+        assert!(!ask_shutdown(&root, Instant::now() + RETIRE_TIMEOUT), "No agent, no shutdown");
+    }
+    #[test]
+    fn spawning_requires_the_bundled_runtime() {
+        let missing = std::env::temp_dir().join(format!("nortuscc-agent-child-{}", std::process::id()));
+        assert!(spawn(&missing, &missing, None).err().unwrap().starts_with("Missing bundled agent"));
+        assert!(spawn(Path::new("relative"), &missing, None).err().unwrap().starts_with("Missing bundled agent"));
+    }
+    #[test]
+    fn closing_the_job_kills_its_assigned_child() {
         let job = Job::new().unwrap();
         let mut child = Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 > NUL"])
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().unwrap();
