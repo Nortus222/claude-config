@@ -1,6 +1,6 @@
 import React from 'react';
 import type { ConnectionsController, ConnectionsViewState } from './mcp-connections-controller.ts';
-import { thisMachine } from './device.ts';
+import { agentLifetime, thisMachine } from './device.ts';
 const labels = { configured: 'Configured', absent: 'Not configured', 'repair-needed': 'Repair needed', conflict: 'Needs review', unavailable: 'Unavailable' };
 const guidance = {
   installed: 'App guidance is installed in the managed instruction file.',
@@ -78,6 +78,6 @@ export function ConnectionsView({ state, controller }: { state: ConnectionsViewS
         </details> : null}
       </article>;
     })}</div>
-    <p className="row-sub mcp-connections-foot">Connections are configured on {thisMachine}. The background agent keeps working when this window is closed.</p>
+    <p className="row-sub mcp-connections-foot">Connections are configured on {thisMachine}. {agentLifetime}</p>
   </section>;
 }
