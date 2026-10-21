@@ -23,7 +23,7 @@ import { agentMachine } from '../../../packages/agent/checks/support/agent-machi
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
 import { listenAgent } from '../../../test/support/agent-endpoint.ts';
 
-// The app MCP entry refuses to start off macOS, so every case that launches it runs on macOS only.
+// Every case launches the entry from a macOS app layout with a POSIX shell, so it runs on macOS only.
 const test = process.platform === 'darwin' ? nodeTest : nodeTest.skip;
 const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
 const bundle = join(fixtureRoot, 'Test.app/Contents/Resources/agent-runtime');
