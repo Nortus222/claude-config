@@ -687,8 +687,10 @@ test('startup maintenance read failure preserves the resolved root and setup wit
 // The Windows app owns its agent (ADR 0040): helpers never register a login service there.
 const windowsInput = (f: ReturnType<typeof fixture>, arg: string) => ({ ...f.input, platform: 'win32' as const,
   args: [arg, '--app', join(f.home, 'Nortuscc', 'Nortuscc.exe')] });
-// Read-only Git (prerequisite and origin lookups) is the only process a Windows helper may run here.
-const registers = (f: ReturnType<typeof fixture>) => f.commands.filter(c => c.cmd !== 'git');
+// Read-only Git (the prerequisite probe and the checkout's origin lookup) is the only process a Windows helper may run here.
+const readOnlyGit = (c: Command) => c.cmd === 'git' && (c.args.join(' ') === '--version'
+  || (c.args.length === 5 && c.args[0] === '-C' && c.args.slice(2).join(' ') === 'remote get-url origin'));
+const registers = (f: ReturnType<typeof fixture>) => f.commands.filter(c => !readOnlyGit(c));
 const recorded = (f: ReturnType<typeof fixture>) => JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'));
 
 test('on Windows startup records the app as its agent\'s owner without registering a service', async t => {
@@ -731,6 +733,32 @@ test('on Windows startup leaves a CLI-installed agent to the CLI', async t => {
   assert.equal(startupResult(f).outcome, 'ready');
   assert.equal(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'), text);
   assert.deepEqual(registers(f), []);
+});
+
+// A running agent rewrites agent.json itself (pause, policy), so ownership is recorded only while none runs.
+test('on Windows a running agent blocks recording a new owner but not an unchanged one', async t => {
+  const live = (f: ReturnType<typeof fixture>) => writeFileSync(join(f.stateRoot, 'agent/agent.lock'), JSON.stringify({ pid: process.pid }));
+  const backups = (f: ReturnType<typeof fixture>) => existsSync(f.paths.backups) ? readdirSync(f.paths.backups, { recursive: true }).length : 0;
+  for (const arg of ['--startup', '--ensure', '--restart']) {
+    const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent')); live(f);
+    const input = arg === '--startup' ? { ...startupInput(f), ...windowsInput(f, arg) } : windowsInput(f, arg);
+    const code = await runDesktopEntry(input);
+    if (arg === '--startup') { assert.equal(code, 0, f.stderr.join('')); assert.equal(startupResult(f).outcome, 'ensure_failed', arg); }
+    else { assert.equal(code, 1, arg); assert.deepEqual(f.stdout, [], arg); }
+    if (arg !== '--startup') assert.match(f.stderr.join(''), /another agent is running.*stop it/i, arg);
+    assert.equal(existsSync(join(f.stateRoot, 'agent/agent.json')), false, `${arg}: no owner is written`);
+    assert.equal(existsSync(join(f.stateRoot, 'agent/setups.json')), false, `${arg}: no trust is established`);
+    assert.equal(backups(f), 0, arg);
+    assert.deepEqual(registers(f), [], arg);
+  }
+  const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent'));
+  const text = JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: { reason: 'keep', at: '2026-10-20T00:00:00Z' },
+    installedBy: 'app', agentVersion: 'bundle-hash', appPath: windowsInput(f, '--startup').args[2] });
+  writeFileSync(join(f.stateRoot, 'agent/agent.json'), text); writeFileSync(join(f.stateRoot, 'agent/setups.json'), '{"version":1,"setups":[]}'); live(f);
+  assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0, f.stderr.join(''));
+  assert.equal(startupResult(f).outcome, 'ready');
+  assert.equal(await runDesktopEntry(windowsInput(f, '--restart')), 0, f.stderr.join(''));
+  assert.equal(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'), text);
 });
 
 test('on Windows startup with a pending update still refuses recovery', async t => {
