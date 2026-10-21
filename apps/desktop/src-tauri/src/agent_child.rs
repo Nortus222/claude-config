@@ -61,7 +61,8 @@ fn ensure_with<T>(slot: &mut Slot<T>, restart: bool, reachable: impl FnOnce() ->
     slot.owned = Some(spawn()?);
     Ok(())
 }
-
+/// Takes the owned child, if any, for termination; the slot stays usable.
+fn stop_with<T>(slot: &mut Slot<T>) -> Option<T> { slot.owned.take() }
 /// The app's agent child, if any; closing it on exit kills the agent.
 pub struct AgentChild { slot: Mutex<Slot<Owned>>, log: Option<PathBuf> }
 impl AgentChild {
@@ -72,6 +73,11 @@ impl AgentChild {
     pub fn ensure(&self, resources: &Path, state_root: &Path, restart: bool) -> Result<(), String> {
         let reachable = || Agent::connect_notification(state_root, Instant::now() + PROBE_TIMEOUT).map(|agent| agent.disconnect()).is_ok();
         ensure_with(&mut self.slot.lock().unwrap(), restart, reachable, || spawn(resources, self.log.as_deref()))
+    }
+    /// Kills the owned agent so a helper sees its lock released; a later `ensure` spawns anew.
+    pub fn stop(&self) {
+        let owned = stop_with(&mut self.slot.lock().unwrap());
+        drop(owned);
     }
     /// Kills the owned agent and refuses later spawns. The agent's apply is pause-safe (ADR 0011).
     pub fn close(&self) {
@@ -151,6 +157,20 @@ mod tests {
         assert!(slot.owned.is_none());
         slot.closed = true;
         assert!(ensure_with(&mut slot, false, || false, || panic!("Closed")).is_err());
+    }
+    #[test]
+    fn stopping_terminates_the_owned_child_and_leaves_the_slot_open() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut slot = slot(Some("old"), &log);
+        stop_with(&mut slot);
+        assert!(slot.owned.is_none() && !slot.closed);
+        assert_eq!(*log.borrow(), ["terminate old"]);
+        stop_with(&mut slot);
+        assert_eq!(log.borrow().len(), 1, "Stopping an empty slot is a no-op");
+        let spawned = log.clone();
+        ensure_with(&mut slot, true, || panic!("Restart never probes"), || { spawned.borrow_mut().push("spawn new".into()); Ok(Fake("new", spawned.clone())) }).unwrap();
+        assert_eq!(slot.owned.as_ref().unwrap().0, "new");
+        assert_eq!(*log.borrow(), ["terminate old", "spawn new"]);
     }
     #[test]
     fn spawning_requires_the_bundled_runtime() {

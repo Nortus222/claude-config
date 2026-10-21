@@ -51,6 +51,9 @@ impl Owner {
     }
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<(Agent, bool), String> {
         let trace = startup_diagnostics::trace(setup.operation());
+        // Restart replaces the app's own agent anyway; stopping it first frees its lock for the helper's ownership check.
+        #[cfg(windows)]
+        if matches!(setup, Setup::Restart) { self.child.stop(); }
         let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
         let state_root = if recovered {
             let result=update_service::recover(&self.resources,&self.app.package_info().version.to_string());
