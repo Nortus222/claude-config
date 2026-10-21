@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 const root = fileURLToPath(new URL('..', import.meta.url));
-const target = process.env.DESKTOP_TARGET || `${process.platform}-${process.arch}`;
+const target = `${process.platform}-${process.arch}`;
 if (target !== 'darwin-arm64' && target !== 'win32-x64')
   throw new Error('Desktop resources target darwin-arm64 or win32-x64.');
 const windows = target === 'win32-x64';
