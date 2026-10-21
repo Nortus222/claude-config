@@ -135,7 +135,7 @@ capabilities must update the checked inventory before claiming availability.
 
 ## Local setup
 
-This package targets macOS arm64. It needs Node 24+, npm, Bun 1.3+, Rust, Xcode command line tools, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Other packaging targets are not validated. Windows agent IPC remains unsupported under ADR 0019.
+This package targets macOS arm64. It needs Node 24+, npm, Bun 1.3+, Rust, Xcode command line tools, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). Other packaging targets are not validated. Windows agent IPC uses a named pipe under ADR 0040; see "Windows (local, unsigned)".
 
 The bundler accepts only a standalone Bun executable whose linked libraries are in macOS system directories. Obtain `LICENSE.md` from the matching `bun-v<version>` tag of [oven-sh/bun](https://github.com/oven-sh/bun) and set `DESKTOP_BUN_LICENSE`. Installed-app startup downloads no code.
 
@@ -184,7 +184,7 @@ npm test -w apps/desktop
 npm run test:resources -w apps/desktop
 ```
 
-`test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and independent Bun, agent and MCP hashes, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket, POSIX shell and smoke checks report explicit Windows skips because those desktop behaviors are unsupported under ADR 0019. Lifecycle checks still use temporary state paths and fake service managers on Windows.
+`test:resources` bundles the agent into a temporary directory, copies the installed Bun runtime and license notices, records its version and independent Bun, agent and MCP hashes, and removes the fixture after the checks. It downloads the matching Bun license unless `DESKTOP_BUN_LICENSE` names a local copy; `DESKTOP_BUN_RUNTIME` can select a runtime. Windows runs the resource contents, hash and real `bun.exe --version` checks. Unix socket and POSIX shell checks report explicit Windows skips. Lifecycle checks still use temporary state paths and fake service managers on Windows.
 
 Unknown local setup displays **Opening Nortuscc**; first-run consent appears only after a validated setup-needed reply. Existing installations wait for genuine connection and initial reads. `status` may answer `NO_REPORT` before the first inspection; this remains connected with a waiting explanation and a read-only **Recheck agent status** action. A current report completes that wait, and an active apply exposes the existing Cancel control. Actual transport, setup and inspection failures remain visible with explicit recheck or Settings recovery; they are not treated as startup progress. Startup uses one focused loading card with confirmed Local setup, Agent connection and Local inspection milestones. Activity is indeterminate, announced politely and respects reduced motion. Updates remain available in a secondary disclosure independently of agent readiness; update activity, availability and retry open it automatically, while idle checks start compact. `UNAUTHORIZED` or a lost connection shows offline with Restart agent. Paused automatic apply remains visible and does not prevent a person applying. Cancel remains available when a reopened window sees active application; a refusal leaves activity visible until the agent reports idle.
 
@@ -460,7 +460,11 @@ gh api "repos/oven-sh/bun/contents/LICENSE.md?ref=bun-v1.3.14" -H "Accept: appli
 DESKTOP_BUN_LICENSE=<path to LICENSE.md> npm run resources --workspace apps/desktop
 ```
 
-This writes `src-tauri/resources/win32-x64/` (`bun.exe`, `agent.mjs`, `mcp.mjs`, `runtime.json`, licenses). App MCP stays macOS-only. `scripts/verify-runtime.mjs` checks finished macOS `.app` bundles only.
+This writes `src-tauri/resources/win32-x64/` (`bun.exe`, `agent.mjs`, `mcp.mjs`, `runtime.json`, licenses). `scripts/verify-runtime.mjs` checks finished macOS `.app` bundles only.
+
+`DESKTOP_BUN_LICENSE` is required: the build fails without it. `npm run desktop:build:windows --workspace apps/desktop` writes the release exe with `agent-runtime\` beside it, plus an NSIS installer under `src-tauri/target/release/bundle/nsis/`. Both are unsigned and there is no updater. App MCP works on Windows.
+
+On Windows the app spawns and owns the agent as a kill-on-close job child; no login service is registered (ADR 0040). An agent installed by the CLI keeps running under its own service, so run `nortuscc agent uninstall` to hand it to the app.
 
 After `npm run desktop:build:windows`, smoke the build on a throwaway profile: a foreground agent, a raw `hello` over its pipe, then the exe's `--smoke`. Without an exe argument only the bundled agent is smoked.
 

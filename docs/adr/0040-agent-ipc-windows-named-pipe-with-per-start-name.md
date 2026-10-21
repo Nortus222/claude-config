@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # On Windows the agent serves IPC on a named pipe whose name is per-start
@@ -35,9 +35,13 @@ user's SID.
 
 - A stale `agent.pipe` left by a dead agent is the remaining exposure: another user could create
   that name and impersonate the agent. A token sent to it is worthless, because each start mints
-  a new one. The Rust host's SID check refuses such a server. TypeScript clients (CLI, MCP) have
-  no FFI for that check yet, so for them a spoofed agent could return false status until the
-  real agent starts again.
+  a new one. The Rust host's SID check refuses such a server. TypeScript clients (the CLI and
+  App MCP, which runs on Windows) have no FFI for that check and get name protection only. A
+  spoofed agent could return false status, and could feed false tool results to an MCP host,
+  until the real agent starts again.
+- On Windows the desktop app owns the agent: it spawns the bundled agent as a child in a
+  kill-on-close job, so the agent dies with the app. There is no Task Scheduler login service for
+  an app-owned agent.
 - Another user can hold read-only instances open until the 10 s handshake timer closes them:
   a nuisance, not a leak.
 - The protocol, token, framing and error codes are unchanged; only how a client finds and opens

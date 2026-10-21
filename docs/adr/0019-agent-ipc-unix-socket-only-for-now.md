@@ -1,5 +1,6 @@
 ---
 status: accepted
+note: amended by 0040 for Windows
 ---
 
 # The agent serves IPC on a Unix socket only, for now
