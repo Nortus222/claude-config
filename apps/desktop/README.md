@@ -461,3 +461,9 @@ DESKTOP_BUN_LICENSE=<path to LICENSE.md> npm run resources --workspace apps/desk
 ```
 
 This writes `src-tauri/resources/win32-x64/` (`bun.exe`, `agent.mjs`, `mcp.mjs`, `runtime.json`, licenses). App MCP stays macOS-only. `scripts/verify-runtime.mjs` checks finished macOS `.app` bundles only.
+
+After `npm run desktop:build:windows`, smoke the build on a throwaway profile: a foreground agent, a raw `hello` over its pipe, then the exe's `--smoke`. Without an exe argument only the bundled agent is smoked.
+
+```
+npm run smoke:windows --workspace apps/desktop -- src-tauri/target/release/nortuscc-desktop-validation.exe
+```
