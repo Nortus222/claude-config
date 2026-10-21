@@ -2,10 +2,11 @@ import React from 'react';
 import type { RunView } from '@nortuscc/agent/operations';
 import { AGENT_LOG, backupFolder, changeTitle, runCauses } from './copy.ts';
 import type { RevealPlace } from './setup-sync-controller.ts';
+import { fileManager, thisMachine } from './device.ts';
 
 const changes = (n: number) => `${n} change${n === 1 ? '' : 's'}`;
 
-// Shows a place in Finder; resolves to why it couldn't, or null once shown.
+// Shows a place in the file manager; resolves to why it couldn't, or null once shown.
 export type Reveal = (place: RevealPlace) => Promise<string | null>;
 
 // What a run wrote and did not: the agent's evidence when it kept some, else its step outcomes against the
@@ -19,12 +20,12 @@ export function runCounts(run: RunView): { written: number; notWritten: number |
   return { written: ok, notWritten: planned === null ? null : Math.max(planned - ok, run.steps.length - ok), backupIds: [] };
 }
 
-// Where to look after a run stops: the agent log and the backups folder, each with Show in Finder when the
+// Where to look after a run stops: the agent log and the backups folder, each with a reveal button when the
 // host can show it.
 export function RunPlaces({ backupIds, onReveal }: { backupIds: readonly string[]; onReveal?: Reveal }) {
   const [problem, setProblem] = React.useState<string | null>(null);
   const show = (place: RevealPlace, name: string) => onReveal
-    ? <button className="link" aria-label={`Show ${name} in Finder`} onClick={() => { setProblem(null); void onReveal(place).then(setProblem); }}>Show in Finder</button> : null;
+    ? <button className="link" aria-label={`Show ${name} in ${fileManager}`} onClick={() => { setProblem(null); void onReveal(place).then(setProblem); }}>Show in {fileManager}</button> : null;
   return <>
     <dl className="setup-sync-facts run-places">
       <dt>Agent log</dt><dd><code>{AGENT_LOG}</code> {show('agentLog', 'the agent log')}<small>What the agent did and why it stopped.</small></dd>
@@ -66,7 +67,7 @@ export function RunRecovery({ run, onRepreview, onAskAbandon, onAbandon, onKeep,
       <div className="setup-sync-actions"><button className="danger" disabled={disabled} onClick={onAbandon}>Abandon</button>
         <button onClick={onKeep}>Keep</button></div>
     </div> : run.state === 'interrupted' ? <>
-      <p className="muted">Re-preview checks this Mac again and prepares a fresh plan. It doesn’t block other changes or app updates.</p>
+      <p className="muted">Re-preview checks {thisMachine} again and prepares a fresh plan. It doesn’t block other changes or app updates.</p>
       <div className="setup-sync-actions"><button disabled={disabled} onClick={onRepreview}>Re-preview</button>
         <button disabled={disabled} onClick={onAskAbandon}>Abandon</button>{report ? <CopyDetails text={report} /> : null}</div>
     </> : null}

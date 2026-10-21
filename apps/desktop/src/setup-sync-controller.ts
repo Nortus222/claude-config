@@ -4,6 +4,7 @@ import type { Bridge, HostEvent } from './bridge.ts';
 import type { MachineBusy, MachineController } from './controller.ts';
 import { errorText } from './copy.ts';
 import { operation } from './operations.ts';
+import { ThisMachine, fileManager, thisMachine } from './device.ts';
 
 type Review = OperationOutput<'setupReview'>;
 type Source = OperationOutput<'inspectSetups'>['items'][number];
@@ -39,10 +40,10 @@ const SCOPE = { kind: 'machine' } as const;
 const PAGE_SIZE = 100;
 const MAX_CHOICES = 1000;
 const MAX_RUN_PAGES = 5;
-const STALE = 'This Mac changed. Review the updated plan.';
+const STALE = `${ThisMachine} changed. Review the updated plan.`;
 const PROFILE_CHANGED = 'Your profile changed. Review the new values and choose again.';
-const MAC_CHANGED = 'This Mac changed. Preview again.';
-const REVIEW_AGAIN = 'Nothing was applied because your profile or this Mac changed. A fresh review is needed before choosing again.';
+const MAC_CHANGED = `${ThisMachine} changed. Preview again.`;
+const REVIEW_AGAIN = `Nothing was applied because your profile or ${thisMachine} changed. A fresh review is needed before choosing again.`;
 // What a person saw of a row when choosing for it.
 const seen = (row: Review['rows'][number]) => JSON.stringify([row.change, row.held, row.conflict, row.before ?? null, row.after ?? null, row.mine ?? null]);
 // Runs that change this Mac; the Changes page shows one while it is active or interrupted.
@@ -427,12 +428,12 @@ export class SetupSyncController {
     if (change.kind !== 'reconcile') return this.prepare(change);
     const waiting = new Set(applyKeys(this.state.inspection));
     const only = change.only.filter(key => waiting.has(key));
-    if (!only.length) { this.update({ localError: 'Nothing from that run is still waiting to apply on this Mac.' }); return; }
+    if (!only.length) { this.update({ localError: `Nothing from that run is still waiting to apply on ${thisMachine}.` }); return; }
     await this.prepare({ ...change, only });
   }
   // Shows the agent log or the backups folder in Finder. Resolves to why it couldn't, or null once shown.
   async reveal(place: RevealPlace): Promise<string | null> {
-    if (!this.bridge) return 'Open the desktop app to show files in Finder.';
+    if (!this.bridge) return `Open the desktop app to show files in ${fileManager}.`;
     try { await this.bridge.invoke('reveal_place', { place }); return null; } catch (error) { return errorText(error); }
   }
   // Opens the one confirmation Abandon needs; confirming calls abandon().

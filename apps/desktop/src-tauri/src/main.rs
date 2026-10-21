@@ -599,7 +599,12 @@ fn main() {
     }));
     let startup=Arc::new(startup::Startup::default());
     let setup_startup=startup.clone();
-    let exit_code=tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Declared before the page loads, so the renderer names this PC and File Explorer (src/device.ts); macOS keeps its default wording.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("nortuscc-platform")
+        .js_init_script("Object.defineProperty(window, '__NORTUSCC_PLATFORM__', { value: 'windows' });").build());
+    let exit_code=builder
         .setup(move |app| {
             if let Ok(directory) = app.path().app_log_dir() { startup_diagnostics::initialize(&directory); }
             let trace = startup_diagnostics::trace(Operation::AppStartup);

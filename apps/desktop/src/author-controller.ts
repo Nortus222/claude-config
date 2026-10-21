@@ -2,6 +2,7 @@ import type { ChangePreview, OperationChange, OperationInput, OperationName, Ope
 import type { Bridge, HostEvent } from './bridge.ts';
 import { AUTHOR_RUN_KINDS, type MachineController } from './controller.ts';
 import { operation } from './operations.ts';
+import { thisMachine } from './device.ts';
 
 export type AuthorIntent = Extract<OperationChange, { kind: 'editDraft' }>['intent'];
 type DraftEntry = OperationOutput<'drafts'>['drafts'][number];
@@ -155,7 +156,7 @@ export class AuthorController {
       this.update({ capture: null });
       const file = await this.call(mark, 'machineFile', { scope: SCOPE, fileId, profile });
       if (!file) return;
-      if (!file.exists) throw new Error('This file is absent on this Mac. Nothing was captured.');
+      if (!file.exists) throw new Error(`This file is absent on ${thisMachine}. Nothing was captured.`);
       if (file.truncated) throw new Error('This file exceeds the capture size limit. Partial text cannot be captured.');
       const path = this.state.profiles?.profiles.find(p => p.name === profile)?.files.find(f => f.fileId === fileId)?.path;
       const affectedProfiles = path ? this.state.profiles!.profiles.filter(p => p.files.some(f => f.path === path)).map(p => p.name) : [profile];

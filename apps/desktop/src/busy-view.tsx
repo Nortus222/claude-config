@@ -1,5 +1,6 @@
 import React from 'react';
 import type { MachineBusy } from './controller.ts';
+import { ThisMachine } from './device.ts';
 
 // "12 of 30", when the run reports its planned steps.
 export const busyCount = (busy: MachineBusy) => busy.total !== null && busy.done !== null ? `${busy.done} of ${busy.total}` : null;
@@ -18,7 +19,7 @@ export function BusyProgress({ busy }: { busy: MachineBusy }) {
 // A page section for a busy Mac: what it is doing, an optional action, and that the page reads again
 // when it finishes.
 export function BusyCard({ busy, action, note = 'This page updates by itself when it finishes.' }: { busy: MachineBusy; action?: React.ReactNode; note?: string }) {
-  return <section className="card busy-card" aria-label="This Mac is busy">
+  return <section className="card busy-card" aria-label={`${ThisMachine} is busy`}>
     <BusyProgress busy={busy} />
     <div className="card-head"><p>{note}</p>{action ?? null}</div>
   </section>;

@@ -9,6 +9,7 @@ import type { MachineController, ViewState } from './controller.ts';
 import { incomingCounts, type SetupSyncController, type SetupSyncState } from './setup-sync-controller.ts';
 import { draftCount, type HomeState } from './home-controller.ts';
 import { errorText, repoName } from './copy.ts';
+import { THIS_MACHINE, ThisMachine, thisMachine } from './device.ts';
 
 export type Screen = 'home' | 'changes' | 'skills' | 'profiles' | 'upstreams' | 'publish' | 'settings';
 // Counts shown beside a screen's name: undecided incoming changes, unpublished drafts, an app update.
@@ -23,7 +24,7 @@ export function navBadges(changes: Pick<SetupSyncState, 'review'>, home: Pick<Ho
   };
 }
 const groups = [
-  ['THIS MAC', [['home', 'Home'], ['changes', 'Changes'], ['skills', 'Skills']]],
+  [THIS_MACHINE, [['home', 'Home'], ['changes', 'Changes'], ['skills', 'Skills']]],
   ['MY PROFILES', [['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['publish', 'Publish']]],
 ] as const;
 // A notification click names no notification. Item notifications count incoming changes, decided on Changes;
@@ -48,7 +49,7 @@ function DisconnectedBanner({ machine, onReconnect }: { machine: ViewState; onRe
 // A failed inspection on a connected agent stays visible on every screen with a read-only retry.
 function InspectionBanner({ machine, onRecheck }: { machine: ViewState; onRecheck: () => void }) {
   return <div className="alert shell-banner" role="alert">
-    <div><strong>This Mac couldn’t be checked.</strong> <span>{errorText(machine.initialReadError)}</span></div>
+    <div><strong>{ThisMachine} couldn’t be checked.</strong> <span>{errorText(machine.initialReadError)}</span></div>
     <button disabled={machine.pending || machine.status?.applying === true} onClick={onRecheck}>Check again</button>
   </div>;
 }
@@ -104,7 +105,7 @@ export function SetupView({ state, controller }: { state: SetupViewState; contro
   return (
     <main className="onboarding">
       <p className="eyebrow">NORTUSCC / FIRST RUN</p>
-      <h1>Set up this Mac</h1>
+      <h1>Set up {thisMachine}</h1>
       <p className="intro">Prepare the local setup and background agent. Review configuration changes before applying them.</p>
       <section className="form-section">
         <h2>Setup repository</h2>
@@ -144,19 +145,19 @@ function StartupCard({ stage, title, detail, error = false, children }: {
   return <>
     {!error ? <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{`${title}. ${detail}`}</p> : null}
     <section className={`startup-card${error ? ' startup-attention' : ''}`} aria-busy={!error} aria-labelledby="startup-heading">
-    <div className="startup-brand"><span className="startup-mark" aria-hidden="true">N</span><p className="eyebrow">NORTUSCC / THIS MAC</p></div>
+    <div className="startup-brand"><span className="startup-mark" aria-hidden="true">N</span><p className="eyebrow">NORTUSCC / {THIS_MACHINE}</p></div>
     <div className="startup-message">
       <span className={error ? 'startup-attention-mark' : 'startup-activity'} aria-hidden="true">{error ? '!' : null}</span>
       <div><h1 id="startup-heading">{title}</h1><p role={error ? 'alert' : undefined}>{detail}</p></div>
     </div>
     <ol className="startup-milestones" aria-label="Startup readiness">
-      {['Local setup', 'Agent connection', 'Checking this Mac'].map((label, index) => <li key={label}
+      {['Local setup', 'Agent connection', `Checking ${thisMachine}`].map((label, index) => <li key={label}
         aria-current={!error && index === stage ? 'step' : undefined} className={index < stage ? 'complete' : index === stage ? 'current' : ''}>
         <span className="startup-step-mark" aria-hidden="true">{index < stage ? '✓' : index + 1}</span>
         <span>{label}</span><span className="startup-step-state">{index < stage ? 'Complete' : index === stage ? error ? 'Needs attention' : 'In progress' : 'Waiting'}</span>
       </li>)}
     </ol>
-    <div className="startup-next">{children ?? <p className="muted">Your configuration will be ready to review when the agent finishes checking this Mac.</p>}</div>
+    <div className="startup-next">{children ?? <p className="muted">Your configuration will be ready to review when the agent finishes checking {thisMachine}.</p>}</div>
     </section>
   </>;
 }
@@ -221,9 +222,9 @@ function LegacyOfferedSetup({ setup, controller, disabled }: { setup: WireHosted
       <div className="row-main"><h3 className="row-title">{setup.name}</h3><p className="row-sub">{repoName(setup.repoUrl)}</p>
         <label className="choice">
           <input type="checkbox" disabled={disabled} checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-          I trust this repository to supply setup changes on this Mac.
+          I trust this repository to supply setup changes on {thisMachine}.
         </label></div>
-      <div className="row-trail"><button disabled={disabled || !consent} onClick={() => void controller.trustSetup(setup.setupId, consent)}>Trust on this Mac</button></div>
+      <div className="row-trail"><button disabled={disabled || !consent} onClick={() => void controller.trustSetup(setup.setupId, consent)}>Trust on {thisMachine}</button></div>
     </li>
   );
 }
@@ -300,7 +301,7 @@ export function SettingsView({ machine, state, controller, machineController, on
               <span className="row-main"><span>Share this machine's status summary</span><span className="row-sub">Displayed reporting settings include local queued changes.</span></span>
             </label></li>
           </> : null}
-          <li className="row"><div className="row-main"><p className="row-title">Local agent</p><p className="row-sub">{reconnect ?? 'Restarts the background agent on this Mac.'}</p></div>
+          <li className="row"><div className="row-main"><p className="row-title">Local agent</p><p className="row-sub">{reconnect ?? `Restarts the background agent on ${thisMachine}.`}</p></div>
             <div className="row-trail"><button disabled={reconnect !== null} title={reconnect ?? undefined} onClick={() => void machineController.restart()}>Reconnect agent</button></div>
             {machine.hello ? <details className="settings-details"><summary>Details</summary><p className="agent-version">Agent version {machine.hello.agentVersion}</p></details> : null}</li>
         </ul>

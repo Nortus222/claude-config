@@ -3,6 +3,7 @@ import type { Bridge, Envelope, HostEvent } from './bridge.ts';
 import type { MachineController, ViewState } from './controller.ts';
 import { operation } from './operations.ts';
 import { changeTitle, runCauses } from './copy.ts';
+import { thisMachine } from './device.ts';
 
 export type SkillChoice = 'on' | 'off' | 'inherit';
 export type SkillRow = Extract<OperationOutput<'inspectIntent'>['items'][number], { kind: 'skill' }>;
@@ -28,7 +29,7 @@ export type SkillsOptions = { readonly maintenance?: () => string | null };
 const SCOPE = { kind: 'machine' } as const;
 const PAGE_SIZE = 100;
 const MAX_ERROR = 300;
-const BROWSER = 'Open the desktop app to manage skills on this Mac.';
+const BROWSER = `Open the desktop app to manage skills on ${thisMachine}.`;
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR);
 const live = (run: RunView | null) => run?.state === 'accepted' || run?.state === 'running';
 const sameSkill = (a: { source: string; name: string }, b: { source: string; name: string }) => a.source === b.source && a.name === b.name;
@@ -46,12 +47,12 @@ export function eligibleUpdates(view: { readonly items: readonly OperationOutput
 export function mutationBlocked(machine: ViewState, skills: SkillsViewState, maintenance: string | null): string | null {
   if (!skills.native || machine.connection === 'browser') return BROWSER;
   if (machine.connection !== 'connected') return 'Reconnect the local agent to change skills.';
-  if (live(skills.run) || machine.run?.outcome === 'running' || machine.status?.applying) return 'An apply is running on this Mac. Wait for it to finish.';
+  if (live(skills.run) || machine.run?.outcome === 'running' || machine.status?.applying) return `An apply is running on ${thisMachine}. Wait for it to finish.`;
   if (machine.pending || machine.initialReadPending) return 'Another machine action is in progress.';
   if (maintenance) return maintenance;
   if (skills.operation) return 'A Skills request is in progress.';
   if (!skills.view) return 'Skills has not been read yet.';
-  if (skills.outdated) return 'Skills is reading this Mac again.';
+  if (skills.outdated) return `Skills is reading ${thisMachine} again.`;
   return skills.stale;
 }
 
@@ -83,7 +84,7 @@ export class SkillsController {
     this.session = machine.state.session;
     this.connected = machine.state.connection === 'connected';
     this.state = { native: bridge !== null, view: null, check: null, operation: null, saving: null, selected: [], preview: null, run: null,
-      stale: null, outdated: false, error: null, detail: bridge ? 'Open Skills to read this Mac\'s skills.' : BROWSER };
+      stale: null, outdated: false, error: null, detail: bridge ? `Open Skills to read ${thisMachine}'s skills.` : BROWSER };
     this.unlistenMachine = machine.subscribe(() => {
       const connected = machine.state.connection === 'connected', reconnect = connected && !this.connected;
       this.connected = connected;
@@ -92,7 +93,7 @@ export class SkillsController {
         this.epoch++;
         this.refreshFlight = null;
         this.update({ view: null, check: null, selected: [], preview: null, operation: null, saving: this.state.run ? this.state.saving : null, stale: null, outdated: true, error: null,
-          detail: 'Reconnect or reload Skills to read this Mac\'s skills.' });
+          detail: `Reconnect or reload Skills to read ${thisMachine}'s skills.` });
       }
       if (reconnect && this.state.run) void this.refreshRun();
       this.catchUp();
@@ -177,9 +178,9 @@ export class SkillsController {
       const view = await this.readInventory(current);
       if (view) {
         this.pendingInventory = false;
-        this.update({ view, check: null, selected: [], preview: null, stale: null, outdated: false, detail: 'Skills read from this Mac.' });
+        this.update({ view, check: null, selected: [], preview: null, stale: null, outdated: false, detail: `Skills read from ${thisMachine}.` });
       }
-    }, { detail: 'Reading skills on this Mac', outdated: false });
+    }, { detail: `Reading skills on ${thisMachine}`, outdated: false });
   }
   setChoice(source: string, name: string, choice: SkillChoice) {
     if (!this.ready() || this.blocked()) return Promise.resolve();
@@ -224,7 +225,7 @@ export class SkillsController {
         if (live(reply.data)) continue;
         if (reply.data.state !== 'succeeded') {
           const ended = `${changeTitle(reply.data.intent.change.kind)} ${ENDED[reply.data.state] ?? 'stopped'}.`, [cause] = runCauses(reply.data);
-          this.update({ saving: null, stale: `${ended}${cause ? ` ${cause}` : ''} Reload Skills to see the saved choice and what is on this Mac.`, check: null, selected: [], detail: ended });
+          this.update({ saving: null, stale: `${ended}${cause ? ` ${cause}` : ''} Reload Skills to see the saved choice and what is on ${thisMachine}.`, check: null, selected: [], detail: ended });
         } else if (this.settledRun !== runId || this.pendingInventory) {
           const firstConfirmation = this.settledRun !== runId;
           this.settledRun = runId;

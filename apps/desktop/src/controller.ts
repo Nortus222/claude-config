@@ -4,6 +4,7 @@ import {
 } from '@nortuscc/agent/ipc/protocol';
 import { decodeRunView, decodeOperationOutput, type RunView as OperationRunView } from '@nortuscc/agent/operations';
 import type { Bridge, Envelope, HostEvent } from './bridge.ts';
+import { thisMachine } from './device.ts';
 
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'cancelled';
 export type StepView = { readonly key: string; readonly summary: string; readonly status: StepStatus; readonly note: string; readonly index?: number };
@@ -65,11 +66,11 @@ const checkedReply = <T>(decode: (value: unknown) => T, value: unknown): T => {
 };
 
 const BUSY: Readonly<Record<string, string>> = {
-  reconcile: 'Applying changes on this Mac', setupApply: 'Applying incoming changes from your profile',
-  followProfile: 'Switching the profile this Mac follows', update: 'Updating skills', addSkill: 'Adding a skill',
-  machineIntent: 'Saving a choice for this Mac', uninstallConfig: 'Restoring configuration files', syncDecision: 'Saving a choice about an incoming change',
+  reconcile: `Applying changes on ${thisMachine}`, setupApply: 'Applying incoming changes from your profile',
+  followProfile: `Switching the profile ${thisMachine} follows`, update: 'Updating skills', addSkill: 'Adding a skill',
+  machineIntent: `Saving a choice for ${thisMachine}`, uninstallConfig: 'Restoring configuration files', syncDecision: 'Saving a choice about an incoming change',
   setPolicy: 'Changing the apply policy', resume: 'Resuming automatic apply', signIn: 'Signing in', signOut: 'Signing out',
-  syncAccount: 'Syncing your account', patchMachineMetadata: 'Updating this Mac\'s details', pruneBackups: 'Removing old backups',
+  syncAccount: 'Syncing your account', patchMachineMetadata: `Updating ${thisMachine}'s details`, pruneBackups: 'Removing old backups',
 };
 const FINISHED: ReadonlySet<StepStatus> = new Set(['ok', 'failed', 'cancelled']);
 // The run in progress, else an apply the agent reports.
@@ -81,10 +82,10 @@ export function machineBusy(state: Pick<ViewState, 'connection' | 'run' | 'statu
     const planned = receipt?.intent.parity && 'plannedKeys' in receipt.intent.parity ? receipt.intent.parity.plannedKeys.length : undefined;
     const total = planned ?? run.total ?? null;
     const step = run.steps.find(step => step.status === 'running')?.summary ?? receipt?.current?.summary ?? null;
-    return { kind, description: kind === null ? BUSY.reconcile! : BUSY[kind] ?? 'Working on this Mac', done: total === null ? null : run.steps.filter(step => FINISHED.has(step.status)).length,
+    return { kind, description: kind === null ? BUSY.reconcile! : BUSY[kind] ?? `Working on ${thisMachine}`, done: total === null ? null : run.steps.filter(step => FINISHED.has(step.status)).length,
       total, step, runId: run.runId };
   }
-  return state.status?.applying ? { kind: null, description: 'The agent is applying changes on this Mac', done: null, total: null, step: null, runId: null } : null;
+  return state.status?.applying ? { kind: null, description: `The agent is applying changes on ${thisMachine}`, done: null, total: null, step: null, runId: null } : null;
 }
 
 // Folds one progress event into a run's view.
@@ -137,7 +138,7 @@ export class MachineController {
 
   constructor(bridge: Bridge | null) {
     this.bridge = bridge;
-    if (!bridge) this.state = { ...this.state, connection: 'browser', initialReadPending: false, detail: 'Browser preview. Open the desktop app to see this Mac.' };
+    if (!bridge) this.state = { ...this.state, connection: 'browser', initialReadPending: false, detail: `Browser preview. Open the desktop app to see ${thisMachine}.` };
   }
 
   subscribe = (listener: () => void) => {
@@ -415,7 +416,7 @@ export class MachineController {
           return !this.state.status.applying && (!initialConnection || !this.state.status.error);
         }
         if (this.state.status === null && this.state.initialReadPending && this.state.inspection === null) {
-          this.update({ waitingForReport: true, detail: 'Waiting for the agent’s first check of this Mac.' });
+          this.update({ waitingForReport: true, detail: `Waiting for the agent’s first check of ${thisMachine}.` });
           return false;
         }
       }
@@ -427,7 +428,7 @@ export class MachineController {
   // Inspects within an action that already holds `pending`; a refusal leaves the app connected.
   private async load(revision: number) {
     this.reviewRefresh = false;
-    this.update({ detail: 'Checking this Mac' });
+    this.update({ detail: `Checking ${thisMachine}` });
     const statusRevision = this.statusRevision;
     const initialRead = this.state.initialReadPending;
     try {

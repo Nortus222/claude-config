@@ -7,6 +7,7 @@ import type { UpdateViewState } from './update-controller.ts';
 import { draftCount, interruptedRuns, unannouncedRun, type HomeController, type HomeState } from './home-controller.ts';
 import { changeTitle, plural, repoName, runCauses } from './copy.ts';
 import { BusyProgress } from './busy-view.tsx';
+import { ThisMachine, thisMachine } from './device.ts';
 
 
 export type HomeScreen = 'changes' | 'publish' | 'settings';
@@ -24,10 +25,10 @@ function Line({ tone, children, action }: { tone?: 'attention'; children: ReactN
 
 function agentLine({ machine }: HomeProps, open: (screen: HomeScreen, label?: string) => ReactNode): ReactNode {
   const status = machine.status;
-  if (machine.connection === 'browser') return <Line action={open('settings')}>Browser preview. Open the desktop app to see this Mac.</Line>;
+  if (machine.connection === 'browser') return <Line action={open('settings')}>Browser preview. Open the desktop app to see {thisMachine}.</Line>;
   if (machine.connection === 'connecting') return <Line action={open('settings')}>Connecting to the agent…</Line>;
   if (machine.connection === 'disconnected') return <Line tone="attention" action={open('settings')}>The agent isn’t connected.</Line>;
-  if (status?.error) return <Line tone="attention" action={open('settings')}>The agent couldn’t check this Mac. Details are in Settings.</Line>;
+  if (status?.error) return <Line tone="attention" action={open('settings')}>The agent couldn’t check {thisMachine}. Details are in Settings.</Line>;
   if (machine.busy) return <li className="home-line row home-busy"><div className="row-main"><BusyProgress busy={machine.busy} /></div>
     <div className="row-trail home-actions">{open('changes', 'Open Changes')}</div></li>;
   if (status?.paused) return <Line tone="attention" action={open('settings')}>Automatic apply is paused.</Line>;
@@ -67,17 +68,17 @@ export function HomeView(props: HomeProps) {
   const phase = update.update?.enabled ? update.update.phase : null;
   const version = update.update?.availableVersion;
   return <div className="home-view">
-    <header className="page-header"><div><h1>Home</h1><p className="intro">What this Mac follows and what needs your attention.</p></div></header>
-    <ul className="card home-lines" aria-label="This Mac">
+    <header className="page-header"><div><h1>Home</h1><p className="intro">What {thisMachine} follows and what needs your attention.</p></div></header>
+    <ul className="card home-lines" aria-label={ThisMachine}>
       {agentLine(props, open)}
       {changes.profiles ? followed
         ? <Line action={open('changes', 'Switch profile')}>Following <strong>{followed.profile}</strong> from <strong>{repoName(followed.repoUrl)}</strong></Line>
-        : <Line action={open('changes', 'Choose a profile')}>This Mac doesn’t follow a profile yet.</Line> : null}
+        : <Line action={open('changes', 'Choose a profile')}>{ThisMachine} doesn’t follow a profile yet.</Line> : null}
       {review ? incoming + held > 0
         ? <Line action={open('changes')}>{plural(incoming, 'incoming change')}{more}{held ? ` · ${held}${more} on hold` : ''}</Line>
         : <Line action={open('changes', 'Open Changes')}>No incoming changes. You’re up to date.</Line> : null}
-      {waiting ? <Line action={open('changes')}>{plural(waiting, 'change')} waiting to apply on this Mac</Line> : null}
-      {changedHere ? <Line action={open('changes')}>{plural(changedHere, 'item')} changed on this Mac</Line> : null}
+      {waiting ? <Line action={open('changes')}>{plural(waiting, 'change')} waiting to apply on {thisMachine}</Line> : null}
+      {changedHere ? <Line action={open('changes')}>{plural(changedHere, 'item')} changed on {thisMachine}</Line> : null}
       {interruptedRuns(home.runs).map(run => interruptedLine(run, props))}
       {drafts ? <Line action={open('publish')}>{plural(drafts, 'draft')} not published</Line> : null}
       {unannounced ? <Line action={open('publish')}>Published, not announced</Line> : null}

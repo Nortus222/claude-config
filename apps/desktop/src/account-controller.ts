@@ -3,6 +3,7 @@ import { DisplayNameSchema, MachinePatchSchema, type MachinePatch, type Policy }
 import { decodeHostedState, decodeSignInResult, type WireHostedState } from '@nortuscc/agent/ipc/protocol';
 import type { Bridge, Command } from './bridge.ts';
 import type { MachineController } from './controller.ts';
+import { thisMachine } from './device.ts';
 
 export type AccountTimers = { now(): number; set(callback: () => void, delay: number): unknown; clear(timer: unknown): void };
 const timers: AccountTimers = { now: () => Date.now(), set: (callback, delay) => setTimeout(callback, delay), clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>) };
@@ -142,7 +143,7 @@ export class AccountController {
     if (this.state.flow !== 'pending' || !this.state.code || this.state.pending) return Promise.resolve();
     return this.serial(async (current) => {
       const reply = await this.bridge!.invoke('open_device_login');
-      if (current(reply)) { opened(reply.data); this.update({ detail: 'GitHub opened. Enter the code to authorize this Mac.' }); }
+      if (current(reply)) { opened(reply.data); this.update({ detail: `GitHub opened. Enter the code to authorize ${thisMachine}.` }); }
     });
   }
   private mutation(command: Command, args: Readonly<Record<string, unknown>> | undefined, detail: string) {
@@ -160,7 +161,7 @@ export class AccountController {
   }
   trustSetup(setupId: string, consent: boolean) {
     if (!consent || !this.state.hosted?.setups.some((setup) => setup.setupId === setupId)) return Promise.resolve();
-    return this.mutation('trust_setup', { setupId }, 'Trust request acknowledged for this Mac. Repeating it is safe.');
+    return this.mutation('trust_setup', { setupId }, `Trust request acknowledged for ${thisMachine}. Repeating it is safe.`);
   }
   setPolicy(policy: Policy) {
     if (this.state.pending) return Promise.resolve();

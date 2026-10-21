@@ -1,4 +1,5 @@
 import type { OperationChange, RunView } from '@nortuscc/agent/operations';
+import { thisMachine } from './device.ts';
 
 // Shared user-facing words, so no view shows raw keys, change kinds, ISO times or error codes.
 
@@ -78,12 +79,12 @@ export function groupLabels(labels: readonly ItemLabel[]): LabelGroup[] {
 const CHANGE_TITLES = {
   setupApply: 'Apply incoming changes',
   followProfile: 'Follow profile',
-  reconcile: 'Apply changes to this Mac',
+  reconcile: `Apply changes to ${thisMachine}`,
   machineIntent: 'Save skill choice',
   update: 'Update skills',
   addSkill: 'Add a skill',
   uninstallConfig: 'Restore configuration',
-  capture: 'Save this Mac’s changes to a draft',
+  capture: `Save ${thisMachine}’s changes to a draft`,
   syncDecision: 'Decide on an incoming change',
   editDraft: 'Save draft',
   removeDraftIntent: 'Remove a draft change',
@@ -97,7 +98,7 @@ const CHANGE_TITLES = {
   signIn: 'Sign in',
   signOut: 'Sign out',
   syncAccount: 'Sync account',
-  patchMachineMetadata: 'Update this Mac’s details',
+  patchMachineMetadata: `Update ${thisMachine}’s details`,
   pruneBackups: 'Remove old backups',
 } as const satisfies Record<OperationChange['kind'], string>;
 
@@ -137,7 +138,7 @@ const OFFLINE = 'Lost the connection to the agent. Reconnect the agent.';
 // What happened and what to do, for codes whose agent sentence is not meant for people.
 const ERROR_TEXT: Readonly<Record<string, string>> = {
   NOT_SIGNED_IN: 'Not signed in to GitHub, or GitHub is unreachable. Sign in, then retry.',
-  NO_REPORT: 'The agent hasn’t checked this Mac yet. Wait a moment, then reload.',
+  NO_REPORT: `The agent hasn’t checked ${thisMachine} yet. Wait a moment, then reload.`,
   MALFORMED: OFFLINE,
 };
 // The next step for codes whose agent sentence says what happened: shown after that sentence, or as part of
