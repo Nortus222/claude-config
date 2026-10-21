@@ -104,7 +104,7 @@ pub fn run_mcp(resources: &Path) -> Result<i32, String> {
     {
         // The windowless app has no console for Bun to share; its stdio stays inherited.
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        command.creation_flags(crate::host::CREATE_NO_WINDOW);
         let status = command.status().map_err(|_| INVALID_RUNTIME)?;
         Ok(status.code().unwrap_or(1))
     }
