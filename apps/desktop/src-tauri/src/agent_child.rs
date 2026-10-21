@@ -55,18 +55,22 @@ impl Drop for Owned {
 }
 impl Owned {
     /// Stops the agent so its own cleanup removes `agent.pipe` and `agent.token` and releases `agent.lock`:
-    /// a bounded `shutdown` request, then the kill in `drop` if it has not exited. A child that already
-    /// exited (e.g. on a lock held by a CLI agent) asks nothing, so that agent is left alone.
+    /// a bounded `shutdown` request, then the kill in `drop` if it has not exited. Only the child itself is
+    /// asked: an exited child, or a pipe served by another agent (e.g. a CLI agent holding the lock), is left alone.
     fn retire(mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let state_root = self.state_root.clone();
-            shut_down_within(Instant::now() + RETIRE_TIMEOUT, |deadline| ask_shutdown(&state_root, deadline), || !matches!(self.child.try_wait(), Ok(None)));
+            let (state_root, pid) = (self.state_root.clone(), self.child.id());
+            shut_down_within(Instant::now() + RETIRE_TIMEOUT, |deadline| ask_shutdown(&state_root, pid, deadline), || !matches!(self.child.try_wait(), Ok(None)));
         }
     }
 }
-/// Hello with the agent's token, then `shutdown`, both before `deadline`; true once the agent accepted.
-fn ask_shutdown(state_root: &Path, deadline: Instant) -> bool {
-    Agent::connect_notification(state_root, deadline).and_then(|agent| agent.request_before(Request::Shutdown, deadline)).is_ok()
+/// Hello with the agent's token, then `shutdown` only if process `pid` serves the pipe, both before
+/// `deadline`; true once that agent accepted.
+fn ask_shutdown(state_root: &Path, pid: u32, deadline: Instant) -> bool {
+    Agent::connect_notification(state_root, deadline).and_then(|agent| {
+        if agent.server_pid()? != pid { return Err("Agent pipe is served by another process".into()); }
+        agent.request_before(Request::Shutdown, deadline)
+    }).is_ok()
 }
 /// Asks for a shutdown, then polls `exited` until `deadline`. False when the request failed or the process
 /// outlived the deadline: the caller must kill it.
@@ -228,10 +232,24 @@ mod tests {
             assert_eq!(shutdown["command"], "shutdown");
             wire.reply(&shutdown, serde_json::json!({"shutdown":true}));
         });
-        assert!(ask_shutdown(&fixture.root, Instant::now() + RETIRE_TIMEOUT));
+        // The fake agent serves from this process.
+        assert!(ask_shutdown(&fixture.root, std::process::id(), Instant::now() + RETIRE_TIMEOUT));
         let root = fixture.root.clone();
         fixture.finish();
-        assert!(!ask_shutdown(&root, Instant::now() + RETIRE_TIMEOUT), "No agent, no shutdown");
+        assert!(!ask_shutdown(&root, std::process::id(), Instant::now() + RETIRE_TIMEOUT), "No agent, no shutdown");
+    }
+    #[test]
+    fn a_foreign_agent_behind_the_pipe_is_never_asked_to_shut_down() {
+        let fixture = crate::host::fixtures::Fixture::new(|mut wire| {
+            let hello = wire.next().unwrap();
+            wire.reply(&hello, crate::host::fixtures::hello_result());
+            assert!(wire.next().is_none(), "Only hello reaches an agent the app does not own");
+        });
+        let child = std::process::id().wrapping_add(1);
+        let deadline = Instant::now() + RETIRE_TIMEOUT;
+        assert!(!shut_down_within(deadline, |given| ask_shutdown(&fixture.root, child, given), || panic!("A refused shutdown is not waited for")),
+            "A mismatched server falls back to killing the app's own child");
+        fixture.finish();
     }
     #[test]
     fn spawning_requires_the_bundled_runtime() {

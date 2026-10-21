@@ -685,6 +685,11 @@ impl Agent {
             }
         }
     }
+    /// The process id of the agent serving this connection.
+    #[cfg(windows)]
+    pub fn server_pid(&self) -> Result<u32, String> {
+        self.inner.control.server_pid().map_err(|e| format!("Agent pipe server: {e}"))
+    }
     pub fn is_connected(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
     }

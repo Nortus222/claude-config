@@ -45,6 +45,12 @@ impl Pipe {
         Self(Arc::new(Shared { handle: handle as usize, open: RwLock::new(()), closed: AtomicBool::new(false), read_timeout: Mutex::new(None), write_timeout: Mutex::new(None) }))
     }
     fn handle(&self) -> HANDLE { self.0.handle as HANDLE }
+    /// The process id of the pipe's server.
+    pub fn server_pid(&self) -> io::Result<u32> {
+        let mut pid = 0;
+        if unsafe { GetNamedPipeServerProcessId(self.handle(), &mut pid) } == 0 { return Err(io::Error::last_os_error()); }
+        Ok(pid)
+    }
     pub fn try_clone(&self) -> io::Result<Self> { Ok(Self(self.0.clone())) }
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> { *self.0.write_timeout.lock().unwrap() = timeout; Ok(()) }
     #[cfg(test)]
@@ -138,8 +144,7 @@ fn process_user(process: HANDLE) -> io::Result<Sid> {
 /// Refuses a pipe whose server process does not run as the current user.
 fn check_server(pipe: &Pipe) -> Result<(), String> {
     let refuse = |e: io::Error| format!("UNREACHABLE: Agent pipe server: {e}");
-    let mut pid = 0;
-    if unsafe { GetNamedPipeServerProcessId(pipe.handle(), &mut pid) } == 0 { return Err(refuse(io::Error::last_os_error())); }
+    let pid = pipe.server_pid().map_err(refuse)?;
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() { return Err(refuse(io::Error::last_os_error())); }
     let process = Handle(process);
