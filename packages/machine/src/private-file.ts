@@ -76,7 +76,6 @@ export const privateFile = (path: string, options: PrivateFileOptions = {}) => {
       if (!entry) return false;
       if (!entry.isDirectory() || entry.isSymbolicLink()) return yield* Effect.fail(failure('inspect'));
     }
-    // Protecting ends with the same verification a check runs, so a just-protected directory is not checked again.
     if (create) {
       yield* attempt('permissions', () => chmod(directory, 0o700));
       yield* secure(directory, 'protect');
@@ -84,6 +83,9 @@ export const privateFile = (path: string, options: PrivateFileOptions = {}) => {
       const entry = yield* attempt('inspect', () => lstat(directory));
       if ((entry.mode & 0o777) !== 0o700) return yield* Effect.fail(failure('inspect'));
     }
+    // Protecting ends with the same verification a check runs, so a just-protected directory is not
+    // checked again. That holds only while the helper's protect branch falls through into its verification:
+    // never exit early after SetAccessControl.
     if (requirePrivate && !create) yield* secure(directory, 'check');
     return true;
   });
