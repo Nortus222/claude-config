@@ -462,7 +462,7 @@ DESKTOP_BUN_LICENSE=<path to LICENSE.md> npm run resources --workspace apps/desk
 
 This writes `src-tauri/resources/win32-x64/` (`bun.exe`, `agent.mjs`, `mcp.mjs`, `runtime.json`, licenses). `scripts/verify-runtime.mjs` checks finished macOS `.app` bundles only.
 
-`DESKTOP_BUN_LICENSE` is required: the build fails without it. `npm run desktop:build:windows --workspace apps/desktop` writes the release exe with `agent-runtime\` beside it, plus an NSIS installer under `src-tauri/target/release/bundle/nsis/`. Both are unsigned and there is no updater. App MCP works on Windows.
+`DESKTOP_BUN_LICENSE` is required: the build fails without it. `npm run desktop:build:windows --workspace apps/desktop` writes the release exe with `agent-runtime\` beside it, plus an NSIS installer under `src-tauri/target/release/bundle/nsis/`. Both are unsigned and there is no updater. App MCP works on Windows while the app is open, because the app owns the agent.
 
 On Windows the app spawns and owns the agent as a kill-on-close job child; no login service is registered (ADR 0040). An agent installed by the CLI keeps running under its own service, so run `nortuscc agent uninstall` to hand it to the app.
 
