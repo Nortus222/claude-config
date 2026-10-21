@@ -11,7 +11,7 @@ import { followedSetupSourceLayer, migrateFollowed, RevisionUnavailable, SetupSo
 import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
 import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
 import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
-import { ensureAgent } from './lifecycle.ts';
+import { ensureAgent, recordAppOwnership } from './lifecycle.ts';
 import { MACOS_TOOL_DIRECTORIES, probeLoginEnvironment, withToolDirectories } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
 import { desktopHostedUrl } from './public-config.ts';
@@ -127,9 +127,12 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
           context.maintenance = maintenance.value;
           if (context.setup!.needsSetup) { context.outcome = 'needs_setup'; return; }
           // The Windows app owns its agent (ADR 0040): the host spawns it after `ready`, so nothing
-          // registers here, and app updates, hence recovery, stay macOS-only.
+          // registers here: only the app's ownership is recorded. App updates, hence recovery, stay macOS-only.
           if (platform === 'win32') {
-            context.outcome = maintenance.value.pending ? 'recovery_failed' : 'ready'; return;
+            if (maintenance.value.pending) { context.outcome = 'recovery_failed'; return; }
+            const owned = yield* Effect.exit(phase('lifecycle', recordAppOwnership(lifecycleInput)));
+            signal.throwIfAborted();
+            context.outcome = Exit.isSuccess(owned) ? 'ready' : 'ensure_failed'; return;
           }
           if (maintenance.value.pending) {
             const recovered = yield* Effect.exit(phase('lifecycle', recoverUpdate(lifecycleInput, {
@@ -148,7 +151,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
         });
         yield* operation.pipe(Effect.provide(nodeFileIntegrity),
           Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes })))));
-        if ((context.outcome === 'ready' || context.outcome === 'recovered') && platform !== 'win32') {
+        if (context.outcome === 'ready' || context.outcome === 'recovered') {
           yield* Effect.exit(repairConnections({ home, appPath: appPath! }).pipe(
             Effect.provide(setupSourceLayer(paths, { processes })),
             Effect.provide(backupsForRun().pipe(Layer.provideMerge(agentLayer(paths, { processes }))))));
@@ -205,13 +208,8 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       if (arg !== undefined) {
         if (platform !== 'darwin' && platform !== 'linux' && platform !== 'win32') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
         // The Windows app owns its agent (ADR 0040): the Rust host starts and restarts its agent child, so
-        // ensure and restart only report the state root it connects under. App updates stay macOS-only.
-        // Maintenance state runs as elsewhere; MCP connections may be inspected and removed, but App MCP
-        // cannot start on Windows yet, so connecting a host is refused there.
-        if (platform === 'win32') {
-          if (arg === '--ensure' || arg === '--restart') { stdout(JSON.stringify({ stateRoot: paths.stateRoot }) + '\n'); return 0; }
-          if (arg === '--prepare-update' || arg === '--recover-update') return yield* Effect.fail(new Error('desktop app updates are not supported on Windows'));
-        }
+        // ensure and restart only record the app's ownership. App updates stay macOS-only.
+        if (platform === 'win32' && (arg === '--prepare-update' || arg === '--recover-update')) return yield* Effect.fail(new Error('desktop app updates are not supported on Windows'));
         const lifecycleInput = {
           paths, env, shellEnvironment: input.env, resources: input.resources, agentVersion,
           appPath: appPath!,
@@ -222,7 +220,6 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
             const action = yield* Effect.tryPromise({ try: () => readConnectionAction(input.stdin ?? process.stdin), catch: () => new Error('Invalid connection action') }).pipe(Effect.timeout(5000));
             const connectionInput = { home, appPath: appPath! };
             if (action.action === 'inspect') return yield* inspectConnections(connectionInput);
-            if (action.action === 'connect' && platform === 'win32') return yield* Effect.fail(new Error('App MCP is not supported on Windows yet'));
             return { connections: [yield* (action.action === 'connect' ? connectHost : disconnectHost)({ ...connectionInput, target: action.target })] };
           }
           if (arg === '--maintenance-state') return yield* maintenanceState(lifecycleInput);
@@ -231,6 +228,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
             try { process.kill(pid, 0); return true; }
             catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
           } });
+          if (platform === 'win32') return yield* recordAppOwnership(lifecycleInput);
           return yield* ensureAgent(lifecycleInput, { restart: arg === '--restart' });
         });
         const result = yield* phase('lifecycle', operation.pipe(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
@@ -673,16 +673,50 @@ test('startup maintenance read failure preserves the resolved root and setup wit
 // The Windows app owns its agent (ADR 0040): helpers never register a login service there.
 const windowsInput = (f: ReturnType<typeof fixture>, arg: string) => ({ ...f.input, platform: 'win32' as const,
   args: [arg, '--app', join(f.home, 'Nortuscc', 'Nortuscc.exe')] });
-const registers = (f: ReturnType<typeof fixture>) => f.commands.filter(c => !(c.cmd === 'git' && c.args[0] === '--version'));
+// Read-only Git (prerequisite and origin lookups) is the only process a Windows helper may run here.
+const registers = (f: ReturnType<typeof fixture>) => f.commands.filter(c => c.cmd !== 'git');
+const recorded = (f: ReturnType<typeof fixture>) => JSON.parse(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'));
 
-test('on Windows startup reports ready without registering a service or repairing connections', async t => {
+test('on Windows startup records the app as its agent\'s owner without registering a service', async t => {
   const f = fixture(t);
   assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0, f.stderr.join(''));
   const result = startupResult(f);
   assert.equal(result.outcome, 'ready'); assert.equal(result.stateRoot, f.stateRoot);
   assert.equal(result.setup.needsSetup, false); assert.equal(result.maintenance.pending, false);
   assert.deepEqual(registers(f), [], 'no scheduler, service manager or MCP host command');
-  for (const name of ['agent.json', 'app-service.json']) assert.equal(existsSync(join(f.stateRoot, 'agent', name)), false, name);
+  assert.equal(existsSync(join(f.stateRoot, 'agent', 'app-service.json')), false);
+  const owner = recorded(f);
+  assert.deepEqual([owner.installedBy, owner.agentVersion, owner.appPath], ['app', 'bundle-hash', windowsInput(f, '--startup').args[2]]);
+  // A first ownership trusts the app's own setup, as a first installation does on macOS.
+  assert.match(readFileSync(join(f.stateRoot, 'agent/setups.json'), 'utf8'), /"checkout"/);
+  const before = readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8');
+  f.stdout.length = 0;
+  assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0, f.stderr.join(''));
+  assert.equal(startupResult(f).outcome, 'ready');
+  assert.equal(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'), before, 'an unchanged owner is not rewritten');
+});
+
+test('on Windows a moved app updates only its recorded ownership after a backup', async t => {
+  const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent'));
+  const moved = join(f.home, 'Old', 'Nortuscc.exe');
+  writeFileSync(join(f.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null, kept: [1], installedBy: 'app', agentVersion: 'old-hash', appPath: moved }));
+  writeFileSync(join(f.stateRoot, 'agent/setups.json'), '{"version":1,"setups":[]}');
+  assert.equal(await runDesktopEntry(windowsInput(f, '--ensure')), 0, f.stderr.join(''));
+  const owner = recorded(f);
+  assert.deepEqual(owner, { version: 1, policy: 'manual', policySource: 'person', paused: null, kept: [1], installedBy: 'app', agentVersion: 'bundle-hash', appPath: windowsInput(f, '--ensure').args[2] });
+  assert.equal(readFileSync(join(f.stateRoot, 'agent/setups.json'), 'utf8'), '{"version":1,"setups":[]}', 'an existing trust decision is not changed');
+  const backups = readdirSync(f.paths.backups, { recursive: true, encoding: 'utf8' });
+  assert.ok(backups.some(name => { try { return readFileSync(join(f.paths.backups, name), 'utf8').includes('old-hash'); } catch { return false; } }), 'the previous owner is backed up');
+});
+
+test('on Windows startup leaves a CLI-installed agent to the CLI', async t => {
+  const f = fixture(t); mkdirSync(join(f.stateRoot, 'agent'));
+  const text = JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null, installedBy: 'cli', agentVersion: 'checkout' });
+  writeFileSync(join(f.stateRoot, 'agent/agent.json'), text);
+  assert.equal(await runDesktopEntry({ ...startupInput(f), ...windowsInput(f, '--startup') }), 0, f.stderr.join(''));
+  assert.equal(startupResult(f).outcome, 'ready');
+  assert.equal(readFileSync(join(f.stateRoot, 'agent/agent.json'), 'utf8'), text);
+  assert.deepEqual(registers(f), []);
 });
 
 test('on Windows startup with a pending update still refuses recovery', async t => {
@@ -693,7 +727,7 @@ test('on Windows startup with a pending update still refuses recovery', async t 
   assert.deepEqual(registers(f), []);
 });
 
-test('on Windows ensure and restart report the state root without registering, and maintenance reads as idle', async t => {
+test('on Windows ensure and restart record ownership without registering, and maintenance reads as idle', async t => {
   for (const arg of ['--ensure', '--restart', '--maintenance-state']) {
     const f = fixture(t);
     assert.equal(await runDesktopEntry(windowsInput(f, arg)), 0, `${arg}: ${f.stderr.join('')}`);
@@ -701,25 +735,25 @@ test('on Windows ensure and restart report the state root without registering, a
       ? { pending: false, phase: null, fromVersion: null, toVersion: null, backupPath: null, diagnostic: null } : { stateRoot: f.stateRoot }, arg);
     assert.deepEqual(registers(f), [], arg);
     assert.equal(existsSync(join(f.stateRoot, 'agent', 'app-service.json')), false, arg);
+    if (arg !== '--maintenance-state') assert.equal(recorded(f).appPath, windowsInput(f, arg).args[2], arg);
   }
 });
 
-test('on Windows MCP connections can be inspected but connecting a host is refused before any registration', async t => {
-  for (const action of [{ action: 'connect', target: 'claude' }, { action: 'connect', target: 'codex' }, { action: 'inspect' }]) {
-    const f = fixture(t); const seen: Command[] = [];
-    const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { seen.push(command); return { code: 1, stdout: '', stderr: 'unavailable' }; }) });
-    const stdin = async function* () { yield JSON.stringify(action); };
-    const code = await runDesktopEntry({ ...windowsInput(f, '--mcp-connections'), processes, stdin: stdin() });
-    if (action.action === 'connect') {
-      assert.equal(code, 1, action.target);
-      assert.match(f.stderr.join(''), /App MCP is not supported on Windows yet/);
-      assert.deepEqual(seen, [], 'no host CLI runs, so no mcp add');
-      assert.equal(existsSync(join(f.stateRoot, 'mcp-connections.json')), false);
-    } else {
-      assert.equal(code, 0, f.stderr.join(''));
-      assert.ok(Array.isArray(JSON.parse(f.stdout.at(-1)!).connections));
-      assert.equal(seen.some(c => c.args.includes('add')), false);
+test('on Windows MCP connection actions run the same helper path as on macOS', async t => {
+  for (const action of [{ action: 'connect', target: 'claude' }, { action: 'connect', target: 'codex' }, { action: 'disconnect', target: 'claude' }, { action: 'inspect' }]) {
+    const outcomes = [];
+    for (const platform of ['darwin', 'win32'] as const) {
+      const f = fixture(t); const seen: Command[] = [];
+      const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { seen.push(command); return { code: 1, stdout: '', stderr: 'unavailable' }; }) });
+      const stdin = async function* () { yield JSON.stringify(action); };
+      const app = platform === 'win32' ? join(f.home, 'Nortuscc', 'Nortuscc.exe') : join(f.home, 'Nortuscc.app/Contents/MacOS/Nortuscc');
+      const code = await runDesktopEntry({ ...f.input, platform, args: ['--mcp-connections', '--app', app], processes, stdin: stdin() });
+      assert.doesNotMatch(f.stderr.join(''), /not supported/, `${platform} ${action.action}`);
+      assert.equal(seen.some(c => c.args.includes('add')), false, 'fixture hosts are unavailable, so nothing is added');
+      const scrub = (text: string) => text.replaceAll(f.home, '<home>').replaceAll(JSON.stringify(f.home).slice(1, -1), '<home>');
+      outcomes.push({ code, stderr: scrub(f.stderr.filter(line => !line.startsWith(STARTUP_PREFIX)).join('')), stdout: scrub(f.stdout.join('')), commands: seen.map(c => c.cmd + ' ' + c.args.join(' ')).map(scrub) });
     }
+    assert.deepEqual(outcomes[1], outcomes[0], JSON.stringify(action));
   }
 });
 
