@@ -134,11 +134,11 @@ const digest = (value: unknown) => createHash('sha256').update(canonical(value))
 
 const busy = new SessionError('BUSY', 'An apply is running');
 
-// Why a job left no inspection: its own error where it has one.
-const noInspection = (status: AgentStatus): SessionError => {
+// Why a job left no inspection: its own error where it has one, naming the machine as `platform` calls it.
+const noInspection = (status: AgentStatus, platform?: NodeJS.Platform): SessionError => {
   const detail = status.detail ? `: ${status.detail}` : '';
   if (status.error === 'PROFILE_INVALID') return new SessionError('PROFILE_INVALID', `The profile is invalid${detail}`);
-  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent couldn't read this Mac (${status.error})${detail}`);
+  if (status.error !== undefined) return new SessionError('INSPECT_FAILED', `The agent couldn't read ${platform === 'win32' ? 'this PC' : 'this Mac'} (${status.error})${detail}`);
   return new SessionError('NO_REPORT', 'The agent has no inspection; check for new changes again');
 };
 
@@ -154,8 +154,8 @@ const planFor = (inspection: JobInspection, exclude: ReadonlyArray<string>, only
 
 // Builds the session in the current scope. A run is a fiber in that scope; closing the scope or
 // aborting `signal` cancels it at its next step, and it still records how it ended. `domains` is the
-// agent's factory, which apply's re-inspection builds from.
-export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates']; readonly skillVerification?: Parameters<typeof makeAdditionDriver>[3] }) =>
+// agent's factory, which apply's re-inspection builds from; `platform` picks how messages name the machine.
+export const makeSession = (handle: AgentHandle, options: { readonly signal: AbortSignal; readonly domains: AgentDomains; readonly platform?: NodeJS.Platform; readonly skillCandidates?: Parameters<typeof makeSkillOperations>[0]['readCandidates']; readonly skillVerification?: Parameters<typeof makeAdditionDriver>[3] }) =>
   Effect.gen(function* () {
     const context = yield* Effect.context<AgentServices | SetupSource>();
     const configuredPaths = yield* MachinePaths;
@@ -213,7 +213,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const status = yield* handle.request('inspect');
         const inspection = yield* handle.inspection;
         previewed = undefined; parityPlans.clear();
-        if (inspection === undefined) return yield* Effect.fail(noInspection(status));
+        if (inspection === undefined) return yield* Effect.fail(noInspection(status, options.platform));
         const result: InspectResult & { status: WireStatus } = {
           profile: {
             repo,
@@ -466,7 +466,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
             Effect.mapError((error) => new SessionError('INSPECT_FAILED', describe(error))),
           );
           const inspection = job.inspection;
-          if (inspection === undefined) return yield* Effect.fail(noInspection(job.status));
+          if (inspection === undefined) return yield* Effect.fail(noInspection(job.status, options.platform));
           yield* validate(inspection);
           if (addition) {
             if (canonical(inspection.desired) !== canonical(addition.baseline)) return yield* Effect.fail(new SessionError('UNKNOWN_PLAN', 'The setup changed; preview again'));
@@ -545,7 +545,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           else emit(wire);
         });
         const driver = addition && lifecycle ? yield* makeAdditionDriver(addition, lifecycle,
-          handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.flatMap(job => job.inspection ? Effect.succeed(job.inspection) : Effect.fail(noInspection(job.status))), Effect.provideContext(context)), options.skillVerification, invocation) : undefined;
+          handle.exclusive(handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.flatMap(job => job.inspection ? Effect.succeed(job.inspection) : Effect.fail(noInspection(job.status, options.platform))), Effect.provideContext(context)), options.skillVerification, invocation) : undefined;
         const exit = yield* Effect.exit(
           Effect.gen(function* () {
             const backups = yield* Backups;
