@@ -175,7 +175,7 @@ test(`fixed desktop helper resolves current checkout and invokes a fake executab
   const windows = helperPlatform === 'win32';
   // Only the fixture's bin, Git and (on Windows) cmd.exe resolve, so no real host CLI can run.
   const system = windows ? [dirname(execFileSync('where', ['git'], { encoding: 'utf8' }).split(/\r?\n/)[0]!), join(process.env.SystemRoot!, 'System32')].join(delimiter) : '/usr/bin:/bin';
-  const windowsEnv = windows ? { SystemRoot: process.env.SystemRoot!, COMSPEC: process.env.ComSpec ?? join(process.env.SystemRoot!, 'System32', 'cmd.exe') } : {};
+  const windowsEnv: Record<string, string> = windows ? { SystemRoot: process.env.SystemRoot!, COMSPEC: process.env.ComSpec ?? join(process.env.SystemRoot!, 'System32', 'cmd.exe') } : {};
   const m = configMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true })); await m.sync();
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']]) {
     const result = spawnSync('git', args, { cwd: m.paths.repo, env: { HOME: m.root, PATH: system, ...windowsEnv }, encoding: 'utf8' });
