@@ -57,7 +57,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     trace.record('login_probe', 'started');
     try {
       signal.throwIfAborted();
-      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, pathFile: loginPathFile(), onProgress: trace.record, signal });
+      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, platform: input.platform ?? process.platform, runtime: process.execPath, pathFile: loginPathFile(), onProgress: trace.record, signal });
       signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
       // Every helper, the registered service's PATH and the agent's tools (git, npx, gh) see Homebrew.

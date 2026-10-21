@@ -72,6 +72,20 @@ test('paths helper emits safe phase timings while keeping its one-record stdout 
   assert.deepEqual(f.commands, [], 'read-only helper does not register services');
 });
 
+test('helpers hand the platform to the login probe, which keeps the inherited environment on Windows', async (t) => {
+  const f = fixture(t);
+  const platforms: Array<NodeJS.Platform | undefined> = [];
+  const env = { ...f.input.env, SHELL: join(f.home, 'absent-shell') };
+  assert.equal(await runDesktopEntry({ ...f.input, args: ['--paths'], platform: 'win32', env,
+    probe: async input => { platforms.push(input.platform); return probeLoginEnvironment(input); } }), 0);
+  assert.deepEqual(platforms, ['win32']);
+  assert.deepEqual(f.stdout, [JSON.stringify({ stateRoot: f.stateRoot }) + '\n']);
+  assert.deepEqual(f.stderr.filter(line => !line.startsWith(STARTUP_PREFIX)), [], 'no probe fallback is reported');
+  const records = startupRecords(f.stderr);
+  assert.ok(records.some(r => r.phase === 'login_probe' && r.status === 'completed'));
+  assert.equal(records.some(r => r.phase === 'shell_spawn'), false);
+});
+
 test('a helper whose login probe times out uses the PATH remembered under the state root', {
   skip: process.platform === 'win32' ? 'requires POSIX shell scripts' : false, timeout: 10000,
 }, async (t) => {

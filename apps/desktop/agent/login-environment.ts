@@ -118,9 +118,11 @@ const rememberedPath = (file: string | undefined) =>
 
 // Reads the environment once from the user's login shell, so installers and MCP prerequisites see
 // what a terminal sees. A success remembers its PATH in `pathFile`; failures fall back to inherited
-// values with that remembered PATH, if any. Cancellation rejects after cleanup.
+// values with that remembered PATH, if any. Cancellation rejects after cleanup. A Windows app already
+// inherits the user's environment and has no login shell, so on win32 the inherited values are used as they are.
 export async function probeLoginEnvironment(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
+  readonly platform?: NodeJS.Platform;
   readonly timeoutMs?: number;
   // A 0600 file holding the last successful login PATH; absent disables remembering.
   readonly pathFile?: string;
@@ -130,6 +132,7 @@ export async function probeLoginEnvironment(input: {
   readonly signal?: AbortSignal;
 }): Promise<LoginEnvironment> {
   const fallback = strings(input.env);
+  if (input.platform === 'win32') return { env: fallback };
   const shell = loginShell(input.env);
   const progress: StartupDiagnostics['record'] = (phase, status) => {
     try { input.onProgress?.(phase, status); } catch {}
