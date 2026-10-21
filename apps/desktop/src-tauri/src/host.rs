@@ -39,6 +39,15 @@ const BUN: &str = "bun";
 const BUN: &str = "bun.exe";
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// The executable helpers name as the app. On Windows, its canonical path without the verbatim prefix:
+/// the form MCP names it by and the bundled runtime sees its own directory in.
+#[cfg(unix)]
+fn app_executable() -> Result<PathBuf, String> { std::env::current_exe().map_err(|e| e.to_string()) }
+#[cfg(windows)]
+fn app_executable() -> Result<PathBuf, String> {
+    let executable = std::fs::canonicalize(std::env::current_exe().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(dunce::simplified(&executable).to_path_buf())
+}
 
 /// The agent endpoint: a stream that clones, bounds writes and shuts down every clone at once.
 #[cfg(unix)]
@@ -745,7 +754,7 @@ pub(crate) fn helper_command(resources: &Path, setup: Setup, home: Option<&Path>
     if !resources.is_absolute() || !bun.is_file() || !script.is_file() { return Err(format!("Missing bundled agent at {}", resources.display())); }
     let mut command = Command::new(bun);
     command.arg(script).arg(setup.argument());
-    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState | Setup::McpConnections) { command.arg("--app").arg(std::env::current_exe().map_err(|e| e.to_string())?); }
+    if matches!(setup, Setup::Startup | Setup::Ensure | Setup::Restart | Setup::Bootstrap | Setup::PrepareUpdate | Setup::RecoverUpdate | Setup::MaintenanceState | Setup::McpConnections) { command.arg("--app").arg(app_executable()?); }
     command.current_dir(resources)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -2177,7 +2186,14 @@ printf '%s\n' '{}'
         std::fs::write(root.join("agent.mjs"), "fixture").unwrap();
         let command = helper_command(&root, Setup::McpConnections, None).unwrap();
         let args: Vec<_> = command.get_args().map(|arg|arg.to_os_string()).collect();
-        assert_eq!(args, vec![root.join("agent.mjs").into_os_string(), "--mcp-connections".into(), "--app".into(), std::env::current_exe().unwrap().into_os_string()]);
+        #[cfg(unix)]
+        let app = std::env::current_exe().unwrap();
+        // The plain canonical path MCP also names the app by, so the agent's recorded owner matches it.
+        #[cfg(windows)]
+        let app = dunce::simplified(&std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()).to_path_buf();
+        #[cfg(windows)]
+        assert!(!app.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(args, vec![root.join("agent.mjs").into_os_string(), "--mcp-connections".into(), "--app".into(), app.into_os_string()]);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

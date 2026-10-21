@@ -2059,6 +2059,7 @@ version = "0.1.6"
 dependencies = [
  "base64 0.23.1",
  "block2",
+ "dunce",
  "flate2",
  "libc",
  "minisign-verify",

@@ -29,13 +29,14 @@ pub fn installed_resources(executable: &Path) -> Result<PathBuf, String> {
     if fs::canonicalize(&resources).map_err(|_| INVALID_RUNTIME)? != resources || !resources.is_dir() { return Err(INVALID_RUNTIME.into()); }
     Ok(resources)
 }
-/// Resolves only the installed app's fixed resource directory beside its executable.
+/// Resolves only the installed app's fixed resource directory beside its executable, without the verbatim
+/// `\\?\` prefix, as the bundled runtime names its own directory.
 #[cfg(windows)]
 pub fn installed_resources(executable: &Path) -> Result<PathBuf, String> {
     let executable = fs::canonicalize(executable).map_err(|_| INVALID_RUNTIME)?;
     let resources = executable.parent().ok_or(INVALID_RUNTIME)?.join("agent-runtime");
     if fs::canonicalize(&resources).map_err(|_| INVALID_RUNTIME)? != resources || !resources.is_dir() { return Err(INVALID_RUNTIME.into()); }
-    Ok(resources)
+    Ok(dunce::simplified(&resources).to_path_buf())
 }
 
 fn file_hash(path: &Path, limit: u64) -> Result<String, String> {
@@ -71,6 +72,9 @@ fn verify_resources(resources: &Path) -> Result<(), String> {
 fn launch_command(resources: &Path, executable: &Path, state_root: &Path) -> Result<Command, String> {
     if !state_root.is_absolute() || state_root.to_str().is_none_or(|path| path.chars().any(char::is_control)) { return Err(INVALID_STATE.into()); }
     let executable = fs::canonicalize(executable).map_err(|_| INVALID_RUNTIME)?;
+    // The agent records the app by this plain path, the form helpers name it by.
+    #[cfg(windows)]
+    let executable = dunce::simplified(&executable).to_path_buf();
     if executable.to_str().is_none_or(|path| path.chars().any(char::is_control))
         || installed_resources(&executable)? != resources { return Err(INVALID_RUNTIME.into()); }
     let mut command = Command::new(resources.join(BUN));
@@ -184,8 +188,23 @@ mod windows_tests {
         let root = std::env::temp_dir().join(format!("ncc-mcp-windows-{}", std::process::id()));
         fs::create_dir_all(root.join("agent-runtime")).unwrap(); let root = fs::canonicalize(root).unwrap();
         fs::write(root.join("Nortuscc.exe"), b"native").unwrap();
-        assert_eq!(installed_resources(&root.join("Nortuscc.exe")).unwrap(), root.join("agent-runtime"));
+        assert_eq!(installed_resources(&root.join("Nortuscc.exe")).unwrap(), dunce::simplified(&root).join("agent-runtime"));
         assert!(installed_resources(&root.join("agent-runtime/Nortuscc.exe")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn launch_names_the_app_by_its_plain_canonical_path() {
+        let root = std::env::temp_dir().join(format!("ncc-mcp-windows-launch-{}", std::process::id()));
+        fs::create_dir_all(root.join("App With Spaces/agent-runtime")).unwrap(); let root = fs::canonicalize(root).unwrap();
+        let app = root.join("App With Spaces/Nortuscc.exe"); fs::write(&app, b"native").unwrap();
+        let resources = installed_resources(&app).unwrap();
+        let state = root.join("state with spaces");
+        let command = launch_command(&resources, &app, &state).unwrap();
+        let plain = dunce::simplified(&app).to_path_buf();
+        assert!(!plain.to_string_lossy().starts_with(r"\\?\") && !resources.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(command.get_program(), resources.join("bun.exe"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), [resources.join("mcp.mjs").as_os_str(), std::ffi::OsStr::new("--app"), plain.as_os_str()]);
+        assert!(command.get_envs().any(|(key,value)| key=="NORTUSCC_STATE_DIR" && value==Some(state.as_os_str())));
         fs::remove_dir_all(root).unwrap();
     }
 }
