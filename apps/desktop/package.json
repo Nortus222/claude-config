@@ -14,6 +14,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "desktop:build:windows": "tauri build --config src-tauri/tauri.local-windows.conf.json",
     "smoke": "node scripts/smoke.mjs",
     "smoke:mcp": "node scripts/mcp-smoke.mjs"
   },
