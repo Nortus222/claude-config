@@ -124,8 +124,9 @@ export const serveIpc = (input: {
     });
     const token = randomBytes(32).toString('base64url');
     const expected = digest(token);
-    yield* writePrivate(tokenPath, token);
+    // A stale agent.pipe goes first, so no client pairs the fresh token with a dead agent's pipe name.
     yield* attempt(`remove ${endpointFile}`, () => rm(endpointFile, { force: true }));
+    yield* writePrivate(tokenPath, token);
 
     // Handlers run in this scope: closing it interrupts any still running.
     const run = yield* FiberSet.makeRuntime<AgentServices>();
