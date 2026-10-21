@@ -455,7 +455,7 @@ test('an apply whose plan changed since the preview answers stale with the new p
   });
 });
 
-test('a silent client does not block another; the directory is 0700, the socket and token 0600', async () => {
+test('a silent client does not block another; off Windows the directory is 0700, the socket and token 0600', async () => {
   await withServer({}, async (s) => {
     const silent = await connect(s.endpoint);
     silent.sendRaw('{"version":3');

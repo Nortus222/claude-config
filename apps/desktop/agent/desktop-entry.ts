@@ -246,6 +246,8 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       }
       // Each job's integrations domain reads that job's snapshot and uses the login environment.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
+      // runAgent's own `platform` stays this process's, so its endpoint is the one this host's clients open
+      // even when a test injects another platform; in the app the two are the same.
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
         ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: appDirectory(input.resources, platform), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
