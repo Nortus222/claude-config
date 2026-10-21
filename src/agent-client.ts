@@ -3,7 +3,8 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { decodeOperationOutput, type OperationName } from '@nortuscc/agent/operations';
 import type { MachinePathsValue } from '@nortuscc/machine';
-import { agentEndpoint, AgentEndpointError } from '@nortuscc/sync';
+// The endpoint module alone, so the bundled App MCP client stays free of sync's machine readers.
+import { agentEndpoint, AgentEndpointError } from '@nortuscc/sync/agent-endpoint';
 import { decodeWireStatus, decodeHostedState, decodeSignInResult, decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
 
 // The agent answered a request with an error, sent a record outside the protocol, or did not answer
