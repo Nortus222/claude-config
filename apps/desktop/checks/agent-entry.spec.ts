@@ -941,6 +941,31 @@ for (const target of ['win32-x64', 'darwin-arm64'] as const) {
   });
 }
 
+// The Windows app never takes over a CLI-installed agent, so it names the way to hand the agent over.
+for (const platform of ['win32', 'darwin'] as const) {
+  test(`on ${platform} an app connecting to a CLI-installed agent is told how to proceed`, {
+    timeout: 10000, skip: platform === 'darwin' && process.platform !== 'darwin' ? 'requires macOS agent IPC' : false,
+  }, async t => {
+    const f = fixture(t); const controller = new AbortController(); t.after(() => controller.abort());
+    const resources = join(f.home, 'Nortuscc', 'agent-runtime'); mkdirSync(resources, { recursive: true });
+    writeFileSync(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'bundle-hash', appVersion: '0.1.6', target: platform === 'win32' ? 'win32-x64' : 'darwin-arm64' }));
+    mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
+    writeFileSync(join(f.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'manual', policySource: 'person', paused: null, installedBy: 'cli', agentVersion: 'checkout' }));
+    const running = runDesktopEntry({ ...f.input, platform, args: [], resources, signal: controller.signal });
+    let conn: AgentConnection | undefined; const until = Date.now() + 5000;
+    while (!conn && Date.now() < until) {
+      try { conn = await connectAgent(f.paths, { client: 'app', platform, timeoutMs: 100 }); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+    }
+    try {
+      assert.ok(conn, f.stderr.join(''));
+      assert.equal(conn.hello.operations?.available, false);
+      assert.equal(conn.hello.operations?.reason, platform === 'win32'
+        ? 'The command-line tool manages this agent; run `nortuscc agent uninstall` to hand it to the desktop app.'
+        : 'Open the installed desktop app to configure its background agent.');
+    } finally { conn?.close(); controller.abort(); assert.equal(await running, 0); }
+  });
+}
+
 test('a corrupt followed store leaves the agent running with the setup source unavailable', { timeout: 10000 }, async t => {
   const f = fixture(t);
   mkdirSync(join(f.stateRoot, 'agent'), { recursive: true });
