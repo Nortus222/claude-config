@@ -909,6 +909,11 @@ pub fn reveal_command(path: &Path) -> Command {
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     command
 }
+/// The file manager that shows a revealed place.
+#[cfg(windows)]
+const REVEALER: &str = "File Explorer";
+#[cfg(not(windows))]
+const REVEALER: &str = "Finder";
 /// Selects the place in a Finder or Explorer window. Elsewhere it is refused before `state_root` is looked
 /// up; a place that does not exist yet is refused with what that means.
 pub fn reveal_place(state_root: impl FnOnce() -> Result<PathBuf, String>, place: RevealPlace) -> Result<Value, String> {
@@ -919,11 +924,13 @@ fn reveal_place_on(supported: bool, state_root: impl FnOnce() -> Result<PathBuf,
     let path = reveal_path(&state_root()?, place);
     if !path.exists() {
         return Err(match place {
+            RevealPlace::AgentLog if cfg!(windows) => "The agent log doesn't exist yet. The agent writes it once it has run on this PC.",
             RevealPlace::AgentLog => "The agent log doesn't exist yet. The agent writes it once it has run on this Mac.",
+            RevealPlace::Backups if cfg!(windows) => "There are no backups on this PC yet.",
             RevealPlace::Backups => "There are no backups on this Mac yet.",
         }.into());
     }
-    run_browser(reveal_command(&path), Duration::from_secs(5), "Finder")
+    run_browser(reveal_command(&path), Duration::from_secs(5), REVEALER)
 }
 fn run_browser(mut command: Command, timeout: Duration, what: &str) -> Result<Value, String> {
     wait_browser(command.spawn().map_err(|_| format!("Unable to open {what}"))?, timeout, what)
@@ -2085,6 +2092,11 @@ mod onboarding_bridge_tests {
         let missing = std::env::temp_dir().join(format!("nortuscc-reveal-{}", std::process::id()));
         assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::AgentLog).unwrap_err().contains("doesn't exist yet"));
         assert!(reveal_place_on(true, || Ok(missing.clone()), RevealPlace::Backups).unwrap_err().contains("no backups"));
+        let here = if cfg!(windows) { "this PC" } else { "this Mac" };
+        for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
+            assert!(reveal_place_on(true, || Ok(missing.clone()), place).unwrap_err().contains(here));
+        }
+        assert_eq!(REVEALER, if cfg!(windows) { "File Explorer" } else { "Finder" });
         // Off macOS the refusal comes first: the state root is never looked up, and a missing place is not reported.
         for place in [RevealPlace::AgentLog, RevealPlace::Backups] {
             assert_eq!(reveal_place_on(false, || panic!("looked up the state root"), place).unwrap_err(), "Show in Finder works only on macOS.");
