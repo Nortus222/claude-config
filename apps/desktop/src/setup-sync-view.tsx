@@ -6,6 +6,7 @@ import { CopyDetails, RunPlaces, RunRecovery, runCounts } from './run-recovery.t
 import { causeText, changeTitle, errorText, groupLabels, itemLabel, namesWhole, repoName, runCauses, runReport, type ItemLabel } from './copy.ts';
 import { DEFAULT_REPO_URL } from '../shared/setup-protocol.ts';
 import { BusyCard } from './busy-view.tsx';
+import { ThisMachine, thisMachine } from './device.ts';
 
 type Review = OperationOutput<'setupReview'>;
 type ReviewRow = Review['rows'][number];
@@ -23,7 +24,7 @@ const RUN_TONE: Readonly<Record<RunView['state'], string>> = { accepted: 'pill-a
 const AGENTS: Readonly<Record<string, string>> = { claude: 'Claude', codex: 'Codex' };
 // Why an item is waiting to apply, by its inspected state.
 const WAITING: Readonly<Record<string, string>> = {
-  missing: 'Not installed on this Mac yet', 'off-pin': 'Not at the version your profile pins', disabled: 'Turned off; it will be removed from this Mac',
+  missing: `Not installed on ${thisMachine} yet`, 'off-pin': 'Not at the version your profile pins', disabled: `Turned off; it will be removed from ${thisMachine}`,
   'repo-ahead': 'Your profile has a newer version', unmanaged: 'Not set up from your profile yet',
 };
 // Waiting items shown before "Show all".
@@ -64,9 +65,9 @@ function Label({ label }: { label: ItemLabel }) {
 // Accept keeps local overrides; replacing one requires a separate, explicit choice.
 function pairLabel(row: ReviewRow, action: SetupChoice['action']) {
   if (action === 'hold') return 'Hold at the current value';
-  if (action === 'takeTheirs') return row.kind === 'file' ? "Replace this Mac's file with your profile's version (backed up first)" : "Use your profile's value and remove this Mac's override (backed up first)";
+  if (action === 'takeTheirs') return row.kind === 'file' ? `Replace ${thisMachine}'s file with your profile's version (backed up first)` : `Use your profile's value and remove ${thisMachine}'s override (backed up first)`;
   const incoming = action === 'release' ? "Release the hold and take your profile's value" : "Take your profile's value";
-  return row.conflict ? `${incoming} · keep this Mac's ${row.kind === 'file' ? 'file' : 'override'}` : incoming;
+  return row.conflict ? `${incoming} · keep ${thisMachine}'s ${row.kind === 'file' ? 'file' : 'override'}` : incoming;
 }
 // A preview's staged choices, one line per action in this order, each headed by its action and count.
 const CHOICE_GROUPS: readonly { action: SetupChoice['action']; head: (n: number) => string }[] = [
@@ -107,7 +108,7 @@ function unavailableReason(state: SetupSyncState): string | null {
   if (state.connection !== 'connected') return 'Connect the agent to read changes.';
   if (state.busy) return `${state.busy.description}. Available when it finishes.`;
   if (activeRun(state.run)) return 'Available when the current run finishes.';
-  return 'Available when this Mac finishes its current work.';
+  return `Available when ${thisMachine} finishes its current work.`;
 }
 
 // The panel's heading and its Apply button, in words for the kind of change previewed.
@@ -118,9 +119,9 @@ function previewCopy(preview: ChangePreview, state: SetupSyncState): { title: st
     const text = taken ? `Apply ${count(taken, 'incoming change')}` : `Hold ${count(change.choices.length, 'incoming change')}`;
     return { title: text, apply: text };
   }
-  if (change.kind === 'reconcile') { const text = `Apply ${count(change.only.length, 'change')} to this Mac`; return { title: text, apply: text }; }
+  if (change.kind === 'reconcile') { const text = `Apply ${count(change.only.length, 'change')} to ${thisMachine}`; return { title: text, apply: text }; }
   if (change.kind === 'followProfile') return state.profiles?.followed
-    ? { title: `Switch this Mac to ${change.profile}`, apply: `Switch to ${change.profile}` }
+    ? { title: `Switch ${thisMachine} to ${change.profile}`, apply: `Switch to ${change.profile}` }
     : { title: `Follow ${change.profile}`, apply: `Follow ${change.profile}` };
   return { title: changeTitle(change.kind), apply: changeTitle(change.kind) };
 }
@@ -148,7 +149,7 @@ export function PreviewPanel({ state, controller }: { state: SetupSyncState; con
       })}</div> : null}
       {change.kind === 'reconcile' ? <PreviewLine labels={change.only.map(key => keyLabel(key, state.inspection))} label="Changes to apply" /> : null}
     </div>
-    {change.kind === 'setupApply' && !steps.length ? <p className="muted">Nothing on this Mac changes yet. Apply saves your choices.</p> : null}
+    {change.kind === 'setupApply' && !steps.length ? <p className="muted">Nothing on {thisMachine} changes yet. Apply saves your choices.</p> : null}
     {steps.length || effects.length ? <details className="preview-more"><summary>{steps.length ? `Steps (${steps.length})` : 'What Apply does'}</summary>
       {steps.length ? <ol className="steps setup-sync-steps" aria-label="Planned steps">{steps.map((step, index) => <li key={index}><span>{step.summary}</span></li>)}</ol> : null}
       {effects.length ? <ul className="preview-effects">{effects.map(effect => <li key={effect}>{effect}</li>)}</ul> : null}</details> : null}
@@ -221,7 +222,7 @@ function RunFailure({ run, state, controller, head, outcome }: { run: RunView; s
     <p className="muted">{count(counts.written, 'change')} written{counts.notWritten === null ? '' : ` · ${counts.notWritten} not written`}.
       {counts.backupIds.length ? ' Backups of what it replaced are kept.' : ''} Nothing is rolled back automatically.</p>
     <div className="setup-sync-actions">
-      {controller.reload ? <button disabled={!state.eligibility.read} title="Reads this Mac and your profile again" onClick={() => void controller.reload!()}>Check again</button> : null}
+      {controller.reload ? <button disabled={!state.eligibility.read} title={`Reads ${thisMachine} and your profile again`} onClick={() => void controller.reload!()}>Check again</button> : null}
       {controller.repreview && run.state === 'failed' ? <button disabled={!state.eligibility.read} title="Prepares a fresh plan for what is still waiting" onClick={() => void controller.repreview!()}>Re-preview</button> : null}
       <CopyDetails text={report} /></div>
     <details className="run-details"><summary>Details</summary>
@@ -250,7 +251,7 @@ function Following({ state, controller, repoUrl = DEFAULT_REPO_URL }: Props) {
   const [link, setLink] = React.useState('');
   const followed = state.profiles?.followed;
   return <section className="card setup-sync-summary" aria-labelledby="changes-following-h">
-    <h2 id="changes-following-h">{followed ? `Following ${followed.profile} from ${repoName(followed.repoUrl)}` : source?.repository ? `Using ${source.repository}` : "This Mac doesn't follow a profile yet"}</h2>
+    <h2 id="changes-following-h">{followed ? `Following ${followed.profile} from ${repoName(followed.repoUrl)}` : source?.repository ? `Using ${source.repository}` : `${ThisMachine} doesn't follow a profile yet`}</h2>
     {state.profileNotice ? <p className={state.profiles ? 'notice' : 'alert'}>{state.profileNotice}</p> : null}
     <SetupProfiles state={state} controller={controller} repoUrl={repoUrl} />
     <ul className="rows">
@@ -262,7 +263,7 @@ function Following({ state, controller, repoUrl = DEFAULT_REPO_URL }: Props) {
       {state.sources.length > 1 ? <li className="row"><label className="row-main" htmlFor="changes-source">Source</label>
         <div className="row-trail"><select id="changes-source" value={source?.setupId ?? ''} disabled={!state.eligibility.read}
           onChange={event => void controller.selectSource(event.target.value)}>{state.sources.map((item, index) => <option key={item.setupId} value={item.setupId}>{item.repository ?? `Source ${index + 1}`}</option>)}</select></div></li> : null}
-      {source && !source.trusted ? <li className="row"><p className="row-main">Not trusted on this Mac.</p><span className="pill pill-warning">Untrusted</span></li> : null}
+      {source && !source.trusted ? <li className="row"><p className="row-main">Not trusted on {thisMachine}.</p><span className="pill pill-warning">Untrusted</span></li> : null}
     </ul>
   </section>;
 }
@@ -341,12 +342,12 @@ export function IncomingRow({ row, state, controller, open, onToggle, member = f
   const chosen = staged?.action === 'accept' && row.held ? 'release' : staged?.action;
   const actions: SetupChoice['action'][] = ['hold', row.held ? 'release' : 'accept', ...(row.conflict ? ['takeTheirs' as const] : [])];
   const label = itemLabel(row.itemId), values = domId('values', row.itemId);
-  const named = [['Current', row.before], ['Offered', row.after], ["This Mac's", row.mine]] as const;
+  const named = [['Current', row.before], ['Offered', row.after], [`${ThisMachine}'s`, row.mine]] as const;
   return <li className={`row incoming-row${member ? ' incoming-member' : ''}`}>
     <span className="incoming-name"><Label label={label} />
       <span className={`pill ${CHANGE_TONE[row.change]}`}>{CHANGE[row.change]}</span>
       {row.held ? <span className="pill" title="On hold at the current value">On hold</span> : null}
-      {row.conflict ? <span className="pill pill-warning" title="This Mac overrides this value">Overridden here</span> : null}</span>
+      {row.conflict ? <span className="pill pill-warning" title={`${ThisMachine} overrides this value`}>Overridden here</span> : null}</span>
     {member ? null : <Segmented label={`Choice for ${label.text}`} disabled={!state.eligibility.choose} selected={chosen}
       options={actions.map(action => ({ value: action, text: SEGMENT[action], title: pairLabel(row, action) }))}
       onSelect={action => controller.choose({ itemId: row.itemId, action })} />}
@@ -421,8 +422,8 @@ function Incoming({ review, state, controller }: { review: Review; state: SetupS
 function OnThisMac({ state, controller, onOpenProfiles }: Props) {
   const [all, setAll] = React.useState(false);
   const { inspection, eligibility: can } = state;
-  if (!inspection) return <section className="card changes-local" aria-labelledby="changes-local-h"><h2 id="changes-local-h">On this Mac</h2>
-    <p className="muted">This Mac hasn't been checked yet.</p></section>;
+  if (!inspection) return <section className="card changes-local" aria-labelledby="changes-local-h"><h2 id="changes-local-h">On {thisMachine}</h2>
+    <p className="muted">{ThisMachine} hasn't been checked yet.</p></section>;
   const excluded = new Set(state.excluded), selected = selectedLocal(state).length;
   const waiting = inspection.items.filter(item => item.disposition === 'apply');
   const captured = inspection.items.filter(item => item.disposition === 'capture');
@@ -430,10 +431,10 @@ function OnThisMac({ state, controller, onOpenProfiles }: Props) {
   const issues = inspection.profile.issues.length, unread = inspection.probeErrors.length;
   const shown = all ? waiting : waiting.slice(0, LOCAL_PREVIEW_ROWS);
   return <section className="card changes-local" aria-labelledby="changes-local-h">
-    <div className="card-head"><div><h2 id="changes-local-h">{waiting.length ? `${count(waiting.length, 'change')} waiting to apply on this Mac` : 'Nothing waiting to apply on this Mac'}</h2>
+    <div className="card-head"><div><h2 id="changes-local-h">{waiting.length ? `${count(waiting.length, 'change')} waiting to apply on ${thisMachine}` : `Nothing waiting to apply on ${thisMachine}`}</h2>
       {waiting.length ? <p>Uncheck anything you want to leave for now.</p> : null}</div></div>
-    {issues ? <p className="alert">Your profile has {count(issues, 'problem')}, so changes can’t be applied to this Mac. Open Details below to see {issues === 1 ? 'it' : 'them'}.</p> : null}
-    {unread ? <p className="notice">{count(unread, 'part')} of this Mac couldn’t be read. Open Details below to see why.</p> : null}
+    {issues ? <p className="alert">Your profile has {count(issues, 'problem')}, so changes can’t be applied to {thisMachine}. Open Details below to see {issues === 1 ? 'it' : 'them'}.</p> : null}
+    {unread ? <p className="notice">{count(unread, 'part')} of {thisMachine} couldn’t be read. Open Details below to see why.</p> : null}
     {waiting.length ? <>
       <ul className="rows setup-sync-rows">{shown.map(item => { const label = observedLabel(item); return <li key={item.key} className="row setup-sync-row">
         <label className="setup-sync-choice row-main"><input type="checkbox" aria-label={`Include ${label.text}`} checked={!excluded.has(item.key)} disabled={!can.local} onChange={() => controller.toggleLocal(item.key)} />
@@ -442,13 +443,13 @@ function OnThisMac({ state, controller, onOpenProfiles }: Props) {
       <div className="setup-sync-actions section-foot"><button className="primary" disabled={!can.previewLocal} onClick={() => void controller.previewLocal()}>Preview</button><span className="reason">{selected} of {waiting.length} included. Preview writes nothing.</span></div>
     </> : null}
     {state.localError ? <p className="alert" role="alert">{state.localError}</p> : null}
-    {captured.length ? <div className="rows changes-local-group"><p className="group-label">Changed on this Mac</p>
+    {captured.length ? <div className="rows changes-local-group"><p className="group-label">Changed on {thisMachine}</p>
       <div className="row"><p className="row-sub row-main">These differ from your profile. Save them to a profile draft to keep them.</p>
         {onOpenProfiles ? <div className="row-trail"><button onClick={onOpenProfiles}>Open Profiles</button></div> : null}</div>
       <ul className="rows">{captured.map(item => <li className="row" key={item.key}><Label label={observedLabel(item)} /></li>)}</ul></div> : null}
     {blocked.length ? <div className="rows changes-local-group"><p className="group-label">Can’t be applied</p>
-      <ul className="rows">{blocked.map(item => <li className="row" key={item.key}><span className="row-main"><Label label={observedLabel(item)} /><small className="row-sub">{item.note ?? 'This Mac’s copy needs fixing by hand.'}</small></span></li>)}</ul>
-      <p className="row-sub group-foot">Fix these on this Mac, then reload.</p></div> : null}
+      <ul className="rows">{blocked.map(item => <li className="row" key={item.key}><span className="row-main"><Label label={observedLabel(item)} /><small className="row-sub">{item.note ?? `${ThisMachine}’s copy needs fixing by hand.`}</small></span></li>)}</ul>
+      <p className="row-sub group-foot">Fix these on {thisMachine}, then reload.</p></div> : null}
   </section>;
 }
 
@@ -486,7 +487,7 @@ export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Pr
   // A busy Mac's card stands in for the run card of the same run, and for the review and "On this Mac".
   const busyRun = busy && run && activeRun(run) && (busy.runId === null || busy.runId === run.runId);
   return <div className="setup-sync-view changes-view">
-    <header className="page-header"><div><h1>Changes</h1><p className="intro">What your profile brings and what this Mac still needs.</p></div>
+    <header className="page-header"><div><h1>Changes</h1><p className="intro">What your profile brings and what {thisMachine} still needs.</p></div>
       <div className="header-actions">{state.connection !== 'connected' ? <span className={`pill connection ${state.connection}`}>{CONNECTION[state.connection]}</span> : null}
         <button disabled={!can.read} title={reason ?? undefined} onClick={() => void controller.reload()}>Reload</button>
         <button disabled={!can.refetch} title={reason ?? undefined} onClick={() => void controller.refetch()}>Check for new changes</button></div></header>
@@ -494,7 +495,7 @@ export function SetupSyncView({ state, controller, onOpenProfiles, repoUrl }: Pr
     {reason && !busy && !activeRun(run) ? <p className="notice">{reason}</p> : null}
     <p className="setup-sync-detail" role="status">{state.pending ? 'Reading…' : state.message}</p>
     <PreviewPanel state={state} controller={controller} />
-    {busy ? <BusyCard busy={busy} note="Incoming changes and this Mac’s items are read again when it finishes."
+    {busy ? <BusyCard busy={busy} note={`Incoming changes and ${thisMachine}’s items are read again when it finishes.`}
       action={busyRun && can.cancel ? <button onClick={() => void controller.cancel()} disabled={state.pending}>Cancel</button> : undefined} /> : null}
     {run && !busyRun ? <RunCard run={run} state={state} controller={controller} /> : null}
     {run ? <RunRecovery run={run} onRepreview={() => void controller.repreview()} onAskAbandon={() => controller.askAbandon()} onAbandon={() => void controller.abandon()}

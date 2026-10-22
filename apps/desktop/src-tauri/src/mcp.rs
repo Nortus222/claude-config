@@ -6,8 +6,17 @@ use sha2::{Digest, Sha256};
 
 const INVALID_RUNTIME: &str = "Installed MCP runtime is unavailable or incompatible. Reinstall the Nortuscc app.";
 const INVALID_STATE: &str = "App state could not be resolved. Open Nortuscc and complete setup, then retry MCP.";
+#[cfg(unix)]
+const TARGET: &str = "darwin-arm64";
+#[cfg(windows)]
+const TARGET: &str = "win32-x64";
+#[cfg(unix)]
+const BUN: &str = "bun";
+#[cfg(windows)]
+const BUN: &str = "bun.exe";
 
 /// Resolves only the current installed app's fixed resource directory.
+#[cfg(unix)]
 pub fn installed_resources(executable: &Path) -> Result<PathBuf, String> {
     let executable = fs::canonicalize(executable).map_err(|_| INVALID_RUNTIME)?;
     let macos = executable.parent().ok_or(INVALID_RUNTIME)?;
@@ -19,6 +28,15 @@ pub fn installed_resources(executable: &Path) -> Result<PathBuf, String> {
     let resources = contents.join("Resources/agent-runtime");
     if fs::canonicalize(&resources).map_err(|_| INVALID_RUNTIME)? != resources || !resources.is_dir() { return Err(INVALID_RUNTIME.into()); }
     Ok(resources)
+}
+/// Resolves only the installed app's fixed resource directory beside its executable, without the verbatim
+/// `\\?\` prefix, as the bundled runtime names its own directory.
+#[cfg(windows)]
+pub fn installed_resources(executable: &Path) -> Result<PathBuf, String> {
+    let executable = fs::canonicalize(executable).map_err(|_| INVALID_RUNTIME)?;
+    let resources = executable.parent().ok_or(INVALID_RUNTIME)?.join("agent-runtime");
+    if fs::canonicalize(&resources).map_err(|_| INVALID_RUNTIME)? != resources || !resources.is_dir() { return Err(INVALID_RUNTIME.into()); }
+    Ok(dunce::simplified(&resources).to_path_buf())
 }
 
 fn file_hash(path: &Path, limit: u64) -> Result<String, String> {
@@ -41,22 +59,25 @@ fn verify_resources(resources: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(&metadata_path).map_err(|_| INVALID_RUNTIME)?;
     if !metadata.is_file() || metadata.len() > 16384 { return Err(INVALID_RUNTIME.into()); }
     let metadata: serde_json::Value = serde_json::from_slice(&fs::read(metadata_path).map_err(|_| INVALID_RUNTIME)?).map_err(|_| INVALID_RUNTIME)?;
-    if metadata["target"] != "darwin-arm64" || metadata["appVersion"] != env!("CARGO_PKG_VERSION")
-        || metadata["maintenanceProtocol"] != 1 || metadata["executable"] != "bun"
+    if metadata["target"] != TARGET || metadata["appVersion"] != env!("CARGO_PKG_VERSION")
+        || metadata["maintenanceProtocol"] != 1 || metadata["executable"] != BUN
         || metadata["mcp"]["protocol"] != 1 || metadata["mcp"]["executable"] != "mcp.mjs"
         || metadata["mcp"]["sdk"] != "2.3.1"
         || metadata["agentVersion"].as_str() != Some(file_hash(&resources.join("agent.mjs"), 67_108_864)?.as_str())
         || metadata["mcp"]["sha256"].as_str() != Some(file_hash(&resources.join("mcp.mjs"), 67_108_864)?.as_str())
-        || metadata["bunSha256"].as_str() != Some(file_hash(&resources.join("bun"), 268_435_456)?.as_str()) { return Err(INVALID_RUNTIME.into()); }
+        || metadata["bunSha256"].as_str() != Some(file_hash(&resources.join(BUN), 268_435_456)?.as_str()) { return Err(INVALID_RUNTIME.into()); }
     Ok(())
 }
 
 fn launch_command(resources: &Path, executable: &Path, state_root: &Path) -> Result<Command, String> {
     if !state_root.is_absolute() || state_root.to_str().is_none_or(|path| path.chars().any(char::is_control)) { return Err(INVALID_STATE.into()); }
     let executable = fs::canonicalize(executable).map_err(|_| INVALID_RUNTIME)?;
+    // The agent records the app by this plain path, the form helpers name it by.
+    #[cfg(windows)]
+    let executable = dunce::simplified(&executable).to_path_buf();
     if executable.to_str().is_none_or(|path| path.chars().any(char::is_control))
         || installed_resources(&executable)? != resources { return Err(INVALID_RUNTIME.into()); }
-    let mut command = Command::new(resources.join("bun"));
+    let mut command = Command::new(resources.join(BUN));
     command.arg(resources.join("mcp.mjs")).arg("--app").arg(executable)
         .env("NORTUSCC_STATE_DIR", state_root)
         .env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("BUN_OPTIONS")
@@ -64,20 +85,32 @@ fn launch_command(resources: &Path, executable: &Path, state_root: &Path) -> Res
     Ok(command)
 }
 
-/// Replaces this hidden process with MCP. The background agent and accepted runs remain independent.
+/// Replaces this hidden process with MCP (on Windows, runs it and returns its exit code). The background
+/// agent and accepted runs remain independent.
 pub fn run_mcp(resources: &Path) -> Result<i32, String> {
-    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) { return Err(INVALID_RUNTIME.into()); }
+    if !cfg!(any(all(target_os = "macos", target_arch = "aarch64"), all(windows, target_arch = "x86_64"))) { return Err(INVALID_RUNTIME.into()); }
     let executable = std::env::current_exe().and_then(fs::canonicalize).map_err(|_| INVALID_RUNTIME)?;
     if installed_resources(&executable)? != resources { return Err(INVALID_RUNTIME.into()); }
     verify_resources(resources)?;
     let state_root = crate::host::setup_agent(resources, crate::host::Setup::Paths).map_err(|_| INVALID_STATE)?;
     let mut command = launch_command(resources, &executable, &state_root)?;
-    use std::os::unix::process::CommandExt;
-    let _ = command.exec();
-    Err(INVALID_RUNTIME.into())
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let _ = command.exec();
+        Err(INVALID_RUNTIME.into())
+    }
+    #[cfg(windows)]
+    {
+        // The windowless app has no console for Bun to share; its stdio stays inherited.
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::host::CREATE_NO_WINDOW);
+        let status = command.status().map_err(|_| INVALID_RUNTIME)?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -144,5 +177,34 @@ mod tests {
         fs::rename(resources.join("mcp.mjs"),root.join("external.mjs")).unwrap();
         std::os::unix::fs::symlink(root.join("external.mjs"),resources.join("mcp.mjs")).unwrap();
         assert!(verify_resources(&resources).is_err()); fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn installed_resources_sit_beside_the_executable() {
+        let root = std::env::temp_dir().join(format!("ncc-mcp-windows-{}", std::process::id()));
+        fs::create_dir_all(root.join("agent-runtime")).unwrap(); let root = fs::canonicalize(root).unwrap();
+        fs::write(root.join("Nortuscc.exe"), b"native").unwrap();
+        assert_eq!(installed_resources(&root.join("Nortuscc.exe")).unwrap(), dunce::simplified(&root).join("agent-runtime"));
+        assert!(installed_resources(&root.join("agent-runtime/Nortuscc.exe")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn launch_names_the_app_by_its_plain_canonical_path() {
+        let root = std::env::temp_dir().join(format!("ncc-mcp-windows-launch-{}", std::process::id()));
+        fs::create_dir_all(root.join("App With Spaces/agent-runtime")).unwrap(); let root = fs::canonicalize(root).unwrap();
+        let app = root.join("App With Spaces/Nortuscc.exe"); fs::write(&app, b"native").unwrap();
+        let resources = installed_resources(&app).unwrap();
+        let state = root.join("state with spaces");
+        let command = launch_command(&resources, &app, &state).unwrap();
+        let plain = dunce::simplified(&app).to_path_buf();
+        assert!(!plain.to_string_lossy().starts_with(r"\\?\") && !resources.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(command.get_program(), resources.join("bun.exe"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), [resources.join("mcp.mjs").as_os_str(), std::ffi::OsStr::new("--app"), plain.as_os_str()]);
+        assert!(command.get_envs().any(|(key,value)| key=="NORTUSCC_STATE_DIR" && value==Some(state.as_os_str())));
+        fs::remove_dir_all(root).unwrap();
     }
 }

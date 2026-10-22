@@ -21,8 +21,9 @@ import { operation } from '../src/operations.ts';
 import { agentSkillInstaller } from '../../../packages/agent/src/skill-installer.ts';
 import { agentMachine } from '../../../packages/agent/checks/support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from '../../../packages/agent/checks/support/setup-fixture.ts';
+import { listenAgent } from '../../../test/support/agent-endpoint.ts';
 
-// The app MCP entry refuses to start off macOS, so every case that launches it runs on macOS only.
+// Every case launches the entry from a macOS app layout with a POSIX shell, so it runs on macOS only.
 const test = process.platform === 'darwin' ? nodeTest : nodeTest.skip;
 const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-bundle-')));
 const bundle = join(fixtureRoot, 'Test.app/Contents/Resources/agent-runtime');
@@ -209,7 +210,7 @@ async function agent(identity: 'app' | 'cli' = 'app', inputs: { metadata?: boole
       Effect.provideService(Fs, { ...fs, remove: path => path.startsWith(m.paths.backups + '/') && ++pruneAttempts === inputs.failPruneAt
         ? Effect.fail(new FsFailed({ op: 'remove', path, reason: 'PRIVATE-PRUNE-ERROR' })) : fs.remove(path) }),
     );
-    yield* serveIpc({ paths: m.paths, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
+    yield* serveIpc({ paths: m.paths, platform: process.platform, handle, session, agentVersion: expectedRuntime, appRuntime: { version: '0.1.6', runtimeId: expectedRuntime, appDirectory: dirname(expectedApp), platform: 'darwin', target: 'darwin-arm64', metadataPath: join(m.root, 'runtime.json') }, onShutdown: () => {} });
     while ((yield* handle.status) === undefined) yield* Effect.sleep('10 millis');
   }).pipe(Scope.provide(scope)), source);
   return { m, metadataPatches, started, release, close: async () => { Deferred.doneUnsafe(release, Effect.void); await Effect.runPromise(Scope.close(scope, Exit.void)); rmSync(m.root, { recursive: true, force: true }); assert.equal(existsSync(m.root),false); } };
@@ -441,7 +442,7 @@ test('malformed replies and private failure codes are redacted and an identical-
       }
     });
   });
-  await new Promise<void>(done => server.listen(join(root, 'agent/agent.sock'), done));
+  await listenAgent(server, join(root, 'agent'));
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(done => server.close(() => done())); });
   const client = open(process.execPath, root); t.after(client.close); await client.initialize();
   const reply = await client.call('getRun', { runId: 'r' });

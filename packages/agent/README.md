@@ -23,7 +23,9 @@ per-user login service. Decisions: `docs/adr/0011-local-agent-per-user-login-ser
   `installService`, `uninstallService` and `restartService` register them through `Processes`.
 - IPC (#78, `docs/adr/0019-agent-ipc-unix-socket-only-for-now.md`): the agent serves protocol v3 on
   `<stateRoot>/agent/agent.sock`, after a `hello` carrying the per-start token in `agent.token`.
-  Person-initiated inspect, preview and apply run inside the agent. Windows serves no IPC yet.
+  On Windows it listens on a named pipe whose name is drawn per start and written to
+  `agent/agent.pipe` after `listen` succeeds (`docs/adr/0040-agent-ipc-windows-named-pipe-with-per-start-name.md`).
+  Person-initiated inspect, preview and apply run inside the agent.
   `history` takes `limit` from 1 to 500 and an optional exclusive `before: { at, seq }` cursor.
   `at` is an ISO timestamp; `seq` is a nonnegative safe integer assigned by append order within
   that exact millisecond, starting at zero. Events sort by timestamp then sequence, both newest

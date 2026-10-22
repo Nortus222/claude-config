@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test, type TestContext } from 'node:test';
 import { connectAgent } from '../../../src/agent-client.ts';
+import { listenAgent } from '../../../test/support/agent-endpoint.ts';
 
 const native = process.env.DESKTOP_MCP_NATIVE_RUNTIME;
 const resources = process.env.DESKTOP_AGENT_RESOURCES;
@@ -113,7 +114,7 @@ test('native MCP captures login-profile-only state root and binds each invocatio
       }
     });
   });
-  await new Promise<void>(done => server.listen(join(f.state, 'agent/agent.sock'), done));
+  await listenAgent(server, join(f.state, 'agent'));
   f.cleanups.push(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(done => server.close(() => done())); });
   const old = open(t, f, ['--mcp'], {}); await old.ask('tools/list');
   const call = (client: ReturnType<typeof open>) => client.ask('tools/call', { name: 'nortuscc_get_run', arguments: { runId: 'r' } });

@@ -130,6 +130,41 @@ const registrationText = (text: string, changes: Readonly<Record<string, string>
   return text;
 };
 
+// A running agent rewrites agent.json itself, so a helper writing beside it could lose a pause or policy.
+export class AgentRunning extends Error {
+  readonly _tag = 'AgentRunning';
+  constructor() { super("Another agent is running for this setup; stop it, then restart the app's agent so the app can record itself as its owner."); }
+}
+
+// The Windows app runs its agent as a child (ADR 0040), so nothing is registered: the app only records
+// itself as the agent's owner, which the agent and App MCP authenticate. A first ownership trusts the
+// app's own setup, as a first installation does; an agent the CLI installed stays the CLI's. Changing the
+// owner fails with AgentRunning while any agent holds agent.lock; an unchanged owner is never rewritten.
+export const recordAppOwnership = (input: LifecycleInput) => Effect.scoped(Effect.gen(function* () {
+  if (!isAbsolute(input.appPath) || /[\x00-\x1f\x7f]/.test(input.appPath)) return yield* Effect.fail(new Error('app path must be an absolute executable path without control characters'));
+  if (input.target.platform !== 'win32') return yield* Effect.fail(new Error('only the Windows app owns its agent without a login service'));
+  const { paths } = input;
+  const fs = yield* Fs;
+  yield* acquirePidLock(join(paths.stateRoot, 'agent', 'app-install.lock'));
+  if ((yield* fs.readText(pendingPath(input))) !== undefined) return yield* Effect.fail(new Error('pending app update requires recovery before ensuring the agent'));
+  yield* validateExistingAuthority(input);
+  const state = yield* AgentStateStore;
+  const recorded = yield* state.read;
+  if (recorded.installedBy === 'cli' || (recorded.installedBy === 'app' && recorded.agentVersion === input.agentVersion
+    && recorded.appPath === input.appPath)) return { stateRoot: paths.stateRoot };
+  if (liveLockHolder(join(paths.stateRoot, 'agent', 'agent.lock')) !== undefined) return yield* Effect.fail(new AgentRunning());
+  const statePath = join(paths.stateRoot, 'agent', 'agent.json');
+  const firstInstallation = recorded.installedBy === undefined && recorded.agentVersion === undefined
+    && !(yield* fs.exists(join(paths.stateRoot, 'agent', 'setups.json')));
+  const backups = yield* Backups;
+  for (const name of ['agent.json', 'setups.json']) yield* backups.preserve(join(paths.stateRoot, 'agent', name), name, 'agent');
+  if (firstInstallation) yield* trustOwnSetup('app');
+  yield* validateExistingAuthority(input);
+  const text = (yield* fs.readText(statePath)) ?? JSON.stringify(yield* state.read);
+  yield* fs.writeTextAtomic(statePath, registrationText(text, { installedBy: 'app', agentVersion: input.agentVersion, appPath: input.appPath }));
+  return { stateRoot: paths.stateRoot };
+}));
+
 // A matching unit alone does not prove a successful bootstrap. The marker is written only after
 // registration succeeds, so a failed install remains retryable even if it wrote the desired unit.
 export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {}) => Effect.scoped(Effect.gen(function* () {
@@ -153,7 +188,7 @@ export const ensureAgent = (input: LifecycleInput, options: LifecycleOptions = {
   const previousUnit = yield* fs.readText(unitPath(target));
   const registered = previousMarker?.trim() === marker;
   const unitMatches = previousUnit === rendered;
-  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(paths, { client: 'app' }))));
+  const opened = yield* Effect.result(attempt(options.connect ?? (() => connectAgent(paths, { client: 'app', platform: target.platform }))));
   let conn: AgentConnection | undefined;
   if (opened._tag === 'Success') conn = opened.success;
   else {

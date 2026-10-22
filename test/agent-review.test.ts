@@ -1,16 +1,16 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MachinePathsValue } from '@nortuscc/machine';
 import { connectAgent } from '../src/agent-client.ts';
+import { listenAgent, shortTempDir } from './support/agent-endpoint.ts';
 import { run, type AgentDeps } from '../src/commands/agent.ts';
 import type { Choice } from '../src/select.ts';
 
 // `nortuscc agent review` with an injected picker and confirm, over the real client and a scripted
 // protocol v3 server in this process: no agent runs and nothing on the machine changes.
-const skip = process.platform === 'win32' ? 'the agent serves no socket on Windows' : false;
 const TOKEN = 'the-token';
 
 const item = (key: string, label: string) => ({ key, domain: 'config', label, group: 'files', state: 'differs', disposition: 'apply' });
@@ -48,7 +48,7 @@ const progress = (socket: Socket, p: unknown) => send(socket, { version: 3, even
 
 // Answers inspect, preview and apply as the agent would; apply streams a run of the previewed steps.
 async function fake(script: Script = {}): Promise<Fake> {
-  const stateRoot = mkdtempSync('/tmp/nar-');
+  const stateRoot = shortTempDir('nar-');
   const dir = join(stateRoot, 'agent');
   mkdirSync(dir);
   writeFileSync(join(dir, 'agent.token'), TOKEN);
@@ -91,7 +91,8 @@ async function fake(script: Script = {}): Promise<Fake> {
             const steps = previewed!.steps;
             if (script.drop) {
               progress(socket, { type: 'started', index: 0, total: steps.length, step: steps[0] });
-              socket.destroy();
+              // Ends after flushing: a destroyed named pipe drops what it has not yet written.
+              socket.end();
               break;
             }
             steps.forEach((s, index) => {
@@ -105,7 +106,7 @@ async function fake(script: Script = {}): Promise<Fake> {
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(join(dir, 'agent.sock'), resolve));
+  await listenAgent(server, dir);
   const paths: MachinePathsValue = {
     repo: stateRoot, claude: stateRoot, codex: stateRoot, codexOpenRouter: stateRoot, agentsSkills: stateRoot, stateRoot, backups: stateRoot,
   };
@@ -148,7 +149,7 @@ const deps = (f: Fake, options: { pick?: Picker; yes?: boolean; shown?: Choice[]
 
 const commands = (f: Fake) => f.seen.map((r) => r.command);
 
-test('agent review shows pending, held and drift rows and applies the checked items', { skip }, async () => {
+test('agent review shows pending, held and drift rows and applies the checked items', async () => {
   const f = await fake();
   try {
     const shown: Choice[][] = [];
@@ -176,7 +177,7 @@ test('agent review shows pending, held and drift rows and applies the checked it
   }
 });
 
-test('agent review excludes an unchecked item from the preview', { skip }, async () => {
+test('agent review excludes an unchecked item from the preview', async () => {
   const f = await fake();
   try {
     const { result } = await captured(() => run(['review'], deps(f, { pick: () => ['config:b', 'config:c'] })));
@@ -187,7 +188,7 @@ test('agent review excludes an unchecked item from the preview', { skip }, async
   }
 });
 
-test('agent review applies nothing when the person declines', { skip }, async () => {
+test('agent review applies nothing when the person declines', async () => {
   const f = await fake();
   try {
     const { result, stdout } = await captured(() => run(['review'], deps(f, { yes: false })));
@@ -199,7 +200,7 @@ test('agent review applies nothing when the person declines', { skip }, async ()
   }
 });
 
-test('agent review exits 1 when the machine changed since the preview', { skip }, async () => {
+test('agent review exits 1 when the machine changed since the preview', async () => {
   const f = await fake({ stale: true });
   try {
     const { result, stdout } = await captured(() => run(['review'], deps(f)));
@@ -210,7 +211,7 @@ test('agent review exits 1 when the machine changed since the preview', { skip }
   }
 });
 
-test('agent review exits 1 promptly when the agent goes away during the run', { skip }, async () => {
+test('agent review exits 1 promptly when the agent goes away during the run', async () => {
   const f = await fake({ drop: true });
   try {
     const started = Date.now();
@@ -224,7 +225,7 @@ test('agent review exits 1 promptly when the agent goes away during the run', { 
   }
 });
 
-test('an agent command whose request goes unanswered exits 1 and says so', { skip }, async () => {
+test('an agent command whose request goes unanswered exits 1 and says so', async () => {
   const f = await fake();
   try {
     const { result, stderr } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths, { requestTimeoutMs: 50 }) }));
@@ -235,7 +236,7 @@ test('an agent command whose request goes unanswered exits 1 and says so', { ski
   }
 });
 
-test('agent status prints the status error and exits 1', { skip }, async () => {
+test('agent status prints the status error and exits 1', async () => {
   const f = await fake({ status: { ...STATUS, error: 'JOB_FAILED', detail: 'the job stopped' } });
   try {
     const { result, stdout } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths) }));
@@ -247,7 +248,7 @@ test('agent status prints the status error and exits 1', { skip }, async () => {
   }
 });
 
-test('agent status says the agent is still starting and exits 1 before its first job', { skip }, async () => {
+test('agent status says the agent is still starting and exits 1 before its first job', async () => {
   const f = await fake({ statusError: { code: 'NO_REPORT', message: 'the agent is still starting' } });
   try {
     const { result, stdout, stderr } = await captured(() => run(['status'], { connect: () => connectAgent(f.paths) }));
@@ -260,7 +261,7 @@ test('agent status says the agent is still starting and exits 1 before its first
 });
 
 for (const hang of ['inspect', 'preview']) {
-  test(`agent review exits 130 on Ctrl-C while waiting for ${hang}, and applies nothing`, { skip }, async () => {
+  test(`agent review exits 130 on Ctrl-C while waiting for ${hang}, and applies nothing`, async () => {
     const f = await fake({ hang });
     const controller = new AbortController();
     // Ctrl-C once the agent has the request it will never answer.

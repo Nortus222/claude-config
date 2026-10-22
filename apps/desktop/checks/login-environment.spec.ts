@@ -172,6 +172,16 @@ test('a background process holding stdout does not delay the PATH or outlive the
   assert.equal(lingering, false, 'the background sleep outlived the probe');
 });
 
+test('on Windows the inherited environment is used without a shell or a remembered PATH', async () => {
+  const pathFile = join(realpathSync(mkdtempSync(join(dir, 'windows-'))), 'agent', 'login-path');
+  const events: Array<[StartupPhase, StartupStatus]> = [];
+  const env = { SHELL: join(dir, 'absent-shell'), PATH: 'C:/inherited', KEEP: 'me', UNSET: undefined };
+  const result = await probeLoginEnvironment({ env, platform: 'win32', pathFile, onProgress: (phase, status) => events.push([phase, status]) });
+  assert.deepEqual(result, { env: { SHELL: env.SHELL, PATH: 'C:/inherited', KEEP: 'me' } });
+  assert.deepEqual(events, [], 'no shell is spawned');
+  assert.equal(existsSync(pathFile), false, 'no PATH is remembered');
+});
+
 test('a missing shell falls back with a probe error', async () => {
   const result = await probeLoginEnvironment({ env: { SHELL: join(dir, 'absent-shell'), PATH: '/inherited' } });
   assert.equal(result.env.PATH, '/inherited');

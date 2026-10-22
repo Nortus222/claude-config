@@ -10,6 +10,7 @@ import {
   type AgentDomain, type AgentDomains,
 } from '../src/index.ts';
 import { pause, resume } from '../src/pause.ts';
+import { agentEndpoint } from '@nortuscc/sync';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, EFFORT, setupFixture } from './support/setup-fixture.ts';
 
@@ -101,26 +102,31 @@ const prepare = async (options: Options = {}) => {
   const source = fixture.source;
   const dir = join(m.paths.stateRoot, 'agent');
   m.write(join(dir, 'runtime.json'), JSON.stringify({agentVersion:'9.9.9',appVersion:'0.1.6',target:'darwin-arm64'}));
-  return { m, fixture, domains, source, dir, socketPath: join(dir, 'agent.sock'), tokenPath: join(dir, 'agent.token') };
+  return { m, fixture, domains, source, dir, tokenPath: join(dir, 'agent.token') };
 };
 
 // `prepare`'s machine served on its socket. `open` connects and says hello. The agent, the session
 // and the server run in a scope the test closes after the start job has finished.
 const serverMachine = async (options: Options = {}) => {
-  const { m, domains, source, dir, socketPath, tokenPath } = await prepare(options);
+  const { m, domains, source, dir, tokenPath } = await prepare(options);
   const scope = Scope.makeUnsafe();
   await m.run(Effect.gen(function* () {
     const agent = yield* startAgent(domains);
     const session = yield* makeSession(agent, { signal: new AbortController().signal, domains });
     yield* serveIpc({
-      paths: m.paths, handle: agent, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath: join(dir,'runtime.json') }, onShutdown: () => {},
+      paths: m.paths, platform: process.platform, handle: agent, session, agentVersion: '9.9.9', appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath: join(dir,'runtime.json') }, onShutdown: () => {},
     });
     while ((yield* agent.status) === undefined) yield* Effect.sleep('10 millis');
-  }).pipe(Scope.provide(scope)), source);
+  }).pipe(Scope.provide(scope)), source).catch(async (error) => {
+    // An open scope keeps the agent's fibers alive, so a failed start would hang the run.
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    throw error;
+  });
+  const endpoint = agentEndpoint(dir, process.platform);
   const token = readFileSync(tokenPath, 'utf8');
   const clients: Array<Client> = [];
   const open = async (client: 'app' | 'cli' | 'mcp' = 'mcp') => {
-    const c = await connect(socketPath);
+    const c = await connect(endpoint);
     clients.push(c);
     const hello = await ask(c, { command: 'hello', token, client, ...(client === 'mcp' ? { runtimeId: '9.9.9' } : {}) });
     assert.equal(hello.ok, true, JSON.stringify(hello));
@@ -131,7 +137,7 @@ const serverMachine = async (options: Options = {}) => {
     await Effect.runPromise(Scope.close(scope, Exit.void));
     rmSync(m.root, {recursive:true,force:true});
   };
-  return { m, dir, socketPath, tokenPath, token, open, clients, close };
+  return { m, dir, endpoint, tokenPath, token, open, clients, close };
 };
 
 const withServer = async (options: Options, body: (s: Awaited<ReturnType<typeof serverMachine>>) => Promise<void>) => {
@@ -209,13 +215,13 @@ test('maintenance activated after preview refuses acceptance without a run or mu
 
 test('MCP authentication reads a fresh token and rejects incorrect runtime identity without mutation', async () => {
   await withServer({}, async s => {
-    const unauthenticated = await connect(s.socketPath);
+    const unauthenticated = await connect(s.endpoint);
     assert.equal((await operation(unauthenticated, 'inspect')).error.code, 'UNAUTHORIZED'); await unauthenticated.closed;
-    const unauthenticatedBackups = await connect(s.socketPath);
+    const unauthenticatedBackups = await connect(s.endpoint);
     assert.equal((await operation(unauthenticatedBackups, 'listBackups', {limit:1})).error.code, 'UNAUTHORIZED'); await unauthenticatedBackups.closed;
-    const bad = await connect(s.socketPath);
+    const bad = await connect(s.endpoint);
     assert.equal((await ask(bad, {command:'hello',client:'mcp',runtimeId:'9.9.9',token:'wrong'})).error.code, 'UNAUTHORIZED'); await bad.closed;
-    const mismatch = await connect(s.socketPath); s.clients.push(mismatch);
+    const mismatch = await connect(s.endpoint); s.clients.push(mismatch);
     const hello = await ask(mismatch, {command:'hello',client:'mcp',runtimeId:'old',token:readFileSync(s.tokenPath,'utf8')});
     assert.equal(hello.result.operations.available,false);
     assert.equal((await operation(mismatch,'getContext')).result.capabilities.applyChange.available,false);

@@ -8,6 +8,8 @@ import { test, type TestContext } from 'node:test';
 
 const unixSmokeSkip = process.platform === 'win32' ? 'requires POSIX smoke tools and Unix agent IPC (ADR 0019)' : false;
 const resourceSkip = unixSmokeSkip || (process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false);
+const windowsSmokeSkip = process.platform !== 'win32' ? 'Windows named-pipe smoke (ADR 0040)'
+  : process.env.DESKTOP_AGENT_RESOURCES === undefined ? 'set DESKTOP_AGENT_RESOURCES after bundling' : false;
 // Keep nested smoke socket paths within Darwin's sockaddr_un limit.
 const smokeTemporaryRoot = process.platform === 'darwin' ? '/tmp' : tmpdir();
 
@@ -313,4 +315,14 @@ createServer(() => {}).listen(join(dir, 'agent.sock'));
   assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
   assert.equal(existsSync(child.home), false);
   assert.equal(existsSync(f.root), false);
+});
+
+test('Windows smoke says hello over the agent pipe and removes agent.pipe and agent.token on shutdown', {
+  skip: windowsSmokeSkip,
+  timeout: 120_000,
+}, async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, ['scripts/smoke-windows.mjs'], { cwd: new URL('..', import.meta.url), timeout: 110_000 });
+  assert.match(stdout, /Raw hello passed/);
+  assert.match(stdout, /Bundled agent Windows smoke passed on temporary root (.+)/);
+  assert.equal(existsSync(stdout.match(/temporary root (.+)/)![1].trim()), false, 'smoke left its temporary root behind');
 });

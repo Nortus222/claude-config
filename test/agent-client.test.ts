@@ -1,13 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MachinePathsValue } from '@nortuscc/machine';
 import { AgentError, AgentUnavailable, connectAgent } from '../src/agent-client.ts';
+import { listenAgent, shortTempDir } from './support/agent-endpoint.ts';
 
 // connectAgent against a minimal protocol v3 server in this process: no agent runs.
-const skip = process.platform === 'win32' ? 'the agent serves no socket on Windows' : false;
 const TOKEN = 'the-token';
 
 const STATUS = {
@@ -24,7 +24,7 @@ const ok = (socket: Socket, id: unknown, result: unknown) => send(socket, { vers
 // Answers hello with the token check, then hands every other request to `answer`. A short /tmp
 // state root keeps the socket path under the Unix limit.
 async function fake(answer: Answer = () => {}, options: { token?: boolean; listen?: boolean; hello?: unknown } = {}): Promise<Fake> {
-  const stateRoot = mkdtempSync('/tmp/nac-');
+  const stateRoot = shortTempDir('nac-');
   const dir = join(stateRoot, 'agent');
   mkdirSync(dir);
   if (options.token !== false) writeFileSync(join(dir, 'agent.token'), TOKEN);
@@ -51,7 +51,7 @@ async function fake(answer: Answer = () => {}, options: { token?: boolean; liste
         }
       });
     });
-    await new Promise<void>((resolve) => server!.listen(join(dir, 'agent.sock'), resolve));
+    await listenAgent(server, dir);
   }
   const paths: MachinePathsValue = {
     repo: stateRoot, claude: stateRoot, codex: stateRoot, codexOpenRouter: stateRoot, agentsSkills: stateRoot, stateRoot, backups: stateRoot,
@@ -64,7 +64,7 @@ async function fake(answer: Answer = () => {}, options: { token?: boolean; liste
   return { paths, seen, close };
 }
 
-test('connectAgent says hello as the CLI with the token, then answers a request by its id', { skip }, async () => {
+test('connectAgent says hello as the CLI with the token, then answers a request by its id', async () => {
   const f = await fake((request, socket) => ok(socket, request.id, STATUS));
   try {
     const conn = await connectAgent(f.paths);
@@ -84,7 +84,7 @@ test('connectAgent says hello as the CLI with the token, then answers a request 
   }
 });
 
-test('responses out of order still settle the request they answer', { skip }, async () => {
+test('responses out of order still settle the request they answer', async () => {
   const held: Array<Record<string, unknown>> = [];
   const f = await fake((request, socket) => {
     held.push(request);
@@ -107,7 +107,7 @@ test('responses out of order still settle the request they answer', { skip }, as
   }
 });
 
-test('an error response rejects with AgentError carrying its code and message', { skip }, async () => {
+test('an error response rejects with AgentError carrying its code and message', async () => {
   const f = await fake((request, socket) =>
     send(socket, { version: 3, id: request.id, ok: false, error: { code: 'PAUSED', message: 'the agent is paused' } }));
   try {
@@ -123,7 +123,7 @@ test('an error response rejects with AgentError carrying its code and message', 
   }
 });
 
-test('events reach every listener until it unsubscribes', { skip }, async () => {
+test('events reach every listener until it unsubscribes', async () => {
   const f = await fake((request, socket) => {
     send(socket, { version: 3, event: 'status', status: STATUS });
     ok(socket, request.id, { subscribed: true });
@@ -146,7 +146,7 @@ test('events reach every listener until it unsubscribes', { skip }, async () => 
   }
 });
 
-test('a record outside the protocol rejects the pending request', { skip }, async () => {
+test('a record outside the protocol rejects the pending request', async () => {
   const f = await fake((request, socket) => send(socket, { version: 3, id: request.id, ok: true }));
   try {
     const conn = await connectAgent(f.paths);
@@ -160,7 +160,7 @@ test('a record outside the protocol rejects the pending request', { skip }, asyn
   }
 });
 
-test('a request past its timeout rejects', { skip }, async () => {
+test('a request past its timeout rejects', async () => {
   const f = await fake();
   try {
     const conn = await connectAgent(f.paths);
@@ -175,7 +175,7 @@ test('a request past its timeout rejects', { skip }, async () => {
   }
 });
 
-test('a request with no timeout of its own times out at the connection default', { skip }, async () => {
+test('a request with no timeout of its own times out at the connection default', async () => {
   const f = await fake();
   try {
     const conn = await connectAgent(f.paths, { requestTimeoutMs: 50 });
@@ -190,7 +190,7 @@ test('a request with no timeout of its own times out at the connection default',
   }
 });
 
-test('inspect and apply wait for the longer inspect timeout, not the request default', { skip }, async () => {
+test('inspect and apply wait for the longer inspect timeout, not the request default', async () => {
   const f = await fake((request, socket) => {
     if (request.command !== 'status') setTimeout(() => ok(socket, request.id, { answered: request.command }), 150);
   });
@@ -208,7 +208,7 @@ test('inspect and apply wait for the longer inspect timeout, not the request def
   }
 });
 
-test('a closed connection rejects what is still pending as AgentUnavailable and tells onClose once', { skip }, async () => {
+test('a closed connection rejects what is still pending as AgentUnavailable and tells onClose once', async () => {
   const f = await fake((_request, socket) => socket.destroy());
   try {
     const conn = await connectAgent(f.paths);
@@ -231,18 +231,18 @@ test('a closed connection rejects what is still pending as AgentUnavailable and 
   }
 });
 
-test('connectAgent is AgentUnavailable with no token, no socket or a silent agent', { skip }, async () => {
+test('connectAgent is AgentUnavailable with no token, no socket or a silent agent', async () => {
   const noToken = await fake(undefined, { token: false });
   const noSocket = await fake(undefined, { listen: false });
   const refused = await fake();
   writeFileSync(join(refused.paths.stateRoot, 'agent', 'agent.token'), 'stale');
   // Accepts connections and never answers.
-  const silentRoot = mkdtempSync('/tmp/nac-');
+  const silentRoot = shortTempDir('nac-');
   mkdirSync(join(silentRoot, 'agent'));
   writeFileSync(join(silentRoot, 'agent', 'agent.token'), TOKEN);
   const sockets = new Set<Socket>();
   const silent = createServer((socket) => void sockets.add(socket));
-  await new Promise<void>((resolve) => silent.listen(join(silentRoot, 'agent', 'agent.sock'), resolve));
+  await listenAgent(silent, join(silentRoot, 'agent'));
   try {
     for (const f of [noToken, noSocket]) await assert.rejects(connectAgent(f.paths), AgentUnavailable);
     await assert.rejects(connectAgent(refused.paths), (error) => error instanceof AgentError && error.code === 'UNAUTHORIZED');
@@ -257,7 +257,21 @@ test('connectAgent is AgentUnavailable with no token, no socket or a silent agen
   }
 });
 
-test('connectAgent can identify the desktop app', { skip }, async () => {
+test('on Windows an agent.pipe that names no agent pipe, or a pipe nobody serves, is AgentUnavailable', {
+  skip: process.platform === 'win32' ? false : 'Windows named pipes only',
+}, async () => {
+  const f = await fake(undefined, { listen: false });
+  try {
+    for (const name of ['\\\\.\\pipe\\someone-else', 'C:\\agent.sock', `\\\\.\\pipe\\nortuscc-agent-${'0'.repeat(32)}`]) {
+      writeFileSync(join(f.paths.stateRoot, 'agent', 'agent.pipe'), name + '\n');
+      await assert.rejects(connectAgent(f.paths, { timeoutMs: 500 }), AgentUnavailable, name);
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test('connectAgent can identify the desktop app', async () => {
   const f = await fake((request, socket) => ok(socket, request.id, STATUS));
   try {
     const conn = await connectAgent(f.paths, { client: 'app' });
@@ -266,7 +280,7 @@ test('connectAgent can identify the desktop app', { skip }, async () => {
   } finally { await f.close(); }
 });
 
-test('outgoing records are bounded by UTF-8 bytes before writing', { skip }, async () => {
+test('outgoing records are bounded by UTF-8 bytes before writing', async () => {
   const f = await fake((request, socket) => ok(socket, request.id, null));
   try {
     const conn = await connectAgent(f.paths);
@@ -276,7 +290,7 @@ test('outgoing records are bounded by UTF-8 bytes before writing', { skip }, asy
   } finally { await f.close(); }
 });
 
-test('incoming records exceeding the byte limit close the connection', { skip }, async () => {
+test('incoming records exceeding the byte limit close the connection', async () => {
   const f = await fake((request, socket) => ok(socket, request.id, 'é'.repeat(524288)));
   try {
     const conn = await connectAgent(f.paths);
@@ -285,7 +299,7 @@ test('incoming records exceeding the byte limit close the connection', { skip },
   } finally { await f.close(); }
 });
 
-test('an unterminated incoming record is bounded before a newline arrives', { skip }, async () => {
+test('an unterminated incoming record is bounded before a newline arrives', async () => {
   const f = await fake((_request, socket) => socket.write('x'.repeat(1048576)));
   try {
     const conn = await connectAgent(f.paths);
@@ -294,7 +308,7 @@ test('an unterminated incoming record is bounded before a newline arrives', { sk
   } finally { await f.close(); }
 });
 
-test('hello protocol mismatch is a typed error instead of an unreachable agent', { skip }, async () => {
+test('hello protocol mismatch is a typed error instead of an unreachable agent', async () => {
   const f = await fake(undefined, { hello: { agentVersion: 'old', protocol: 2, policy: 'notify', paused: null } });
   try {
     await assert.rejects(connectAgent(f.paths, { client: 'app' }), (error) => error instanceof AgentError && error.code === 'MALFORMED');
@@ -303,7 +317,7 @@ test('hello protocol mismatch is a typed error instead of an unreachable agent',
   }
 });
 
-test('hosted IPC rejects pending IDs, tokens and unknown nested result fields', { skip }, async () => {
+test('hosted IPC rejects pending IDs, tokens and unknown nested result fields', async () => {
   const start = { userCode: 'ABCD', verificationUri: 'https://github.com/login/device', interval: 5, expiresIn: 120 };
   const f = await fake((request, socket) => ok(socket, request.id, { ...start, pendingId: 'secret' }));
   try {
@@ -313,7 +327,7 @@ test('hosted IPC rejects pending IDs, tokens and unknown nested result fields', 
   } finally { await f.close(); }
 });
 
-test('MCP authentication binds the expected app runtime and shared results reject unknown fields', {skip}, async () => {
+test('MCP authentication binds the expected app runtime and shared results reject unknown fields', async () => {
   const f=await fake((request,socket) => ok(socket,request.id,{runs:[],nextBefore:null,secret:'not returned'}));
   try {
     const conn=await connectAgent(f.paths,{client:'mcp',runtimeId:'bundle-hash'});

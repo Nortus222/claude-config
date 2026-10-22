@@ -11,7 +11,7 @@ import { followedSetupSourceLayer, migrateFollowed, RevisionUnavailable, SetupSo
 import { maintenanceState, prepareUpdate, recoverUpdate } from './maintenance.ts';
 import { inspectConnections, connectHost, disconnectHost, repairConnections } from './mcp-connections.ts';
 import { decodeConnectionAction } from '../shared/mcp-connections-protocol.ts';
-import { ensureAgent } from './lifecycle.ts';
+import { ensureAgent, recordAppOwnership } from './lifecycle.ts';
 import { MACOS_TOOL_DIRECTORIES, probeLoginEnvironment, withToolDirectories } from './login-environment.ts';
 import { bootstrapSetup, decodeSetupChoices, requestGitInstall, setupState } from './onboarding.ts';
 import { desktopHostedUrl } from './public-config.ts';
@@ -57,7 +57,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     trace.record('login_probe', 'started');
     try {
       signal.throwIfAborted();
-      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, runtime: process.execPath, pathFile: loginPathFile(), onProgress: trace.record, signal });
+      const result = await (input.probe ?? probeLoginEnvironment)({ env: input.env, platform: input.platform ?? process.platform, runtime: process.execPath, pathFile: loginPathFile(), onProgress: trace.record, signal });
       signal.throwIfAborted();
       trace.record('login_probe', result.error ? 'fallback' : 'completed');
       // Every helper, the registered service's PATH and the agent's tools (git, npx, gh) see Homebrew.
@@ -126,8 +126,13 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
           if (Exit.isFailure(maintenance)) { context.outcome = 'maintenance_failed'; return; }
           context.maintenance = maintenance.value;
           if (context.setup!.needsSetup) { context.outcome = 'needs_setup'; return; }
-          if (platform !== 'darwin' && platform !== 'linux') {
-            context.outcome = maintenance.value.pending ? 'recovery_failed' : 'ensure_failed'; return;
+          // The Windows app owns its agent (ADR 0040): the host spawns it after `ready`, so nothing
+          // registers here: only the app's ownership is recorded. App updates, hence recovery, stay macOS-only.
+          if (platform === 'win32') {
+            if (maintenance.value.pending) { context.outcome = 'recovery_failed'; return; }
+            const owned = yield* Effect.exit(phase('lifecycle', recordAppOwnership(lifecycleInput)));
+            signal.throwIfAborted();
+            context.outcome = Exit.isSuccess(owned) ? 'ready' : 'ensure_failed'; return;
           }
           if (maintenance.value.pending) {
             const recovered = yield* Effect.exit(phase('lifecycle', recoverUpdate(lifecycleInput, {
@@ -201,7 +206,10 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       const paths = yield* phase('paths', pathsFromEnvironment({ env, home, platform, ...(arg === '--maintenance-state' || arg === undefined ? { fallbackRepo: home } : {}) }));
       const processes = input.processes ?? nodeProcesses({ env, inherit: 'stderr' });
       if (arg !== undefined) {
-        if (platform !== 'darwin' && platform !== 'linux') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
+        if (platform !== 'darwin' && platform !== 'linux' && platform !== 'win32') return yield* Effect.fail(new Error(`desktop agent IPC is not supported on ${platform}`));
+        // The Windows app owns its agent (ADR 0040): the Rust host starts and restarts its agent child, so
+        // ensure and restart only record the app's ownership. App updates stay macOS-only.
+        if (platform === 'win32' && (arg === '--prepare-update' || arg === '--recover-update')) return yield* Effect.fail(new Error('desktop app updates are not supported on Windows'));
         const lifecycleInput = {
           paths, env, shellEnvironment: input.env, resources: input.resources, agentVersion,
           appPath: appPath!,
@@ -220,6 +228,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
             try { process.kill(pid, 0); return true; }
             catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
           } });
+          if (platform === 'win32') return yield* recordAppOwnership(lifecycleInput);
           return yield* ensureAgent(lifecycleInput, { restart: arg === '--restart' });
         });
         const result = yield* phase('lifecycle', operation.pipe(
@@ -237,9 +246,11 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
       }
       // Each job's integrations domain reads that job's snapshot and uses the login environment.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env }), skillsDomain];
+      // runAgent's own `platform` stays this process's, so its endpoint is the one this host's clients open
+      // even when a test injects another platform; in the app the two are the same.
       yield* runAgent({
         ...(hostedUrl === undefined ? {} : { hosted: { url: hostedUrl, platform, ...input.hostedDependencies } }),
-        ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: resolve(input.resources, '../../MacOS'), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
+        ...(runtime.appVersion && runtime.target ? { appRuntime: { version: runtime.appVersion, runtimeId: agentVersion, appDirectory: appDirectory(input.resources, platform), platform, target: runtime.target, metadataPath: resolve(input.resources, 'runtime.json') } } : {}),
         paths, domains, source: Layer.unwrap(migrateFollowed(paths).pipe(
           Effect.map(followed => followed ? followedSetupSourceLayer(paths, followed, { processes }) : setupSourceLayer(paths, { processes })),
           Effect.provide(setupsStore.pipe(Layer.provideMerge(Layer.mergeAll(machinePaths(paths), nodeFs, processes)))),
@@ -251,7 +262,7 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
               load: () => unavailable, effective: () => unavailable,
             }));
           }),
-        )), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: platform !== 'win32', notifications: { platform },
+        )), processes, dialogue: nodeProcessDialogue({ env }), sourceEnv:env, skillInstaller: agentSkillInstaller({ home, xdgStateHome: env.XDG_STATE_HOME }), agentVersion, ipc: true, notifications: { platform },
         signal,
         onLifecycle: trace.record,
       });
@@ -276,6 +287,10 @@ export async function runDesktopEntry(input: DesktopEntryInput, trace: StartupDi
     process.off('SIGINT', stop);
   }
 }
+
+// Where the app executable lives: Contents/MacOS beside a macOS bundle's Resources/agent-runtime; on
+// Windows the install directory holding agent-runtime.
+const appDirectory = (resources: string, platform: NodeJS.Platform) => resolve(resources, platform === 'win32' ? '..' : '../../MacOS');
 
 const readStartupInput = async (stdin: AsyncIterable<string | Uint8Array>) => {
   const chunks: Buffer[] = [];

@@ -1,0 +1,6 @@
+{
+  "bundle": {
+    "resources": { "resources/darwin-arm64/": null, "resources/win32-x64/": "agent-runtime/" },
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  }
+}

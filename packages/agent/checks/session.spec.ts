@@ -27,6 +27,8 @@ type Options = {
   readonly onStatus?: (status: AgentStatus) => Effect.Effect<void>;
   readonly paused?: boolean;
   readonly fixture?: FixtureOptions;
+  // The OS the session names in its messages.
+  readonly platform?: NodeJS.Platform;
   // Replaces the config domain, so a test can gate or fail a step.
   readonly config?: AgentDomain;
   // Wraps the fixture's setup source, so a test can watch or slow it.
@@ -53,7 +55,7 @@ const sessionMachine = async (options: Options = {}) => {
   const within = <A, E>(body: (session: AgentSession, agent: AgentHandle) => Effect.Effect<A, E, AgentServices | Scope.Scope>) =>
     m.run(Effect.scoped(Effect.gen(function* () {
       const agent = yield* startAgent(domains, { onStatus: options.onStatus });
-      const session = yield* makeSession(agent, { signal: shutdown.signal, domains });
+      const session = yield* makeSession(agent, { signal: shutdown.signal, domains, ...(options.platform ? { platform: options.platform } : {}) });
       return yield* body(session, agent);
     })), source);
   const lock = join(m.paths.stateRoot, 'apply.lock');
@@ -182,7 +184,7 @@ test('an interrupted run does not block a new apply', async () => {
   await f.within((session, agent) => Effect.gen(function* () {
     assert.equal((yield* session.runs.get('interrupted-run')).state, 'interrupted');
     const preview = yield* session.preview(yield* configOnly(session));
-    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => {} });
+    yield* serveIpc({ paths: f.m.paths, platform: process.platform, handle: agent, session, agentVersion: '9.9.9', onShutdown: () => {} });
     const result = yield* Effect.promise(async () => {
       const connection = await connectAgent(f.m.paths, { client: 'app' });
       try {
@@ -208,7 +210,7 @@ test('abandonRun is exposed to the app and mcp clients', async () => {
   await f.m.run(AgentStateStore.use(store => store.update(state => ({ ...state, installedBy: 'app', agentVersion, appPath }))));
   for (const client of ['app', 'mcp']) await f.m.run(RunStore.use(store => store.write({ ...seedInterruptedRun(client), sequence: client === 'app' ? 1 : 2 })));
   await f.within((session, agent) => Effect.gen(function* () {
-    yield* serveIpc({ paths: f.m.paths, handle: agent, session, agentVersion,
+    yield* serveIpc({ paths: f.m.paths, platform: process.platform, handle: agent, session, agentVersion,
       appRuntime: { version: '0.1.6', runtimeId: agentVersion, appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath }, onShutdown: () => {} });
     yield* Effect.promise(async () => {
       for (const client of ['app', 'mcp'] as const) {
@@ -264,6 +266,19 @@ test('without an inspection, preview is NO_REPORT and inspect names why the job 
     return [codeOf(inspect), codeOf(preview)];
   }));
   assert.deepEqual(codes, ['INSPECT_FAILED', 'NO_REPORT']);
+});
+
+test('INSPECT_FAILED names this PC on Windows and keeps the macOS sentence elsewhere', async () => {
+  const messages: Record<string, string> = {};
+  for (const platform of ['win32', 'darwin'] as const) {
+    const { within } = await sessionMachine({ fixture: { unavailable: ['effective'] }, platform });
+    const error = await within((session) => Effect.flip(session.inspect('app')));
+    assert.equal(codeOf(error), 'INSPECT_FAILED');
+    messages[platform] = (error as SessionError).message;
+  }
+  assert.match(messages.win32!, /^The agent couldn't read this PC \(/);
+  assert.match(messages.darwin!, /^The agent couldn't read this Mac \(/);
+  assert.equal(messages.win32!.replace('this PC', 'this Mac'), messages.darwin);
 });
 
 test('apply runs the previewed plan and records it in History as the client, releasing the lock first', async () => {

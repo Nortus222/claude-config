@@ -42,8 +42,9 @@ process.once('exit', () => {
     const external = join(m.home, 'redirected.log');
     mkdirSync(dir, { recursive: true });
     const descriptor = redirected ? openSync(external, 'a') : undefined;
+    // The cwd is temporary: off Windows the faked platform's pipe name is a relative socket path.
     const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, BIN, 'agent', 'run'], {
-      env: cliEnv(m), stdio: descriptor === undefined ? ['ignore', 'pipe', 'pipe'] : ['ignore', descriptor, descriptor],
+      cwd: m.home, env: cliEnv(m), stdio: descriptor === undefined ? ['ignore', 'pipe', 'pipe'] : ['ignore', descriptor, descriptor],
     });
     if (descriptor !== undefined) closeSync(descriptor);
     let stdout = '', stderr = '';
@@ -76,11 +77,15 @@ process.once('exit', () => {
       assert.equal(stderr, '');
       assert.equal(existsSync(logPath), !redirected);
       assert.equal(existsSync(join(dir, 'agent.sock')), false);
+      // Windows serves IPC on a named pipe, published in agent.pipe once listening.
+      for (const deadline = Date.now() + 15_000; !existsSync(join(dir, 'agent.pipe')) && Date.now() < deadline;) await delay(25);
+      assert.equal(existsSync(join(dir, 'agent.pipe')), true, `no agent.pipe: ${stdout}${stderr}`);
       writeFileSync(stopFile, 'stop');
       await waitForOutput(capturedStderr);
       if (process.platform !== 'win32') child.kill('SIGTERM');
       assert.equal(await waitForExit(), 0);
       assert.equal(existsSync(join(dir, 'agent.lock')), false);
+      assert.equal(existsSync(join(dir, 'agent.pipe')), false);
       const finalOutput = readFileSync(destination, 'utf8');
       assert.ok(finalOutput.includes(capturedStdout));
       assert.ok(finalOutput.includes(capturedStderr));

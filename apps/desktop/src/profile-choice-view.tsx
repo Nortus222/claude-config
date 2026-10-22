@@ -3,6 +3,7 @@ import type { ViewState } from './controller.ts';
 import type { SetupViewState } from './setup-controller.ts';
 import type { SetupSyncController, SetupSyncState } from './setup-sync-controller.ts';
 import { PreviewPanel, RunCard } from './setup-sync-view.tsx';
+import { ThisMachine } from './device.ts';
 
 type Actions = Pick<SetupSyncController, 'followRepository' | 'followSharedLink' | 'apply' | 'cancelPreview' | 'cancel'>;
 
@@ -27,7 +28,7 @@ export function ProfileChoiceView({ state, controller, repoUrl, onDone }: { stat
   return <main className="onboarding setup-sync-view profile-choice-view">
     <p className="eyebrow">NORTUSCC / FIRST RUN</p>
     <h1>Choose a profile</h1>
-    <p className="intro">This Mac is set up. Choose the profile it follows from {repoUrl}. Preview shows what changes; nothing is written until you apply.</p>
+    <p className="intro">{ThisMachine} is set up. Choose the profile it follows from {repoUrl}. Preview shows what changes; nothing is written until you apply.</p>
     {state.error ? <p className="alert" role="alert">{state.error}</p> : null}
     <p className="setup-sync-detail" role="status">{state.pending ? 'Reading…' : ''}</p>
     <PreviewPanel state={state} controller={controller} />

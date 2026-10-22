@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AuthorFeedback, AuthorIssues, DraftLine, RunStatus, READ_REASON, WRITE_REASON, type AuthorPageProps } from './publish-view.tsx';
 import type { AuthorState } from './author-controller.ts';
 import { plural } from './copy.ts';
+import { thisMachine } from './device.ts';
 
 type Source = NonNullable<AuthorState['upstreams']>['sources'][number];
 // Discovery state in words, with its pill tone.
@@ -66,7 +67,7 @@ export function UpstreamsView({ state, controller, onOpenPublish }: AuthorPagePr
         <button disabled={!state.canWrite || !url.trim()}>Add source</button></form>
       <p className="row-sub">Browsing a source doesn’t publish it. Including one of its skills adds it to the draft.</p></section>
     {sources.length ? <section className="card" aria-labelledby="upstreams-sources-h">
-      <div className="card-head"><div><h2 id="upstreams-sources-h">Sources</h2>{state.canWrite ? null : <p>Reading skill lists is available when this Mac finishes its current work.</p>}</div></div>
+      <div className="card-head"><div><h2 id="upstreams-sources-h">Sources</h2>{state.canWrite ? null : <p>Reading skill lists is available when {thisMachine} finishes its current work.</p>}</div></div>
       <ul className="rows">{sources.map(source => <SourceRow key={source.source} state={state} controller={controller} source={source} />)}</ul></section> : null}
     {state.skill ? <section className="card"><h2>Skill contents</h2>{'unavailable' in state.skill ? <p className="alert" role="alert">{state.skill.unavailable}</p> : <>
       <p className="row-sub">{state.skill.path}</p><pre className="setup-sync-diff" tabIndex={0} aria-label="Skill text">{state.skill.text}</pre>

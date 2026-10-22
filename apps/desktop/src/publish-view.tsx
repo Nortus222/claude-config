@@ -4,6 +4,7 @@ import type { AuthorAction, AuthorController, AuthorIntent, AuthorState } from '
 import { changeTitle, errorText, itemLabel, plural, relativeTime, repoName } from './copy.ts';
 import { lineDiff } from './line-diff.ts';
 import { RunRecovery } from './run-recovery.tsx';
+import { thisMachine } from './device.ts';
 
 export type AuthorProps = { state: AuthorState; controller: AuthorController };
 // Profiles and Upstreams link to the Publish screen from their draft line when the shell offers it.
@@ -15,7 +16,7 @@ type DraftPreview = OperationOutput<'draftPreview'>;
 // Why read and write actions are unavailable, shown as their buttons' titles. HOOK(controller): canRead and
 // canWrite carry no reason; replace these with the controller's own once it has them.
 export const READ_REASON = 'Reconnect the agent and finish any app update first.';
-export const WRITE_REASON = 'Available when this Mac finishes its current work.';
+export const WRITE_REASON = `Available when ${thisMachine} finishes its current work.`;
 
 const list = (names: readonly string[]) => names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 const short = (revision: string) => revision.slice(0, 7);
@@ -89,7 +90,7 @@ export function intentText(intent: AuthorIntent): string {
     case 'includeSkill': case 'excludeSkill': return `${intent.kind === 'includeSkill' ? 'Include' : 'Exclude'} skill ${intent.name} from ${intent.source} in ${intent.profile}`;
     case 'pin': return `Pin ${intent.source} to ${short(intent.commit)}`;
     case 'unpin': return `Unpin ${intent.source}`;
-    case 'captureFile': return `Capture ${file(intent.fileId)} from this Mac into ${intent.profile}, ${intent.choice.kind === 'updateShared' ? 'updating the shared file' : `as its own copy at ${intent.choice.repoPath}`}`;
+    case 'captureFile': return `Capture ${file(intent.fileId)} from ${thisMachine} into ${intent.profile}, ${intent.choice.kind === 'updateShared' ? 'updating the shared file' : `as its own copy at ${intent.choice.repoPath}`}`;
     case 'createProfile': return `Create ${intent.profile}${intent.extends ? ` extending ${intent.extends}` : ''}`;
     case 'setFile': return `Set ${file(intent.fileId)} in ${intent.profile} to ${intent.path ?? 'unmanaged'}`;
     case 'setIntegration': return `${intent.include ? 'Include' : 'Exclude'} integration ${intent.id} in ${intent.profile}`;
@@ -140,7 +141,7 @@ function DraftCard({ state, controller, drafts }: AuthorProps & { drafts: readon
   const invalid = state.draftPreview?.draftId === state.draft?.id ? state.draftPreview?.invalid ?? [] : [];
   const writeTitle = state.canWrite ? undefined : WRITE_REASON;
   return <section className="card" aria-label="Draft">
-    <div className="card-head"><div><h2>Draft</h2><p>Drafts stay on this Mac until you publish them.</p></div>
+    <div className="card-head"><div><h2>Draft</h2><p>Drafts stay on {thisMachine} until you publish them.</p></div>
       {!confirming && (drafts.length || state.draft) ? <div className="actions">
         {drafts.length ? <button disabled={!state.canWrite} title={writeTitle} onClick={() => controller.newDraft()}>New draft</button> : null}
         {state.draft ? <button disabled={!state.canWrite} title={writeTitle} onClick={() => controller.askDelete()}>Delete draft</button> : null}</div> : null}</div>

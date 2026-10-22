@@ -5,6 +5,7 @@ import { effectiveChoice, eligibleUpdates, mutationBlocked, type SkillChoice, ty
 import type { OperationOutput } from '@nortuscc/agent/operations';
 import { changeTitle } from './copy.ts';
 import { BusyCard } from './busy-view.tsx';
+import { thisMachine } from './device.ts';
 export type SkillsFilter = 'all' | 'choices' | 'attention' | 'updates';
 type Inventory = { readonly items: readonly OperationOutput<'inspectIntent'>['items'][number][] };
 type Observation = Pick<InspectResult['items'][number], 'state' | 'disposition' | 'note'>;
@@ -46,7 +47,7 @@ export function rowState(row: SkillRow, observation?: Observation) {
   else if (state === 'missing' && effectiveChoice(row) && observation?.disposition === 'apply') detail = 'Installs when you Apply on Changes.';
   else if (state === 'off-pin' && effectiveChoice(row)) detail = 'Differs from pin. Apply on Changes reinstalls the pinned version.';
   else if (state === 'ok' && row.choice === null && !row.defaultEnabled) detail = 'Previously installed optional skill. Default keeps it installed; choose Off to plan its removal.';
-  else if (row.choice === false && state === 'missing') detail = 'Off on this Mac.';
+  else if (row.choice === false && state === 'missing') detail = `Off on ${thisMachine}.`;
   else detail = observation?.note ?? null;
   return { installed, detail, review: observation?.disposition === 'apply' };
 }
@@ -54,13 +55,13 @@ export function ChoiceControl({ row, state, disabled, controller }: { row: Skill
   const saving = state.saving && same(state.saving, row);
   const value: SkillChoice = row.choice === null ? 'inherit' : row.choice ? 'on' : 'off';
   return <div className="skills-choice">
-    <div role="radiogroup" aria-label={`${row.name} on this Mac`} className="skills-seg" aria-busy={saving ? true : undefined}>
+    <div role="radiogroup" aria-label={`${row.name} on ${thisMachine}`} className="skills-seg" aria-busy={saving ? true : undefined}>
       {([['inherit', `Default · ${row.defaultEnabled ? 'On' : 'Off'}`], ['on', 'On'], ['off', 'Off']] as const).map(([choice, label]) => <label key={choice}>
         <input type="radio" name={`skill-${JSON.stringify([row.source, row.name])}`} value={choice} checked={value === choice} disabled={disabled}
           onChange={() => void controller.setChoice(row.source, row.name, choice)} /><span>{label}</span>
       </label>)}
     </div>
-    <p className="row-sub">{saving ? <span role="status"><span className="spinner" aria-hidden="true" /> Saving…</span> : row.choice === null ? 'From the profile' : 'Your choice on this Mac'}</p>
+    <p className="row-sub">{saving ? <span role="status"><span className="spinner" aria-hidden="true" /> Saving…</span> : row.choice === null ? 'From the profile' : `Your choice on ${thisMachine}`}</p>
   </div>;
 }
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
@@ -90,15 +91,15 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
   const busyMac = state.native && !active ? machine.busy : null;
   const reading = !busyMac && state.outdated && !alert;
   return <div className="skills-view">
-    <header className="page-header"><div><h1>Skills</h1><p className="intro">Choose which profile skills this Mac installs. Apply on Changes makes installation changes.</p></div>
+    <header className="page-header"><div><h1>Skills</h1><p className="intro">Choose which profile skills {thisMachine} installs. Apply on Changes makes installation changes.</p></div>
       <div className="header-actions">{onOpenChanges && waiting ? <button onClick={onOpenChanges}>Open Changes</button> : null}
-      {state.native ? <button disabled={reloadDisabled} title={reloadDisabled ? blocked ?? (machine.connection === 'connected' ? 'Available when this Mac finishes its current work.' : 'Connect the agent first.') : undefined} onClick={() => void controller.reload()}>{view ? 'Reload skills' : 'Load skills'}</button> : null}</div>
+      {state.native ? <button disabled={reloadDisabled} title={reloadDisabled ? blocked ?? (machine.connection === 'connected' ? `Available when ${thisMachine} finishes its current work.` : 'Connect the agent first.') : undefined} onClick={() => void controller.reload()}>{view ? 'Reload skills' : 'Load skills'}</button> : null}</div>
     </header>
-    {!state.native ? <section className="card"><h2>Open the desktop app to see this Mac's skills</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
+    {!state.native ? <section className="card"><h2>Open the desktop app to see {thisMachine}'s skills</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
       {state.error ? <p className="alert" role="alert">{state.error}</p> : null}
       {state.stale ? <p className="alert" role="alert">{state.stale}</p> : null}
       {blocked && view && !state.operation && !state.stale && !busyMac && !reading ? <p className="notice" role="status">{blocked}</p> : null}
-      {busyMac ? <BusyCard busy={busyMac} note="Skill choices wait until it finishes, then Skills reads this Mac again." /> : null}
+      {busyMac ? <BusyCard busy={busyMac} note={`Skill choices wait until it finishes, then Skills reads ${thisMachine} again.`} /> : null}
       <p className={reading ? 'muted skills-detail busy-line' : 'muted skills-detail'} role="status" aria-live="polite">{alert || busyMac ? '' : reading ? <><span className="spinner" aria-hidden="true" />Reading skills…</> : state.detail}</p>
       {choicePreview && choicePatch ? <section className="card" aria-label="Choice preview"><h2>Review the changed choice</h2>
         {choicePreview.machineIntent.intentChanges.map((change, index) => <p key={index}>{change.message}</p>)}
@@ -113,14 +114,14 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
       </section> : null}
       {view ? <>
         {view.limitReason ? <p className="notice" role="status">Skills inventory is incomplete: {view.limitReason}. Check the configuration it comes from before changing it.</p> : null}
-        <section className="card"><div className="card-head"><div><h2>Skill updates for this Mac</h2><p>Nothing installs until you preview and apply. Pins keep their existing policy.</p></div>
+        <section className="card"><div className="card-head"><div><h2>Skill updates for {thisMachine}</h2><p>Nothing installs until you preview and apply. Pins keep their existing policy.</p></div>
           <button disabled={blocked !== null} title={blocked ?? undefined} onClick={() => void controller.check()}>Check upstream</button></div>
           {check?.unavailable ? <p className="muted" role="status">Upstream checks are unavailable for this machine.</p> : null}
           {check?.limitReason ? <p className="muted" role="status">The upstream check is incomplete: {check.limitReason}.</p> : null}
           {check && !check.unavailable && !check.items.some(changed) ? <p className="muted">No upstream changes to review.</p> : null}
           {check?.items.some(changed) ? <ul className="rows">{check.items.filter(changed).map(item => <li className="row skills-change" key={item.key}>
             <div className="row-main">{eligible.has(item.key) ? <label className="choice"><input type="checkbox" aria-label={`Select ${item.name} for update`} checked={state.selected.includes(item.key)} disabled={blocked !== null} onChange={() => controller.toggle(item.key)} /><span className="row-title">{item.name}</span></label> : <span className="row-title">{item.name}</span>}
-              <span className="row-sub">{item.source} · {item.policy}{!eligible.has(item.key) ? ` · ${item.prerequisite ?? 'Off on this Mac or unavailable for this update route.'}` : ''}</span></div>
+              <span className="row-sub">{item.source} · {item.policy}{!eligible.has(item.key) ? ` · ${item.prerequisite ?? `Off on ${thisMachine} or unavailable for this update route.`}` : ''}</span></div>
             <span className={`pill ${item.state === 'outdated' ? 'pill-accent' : 'pill-warning'}`}>{UPSTREAM[item.state]}</span>
           </li>)}</ul> : null}
           {eligible.size ? <div className="actions"><button className={preview ? undefined : 'primary'} disabled={blocked !== null || !state.selected.length} title={!state.selected.length ? 'Select at least one skill first.' : undefined} onClick={() => void controller.previewUpdate()}>Preview update · {state.selected.length} selected</button></div> : null}
@@ -133,7 +134,7 @@ export function SkillsView({ state, machine, controller, maintenance = null, onO
         <div className="skills-toolbar"><input type="search" aria-label="Search skills" placeholder="Search skills or sources" value={query} onChange={event => setQuery(event.target.value)} />
           <select aria-label="Show" value={filter} onChange={event => setFilter(event.target.value as SkillsFilter)}>
             <option value="all">All skills</option><option value="choices">Your choices</option><option value="attention">Waiting to apply</option><option value="updates">Upstream changes</option>
-          </select><p className="row-sub">Default follows the profile. On and Off are saved on this Mac.</p>
+          </select><p className="row-sub">Default follows the profile. On and Off are saved on {thisMachine}.</p>
         </div>
         {!sources.length ? <p className="card muted">{view.items.length ? 'No skills match.' : 'This profile declares no skills.'}</p> : null}
         {sources.map((source, index) => {

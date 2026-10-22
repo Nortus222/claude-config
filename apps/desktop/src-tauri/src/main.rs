@@ -9,6 +9,10 @@ mod update_service;
 mod updater_transport;
 mod display_name_categories;
 mod notifications;
+#[cfg(windows)]
+mod pipe;
+#[cfg(windows)]
+mod agent_child;
 use host::{Agent, Request, Setup};
 use startup_diagnostics::{Operation, Phase};
 use serde_json::{json, Value};
@@ -35,6 +39,9 @@ struct Owner {
     startup: Arc<startup::Startup>,
     /// The agent state root of the last connection, so Show in Finder needs no helper while connected.
     state_root: Mutex<Option<PathBuf>>,
+    /// The app-owned agent process; Windows has no login service.
+    #[cfg(windows)]
+    child: agent_child::AgentChild,
 }
 impl Owner {
     /// The agent state root: the connected one, else the fixed read-only helper's answer.
@@ -44,12 +51,17 @@ impl Owner {
     }
     fn connect(self: &Arc<Self>, generation: u64, setup: Setup) -> Result<(Agent, bool), String> {
         let trace = startup_diagnostics::trace(setup.operation());
+        // Restart replaces the app's own agent anyway; stopping it first frees its lock for the helper's ownership check.
+        #[cfg(windows)]
+        if matches!(setup, Setup::Restart) { self.child.stop(); }
         let recovered=matches!(setup,Setup::Ensure|Setup::Restart) && trace.measure(Phase::MaintenanceState, || update_service::maintenance_state(&self.resources))?.pending;
         let state_root = if recovered {
             let result=update_service::recover(&self.resources,&self.app.package_info().version.to_string());
             if result.is_err() {self.startup.coordinator()?.recovery("Interrupted app update needs recovery. The existing setup and app backup are retained; repair or restart this app.");}
             result?
         } else {host::setup_agent(&self.resources, setup)?};
+        #[cfg(windows)]
+        self.child.ensure(&self.resources, &state_root, matches!(setup, Setup::Restart))?;
         self.connect_from_root(generation, &state_root, setup.operation()).map(|agent| (agent, recovered))
     }
     fn connect_from_root(self: &Arc<Self>, generation: u64, state_root: &std::path::Path, operation: Operation) -> Result<Agent, String> {
@@ -80,7 +92,7 @@ impl Owner {
         Ok(agent)
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn connect_runtime(resources: &std::path::Path, state_root: &std::path::Path, emit: host::Emit, operation: Operation) -> Result<Agent, String> {
     connect_runtime_cancelled(resources,state_root,emit,operation,None)
 }
@@ -126,7 +138,7 @@ fn generation(session: &Mutex<Session>) -> Result<Value, String> {
     Ok(json!({"generation":session.generation,"data":{"hello":agent.hello}}))
 }
 /// Serializes lifecycle helpers and skips any waiting operation superseded by a newer generation.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn restart(session: &Mutex<Session>, lifecycle: &Mutex<()>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
     restart_with_completion(session, lifecycle, |g| connect(g).map(|agent| (agent, false)), || {})
 }
@@ -233,7 +245,11 @@ fn run_startup(owner: Arc<Owner>, source: Result<Option<Arc<dyn updates::UpdateS
             _=>{},
         }
         let connected=startup_connection(&owner.session,&owner.lifecycle,&owner.startup,context,coordinator,
-            |g,root|owner.connect_from_root_cancelled(g,root,Operation::AppStartup,Some(cancel)));
+            |g,root|{
+                #[cfg(windows)]
+                owner.child.ensure(&owner.resources, root, false)?;
+                owner.connect_from_root_cancelled(g,root,Operation::AppStartup,Some(cancel))
+            });
         if let Err(error)=connected {
             let mut current=owner.session.lock().unwrap();
             if !current.closed && current.generation<=2 {current.error=Some(error);}
@@ -432,7 +448,7 @@ async fn install_update(owner: tauri::State<'_, Arc<Owner>>, request: tauri::ipc
     }).await.map_err(|_|"Native update installation stopped".to_string())?
 }
 /// Bootstrap and ensure share one lifecycle reservation without recursively taking its mutex.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn setup_connection(session: &Mutex<Session>, lifecycle: &Mutex<()>, bootstrap: impl FnOnce() -> Result<(), String>, connect: impl FnOnce(u64) -> Result<Agent, String>) -> Result<Value, String> {
     restart(session, lifecycle, |g| { bootstrap()?; connect(g) })
 }
@@ -472,8 +488,10 @@ fn show_review(app: tauri::AppHandle) {
 fn notify_mode(id: &str) -> Result<bool, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let executable = std::env::current_exe().map_err(|e|e.to_string())?;
-    let contents = executable.parent().and_then(|p|p.parent()).ok_or("Missing app resources")?;
-    let resources = contents.join("Resources/agent-runtime");
+    #[cfg(unix)]
+    let resources = executable.parent().and_then(|p|p.parent()).ok_or("Missing app resources")?.join("Resources/agent-runtime");
+    #[cfg(windows)]
+    let resources = executable.parent().ok_or("Missing app resources")?.join("agent-runtime");
     let state_root = host::setup_agent(&resources, Setup::Paths)?;
     notifications::notify_only(&state_root, id, deadline, notifications::post)
 }
@@ -487,11 +505,26 @@ fn smoke_home(arg: Option<&str>) -> Result<PathBuf, String> {
     }
     Ok(home)
 }
+/// The smoke agent's state root under the throwaway HOME.
+#[cfg(unix)]
+fn smoke_state_root(home: &std::path::Path) -> Result<PathBuf, String> { Ok(home.join(".config/nortuscc")) }
+#[cfg(windows)]
+fn smoke_state_root(home: &std::path::Path) -> Result<PathBuf, String> { smoke_appdata_root(home, std::env::var_os("APPDATA").as_deref()) }
+/// Windows keeps state under APPDATA, which must itself lie inside the smoke HOME.
+#[cfg(windows)]
+fn smoke_appdata_root(home: &std::path::Path, appdata: Option<&std::ffi::OsStr>) -> Result<PathBuf, String> {
+    let appdata = appdata.ok_or("Smoke APPDATA is not set; refusing to apply")?;
+    let appdata = std::fs::canonicalize(appdata).map_err(|e| format!("Smoke APPDATA {}: {e}", std::path::Path::new(appdata).display()))?;
+    if appdata == home || !appdata.starts_with(home) || !appdata.is_dir() {
+        return Err(format!("Smoke APPDATA {} is not inside {}; refusing to apply to it", appdata.display(), home.display()));
+    }
+    Ok(appdata.join("nortuscc"))
+}
 /// Connects directly to the foreground test agent supplied by the JS smoke, without registration.
 fn smoke(home: PathBuf) -> Result<(), String> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
-    let agent = Agent::connect(&home.join(".config/nortuscc"), Arc::new(move |event| captured.lock().unwrap().push(event)))?;
+    let agent = Agent::connect(&smoke_state_root(&home)?, Arc::new(move |event| captured.lock().unwrap().push(event)))?;
     let inspected = agent.request(Request::Inspect)?;
     if !inspected["items"].is_array() || !inspected["profile"]["repo"].is_string() { return Err(format!("Unexpected inspect result {inspected}")); }
     let preview = agent.request(Request::Preview { exclude: vec![] })?;
@@ -569,20 +602,29 @@ fn main() {
     }));
     let startup=Arc::new(startup::Startup::default());
     let setup_startup=startup.clone();
-    let exit_code=tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Declared before the page loads, so the renderer names this PC and File Explorer (src/device.ts); macOS keeps its default wording.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("nortuscc-platform")
+        .js_init_script("Object.defineProperty(window, '__NORTUSCC_PLATFORM__', { value: 'windows' });").build());
+    let exit_code=builder
         .setup(move |app| {
             if let Ok(directory) = app.path().app_log_dir() { startup_diagnostics::initialize(&directory); }
             let trace = startup_diagnostics::trace(Operation::AppStartup);
             trace.measure(Phase::AppSetup, || {
                 *handle.lock().unwrap() = Some(app.handle().clone());
                 let resources = trace.measure(Phase::Paths, || app.path().resource_dir())?.join("agent-runtime");
-                #[cfg(debug_assertions)]
+                #[cfg(all(debug_assertions, unix))]
                 let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/darwin-arm64") };
+                #[cfg(all(debug_assertions, windows))]
+                let resources = if resources.is_dir() { resources } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/win32-x64") };
                 let source=trace.measure(Phase::UpdaterSource, || updater_transport::source(app.handle()));
                 let owner = Arc::new(Owner {
                     session: Mutex::new(Session { agent: None, generation: 1, error: Some("Checking local setup state".into()), closed: false, initial_setup: None }),
                     lifecycle: Mutex::new(()), resources, app: app.handle().clone(), review: review.clone(),startup:setup_startup.clone(),
                     state_root: Mutex::new(None),
+                    #[cfg(windows)]
+                    child: agent_child::AgentChild::new(app.path().app_log_dir().ok().map(|directory| directory.join("agent-child.log"))),
                 });
                 app.manage(owner.clone());
                 trace.measure(Phase::Services, || { notifications::request_permission(); Ok::<_, std::convert::Infallible>(()) })?;
@@ -598,6 +640,8 @@ fn main() {
                 if let Some(owner) = app.try_state::<Arc<Owner>>() {
                     close(&owner.session);
                     owner.startup.close();
+                    #[cfg(windows)]
+                    owner.child.close();
                 }
             }
         });
@@ -609,8 +653,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use host::fixtures::{idle_agent, Fixture};
+    #[cfg(unix)]
     use std::{sync::mpsc, thread, time::{Duration, Instant}};
+    #[cfg(unix)]
     fn session(generation: u64) -> Mutex<Session> { Mutex::new(Session { agent: None, generation, error: None, closed: false, initial_setup: None }) }
     #[test]
     fn update_commands_accept_only_fixed_intent_arguments() {
@@ -622,9 +669,11 @@ mod tests {
             assert!(host::decode_args::<host::EmptyArgs>(json!({field:"arbitrary renderer value"})).is_err());
         }
     }
+    #[cfg(unix)]
     fn startup_context(outcome: &str) -> host::StartupContext {
         host::decode_startup(json!({"stateRoot":"/tmp/login-derived-state","setup":if outcome=="setup_failed" {Value::Null} else {json!({"needsSetup":outcome=="needs_setup","repo":if outcome=="needs_setup" {Value::Null} else {json!("/tmp/repo")},"gitAvailable":true,"canInstallGit":false,"defaultRepoUrl":"https://github.com/Nortus222/claude-config.git"})},"maintenance":if outcome=="setup_failed" {Value::Null} else if matches!(outcome,"recovered"|"recovery_failed") {json!({"pending":true,"phase":"awaiting-health","fromVersion":"0.1.1","toVersion":"0.1.2","backupPath":"/tmp/backup","diagnostic":null})} else {json!({"pending":false,"phase":null,"fromVersion":null,"toVersion":null,"backupPath":null,"diagnostic":null})},"outcome":outcome})).unwrap()
     }
+    #[cfg(unix)]
     #[test]
     fn initial_startup_never_ensures_a_missing_or_corrupt_setup() {
         let session = session(1); let lifecycle = Mutex::new(());
@@ -635,6 +684,7 @@ mod tests {
         assert_eq!(initial_connection(&session,&lifecycle,&startup_context("ready"), |_,root| {assert_eq!(root, std::path::Path::new("/tmp/login-derived-state"));Ok(agent)},|| panic!("Not recovered")).unwrap().unwrap()["generation"],2);
         close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn failed_startup_keeps_update_preferences_root_without_another_lifecycle_helper() {
         let context=Ok(startup_context("ensure_failed"));
@@ -644,6 +694,7 @@ mod tests {
         assert_eq!(session.lock().unwrap().generation,1);
         assert_eq!(startup_preferences(&Err("Invalid startup root".into())),None);
     }
+    #[cfg(unix)]
     #[test]
     fn startup_connects_directly_after_one_helper_and_validates_installed_identity() {
         use std::{fs, os::unix::fs::PermissionsExt};
@@ -663,6 +714,7 @@ mod tests {
             close(&session);fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn initial_setup_snapshot_is_consumed_once_and_restart_invalidates_it() {
         let session=session(1);let lifecycle=Mutex::new(());let context=startup_context("needs_setup");
@@ -677,18 +729,24 @@ mod tests {
         assert!(restart(&session,&lifecycle,|_| Err("offline".into())).is_err());
         assert_eq!(setup_state_response(&session,&lifecycle,|| Ok(json!({"fresh":true}))).unwrap()["data"],json!({"fresh":true}));
     }
+    #[cfg(unix)]
     struct StartupSource;
+    #[cfg(unix)]
     impl updates::UpdateSource for StartupSource {
         fn check(&self) -> updates::FutureResult<'_,Option<Arc<dyn updates::Artifact>>> {Box::pin(async {Ok(None)})}
     }
+    #[cfg(unix)]
     struct StartupService;
+    #[cfg(unix)]
     impl updates::Maintenance for StartupService {
         fn prepare(&self,_: &str,_: &str,_: Arc<std::sync::atomic::AtomicBool>) -> Result<Box<dyn updates::Handoff>,String> {panic!("No service maintenance in startup check test")}
     }
+    #[cfg(unix)]
     fn recovery_coordinator(root: &std::path::Path) -> Arc<updates::Coordinator> {
         let coordinator=Arc::new(updates::Coordinator::new("0.1.4",Some(Arc::new(StartupSource)),Arc::new(StartupService),Some(root.join("agent/update-settings.json"))));
         coordinator.recovery("An interrupted update is pending.");coordinator
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn first_recovered_update_snapshot_waits_for_native_health_then_permits_automatic_checks() {
         let fixture=Fixture::new(|mut wire| {wire.handshake();wire.discard_until_close();});
@@ -718,6 +776,7 @@ mod tests {
         assert!(was_deferred,"The first renderer snapshot must not observe transient recovery while native health is held");
         assert_eq!(first_phase,"idle");assert_eq!(automatic,"current");assert_eq!(explicit,"current");
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn ordinary_startup_checks_remain_independent_of_held_agent_health() {
         let (agent,fixture)=idle_agent();let coordinator=Arc::new(updates::Coordinator::new("0.1.4",Some(Arc::new(StartupSource)),Arc::new(StartupService),Some(fixture.root.join("agent/update-settings.json"))));
@@ -733,6 +792,7 @@ mod tests {
         release.send(()).unwrap();startup.wait().unwrap();startup.join();close(&session);fixture.finish();
         assert_eq!(check,"current");assert_eq!(coordinator.snapshot().phase,"current");
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_native_recovery_identity_publishes_retained_recovery_and_allows_manual_check() {
         let fixture=Fixture::new(|mut wire| {wire.handshake();wire.discard_until_close();});
@@ -748,6 +808,7 @@ mod tests {
         let manual=coordinator.check(false,100).await.phase;
         close(&session);fixture.finish();assert_eq!(first_phase,"recovery");assert_eq!(manual,"current");
     }
+    #[cfg(unix)]
     #[test]
     fn close_during_recovered_health_never_publishes_a_late_coordinator_or_clears_recovery() {
         let (agent,fixture)=idle_agent();let coordinator=recovery_coordinator(&fixture.root);let original=coordinator.clone();
@@ -760,6 +821,7 @@ mod tests {
         assert!(finished.recv_timeout(Duration::from_secs(1)).unwrap().is_err());assert!(startup.coordinator().is_err());
         assert_eq!(original.snapshot().phase,"recovery");assert!(session.lock().unwrap().initial_setup.is_none());fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn recovery_is_cleared_only_after_successful_current_connection_publication() {
         let session=Arc::new(session(1));let lifecycle=Arc::new(Mutex::new(()));let recovered=Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -775,6 +837,7 @@ mod tests {
         initial_connection(&live,&lifecycle,&startup_context("recovered"),|_,_|Ok(agent),||recovered.store(true,std::sync::atomic::Ordering::SeqCst)).unwrap();
         assert!(recovered.load(std::sync::atomic::Ordering::SeqCst));close(&live);fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn bootstrap_then_ensure_uses_one_reservation_and_preserves_failure_for_retry() {
         let session = session(1); let lifecycle = Mutex::new(());
@@ -789,6 +852,7 @@ mod tests {
         assert_eq!(*steps.lock().unwrap(),vec!["bootstrap","bootstrap retry","ensure"]);
         close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn account_reply_in_flight_retains_its_original_generation_after_restart() {
         let (entered, received) = mpsc::channel(); let (release, held) = mpsc::channel();
@@ -805,6 +869,7 @@ mod tests {
         release.send(()).unwrap(); assert_eq!(job.join().unwrap().unwrap()["generation"],7);
         close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn startup_notification_waits_for_publication_and_acks_off_reader() {
         let (sent, received) = mpsc::channel();
@@ -828,6 +893,7 @@ mod tests {
         drop(held);
         assert!(worker.join().unwrap().unwrap()); close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn superseded_notification_never_posts_and_restart_during_post_never_acks() {
         for stale_before_post in [true,false] {
@@ -844,6 +910,7 @@ mod tests {
             close(&session); fixture.finish();
         }
     }
+    #[cfg(unix)]
     #[test]
     fn expired_queued_notification_never_starts_posting() {
         let (agent, fixture) = idle_agent(); let session = session(1); let lifecycle = Mutex::new(());
@@ -862,11 +929,27 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ncc-smoke-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(smoke_home(root.to_str()).unwrap(), std::fs::canonicalize(&root).unwrap());
-        let link = root.join("escape"); std::os::unix::fs::symlink(env!("CARGO_MANIFEST_DIR"), &link).unwrap();
-        assert!(smoke_home(link.to_str()).is_err());
+        #[cfg(unix)]
+        {
+            let link = root.join("escape"); std::os::unix::fs::symlink(env!("CARGO_MANIFEST_DIR"), &link).unwrap();
+            assert!(smoke_home(link.to_str()).is_err());
+        }
         let file = root.join("file"); std::fs::write(&file, "x").unwrap(); assert!(smoke_home(file.to_str()).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn windows_smoke_state_lives_in_appdata_inside_the_smoke_home() {
+        let root = std::env::temp_dir().join(format!("ncc-smoke-appdata-{}", std::process::id()));
+        let appdata = root.join("AppData/Roaming"); std::fs::create_dir_all(&appdata).unwrap();
+        let home = smoke_home(root.to_str()).unwrap();
+        assert_eq!(smoke_appdata_root(&home, Some(appdata.as_os_str())).unwrap(), std::fs::canonicalize(&appdata).unwrap().join("nortuscc"));
+        assert!(smoke_appdata_root(&home, None).is_err());
+        assert!(smoke_appdata_root(&home, Some(home.as_os_str())).unwrap_err().contains("refusing"));
+        assert!(smoke_appdata_root(&home, Some(std::ffi::OsStr::new(env!("CARGO_MANIFEST_DIR")))).unwrap_err().contains("refusing"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
     #[test]
     fn a_request_in_flight_does_not_block_generation_reads() {
         let (entered, received) = mpsc::channel(); let (release, held) = mpsc::channel();
@@ -883,6 +966,7 @@ mod tests {
         release.send(()).unwrap(); assert_eq!(job.join().unwrap().unwrap()["generation"], 7);
         close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn failed_initialization_stays_offline_and_explicit_restart_recovers() {
         let session = session(0); let lifecycle = Mutex::new(());
@@ -893,6 +977,7 @@ mod tests {
         assert_eq!(restart(&session, &lifecycle, |_| Ok(agent)).unwrap()["generation"], 2);
         assert!(generation(&session).is_ok()); close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn restarting_does_not_hold_the_session_mutex_while_waiting() {
         let session = Arc::new(session(3)); let lifecycle = Arc::new(Mutex::new(()));
@@ -905,6 +990,7 @@ mod tests {
         release.send(()).unwrap(); assert_eq!(slow.join().unwrap().unwrap()["generation"], 4);
         close(&session); fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn superseded_waiting_helpers_never_run_and_newest_generation_wins() {
         let session = Arc::new(session(0)); let lifecycle = Arc::new(Mutex::new(()));
@@ -925,10 +1011,12 @@ mod tests {
         assert_eq!(request(&session, Request::Inspect).unwrap()["data"]["command"], "inspect");
         old_fixture.finish(); close(&session); new_fixture.finish();
     }
+    #[cfg(unix)]
     fn wait_generation(session: &Mutex<Session>, wanted: u64) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while session.lock().unwrap().generation < wanted { assert!(Instant::now() < deadline); thread::sleep(Duration::from_millis(1)); }
     }
+    #[cfg(unix)]
     #[test]
     fn closing_during_a_helper_rejects_publication_without_stopping_the_service() {
         let session = Arc::new(session(0)); let lifecycle = Arc::new(Mutex::new(()));
@@ -941,6 +1029,7 @@ mod tests {
         assert!(restart(&session, &lifecycle, |_| panic!("Closed app must not invoke a helper")).is_err());
         fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn restart_disconnects_the_old_socket_without_shutdown() {
         let session = session(2); let lifecycle = Mutex::new(());
@@ -949,6 +1038,7 @@ mod tests {
         assert_eq!(restart(&session, &lifecycle, |_| Ok(new)).unwrap()["generation"], 3);
         old_fixture.finish(); close(&session); new_fixture.finish();
     }
+    #[cfg(unix)]
     #[test]
     fn smoke_connects_directly_and_never_spawns_a_registration_helper() {
         let home = std::env::temp_dir().join(format!("ncc-{:x}", std::process::id()));

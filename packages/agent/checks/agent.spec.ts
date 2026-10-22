@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { Deferred, Effect, Exit, Fiber, Layer, Scope } from 'effect';
 import { configDomain, DecisionsStore, HistoryStore, Processes } from '@nortuscc/machine';
 import { AgentStateStore, runAgent, SetupSource, startAgent, type AgentDomain } from '../src/index.ts';
+import { AGENT_PIPE_FILE, agentEndpoint } from '@nortuscc/sync';
 import { agentMachine } from './support/agent-machine.ts';
 import { accept, APPLIED, EFFORT, HEAD, setupFixture } from './support/setup-fixture.ts';
 
@@ -275,6 +276,11 @@ test('an agent takes over a dead agent\'s lock and removes its own on close', as
   assert.equal(existsSync(lockPath(m)), false);
 });
 
+// What a listening agent leaves in `dir` (its socket, or agent.pipe on Windows), and where to connect.
+const endpointFile = (dir: string) => join(dir, process.platform === 'win32' ? AGENT_PIPE_FILE : 'agent.sock');
+const endpoint = (dir: string) => agentEndpoint(dir, process.platform);
+const IPC_FILES = ['agent.sock', AGENT_PIPE_FILE, 'agent.token', 'agent.lock'];
+
 // Sends each record in turn over one connection, waiting for its reply; answers the replies.
 const converse = (path: string, records: ReadonlyArray<object>) =>
   new Promise<Array<{ readonly [key: string]: any }>>((resolve, reject) => {
@@ -304,16 +310,16 @@ const converse = (path: string, records: ReadonlyArray<object>) =>
     socket.once('error', reject);
   });
 
-test('with ipc, runAgent serves the socket, and a shutdown request ends it like an abort', { skip: process.platform === 'win32' }, async () => {
+test('with ipc, runAgent serves the socket, and a shutdown request ends it like an abort', async () => {
   const m = agentMachine('/tmp');
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   const dir = join(m.paths.stateRoot, 'agent');
   const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.2.3', ipc: true }));
   try {
-    for (let i = 0; i < 500 && !existsSync(join(dir, 'agent.sock')); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    for (let i = 0; i < 500 && !existsSync(endpointFile(dir)); i++) await new Promise((resolve) => setTimeout(resolve, 10));
     const token = readFileSync(join(dir, 'agent.token'), 'utf8');
-    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+    const [hello, shutdown] = await converse(endpoint(dir), [
       { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
       { version: 3, id: 's', command: 'shutdown' },
     ]);
@@ -321,13 +327,13 @@ test('with ipc, runAgent serves the socket, and a shutdown request ends it like 
     assert.deepEqual(shutdown?.result, { shutdown: true });
     const ended = await Effect.runPromise(Fiber.await(fiber).pipe(Effect.timeoutOption('5 seconds')));
     assert.ok(ended._tag === 'Some' && Exit.isSuccess(ended.value), 'the agent kept running after shutdown');
-    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+    for (const name of IPC_FILES) assert.equal(existsSync(join(dir, name)), false, name);
   } finally {
     await Effect.runPromise(Fiber.interrupt(fiber));
   }
 });
 
-test('first job timing distinguishes IPC readiness, returned failure and interrupted work', { skip: process.platform === 'win32', timeout: 15000 }, async (t) => {
+test('first job timing distinguishes IPC readiness, returned failure and interrupted work', { timeout: 15000 }, async (t) => {
   for (const result of ['completed', 'failed', 'cancelled'] as const) await t.test(result, async (t) => {
     const m = agentMachine('/tmp');
     t.after(() => rmSync(m.root, { recursive: true, force: true }));
@@ -351,7 +357,7 @@ test('first job timing distinguishes IPC readiness, returned failure and interru
       assert.ok(events.includes('running:started'), 'IPC is usable while the first job remains held');
       assert.deepEqual(events.filter(e => e.startsWith('first_job:')), ['first_job:started']);
       const token = readFileSync(join(dir, 'agent.token'), 'utf8');
-      const status = () => converse(join(dir, 'agent.sock'), [
+      const status = () => converse(endpoint(dir), [
         { version: 3, id: 'h', command: 'hello', token, client: 'cli' }, { version: 3, id: 's', command: 'status' },
       ]);
       const [hello, pending] = await status();
@@ -369,24 +375,24 @@ test('first job timing distinguishes IPC readiness, returned failure and interru
       assert.ok(events.indexOf('running:started') < events.indexOf(`first_job:${result}`));
       assert.ok(events.every(e => !e.includes('private')));
     } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
-    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(dir, name)), false, name);
+    for (const name of IPC_FILES) assert.equal(existsSync(join(dir, name)), false, name);
   });
 });
 
-test('runAgent observes readiness, IPC cleanup and final lock release without leaking state', { skip: process.platform === 'win32' }, async (t) => {
+test('runAgent observes readiness, IPC cleanup and final lock release without leaking state', async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const fixture = setupFixture(join(m.root, 'setup'));
   const dir = join(m.paths.stateRoot, 'agent');
   const events: Array<{ phase: string; status: string; socket: boolean; token: boolean; lock: boolean }> = [];
   const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true,
-    onLifecycle: (phase, status) => events.push({ phase, status, socket: existsSync(join(dir, 'agent.sock')), token: existsSync(join(dir, 'agent.token')), lock: existsSync(lockPath(m)) }),
+    onLifecycle: (phase, status) => events.push({ phase, status, socket: existsSync(endpointFile(dir)), token: existsSync(join(dir, 'agent.token')), lock: existsSync(lockPath(m)) }),
   }));
   try {
     for (let i = 0; i < 200 && !events.some((e) => e.phase === 'running'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.deepEqual(events.filter((e) => e.status === 'completed' && e.phase !== 'first_job').map((e) => e.phase), ['lock', 'log_rotation', 'services', 'scheduler', 'session', 'ipc']);
     const token = readFileSync(join(dir, 'agent.token'), 'utf8');
-    await converse(join(dir, 'agent.sock'), [
+    await converse(endpoint(dir), [
       { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
       { version: 3, id: 's', command: 'shutdown' },
     ]);
@@ -416,7 +422,7 @@ test('runAgent observes a failed log setup and still releases its acquired lock'
   assert.equal(existsSync(lockPath(m)), false);
 });
 
-test('failed IPC initialization does not report stale files as closed', { skip: process.platform === 'win32' }, async (t) => {
+test('failed IPC initialization does not report stale files as closed', { skip: process.platform === 'win32' ? 'Unix socket path length' : false }, async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const fixture = setupFixture(join(m.root, 'setup'));
@@ -435,7 +441,7 @@ test('failed IPC initialization does not report stale files as closed', { skip: 
   assert.equal(existsSync(join(paths.stateRoot, 'agent', 'agent.lock')), false);
 });
 
-test('throwing lifecycle observers cannot prevent authenticated IPC or shutdown', { skip: process.platform === 'win32' }, async (t) => {
+test('throwing lifecycle observers cannot prevent authenticated IPC or shutdown', async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const fixture = setupFixture(join(m.root, 'setup'));
@@ -447,7 +453,7 @@ test('throwing lifecycle observers cannot prevent authenticated IPC or shutdown'
   try {
     for (let i = 0; i < 200 && !events.includes('running:started'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
     const token = readFileSync(join(dir, 'agent.token'), 'utf8');
-    const [hello, shutdown] = await converse(join(dir, 'agent.sock'), [
+    const [hello, shutdown] = await converse(endpoint(dir), [
       { version: 3, id: 'h', command: 'hello', token, client: 'cli' },
       { version: 3, id: 's', command: 'shutdown' },
     ]);
@@ -461,7 +467,7 @@ test('throwing lifecycle observers cannot prevent authenticated IPC or shutdown'
   } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
 });
 
-test('runAgent reports cancellation after IPC cleanup and releases the lock', { skip: process.platform === 'win32' }, async (t) => {
+test('runAgent reports cancellation after IPC cleanup and releases the lock', async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const fixture = setupFixture(join(m.root, 'setup'));
@@ -477,11 +483,11 @@ test('runAgent reports cancellation after IPC cleanup and releases the lock', { 
     assert.deepEqual(events.filter(event => /^(shutdown|ipc_closed|stopped):/.test(event)),
       ['shutdown:started', 'ipc_closed:completed', 'stopped:cancelled']);
     assert.equal(events.at(-1), 'stopped:cancelled');
-    for (const name of ['agent.sock', 'agent.token', 'agent.lock']) assert.equal(existsSync(join(m.paths.stateRoot, 'agent', name)), false, name);
+    for (const name of IPC_FILES) assert.equal(existsSync(join(m.paths.stateRoot, 'agent', name)), false, name);
   } finally { await Effect.runPromise(Fiber.interrupt(fiber)); }
 });
 
-test('IPC cleanup is observed while shutdown is still waiting for a running apply', { skip: process.platform === 'win32' }, async (t) => {
+test('IPC cleanup is observed while shutdown is still waiting for a running apply', async (t) => {
   const { m, fixture } = await autoApplyMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const entered = Deferred.makeUnsafe<void>();
@@ -503,7 +509,7 @@ test('IPC cleanup is observed while shutdown is still waiting for a running appl
     for (let i = 0; i < 200 && !events.includes('ipc_closed:completed'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.ok(events.includes('ipc_closed:completed'), 'IPC cleanup was hidden behind the running apply');
     assert.equal(events.includes('stopped:completed'), false);
-    assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.sock')), false);
+    assert.equal(existsSync(endpointFile(join(m.paths.stateRoot, 'agent'))), false);
     assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.token')), false);
     assert.equal(existsSync(lockPath(m)), true);
     await Effect.runPromise(Deferred.succeed(release, undefined));
@@ -526,7 +532,7 @@ test('without ipc, runAgent writes no socket or token', async () => {
   const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: '1.0.0', signal: controller.signal }));
   for (let i = 0; i < 200 && !(await m.kinds()).includes('revision-verified'); i++) await new Promise((resolve) => setTimeout(resolve, 10));
   const dir = join(m.paths.stateRoot, 'agent');
-  assert.equal(existsSync(join(dir, 'agent.sock')), false);
+  assert.equal(existsSync(endpointFile(dir)), false);
   assert.equal(existsSync(join(dir, 'agent.token')), false);
   controller.abort();
   assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber))));
@@ -607,21 +613,21 @@ test('status callback is awaited after listeners and cannot fail the next job', 
   assert.deepEqual(order, ['listener', 'notify', 'listener', 'notify']);
 });
 
-test('runAgent enables notification delivery explicitly, refreshes History failures, and deduplicates on restart', { skip: process.platform === 'win32' }, async (t) => {
+test('runAgent enables notification delivery explicitly, refreshes History failures, and deduplicates on restart', async (t) => {
   const m = agentMachine('/tmp');
   t.after(() => rmSync(m.root, { recursive: true, force: true }));
   const fixture = setupFixture(join(m.root, 'setup'));
   await m.trust();
   await m.run(DecisionsStore.use((d) => d.record(accept(EFFORT))));
   const commands: string[] = [];
-  const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { assert.equal(existsSync(join(m.paths.stateRoot, 'agent', 'agent.sock')), true, 'IPC attaches before startup delivery'); commands.push(command.cmd); return { code: 0, stdout: '' }; }) });
+  const processes = Layer.succeed(Processes, { run: (command) => Effect.sync(() => { assert.equal(existsSync(endpointFile(join(m.paths.stateRoot, 'agent'))), true, 'IPC attaches before startup delivery'); commands.push(command.cmd); return { code: 0, stdout: '' }; }) });
   const dir = join(m.paths.stateRoot, 'agent');
   const launch = async (enabled: boolean) => {
     const controller = new AbortController();
     const fiber = Effect.runFork(runAgent({ paths: m.paths, domains: () => m.domains, source: fixture.source, agentVersion: 'test', ipc: true, processes, signal: controller.signal, ...(enabled ? { notifications: { platform: 'linux', timeoutMs: 30 } } : {}) }));
-    for (let i = 0; i < 200 && !existsSync(join(dir, 'agent.sock')); i++) await new Promise((r) => setTimeout(r, 10));
+    for (let i = 0; i < 200 && !existsSync(endpointFile(dir)); i++) await new Promise((r) => setTimeout(r, 10));
     const token = readFileSync(join(dir, 'agent.token'), 'utf8');
-    const inspect = () => converse(join(dir, 'agent.sock'), [{ version: 3, id: 'h', command: 'hello', token, client: 'cli' }, { version: 3, id: 'i', command: 'inspect' }]);
+    const inspect = () => converse(endpoint(dir), [{ version: 3, id: 'h', command: 'hello', token, client: 'cli' }, { version: 3, id: 'i', command: 'inspect' }]);
     await inspect();
     return { inspect, stop: async () => { controller.abort(); assert.ok(Exit.isSuccess(await Effect.runPromise(Fiber.await(fiber)))); } };
   };

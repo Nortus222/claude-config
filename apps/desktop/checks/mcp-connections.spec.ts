@@ -164,17 +164,24 @@ test('malformed ownership stays intact and inspection exposes no raw record', as
   assert.doesNotMatch(JSON.stringify(state), /private|secret/); assert.equal(f.read(path), text);
 });
 
-test('fixed desktop helper resolves current checkout and invokes a fake executable in an isolated home', async t => {
-  const { chmodSync, mkdirSync } = await import('node:fs');
-  const { spawnSync } = await import('node:child_process');
+// The host's own platform: macOS app layout and POSIX fakes, or the Windows install layout with .cmd shims.
+const helperPlatform = process.platform === 'win32' ? 'win32' : 'darwin';
+test(`fixed desktop helper resolves current checkout and invokes a fake executable in an isolated home (${helperPlatform})`, async t => {
+  const { chmodSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { spawnSync, execFileSync } = await import('node:child_process');
+  const { dirname, delimiter } = await import('node:path');
   const { runDesktopEntry } = await import('../agent/main.ts');
   const { nodeProcesses } = await import('@nortuscc/machine');
+  const windows = helperPlatform === 'win32';
+  // Only the fixture's bin, Git and (on Windows) cmd.exe resolve, so no real host CLI can run.
+  const system = windows ? [dirname(execFileSync('where', ['git'], { encoding: 'utf8' }).split(/\r?\n/)[0]!), join(process.env.SystemRoot!, 'System32')].join(delimiter) : '/usr/bin:/bin';
+  const windowsEnv: Record<string, string> = windows ? { SystemRoot: process.env.SystemRoot!, COMSPEC: process.env.ComSpec ?? join(process.env.SystemRoot!, 'System32', 'cmd.exe') } : {};
   const m = configMachine(); t.after(() => rmSync(m.root, { recursive: true, force: true })); await m.sync();
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']]) {
-    const result = spawnSync('git', args, { cwd: m.paths.repo, env: { HOME: m.root, PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
+    const result = spawnSync('git', args, { cwd: m.paths.repo, env: { HOME: m.root, PATH: system, ...windowsEnv }, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
   }
-  const appPath = join(m.root, 'Installed App/Nortuscc'); const resources = join(m.root, 'resources'); const bin = join(m.root, 'bin');
+  const appPath = windows ? join(m.root, 'Installed App', 'Nortuscc.exe') : join(m.root, 'Installed App/Nortuscc'); const resources = windows ? join(m.root, 'Installed App', 'agent-runtime') : join(m.root, 'resources'); const bin = join(m.root, 'bin');
   m.write(join(resources, 'runtime.json'), JSON.stringify({ agentVersion: 'fixture-runtime' }));
   m.write(join(m.paths.stateRoot, 'agent/agent.json'), JSON.stringify({ version: 1, policy: 'notify', policySource: 'default', paused: null, installedBy: 'app', appPath, agentVersion: 'fixture-runtime' }));
   m.write(join(bin, 'codex'), `#!${process.execPath}\n` + `
@@ -189,11 +196,12 @@ else if (args[1] === 'remove') { delete state.entry; fs.writeFileSync(config, JS
 else process.exit(2);
 `);
   chmodSync(join(bin, 'codex'), 0o755); mkdirSync(m.paths.codex, { recursive: true });
+  if (windows) writeFileSync(join(bin, 'codex.cmd'), `@"${process.execPath}" "%~dp0codex" %*\r\n`);
   m.write(join(m.paths.codex, 'config.toml'), '{"unrelated":true}');
-  const env = { HOME: m.root, CODEX_HOME: '/unselected-codex', CLAUDE_CONFIG_DIR: '/unselected-claude', PATH: `${bin}:/usr/bin:/bin`, NORTUSCC_REPO_DIR: m.paths.repo, NORTUSCC_STATE_DIR: m.paths.stateRoot };
+  const env = { HOME: m.root, CODEX_HOME: '/unselected-codex', CLAUDE_CONFIG_DIR: '/unselected-claude', PATH: `${bin}${delimiter}${system}`, NORTUSCC_REPO_DIR: m.paths.repo, NORTUSCC_STATE_DIR: m.paths.stateRoot, ...windowsEnv };
   const run = async (action: unknown) => {
     const out: string[] = []; const errors: string[] = [];
-    const code = await runDesktopEntry({ args: ['--mcp-connections', '--app', appPath], env, resources, platform: 'darwin',
+    const code = await runDesktopEntry({ args: ['--mcp-connections', '--app', appPath], env, resources, platform: helperPlatform,
       processes: nodeProcesses({ env }), probe: async () => ({ env }), stdout: s => out.push(s), stderr: s => errors.push(s),
       stdin: { async *[Symbol.asyncIterator]() { yield JSON.stringify(action); } } });
     return { code, out, errors };

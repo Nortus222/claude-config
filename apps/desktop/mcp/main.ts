@@ -24,13 +24,17 @@ export type McpEntryInput = {
 // Resolves only app-relative metadata and machine paths; never installs, repairs or adopts a setup.
 export async function runMcpEntry(input: McpEntryInput): Promise<StdioServerHandle> {
   const [flag, expectedApp] = input.args;
-  if (input.args.length !== 2 || flag !== '--app' || !expectedApp || !isAbsolute(expectedApp)
-    || /[\x00-\x1f\x7f]/.test(expectedApp) || dirname(expectedApp) !== resolve(input.resources, '../../MacOS'))
-    throw new Error('MCP requires its installed app executable identity.');
   const platform = input.platform ?? process.platform;
-  if (platform !== 'darwin') throw new Error('App MCP currently requires macOS arm64.');
+  // The executable sits in Contents/MacOS beside a macOS bundle's resources; on Windows, in the
+  // install directory holding agent-runtime.
+  const appDirectory = resolve(input.resources, platform === 'win32' ? '..' : '../../MacOS');
+  if (input.args.length !== 2 || flag !== '--app' || !expectedApp || !isAbsolute(expectedApp)
+    || /[\x00-\x1f\x7f]/.test(expectedApp) || dirname(expectedApp) !== appDirectory)
+    throw new Error('MCP requires its installed app executable identity.');
+  const target = platform === 'darwin' ? 'darwin-arm64' : platform === 'win32' ? 'win32-x64' : undefined;
+  if (target === undefined) throw new Error('App MCP requires macOS arm64 or Windows x64.');
   const metadata: unknown = JSON.parse(await readFile(resolve(input.resources, 'runtime.json'), 'utf8'));
-  if (typeof metadata !== 'object' || metadata === null || !('target' in metadata) || metadata.target !== 'darwin-arm64'
+  if (typeof metadata !== 'object' || metadata === null || !('target' in metadata) || metadata.target !== target
     || !('agentVersion' in metadata) || typeof metadata.agentVersion !== 'string' || !/^[^\x00-\x1f\x7f]{1,100}$/.test(metadata.agentVersion))
     throw new Error('App MCP runtime metadata is unavailable or incompatible.');
   const expectedRuntime = metadata.agentVersion;

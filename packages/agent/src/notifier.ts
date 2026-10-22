@@ -64,7 +64,8 @@ export const makeNotifier = (options: { readonly platform: string; readonly time
       return attempt(prepared.deliver, prepared.timeoutMs);
     }).pipe(Effect.catchCause(() => Effect.succeed(false))))) return true;
     const registered = yield* state.read.pipe(Effect.catchCause(() => Effect.succeed(undefined)));
-    if (registered?.installedBy === 'app' && registered.appPath && isAbsolute(registered.appPath)) {
+    // The Windows app posts no notifications, so its executable is never launched for one.
+    if (options.platform !== 'win32' && registered?.installedBy === 'app' && registered.appPath && isAbsolute(registered.appPath)) {
       const executable = registered.appPath;
       const bundle = options.platform === 'darwin' ? executable.match(/^(.*\.app)\/Contents\/MacOS\/[^/]+$/)?.[1] : undefined;
       if (options.platform !== 'darwin' || bundle !== undefined) {

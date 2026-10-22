@@ -8,7 +8,7 @@ import {
   type ApplyResult, type InspectResult, type Policy, type PreviewResult, type RunEvent, type RunProgress, type ServiceFailed,
   type ServiceTarget, type WireStatus,
 } from '@nortuscc/agent';
-import { setupSourceLayer } from '@nortuscc/sync';
+import { AGENT_PIPE_FILE, setupSourceLayer } from '@nortuscc/sync';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../agent-client.ts';
 import { agentProgram, checkoutVersion, serviceTarget } from '../agent-service.ts';
 import { CHECKOUT, resolvePaths, runCommand } from '../machine.ts';
@@ -82,8 +82,8 @@ const install = (linger: boolean) =>
     }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
   });
 
-// Stops and removes the login service and the agent's socket and token; History, decisions,
-// backups and trusted setups stay. Nothing installed is not an error.
+// Stops and removes the login service and the agent's socket or agent.pipe, and its token; History,
+// decisions, backups and trusted setups stay. Nothing installed is not an error.
 const uninstall = Effect.gen(function* () {
   const paths = yield* resolvePaths((m) => console.error(m));
   const target = targetFor(paths);
@@ -97,7 +97,7 @@ const uninstall = Effect.gen(function* () {
     }
     yield* uninstallService(target);
     const fs = yield* Fs;
-    for (const name of ['agent.sock', 'agent.token']) yield* fs.remove(join(paths.stateRoot, 'agent', name));
+    for (const name of ['agent.sock', AGENT_PIPE_FILE, 'agent.token']) yield* fs.remove(join(paths.stateRoot, 'agent', name));
     if (before.installedBy !== undefined || before.agentVersion !== undefined) {
       // update drops the owned fields its result leaves out.
       yield* state.update(({ installedBy: _installedBy, agentVersion: _agentVersion, ...rest }) => rest);
@@ -107,8 +107,8 @@ const uninstall = Effect.gen(function* () {
   }).pipe(Effect.catchTag('ServiceFailed', serviceFailed), Effect.provide(agentLayer(paths)));
 });
 
-// Runs the agent in the foreground, serving its socket off Windows, until SIGTERM, SIGINT or a
-// client's `shutdown`, each of which exits 0.
+// Runs the agent in the foreground, serving IPC (a named pipe on Windows), until SIGTERM, SIGINT or
+// a client's `shutdown`, each of which exits 0.
 async function runForeground(): Promise<number> {
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -121,17 +121,16 @@ async function runForeground(): Promise<number> {
       // Each job builds its domains from its own paths, so the integrations domain reads the job's
       // snapshot, as ADR 0016 requires.
       const domains = (jobPaths: MachinePathsValue) => [configDomain, integrationsDomain({ paths: jobPaths, env: process.env }), skillsDomain];
-      // Windows has no socket server yet; there the agent runs without IPC.
-      const ipc = process.platform !== 'win32';
+      const windows = process.platform === 'win32';
       let redirected = false;
-      if (!ipc) {
+      if (windows) {
         // Headless console handles may be absent; only a regular file proves existing redirection.
         try { redirected = fstatSync(process.stdout.fd).isFile(); } catch {}
       }
       return yield* runAgent({
         ...(process.env.NORTUSCC_HOSTED_URL === undefined ? {} : { hosted: { url: process.env.NORTUSCC_HOSTED_URL, platform: process.platform } }),
-        paths, domains, source: setupSourceLayer(paths), dialogue: nodeProcessDialogue({ env: process.env }), sourceEnv:process.env, skillInstaller: agentSkillInstaller({ home: homedir(), xdgStateHome: process.env.XDG_STATE_HOME }), agentVersion: checkoutVersion(), ipc, notifications: { platform: process.platform }, signal: controller.signal,
-        ...(!ipc && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
+        paths, domains, source: setupSourceLayer(paths), dialogue: nodeProcessDialogue({ env: process.env }), sourceEnv:process.env, skillInstaller: agentSkillInstaller({ home: homedir(), xdgStateHome: process.env.XDG_STATE_HOME }), agentVersion: checkoutVersion(), ipc: true, platform: process.platform, notifications: { platform: process.platform }, signal: controller.signal,
+        ...(windows && !redirected ? { logOutput: { stdout: process.stdout, stderr: process.stderr } } : {}),
         onStarted: () => console.error(`nortuscc agent: running from ${CHECKOUT} (pid ${process.pid})`),
       }).pipe(
         Effect.as(0),

@@ -3,6 +3,8 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { decodeOperationOutput, type OperationName } from '@nortuscc/agent/operations';
 import type { MachinePathsValue } from '@nortuscc/machine';
+// The endpoint module alone, so the bundled App MCP client stays free of sync's machine readers.
+import { agentEndpoint, AgentEndpointError } from '@nortuscc/sync/agent-endpoint';
 import { decodeWireStatus, decodeHostedState, decodeSignInResult, decodeHelloResult, decodeMessage, PROTOCOL_VERSION, MAX_RECORD_BYTES, type HelloResult } from '@nortuscc/agent/ipc/protocol';
 
 // The agent answered a request with an error, sent a record outside the protocol, or did not answer
@@ -16,7 +18,7 @@ export class AgentError extends Error {
   }
 }
 
-// No socket, no token, no answer within the connect timeout, or the connection
+// No socket (or on Windows no valid agent.pipe), no token, no answer within the connect timeout, or the connection
 // closed while a request was pending.
 export class AgentUnavailable extends Error {
   constructor(message: string) {
@@ -45,12 +47,14 @@ const LONG_COMMANDS = new Set(['inspect', 'apply', 'operation']);
 
 type Pending = { readonly command?: string; readonly operation?: OperationName; readonly resolve: (result: unknown) => void; readonly reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> };
 
-// Connects to <stateRoot>/agent/agent.sock with a token read fresh from agent.token and says hello.
+// Connects to the agent's endpoint under <stateRoot>/agent (agent.sock, or on Windows the pipe named in
+// agent.pipe, as `platform` (default this process's) decides; read fresh) with a token read fresh from
+// agent.token, and says hello.
 // Connecting and the hello together must finish within `timeoutMs` (2 s by default). Later requests
 // time out after `requestTimeoutMs` (30 s), or `inspectTimeoutMs` (120 s) for inspect, apply and shared operations.
 export const connectAgent = async (
   paths: Pick<MachinePathsValue, 'stateRoot'>,
-  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' | 'mcp'; runtimeId?: string } = {},
+  options: { timeoutMs?: number; requestTimeoutMs?: number; inspectTimeoutMs?: number; client?: 'app' | 'cli' | 'mcp'; runtimeId?: string; platform?: NodeJS.Platform } = {},
 ): Promise<AgentConnection> => {
   const dir = join(paths.stateRoot, 'agent');
   let token: string;
@@ -61,7 +65,15 @@ export const connectAgent = async (
   }
   if (token.length === 0) throw new AgentUnavailable('the agent has no token');
 
-  const socket = createConnection(join(dir, 'agent.sock'));
+  let endpoint: string;
+  try {
+    endpoint = agentEndpoint(dir, options.platform ?? process.platform);
+  } catch (error) {
+    if (error instanceof AgentEndpointError) throw new AgentUnavailable(error.message);
+    throw error;
+  }
+
+  const socket = createConnection(endpoint);
   const pending = new Map<string, Pending>();
   const listeners = new Set<(event: unknown) => void>();
   const closeListeners = new Set<() => void>();
