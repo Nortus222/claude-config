@@ -112,7 +112,8 @@ export const makeIntentOperations = (options: {
     return yield* Effect.try({ try: () => decodeOperationOutput('inspectIntent', { generation, items: page, nextCursor }), catch: () => refused('OVERSIZED', 'Intent identities or values exceed the supported read limits') });
   }).pipe(Effect.mapError(e => e instanceof SessionError ? e : refused('INSPECT_FAILED', 'Intent inspection could not read configuration')));
 
-  const prepare = (change: IntentChange): Effect.Effect<PreparedParityChange, SessionError> => Effect.gen(function* () {
+  // `after` is the desired configuration the saved intent will resolve to.
+  const prepare = (change: IntentChange): Effect.Effect<PreparedParityChange & { readonly after: DesiredConfig }, SessionError> => Effect.gen(function* () {
     const { inspection, current } = yield* ready;
     if (current.issues.length || inspection.desired.issues.length) return yield* Effect.fail(invalid());
     const generation = String(yield* options.generation);
@@ -165,7 +166,7 @@ export const makeIntentOperations = (options: {
       if (!fresh || canonical(fresh.desired) !== canonical(before) || canonical(yield* store.read) !== canonical(current) || canonical(yield* resolve(fresh, current)) !== canonical(before)) return yield* Effect.fail(stale());
       for (const route of routes) if ((yield* observeRouting(before, route.id)).evidence !== route.evidence || (yield* fs.readText(route.path)) !== route.text) return yield* Effect.fail(stale());
     }).pipe(Effect.provideContext(context), Effect.mapError(e => e instanceof SessionError ? e : stale()));
-    return { preview, acceptance, revalidate, execute: (lifecycle: RunLifecycle, signal: AbortSignal) => Effect.flatMap(clock.now, now => Effect.gen(function* () {
+    return { preview, acceptance, after, revalidate, execute: (lifecycle: RunLifecycle, signal: AbortSignal) => Effect.flatMap(clock.now, now => Effect.gen(function* () {
       const backups = yield* Backups;
       let evidence: Extract<ParityRunEvidence, { kind: 'machineIntent' }> = { kind: 'machineIntent', state: 'needsInspection', intentState: 'pending', routingEffects: [], committedKeys: [], remainingKeys: keys, backupIds: [] };
       const checkpoint = () => Effect.gen(function* () {

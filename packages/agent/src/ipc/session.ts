@@ -24,6 +24,7 @@ import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
+import { makeSkillNow } from '../operations/skill-now.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
 import { causeMessage, describe, safeMessage } from '../operations/safety.ts';
 import type { ParityAcceptance } from '../operations/index.ts';
@@ -294,6 +295,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       };
     });
 
+    const skillNow = yield* makeSkillNow({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0), domains: options.domains,
+      freshInspection: (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.map(job => job.inspection), Effect.provideContext(context)),
+      skills: skillOperations, prepareIntent: intentOperations.prepare, prepareReconcile: prepareAction });
+
     const previewChange: AgentSession['previewChange'] = change => Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => decodeOperationInput('previewChange', { change }),
@@ -343,6 +348,11 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       if (input.change.kind === 'machineIntent') {
         if (active) return yield* Effect.fail(busy);
         return yield* retainParityChange(yield* intentOperations.prepare(input.change));
+      }
+      if (input.change.kind === 'skillNow') {
+        if (active) return yield* Effect.fail(busy);
+        const prepared = yield* skillNow.prepare(input.change);
+        return prepared.kind === 'retained' ? prepared.preview : yield* retainParityChange(prepared.prepared);
       }
       if (input.change.kind === 'addSkill') {
         if (active) return yield* Effect.fail(busy);

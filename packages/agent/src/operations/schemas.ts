@@ -45,6 +45,9 @@ export const SourceDecisionChangeSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('sourceDecision'), sourceId: OperationKeySchema, action: Schema.Literals(['unpin', 'unignore']) }),
 ]);
 export const AddSkillChangeSchema = Schema.Struct({ kind: Schema.Literal('addSkill'), candidateId: IdSchema, targets: SkillTargetsSchema });
+// Install or remove one skill on this machine now: the saved choice and its effect in one run.
+export const SkillNowChangeSchema = Schema.Struct({ kind: Schema.Literal('skillNow'), source: SkillSourceSchema, name: SkillNameSchema,
+  action: Schema.Literals(['install', 'remove']), revision: Schema.optionalKey(SkillRevisionSchema), targets: Schema.optionalKey(SkillTargetsSchema) });
 // Validation walks bounded JSON iteratively before the owner's recursive secret checks.
 export const IntentValueSchema = Schema.declare((value): value is unknown => intentValueProblem(value) === undefined, {
   toCodecJson: () => Schema.link<unknown>()(Schema.Json.annotate({ description: 'Finite JSON; UTF-8 JSON <=32768 bytes, depth <=16, nodes <=4096. Limits are checked before recursive validation.' }), { decode: SchemaGetter.transform((value: Schema.Json): unknown => value), encode: SchemaGetter.transform((value: unknown) => value as Schema.Json) }),
@@ -102,7 +105,7 @@ export const AuthorLocalChangeSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('deleteDraft'), draftId: DraftIdSchema }),
   Schema.Struct({ kind: Schema.Literal('ghLogin') }),
 ]);
-export const ChangeSchema = Schema.Union([FollowProfileChangeSchema,...AuthorLocalChangeSchema.members, PublishDraftChangeSchema, AnnouncePublicationChangeSchema, PruneBackupsChangeSchema, ...AccountChangeSchema.members, ...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, SetupApplyChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema]);
+export const ChangeSchema = Schema.Union([FollowProfileChangeSchema,...AuthorLocalChangeSchema.members, PublishDraftChangeSchema, AnnouncePublicationChangeSchema, PruneBackupsChangeSchema, ...AccountChangeSchema.members, ...SourceDecisionChangeSchema.members, SyncDecisionChangeSchema, SetupApplyChangeSchema, ReconcileChangeSchema, UninstallConfigChangeSchema, UpdateChangeSchema, CaptureChangeSchema, AddSkillChangeSchema, MachineIntentChangeSchema, SkillNowChangeSchema]);
 export const SkillCandidateSchema = Schema.Struct({ candidateId: IdSchema, source: SkillSourceSchema, revision: SkillRevisionSchema,
   sourceDir: KeySchema, selectorName: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)), installedName: SkillNameSchema,
   description: Schema.String.check(Schema.isMaxCodePoints(500)), internal: Schema.Boolean });
@@ -129,7 +132,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'skillNow', 'shareWithMyMachines', 'promoteToProfile'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -171,6 +174,7 @@ const PruneAcceptanceSchema = Schema.Struct({kind:Schema.Literal('pruneBackups')
 const ReconcileAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityAcceptanceFields });
 const UninstallAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('uninstallConfig'), ...parityAcceptanceFields });
 const IntentAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('machineIntent'), ...parityAcceptanceFields });
+const SkillNowAcceptanceSchema = Schema.Struct({ kind: Schema.Literal('skillNow'), ...parityAcceptanceFields });
 const AuthorHeadSchema = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\s\S])/u));
 const AuthorEvidenceSchema = Schema.Struct({ checkout: Text, realCheckout: Text, gitDir: Text, head: AuthorHeadSchema,
   files: Schema.Array(Schema.Struct({ path: Text, kind: Schema.Literals(['absent', 'file']), sha256: Schema.NullOr(DigestSchema), indexBlob: Schema.NullOr(DigestSchema) })).check(Schema.isMaxLength(100)) });
@@ -195,7 +199,7 @@ const AuthorLocalAcceptanceSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('deleteDraft'), ...parityAcceptanceFields, draftId: Schema.NullOr(DraftIdSchema) }),
   Schema.Struct({ kind: Schema.Literal('ghLogin'), ...parityAcceptanceFields, draftId: Schema.NullOr(DraftIdSchema) }),
 ]);
-export const ParityAcceptanceSchema = Schema.Union([FollowAcceptanceSchema, AuthorLocalAcceptanceSchema, PublishAcceptanceSchema, AnnounceAcceptanceSchema, PruneAcceptanceSchema, SetPolicyAcceptanceSchema, ResumeAcceptanceSchema, SignInAcceptanceSchema, SignOutAcceptanceSchema, SyncAccountAcceptanceSchema, PatchMachineMetadataAcceptanceSchema, SourceAcceptanceSchema, SyncAcceptanceSchema, SetupAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema]);
+export const ParityAcceptanceSchema = Schema.Union([FollowAcceptanceSchema, AuthorLocalAcceptanceSchema, PublishAcceptanceSchema, AnnounceAcceptanceSchema, PruneAcceptanceSchema, SetPolicyAcceptanceSchema, ResumeAcceptanceSchema, SignInAcceptanceSchema, SignOutAcceptanceSchema, SyncAccountAcceptanceSchema, PatchMachineMetadataAcceptanceSchema, SourceAcceptanceSchema, SyncAcceptanceSchema, SetupAcceptanceSchema, ReconcileAcceptanceSchema, UninstallAcceptanceSchema, CaptureAcceptanceSchema, UpdateAcceptanceSchema, IntentAcceptanceSchema, SkillNowAcceptanceSchema]);
 const parityEvidenceFields = { state: Schema.Literals(['pending', 'committed', 'partial', 'needsInspection']), committedKeys: list(KeySchema), remainingKeys: list(KeySchema), backupIds: list(IdSchema) };
 const PruneEvidenceSchema = Schema.Struct({kind:Schema.Literal('pruneBackups'),...parityEvidenceFields});
 const ReconcileEvidenceSchema = Schema.Struct({ kind: Schema.Literal('reconcile'), ...parityEvidenceFields });
@@ -206,6 +210,7 @@ const RoutingEffectSchema = Schema.Union([
 ]);
 const IntentEvidenceSchema = Schema.Struct({ kind: Schema.Literal('machineIntent'), ...parityEvidenceFields, intentState: Schema.Literals(['pending', 'saved', 'needsInspection']), routingEffects: Schema.Array(RoutingEffectSchema).check(Schema.isMaxLength(2)) });
 const CaptureEvidenceSchema = Schema.Struct({ kind: Schema.Literal('capture'), ...parityEvidenceFields });
+const SkillNowEvidenceSchema = Schema.Struct({ kind: Schema.Literal('skillNow'), ...parityEvidenceFields });
 const UpdateEvidenceSchema = Schema.Struct({ kind: Schema.Literal('update'), ...parityEvidenceFields });
 const FollowEvidenceSchema = Schema.Struct({kind:Schema.Literal('followProfile'),...parityEvidenceFields});
 const SetupEvidenceSchema = Schema.Struct({kind:Schema.Literal('setupApply'),...parityEvidenceFields});
@@ -230,7 +235,7 @@ const AuthorLocalEvidenceSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('deleteDraft'), ...parityEvidenceFields }),
   Schema.Struct({ kind: Schema.Literal('ghLogin'), ...parityEvidenceFields }),
 ]);
-export const ParityRunEvidenceSchema = Schema.Union([FollowEvidenceSchema, AuthorLocalEvidenceSchema, PublishEvidenceSchema, AnnounceEvidenceSchema, PruneEvidenceSchema, SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, SetupEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema]);
+export const ParityRunEvidenceSchema = Schema.Union([FollowEvidenceSchema, AuthorLocalEvidenceSchema, PublishEvidenceSchema, AnnounceEvidenceSchema, PruneEvidenceSchema, SetPolicyEvidenceSchema, ResumeEvidenceSchema, SignInEvidenceSchema, SignOutEvidenceSchema, SyncAccountEvidenceSchema, PatchMachineMetadataEvidenceSchema, SourceEvidenceSchema, SyncEvidenceSchema, SetupEvidenceSchema, ReconcileEvidenceSchema, UninstallEvidenceSchema, CaptureEvidenceSchema, UpdateEvidenceSchema, IntentEvidenceSchema, SkillNowEvidenceSchema]);
 const IntentOrigin = Schema.Struct({ layer: Schema.Literals(['base', 'pin', 'machine', 'profile']), source: PatchId });
 const IntentTargets = Schema.Array(Schema.Literals(['claude', 'codex'])).check(Schema.isMaxLength(2));
 export const IntentItemSchema = Schema.Union([
@@ -265,6 +270,9 @@ export const UpdatePreviewSchema = Schema.Struct({ ...previewFields, change: Upd
 });
 export const AddSkillPreviewSchema = Schema.Struct({ ...previewFields, change: AddSkillChangeSchema, skillAddition: SkillAdditionPreviewSchema });
 export const MachineIntentPreviewSchema = Schema.Struct({ ...previewFields, change: MachineIntentChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), machineIntent: MachineIntentDetailsSchema });
+// The `add` route also carries the addition's reviewed declaration and accepted candidate.
+export const SkillNowPreviewSchema = Schema.Struct({ ...previewFields, change: SkillNowChangeSchema, skillAddition: Schema.optionalKey(SkillAdditionPreviewSchema),
+  skillNow: Schema.Struct({ route: Schema.Literals(['enable', 'add', 'disable', 'noop']), effects: Schema.Array(Text).check(Schema.isMaxLength(4)) }) });
 export const FollowPreviewSchema = Schema.Struct({ ...previewFields, change: FollowProfileChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), droppedChoices: Schema.Struct({ holds: list(KeySchema), overrides: list(KeySchema) }), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)) });
 export const SetupPreviewSchema = Schema.Struct({ ...previewFields, change: SetupApplyChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), actionEffects: Schema.Array(Text).check(Schema.isMaxLength(4)) });
 export const SyncPreviewSchema = Schema.Struct({...previewFields,change:SyncDecisionChangeSchema,sourceImpact:Schema.NullOr(Schema.Struct({source:Text,skills:Schema.Array(Text).check(Schema.isMaxLength(256)),before:Schema.NullOr(Text),after:Schema.NullOr(Text)})),skillAddition:Schema.optionalKey(Schema.Never),actionEffects:Schema.Array(Text).check(Schema.isMaxLength(4))});
@@ -290,7 +298,7 @@ export const DraftPreviewSchema = Schema.Struct({ draftId: DraftIdSchema, base: 
   itemsTruncated: Schema.optionalKey(Schema.Literal(true)) });
 const AuthorLocalPreviewSchema = Schema.Struct({ ...previewFields, skillAddition: Schema.optionalKey(Schema.Never), change: AuthorLocalChangeSchema,
   draftId: Schema.NullOr(DraftIdSchema), draft: Schema.NullOr(DraftPreviewSchema), actionEffects: Schema.Array(Text) });
-export const ChangePreviewSchema = Schema.Union([FollowPreviewSchema, AuthorLocalPreviewSchema, PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema]);
+export const ChangePreviewSchema = Schema.Union([FollowPreviewSchema, AuthorLocalPreviewSchema, PublicationPreviewSchema, PrunePreviewSchema, AccountPreviewSchema, SourceDecisionPreviewSchema, SyncPreviewSchema, SetupPreviewSchema, ReconcilePreviewSchema, UninstallConfigPreviewSchema, CapturePreviewSchema, UpdatePreviewSchema, AddSkillPreviewSchema, MachineIntentPreviewSchema, SkillNowPreviewSchema]);
 export const StepOutcomeSchema = Schema.Struct({ key: KeySchema, outcome: Schema.Literals(['ok', 'failed', 'cancelled']), note: Text });
 export const PublicationResultSchema = Schema.Struct({ status: Schema.Literals(['succeeded', 'needs-preview', 'interrupted']), message: Text });
 export const RunTerminalResultSchema = Schema.Union([
@@ -365,6 +373,7 @@ export const RunViewSchema = Schema.Union([
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: CaptureChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: CaptureAcceptanceSchema }), parity: Schema.optionalKey(CaptureEvidenceSchema) }),
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: MachineIntentChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: IntentAcceptanceSchema }), parity: Schema.optionalKey(IntentEvidenceSchema) }),
   Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: AddSkillChangeSchema, skillAddition: AcceptedSkillSchema, parity: Schema.optionalKey(Schema.Never) }), parity: Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ ...runFields, intent: Schema.Struct({ ...intentFields, change: SkillNowChangeSchema, skillAddition: Schema.optionalKey(Schema.Never), parity: SkillNowAcceptanceSchema }), parity: Schema.optionalKey(SkillNowEvidenceSchema) }),
 ]);
 export const ApplyChangeResultSchema = Schema.Union([
   Schema.Struct({ status: Schema.Literal('started'), run: RunViewSchema }),

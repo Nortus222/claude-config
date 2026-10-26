@@ -5,7 +5,7 @@ import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/opera
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
 const reads = ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
-const changes = ['followProfile','reconcile', 'machineIntent', 'editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
+const changes = ['followProfile','reconcile', 'machineIntent', 'editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill', 'skillNow'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {
   const rows = Object.values(engineCapabilityCoverage);

@@ -52,6 +52,7 @@ export const engineCapabilityCoverage = {
   agentPolicyResume: available('agent/agent.ts and operations/account.ts', ['agentStatus','previewChange','applyChange'], 'Manual, notify and auto-apply retain policy semantics; resume clears failure pause without changing policy. No user pause or trust grant.', ['setPolicy', 'resume']),
   skillCandidateDiscovery: available('agent/skill-operations.ts', ['resolveSkillCandidate', 'previewChange'], 'Bounded source-specific metadata discovery and exact side-effect-free tentative machine declaration preview.', ['addSkill']),
   skillAddition: available('agent/skill-addition.ts', ['applyChange', 'getRun', 'listRuns', 'cancelRun'], 'Durable machine declaration, accepted content verification and selected native catalog evidence.', ['addSkill']),
+  skillNow: available('operations/skill-now.ts', ['previewChange', 'applyChange', 'getRun'], 'Save one skill choice on this machine and install or remove it in one run; removal is the owned disable only.', ['skillNow']),
   arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Physical general skill removal', 'Enablement and declaration removal change intent; general physical deletion has no supported owner.'),
   integrationRemoval: remaining('machine/integrations/domain.ts', 'Integration removal semantics', 'No existing domain removal steps exist; cannot publish a callable placeholder.'),
   personalSharing: remaining('hosted-protocol/revisions.ts', profiles, 'Requires an available personal distribution destination and declaration workflow.', 'prerequisite'),
@@ -87,7 +88,7 @@ const capabilityCoverage: Record<string, { readonly state: 'available' | 'remain
   setupReview: { state: 'available' }, setupApply: { state: 'available' },
   inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
-  addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
+  addSkill: { state: 'available' }, skillNow: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
 };
 
 // Refuse an operation/capability added without reviewing its coverage and readiness.

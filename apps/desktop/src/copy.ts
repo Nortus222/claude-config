@@ -83,6 +83,7 @@ const CHANGE_TITLES = {
   machineIntent: 'Save skill choice',
   update: 'Update skills',
   addSkill: 'Add a skill',
+  skillNow: 'Install or remove a skill',
   uninstallConfig: 'Restore configuration',
   capture: `Save ${thisMachine}’s changes to a draft`,
   syncDecision: 'Decide on an incoming change',
