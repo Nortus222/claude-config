@@ -7,8 +7,8 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Effect, Exit, Layer, ManagedRuntime, Scope, Semaphore } from 'effect';
 import { loadProfile, nodeFiles } from '@nortuscc/profile-engine';
-import { HistoryStore, OverridesStore, Processes, inspectSkills, skillsDomain, type SkillCandidate } from '@nortuscc/machine';
-import { RemoteStore, SetupSource, TailscaleAccess, agentLayer, type AgentServices } from '../src/index.ts';
+import { HistoryStore, OverridesStore, Processes, inspectSkills, probeUndeclared, skillsDomain, type SkillCandidate } from '@nortuscc/machine';
+import { AgentStateStore, RemoteStore, SetupSource, TailscaleAccess, agentLayer, type AgentServices } from '../src/index.ts';
 import type { AgentHandle } from '../src/agent.ts';
 import { makeSession } from '../src/ipc/session.ts';
 import { makeOperationDispatch, type OperationCaller, type OperationDispatch } from '../src/ipc/operation-dispatch.ts';
@@ -83,7 +83,12 @@ const machine = async (options: MachineOptions) => {
   let installs = 0;
   const port = options.serve ? await freePort() : 0;
   const peers = peerClient({ address: (p) => ({ host: '127.0.0.1', port: options.ports?.get(p.nodeId) ?? 1 }), helloTimeoutMs: 300 });
+  let inspections = 0;
+  const runtimeFile = join(m.paths.stateRoot, 'agent', 'runtime.json');
+  m.write(runtimeFile, JSON.stringify({ agentVersion: '9.9.9', appVersion: '0.1.6', target: 'darwin-arm64' }));
   const dispatch = await runtime.runPromise(Effect.gen(function* () {
+    // An app-owned agent, so MCP callers are admitted.
+    yield* AgentStateStore.use((s) => s.update((state) => ({ ...state, installedBy: 'app', agentVersion: '9.9.9', appPath: '/tmp/Test.app/Contents/MacOS/Test' })));
     if (options.remote) {
       const store = yield* RemoteStore;
       yield* store.setEnabled(options.remote.enabled);
@@ -93,13 +98,17 @@ const machine = async (options: MachineOptions) => {
     const fresh = Effect.gen(function* () {
       const overrides = yield* (yield* OverridesStore).read;
       const desired = yield* loadProfile(m.paths.repo, { overrides }).pipe(Effect.provide(nodeFiles));
-      return { paths: m.paths, desired, report: { desired, ...yield* inspectSkills(desired) }, domains: [skillsDomain], trusted: true, revision: null };
+      const skills = yield* inspectSkills(desired);
+      const undeclared = yield* probeUndeclared(desired, { targets: ['claude'], installed: [], hookCommands: [] });
+      return { paths: m.paths, desired, report: { desired, items: [...skills.items, ...undeclared.items], probeErrors: skills.probeErrors }, domains: [skillsDomain], trusted: true, revision: null };
     }).pipe(Effect.provideContext(context));
+    // The latest job's status: a new one only when the machine inspects.
     const status = () => ({ at: new Date().toISOString(), policy: 'manual', paused: null, trusted: true, pending: [], drift: [], conflicts: [], probeErrors: [] });
+    let latest = status();
     const permit = yield* Semaphore.make(1);
     const exclusive = <A, E, R>(effect: Effect.Effect<A, E, R>) => permit.withPermit(effect);
     const handle = { inspection: fresh, freshInspection: Effect.map(fresh, (inspection) => ({ inspection, status: status() })), generation: Effect.succeed(1), exclusive, withJobMutation: exclusive,
-      request: () => Effect.sync(status) } as unknown as AgentHandle;
+      status: Effect.sync(() => latest), request: () => Effect.sync(() => { inspections++; latest = status(); return latest; }) } as unknown as AgentHandle;
     const processes = yield* Processes;
     const session = yield* makeSession(handle, { signal: new AbortController().signal, domains: () => [skillsDomain],
       skillCandidates: (input) => Effect.sync(() => { input.observeTree?.(candidate, [{ path: 'SKILL.md', sha: candidate.blob, mode: '100644' }]); return { ok: true, source: candidate.source, revision: candidate.revision, candidates: [candidate] }; }),
@@ -111,7 +120,8 @@ const machine = async (options: MachineOptions) => {
     }).pipe(Effect.provide(agentSkillInstaller({ home: join(m.root, 'home') })),
       Effect.provideService(Processes, { ...processes, run: (command) => command.cmd !== 'npx' ? processes.run(command)
         : Effect.promise(async () => { installs++; await options.installGate?.(); return { code: 0, stdout: '' }; }) }));
-    const dispatch = makeOperationDispatch({ session, paths: m.paths, handle, agentVersion: '9.9.9', platform: process.platform, peers });
+    const dispatch = makeOperationDispatch({ session, paths: m.paths, handle, agentVersion: '9.9.9', platform: 'darwin', peers,
+      appRuntime: { version: '0.1.6', runtimeId: '9.9.9', appDirectory: '/tmp/Test.app/Contents/MacOS', platform: 'darwin', target: 'darwin-arm64', metadataPath: runtimeFile } });
     if (options.serve) {
       const store = yield* RemoteStore;
       yield* store.setEnabled(true);
@@ -131,22 +141,25 @@ const machine = async (options: MachineOptions) => {
     runtime.runPromise(Effect.flip(dispatch({ actor: 'app' }, name, { scope: { kind: 'machine' }, ...input })) as Effect.Effect<any, never, AgentServices>);
   const history = () => runtime.runPromise(HistoryStore.use((h) => h.read));
   const known = () => runtime.runPromise(RemoteStore.use((s) => s.get)).then((s) => s.known);
-  return { m, port, call, fails, history, known, installs: () => installs };
+  return { m, port, call, fails, history, known, installs: () => installs, inspections: () => inspections };
 };
 
 // Machine B serving remote requests from machine A; A's Tailscale lists B.
 const pair = async (b: { manifest?: string; installGate?: () => Promise<void> } = {}, a: { peers?: TsPeer[]; ports?: [string, number][]; known?: ReadonlyArray<KnownMachine> } = {}) => {
   const B = await machine({ nodeId: 'node-b', name: 'machine-b', manifest: b.manifest ?? '[owner/repo] optional\nreview\n', serve: { caller: 'machine-a' }, installGate: b.installGate });
   const ports = new Map<string, number>([['node-b', B.port], ...(a.ports ?? [])]);
-  const A = await machine({ nodeId: 'node-a', name: 'machine-a', manifest: '[owner/repo] optional\nreview\n', ports,
+  // Machine A, or A again after its agent restarted (it keeps no memory of earlier fan-outs).
+  const caller = () => machine({ nodeId: 'node-a', name: 'machine-a', manifest: '[owner/repo] optional\nreview\n', ports,
     peers: () => [peer('node-b', 'machine-b'), ...(a.peers ?? [])], remote: { enabled: false, known: a.known } });
-  return { A, B };
+  const A = await caller();
+  return { A, B, caller };
 };
 
 const install = (machines: string[] | 'all', requestId = 'request-1', name = 'review') =>
   ({ requestId, source: 'owner/repo', name, action: 'install', machines });
 const runOn = (A: Awaited<ReturnType<typeof machine>>, machineRef: string, runId: string) =>
   until(() => A.call('machineRun', { machine: machineRef, runId }), (run) => run.result !== null, `the run on ${machineRef}`);
+const mcp = { actor: 'mcp', runtimeId: '9.9.9' } as const;
 
 // A Windows peer whose agent accepts connections but never answers, as one whose app is closed may.
 const silent = async () => {
@@ -193,19 +206,20 @@ test('myMachines lists reachable, powered-off, app-closed, remote-off and incomp
   assert.equal(known.find((k) => k.nodeId === 'node-b')?.name, 'machine-b');
 });
 
-test('installing on another machine and this one starts a run on each; the target records the calling machine', async () => {
+for (const [who, caller] of [['app', { actor: 'app' }], ['mcp', mcp]] as const) test(`installing from ${who} on another machine and this one starts a run on each; the target records the calling machine and ${who}`, async () => {
   const { A, B } = await pair();
-  const result = await A.call('applySkillOnMachines', install(['node-b', 'this']));
+  const result = await A.call('applySkillOnMachines', install(['node-b', 'this']), caller);
   assert.deepEqual(result.results.map((r: any) => [r.machine, r.name, r.outcome.status]), [['node-b', 'machine-b', 'started'], ['this', 'machine-a', 'started']]);
   const remote = await runOn(A, 'node-b', result.results[0].outcome.runId);
   assert.equal(remote.state, 'succeeded', JSON.stringify(remote.result));
-  assert.equal(remote.actor, 'remote');
-  assert.equal(remote.remoteMachine, 'machine-a');
+  assert.deepEqual([remote.actor, remote.remoteMachine, remote.remoteOrigin], ['remote', 'machine-a', who]);
   const local = await runOn(A, 'this', result.results[1].outcome.runId);
   assert.equal(local.state, 'succeeded', JSON.stringify(local.result));
-  assert.equal(local.actor, 'app');
+  assert.deepEqual([local.actor, local.remoteMachine, local.remoteOrigin], [who, undefined, undefined]);
   const events = (await B.history()).filter((e) => 'runId' in e && e.runId === remote.runId);
-  assert.ok(events.length > 0 && events.every((e) => e.actor === 'remote' && e.remoteMachine === 'machine-a'), JSON.stringify(events));
+  assert.ok(events.length > 0 && events.every((e) => e.actor === 'remote' && e.remoteMachine === 'machine-a' && e.remoteOrigin === who), JSON.stringify(events));
+  const listed = (await B.call('history', { limit: 50 })).events.filter((e: any) => e.runId === remote.runId);
+  assert.ok(listed.length > 0 && listed.every((e: any) => e.remoteOrigin === who), JSON.stringify(listed));
   assert.equal(B.installs(), 1);
   assert.equal(A.installs(), 1);
 });
@@ -239,14 +253,57 @@ test('a target whose install outlives the call reports started, and the run fini
   assert.equal((await runOn(A, 'node-b', runId)).state, 'succeeded');
 });
 
-test('resubmitting the same request returns the same runs', async () => {
-  const { A, B } = await pair();
+test('resubmitting the same request returns the same runs, also after the calling agent restarts', async () => {
+  const { A, B, caller } = await pair();
   const first = await A.call('applySkillOnMachines', install(['node-b', 'this'], 'same-request'));
   const second = await A.call('applySkillOnMachines', install(['node-b', 'this'], 'same-request'));
   assert.deepEqual(second.results, first.results);
   assert.ok(first.results.every((r: any) => r.outcome.status === 'started'));
   await runOn(A, 'node-b', first.results[0].outcome.runId);
+  // A fresh agent previews again; B refuses the new plan under the same request ID, so the run it already has is found.
+  const restarted = await caller();
+  const again = await restarted.call('applySkillOnMachines', install(['node-b'], 'same-request'));
+  assert.deepEqual(again.results[0].outcome, first.results[0].outcome);
   assert.equal(B.installs(), 1);
+});
+
+test('the same request ID from another kind of caller is another request', async () => {
+  const { A } = await pair();
+  const app = await A.call('applySkillOnMachines', install(['node-b'], 'shared-id'));
+  await runOn(A, 'node-b', app.results[0].outcome.runId);
+  const cli = await A.call('applySkillOnMachines', install(['node-b'], 'shared-id'), { actor: 'cli' });
+  assert.equal(cli.results[0].outcome.status, 'started');
+  assert.notEqual(cli.results[0].outcome.runId, app.results[0].outcome.runId);
+});
+
+test('a grid read leaves a pending preview on the target usable', async () => {
+  const { A, B } = await pair();
+  const preview = await B.call('previewChange', { change: { kind: 'skillNow', source: 'owner/repo', name: 'review', action: 'install' } });
+  await A.call('machineSkills', { machine: 'node-b' });
+  const applied = await B.call('applyChange', { planId: preview.planId, requestId: 'local-after-read' });
+  assert.equal(applied.status, 'started');
+});
+
+test('a grid read during a run on the target answers from its last inspection; only fresh inspects again', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { A, B } = await pair({ installGate: () => gate });
+  const before = B.inspections();
+  const first = await A.call('machineSkills', { machine: 'node-b' });
+  const started = await A.call('applySkillOnMachines', install(['node-b']));
+  await until(() => A.call('machineRun', { machine: 'node-b', runId: started.results[0].outcome.runId }), (run) => run.state === 'running', 'the run to start');
+  const during = await A.call('machineSkills', { machine: 'node-b' });
+  assert.ok(during.skills.some((s: any) => s.name === 'review'));
+  assert.equal(during.inspectedAt, first.inspectedAt);
+  assert.equal(B.inspections(), before);
+  assert.equal((await A.fails('machineSkills', { machine: 'node-b', fresh: true })).code, 'BUSY');
+  release();
+  await runOn(A, 'node-b', started.results[0].outcome.runId);
+  await until(async () => B.inspections(), (n) => n > before, 'the inspection after the run');
+  const settled = B.inspections();
+  const fresh = await A.call('machineSkills', { machine: 'node-b', fresh: true });
+  assert.equal(B.inspections(), settled + 1);
+  assert.ok(Date.parse(fresh.inspectedAt) > Date.parse(first.inspectedAt));
 });
 
 test('"all" installs on every reachable machine and this one', async () => {
@@ -275,12 +332,14 @@ test('machineSkills lists declared skills and hand-installed ones with the sourc
   B.m.write(join(B.m.paths.agentsSkills, 'handmade', 'SKILL.md'), '# handmade\n');
   B.m.write(join(B.m.paths.agentsSkills, 'scratch', 'SKILL.md'), '# scratch\n');
   B.m.write(join(B.m.paths.agentsSkills, '..', '.skill-lock.json'), JSON.stringify({ version: 3, skills: { handmade: { source: 'Someone/Tools' } } }));
+  B.m.write(join(B.m.paths.claude, 'skills', 'direct', 'SKILL.md'), '# direct\n');
   for (const fresh of [false, true]) {
     const result = await A.call('machineSkills', { machine: 'node-b', fresh });
     assert.ok(Number.isFinite(Date.parse(result.inspectedAt)));
     const rows = Object.fromEntries(result.skills.map((s: any) => [s.name, s]));
     assert.deepEqual(rows.handmade, { source: 'someone/tools', name: 'handmade', state: 'undeclared', choice: null, from: null });
     assert.deepEqual(rows.scratch, { source: null, name: 'scratch', state: 'undeclared', choice: null, from: null });
+    assert.deepEqual(rows.direct, { source: null, name: 'direct', state: 'undeclared', choice: null, from: null });
     assert.equal(rows.review.state, 'profile-off');
     assert.equal(rows.review.source, 'owner/repo');
     assert.equal(rows.review.choice, null);

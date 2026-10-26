@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Effect, Stream } from 'effect';
 import {
   acquireApplyLock, execute, HistoryStore, plan, pruneBackups, selectAll,
-  type Actor, type OperationMetadata, type MachineReport, type Plan, type Progress, type StepRecord,
+  type Actor, type RemoteOrigin, type OperationMetadata, type MachineReport, type Plan, type Progress, type StepRecord,
 } from '@nortuscc/machine';
 import { AgentClock } from './clock.ts';
 import type { AgentDomain } from './layer.ts';
@@ -40,7 +40,7 @@ export const recordedRun = <E = never>(
   report: MachineReport,
   domains: ReadonlyArray<AgentDomain>,
   options: {
-    readonly runId: string; readonly actor: Actor; readonly remoteMachine?: string; readonly automatic: boolean; readonly signal?: AbortSignal;
+    readonly runId: string; readonly actor: Actor; readonly remoteMachine?: string; readonly remoteOrigin?: RemoteOrigin; readonly automatic: boolean; readonly signal?: AbortSignal;
     readonly onProgress?: (progress: Progress) => Effect.Effect<void>;
     readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E>;
     readonly operation?: OperationMetadata;
@@ -50,7 +50,7 @@ export const recordedRun = <E = never>(
   Effect.gen(function* () {
     const history = yield* HistoryStore;
     const { runId, actor } = options;
-    const who = options.remoteMachine === undefined ? { actor } : { actor, remoteMachine: options.remoteMachine };
+    const who = { actor, ...(options.remoteMachine === undefined ? {} : { remoteMachine: options.remoteMachine }), ...(options.remoteOrigin === undefined ? {} : { remoteOrigin: options.remoteOrigin }) };
     yield* history.append({ kind: 'apply-started', ...who, runId, automatic: options.automatic, ...options.operation, keys: planned.steps.map((s) => s.key) });
     const steps: StepRecord[] = [];
     let result: RunRecord['result'] = 'done';

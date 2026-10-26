@@ -19,10 +19,14 @@ type Reach = OperationOutput<'myMachines'>['machines'][number]['reach'];
 type Outcome = OperationOutput<'applySkillOnMachines'>['results'][number]['outcome'];
 type Skill = OperationOutput<'machineSkills'>['skills'][number];
 type Failure = SessionError | RunError | HostedFailure | FsFailed | PeerUnreachable;
+// Fan-out runs only for a caller at this machine; other machines cannot fan out through it.
+type LocalCaller = Exclude<OperationCaller, { readonly actor: 'remote' }>;
 
 // Request IDs this agent fanned out, so a retry with the same caller request reaches the same runs.
 const MAX_REQUESTS = 256;
 const MAX_INTENT_PAGES = 50;
+// How far back a retry looks for the run its request already started.
+const MAX_RUN_PAGES = 5;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const bounded = (text: string) => [...text].slice(0, 500).join('');
 
@@ -58,11 +62,11 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
   const offline = (name: string) => new SessionError('OFFLINE', `${name} can't be reached right now`);
   const unknown = () => new SessionError('UNKNOWN_KEY', 'That is not one of your machines on Tailscale');
   // One operation on a resolved machine, its input given without scope.
-  const on = <N extends RemoteOperation>(caller: OperationCaller, target: Target, name: N, input: object): Effect.Effect<OperationOutput<N>, Failure, AgentServices> =>
+  const on = <N extends RemoteOperation>(caller: LocalCaller, target: Target, name: N, input: object): Effect.Effect<OperationOutput<N>, Failure, AgentServices> =>
     Effect.suspend(() => {
       const full = decodeOperationInput(name, { scope: { kind: 'machine' }, ...input });
       if (target.kind === 'this') return deps.dispatch(caller, name, full) as Effect.Effect<OperationOutput<N>, Failure, AgentServices>;
-      if (target.kind === 'peer') return deps.peers.operation(target.peer, name, full);
+      if (target.kind === 'peer') return deps.peers.operation(target.peer, name, full, caller.actor);
       return Effect.fail(target.kind === 'offline' ? offline(target.name) : unknown());
     });
   // A peer that cannot be reached fails as OFFLINE.
@@ -97,14 +101,14 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
     return { tailscale: state, self: typeof status === 'string' ? null : { nodeId: status.self.nodeId, name: status.self.hostName, os: status.self.os }, machines };
   });
 
-  // The target's declared skills from its effective intent, with installed state from its inspection,
-  // plus what it has installed outside its configuration. The target always inspects anew: `inspect`
-  // is the only read that reports installed skills, so `fresh` asks for nothing more.
-  const machineSkills = (caller: OperationCaller, input: OperationInput<'machineSkills'>) => Effect.gen(function* () {
+  // The target's declared skills from its effective intent, with installed state from its latest
+  // inspection, plus what it has installed outside its configuration. Only `fresh` makes the target
+  // inspect again, which waits out a run there and drops its pending previews.
+  const machineSkills = (caller: LocalCaller, input: OperationInput<'machineSkills'>) => Effect.gen(function* () {
     const target = yield* resolve(input.machine);
     const name = target.kind === 'unknown' ? '' : target.name;
     const read = <N extends RemoteOperation>(op: N, args: object) => on(caller, target, op, args).pipe(asOffline(name));
-    const inspected = yield* read('inspect', {});
+    const inspected = yield* read('inspect', input.fresh ? {} : { cached: true });
     const declared: OperationOutput<'inspectIntent'>['items'][number][] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_INTENT_PAGES; page++) {
@@ -113,7 +117,13 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
       if (result.nextCursor === null) break;
       cursor = result.nextCursor;
     }
+    // Skills in the shared store are `skill:<name>`; a skill put straight into an agent's own skills
+    // folder is `undeclared:<target>:skills:<name>`, from no source the lock records.
     const items = new Map(inspected.items.filter((i) => i.key.startsWith('skill:')).map((i) => [i.key.slice('skill:'.length), i]));
+    for (const i of inspected.items) {
+      const direct = /^undeclared:[^:]+:skills:(.+)$/.exec(i.key)?.[1];
+      if (direct !== undefined && !items.has(direct)) items.set(direct, { ...i, group: '' });
+    }
     const skills: Skill[] = [];
     const names = new Set<string>();
     for (const item of declared) {
@@ -131,21 +141,36 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
     return { inspectedAt: inspected.status?.at ?? (yield* (yield* AgentClock).now).toISOString(), skills };
   });
 
-  // Preview then apply `skillNow` on one machine under a request ID derived from the caller's.
-  const applyOn = (caller: OperationCaller, input: OperationInput<'applySkillOnMachines'>, ref: string) => Effect.gen(function* () {
+  // The run a request ID already started on a machine, among its most recent runs.
+  const existingRun = (caller: LocalCaller, target: Target, requestId: string) => Effect.gen(function* () {
+    let before: string | undefined;
+    for (let page = 0; page < MAX_RUN_PAGES; page++) {
+      const listed = yield* on(caller, target, 'listRuns', { limit: 100, ...(before === undefined ? {} : { before }) });
+      const run = listed.runs.find((r) => r.intent.requestId === requestId);
+      if (run) return run.runId;
+      if (listed.nextBefore === null) return undefined;
+      before = listed.nextBefore;
+    }
+    return undefined;
+  }).pipe(Effect.orElseSucceed(() => undefined));
+
+  // Preview then apply `skillNow` on one machine under a request ID derived from the caller's and the
+  // change, so a retry, even after this agent restarts, reaches the run it started.
+  const applyOn = (caller: LocalCaller, input: OperationInput<'applySkillOnMachines'>, ref: string) => Effect.gen(function* () {
     const target = yield* resolve(ref);
     const name = target.kind === 'unknown' ? ref : target.name;
     if (target.kind === 'offline') return { machine: ref, name, outcome: { status: 'offline' } as Outcome };
     if (target.kind === 'unknown') return { machine: ref, name, outcome: { status: 'refused', reason: unknown().message } as Outcome };
-    const requestId = digest([input.requestId, ref]);
+    const key = digest([caller.actor, input.requestId, ref]);
     const intent = digest([input.source, input.name, input.action, input.revision ?? null]);
-    const remembered = requests.get(requestId);
+    const requestId = digest([caller.actor, input.requestId, ref, intent]);
+    const remembered = requests.get(key);
     if (remembered && remembered.input !== intent) return { machine: ref, name, outcome: { status: 'refused', reason: 'This request ID already belongs to a different change' } as Outcome };
     if (remembered?.runId) return { machine: ref, name, outcome: { status: 'started', runId: remembered.runId } as Outcome };
     const entry = remembered ?? { input: intent };
     if (!remembered) {
       if (requests.size >= MAX_REQUESTS) requests.delete(requests.keys().next().value!);
-      requests.set(requestId, entry);
+      requests.set(key, entry);
     }
     const apply = (planId: string) => on(caller, target, 'applyChange', { planId, requestId });
     const started = Effect.gen(function* () {
@@ -156,27 +181,32 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
       entry.planId = preview.planId;
       return yield* apply(preview.planId);
     });
+    const begun = (runId: string): Outcome => { entry.runId = runId; return { status: 'started', runId }; };
     return yield* started.pipe(
-      Effect.map((applied): Outcome => {
-        if (applied.status === 'stale') return { status: 'refused', reason: bounded(`${input.name} changed on ${name} while it was being prepared; try again`) };
-        entry.runId = applied.run.runId;
-        return { status: 'started', runId: applied.run.runId };
-      }),
-      Effect.catch((error): Effect.Effect<Outcome> => Effect.succeed(error instanceof PeerUnreachable
-        ? error.reason === 'timeout' ? { status: 'refused', reason: bounded(`${name} did not answer in time; try again with the same request`) } : { status: 'offline' }
-        : { status: 'refused', reason: bounded(failureOf(Cause.fail(error)).message) })),
+      Effect.map((applied): Outcome => applied.status === 'stale'
+        ? { status: 'refused', reason: bounded(`${input.name} changed on ${name} while it was being prepared; try again`) }
+        : begun(applied.run.runId)),
+      Effect.catch((error): Effect.Effect<Outcome, never, AgentServices> => Effect.gen(function* () {
+        if (error instanceof PeerUnreachable && error.reason !== 'timeout') return { status: 'offline' };
+        // The request may already have a run: one this agent started before it restarted (the target
+        // refuses the new plan as a conflict), or one whose acceptance did not answer in time.
+        const uncertain = error instanceof PeerUnreachable || ('code' in error && error.code === 'REQUEST_CONFLICT');
+        const runId = uncertain ? yield* existingRun(caller, target, requestId) : undefined;
+        if (runId !== undefined) return begun(runId);
+        return { status: 'refused', reason: bounded(error instanceof PeerUnreachable ? `${name} did not answer in time; try again with the same request` : failureOf(Cause.fail(error)).message) };
+      })),
       Effect.map((outcome) => ({ machine: ref, name, outcome })),
     );
   });
 
-  const applySkillOnMachines = (caller: OperationCaller, input: OperationInput<'applySkillOnMachines'>) => Effect.gen(function* () {
+  const applySkillOnMachines = (caller: LocalCaller, input: OperationInput<'applySkillOnMachines'>) => Effect.gen(function* () {
     const refs = input.machines === 'all'
       ? [...(yield* myMachines).machines.filter((m) => m.reach === 'ok').map((m) => m.nodeId), 'this']
       : [...new Set(input.machines)];
     return { results: yield* Effect.forEach(refs, (ref) => applyOn(caller, input, ref), { concurrency: 'unbounded' }) };
   });
 
-  const machineRun = (caller: OperationCaller, input: OperationInput<'machineRun'>) => Effect.gen(function* () {
+  const machineRun = (caller: LocalCaller, input: OperationInput<'machineRun'>) => Effect.gen(function* () {
     const target = yield* resolve(input.machine);
     return yield* on(caller, target, 'getRun', { runId: input.runId }).pipe(asOffline(target.kind === 'unknown' ? '' : target.name));
   });

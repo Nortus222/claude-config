@@ -2,6 +2,7 @@ import { request } from 'node:http';
 import { Effect } from 'effect';
 import { MAX_RECORD_BYTES } from '../ipc/protocol.ts';
 import { SessionError } from '../ipc/session.ts';
+import type { RemoteOrigin } from '@nortuscc/machine';
 import { decodeOperationOutput, type OperationInput, type OperationOutput } from '../operations/index.ts';
 import { REMOTE_PORT, REMOTE_PROTOCOL, type RemoteHello, type REMOTE_OPERATIONS } from './listener.ts';
 import type { TsPeer } from './tailscale.ts';
@@ -19,11 +20,12 @@ export class PeerUnreachable extends Error {
   }
 }
 
-// Asks the owner's other machines' agents over Tailscale (ADR 0041). A peer's error reply fails as
-// a SessionError with the peer's code; an unreadable reply as INCOMPATIBLE.
+// Asks the owner's other machines' agents over Tailscale (ADR 0041). `origin` tells the peer what
+// started the request here. A peer's error reply fails as a SessionError with the peer's code; an
+// unreadable reply as INCOMPATIBLE.
 export type PeerClient = {
   readonly hello: (peer: TsPeer) => Effect.Effect<RemoteHello, PeerUnreachable | SessionError>;
-  readonly operation: <N extends RemoteOperation>(peer: TsPeer, name: N, input: OperationInput<N>) => Effect.Effect<OperationOutput<N>, PeerUnreachable | SessionError>;
+  readonly operation: <N extends RemoteOperation>(peer: TsPeer, name: N, input: OperationInput<N>, origin: RemoteOrigin) => Effect.Effect<OperationOutput<N>, PeerUnreachable | SessionError>;
 };
 
 export const HELLO_MS = 3000;
@@ -86,8 +88,8 @@ export const peerClient = (options: { readonly address?: (peer: TsPeer) => PeerA
       if (!isRecord(hello) || typeof hello.protocol !== 'number' || !isRecord(hello.machine) || !Array.isArray(hello.operations)) return yield* Effect.fail(refusal(hello));
       return hello as unknown as RemoteHello;
     }),
-    operation: (peer, name, input) => Effect.gen(function* () {
-      const reply = yield* send(yield* address(peer), 'POST', '/v1/operation', options.operationTimeoutMs ?? OPERATION_MS, { protocol: REMOTE_PROTOCOL, operation: name, input });
+    operation: (peer, name, input, origin) => Effect.gen(function* () {
+      const reply = yield* send(yield* address(peer), 'POST', '/v1/operation', options.operationTimeoutMs ?? OPERATION_MS, { protocol: REMOTE_PROTOCOL, origin, operation: name, input });
       const body = reply.body;
       if (!isRecord(body) || body.ok !== true) return yield* Effect.fail(refusal(body));
       return yield* Effect.try({ try: () => decodeOperationOutput(name, body.result), catch: () => incompatible(`The machine answered ${name} in a form this app does not understand`) });

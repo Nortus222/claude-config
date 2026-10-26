@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Deferred, Effect, Exit, FiberSet, type Scope } from 'effect';
+import { REMOTE_ORIGINS, type RemoteOrigin } from '@nortuscc/machine';
 import type { OperationDispatch } from '../ipc/operation-dispatch.ts';
 import { MAX_RECORD_BYTES, type ErrorCode } from '../ipc/protocol.ts';
 import { failureOf, truncate } from '../ipc/server.ts';
@@ -11,8 +12,8 @@ import { callerDecision, type TailscaleAccess, type TsSelf, type WhoisResult } f
 
 export const REMOTE_PORT = 47821;
 export const REMOTE_PROTOCOL = 1;
-// The operations another of the owner's machines may run here; the grid needs no more (ADR 0041).
-export const REMOTE_OPERATIONS = ['inspect', 'inspectIntent', 'applyChange', 'previewChange', 'getRun', 'getContext'] as const satisfies ReadonlyArray<OperationName>;
+// The operations another of the owner's machines may run here; the grid and fan-out retries need no more (ADR 0041).
+export const REMOTE_OPERATIONS = ['inspect', 'inspectIntent', 'applyChange', 'previewChange', 'getRun', 'listRuns', 'getContext'] as const satisfies ReadonlyArray<OperationName>;
 type RemoteOperation = typeof REMOTE_OPERATIONS[number];
 
 const RECHECK = '30 seconds';
@@ -84,8 +85,8 @@ type Bound = { readonly addresses: ReadonlyArray<string>; listening: ReadonlyArr
 // only while remote access is on and Tailscale is running, on this node's Tailscale addresses, and
 // re-reads both every 30 s and whenever remote access is switched. Every request must come from a
 // node Tailscale's `whois` names as another untagged, unshared node of this user; it then runs as
-// `{ actor: 'remote', machine }`. Refusals go to `log` (once a minute per address), never History.
-// `bind` picks the addresses to listen on (tests pass loopback); `onRequests` observes how many
+// `{ actor: 'remote', machine, origin }`, `origin` naming the caller's app, CLI or MCP. Refusals go
+// to `log` (once a minute per address), never History. `bind` picks the addresses to listen on (tests pass loopback); `onRequests` observes how many
 // requests are in flight.
 export const serveRemote = (deps: {
   readonly dispatch: OperationDispatch;
@@ -147,8 +148,11 @@ export const serveRemote = (deps: {
     const operate = (machine: string, body: Buffer) => Effect.gen(function* () {
       let raw: unknown;
       try { raw = JSON.parse(body.toString('utf8')); } catch { return yield* Effect.fail(new SessionError('MALFORMED', 'Expected a JSON body')); }
-      if (!isRecord(raw)) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Expected { protocol, operation, input }'));
+      if (!isRecord(raw)) return yield* Effect.fail(new SessionError('INVALID_REQUEST', 'Expected { protocol, origin, operation, input }'));
       if (raw.protocol !== REMOTE_PROTOCOL) return yield* Effect.fail(new SessionError('INCOMPATIBLE', `This machine speaks remote protocol ${REMOTE_PROTOCOL}.`));
+      // What started the request on the calling machine, recorded with its run.
+      if (!(REMOTE_ORIGINS as ReadonlyArray<unknown>).includes(raw.origin)) return yield* Effect.fail(new SessionError('INVALID_INPUT', 'Expected origin app, cli or mcp'));
+      const origin = raw.origin as RemoteOrigin;
       const name = raw.operation;
       if (!(REMOTE_OPERATIONS as ReadonlyArray<unknown>).includes(name)) return yield* Effect.fail(new SessionError('UNSUPPORTED_OPERATION', `${String(name)} is not available to other machines.`));
       const operation = name as RemoteOperation;
@@ -160,7 +164,7 @@ export const serveRemote = (deps: {
       for (const [id, plan] of plans) if (plan.until <= now) plans.delete(id);
       if (operation === 'applyChange' && plans.get((input as { planId: string }).planId)?.machine !== machine)
         return yield* Effect.fail(new SessionError('UNSUPPORTED_OPERATION', 'Other machines may apply only plans they previewed here.'));
-      const result = yield* deps.dispatch({ actor: 'remote', machine }, operation, input);
+      const result = yield* deps.dispatch({ actor: 'remote', machine, origin }, operation, input);
       if (operation === 'previewChange') {
         if (plans.size >= MAX_PLANS) plans.delete(plans.keys().next().value!);
         plans.set((result as { planId: string }).planId, { machine, until: now + PLAN_MS });

@@ -81,7 +81,9 @@ export type AgentSession = {
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
   // Runs a job now and answers what it inspected, with its status. Clears the reconcile preview.
-  readonly inspect: (actor: Client) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
+  // `cached` answers from the latest job's inspection, without a new job, the BUSY check or dropping
+  // retained previews; it inspects anew only when there is none.
+  readonly inspect: (actor: Client, options?: { readonly cached?: boolean }) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
   readonly preview: (exclude: ReadonlyArray<string>) => Effect.Effect<PreviewResult, SessionError>;
   readonly previewChange: (change: OperationChange) => Effect.Effect<ChangePreview, SessionError>;
   // Answers `started` and runs in the background, or `stale` with a new preview. The run's events
@@ -208,13 +210,18 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
 
     const retainParityChange: AgentSession['retainParityChange'] = prepared => retainPrepared(prepared);
 
-    const inspect: AgentSession['inspect'] = () =>
+    const inspect: AgentSession['inspect'] = (_actor, request = {}) =>
       Effect.gen(function* () {
+        const last = request.cached ? yield* Effect.all([handle.status, handle.inspection]) : undefined;
+        if (last?.[0] && last[1]) return report(last[0], last[1]);
         if (active) return yield* Effect.fail(busy);
         const status = yield* handle.request('inspect');
         const inspection = yield* handle.inspection;
         previewed = undefined; parityPlans.clear();
         if (inspection === undefined) return yield* Effect.fail(noInspection(status, options.platform));
+        return report(status, inspection);
+      });
+    const report = (status: AgentStatus, inspection: JobInspection) => {
         const result: InspectResult & { status: WireStatus } = {
           profile: {
             repo,
@@ -227,7 +234,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           status: { ...toWireStatus(status), applying: active !== undefined || liveLockHolder(join(stateRoot, 'apply.lock')) !== undefined },
         };
         return result;
-      });
+    };
 
     const legacySetupIdentity = (inspection: JobInspection) => Effect.gen(function* () {
       const setupId = inspection.revision === null ? 'local' : revisionSetupId(inspection.revision);

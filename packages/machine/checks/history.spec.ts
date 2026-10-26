@@ -103,6 +103,15 @@ test('remote attribution names the calling machine', async () => {
   assert.equal(event?.remoteMachine, 'Win-01');
 });
 
+test('remote attribution records what started it on the calling machine, and only for the remote actor', async () => {
+  const { run } = setup();
+  await run(h => h.append({ kind: 'apply-started', actor: 'remote', remoteMachine: 'Win-01', remoteOrigin: 'mcp', runId: 'run-1', automatic: false, keys: ['config:a'] }));
+  assert.equal((await run(h => h.read))[0]?.remoteOrigin, 'mcp');
+  await assert.rejects(run(h => h.append({ kind: 'resumed', actor: 'cli', remoteOrigin: 'app', reason: 'x' })));
+  await assert.rejects(run(h => h.append({ kind: 'resumed', actor: 'remote', remoteMachine: 'Win-01', remoteOrigin: 'agent' as never, reason: 'x' })));
+  assert.equal((await run(h => h.read)).length, 1);
+});
+
 test('History refuses a calling machine on a non-remote actor', async () => {
   const { run } = setup();
   await assert.rejects(run(h => h.append({ kind: 'resumed', actor: 'cli', remoteMachine: 'Win-01', reason: 'x' })));

@@ -340,6 +340,8 @@ const runFields = {
   publication: Schema.optionalKey(PublicationSchema),
   actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp', 'remote'])),
   remoteMachine: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxCodePoints(255))),
+  // What started a remote run on the calling machine.
+  remoteOrigin: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted', 'abandoned']),
   abandonedAt: Schema.optionalKey(OperationTimeSchema),
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
@@ -394,7 +396,7 @@ const HistoryStepSchema = Schema.Union([
   Schema.Struct({key:KeySchema,outcome:Schema.Literal('failed'),note:Schema.Literal('Step failed')}),
   Schema.Struct({key:KeySchema,outcome:Schema.Literal('cancelled'),note:Schema.Literal('Step cancelled')}),
 ]);
-const historyFields = {at:HistoryTimeSchema,actor:Schema.Literals(['agent','cli','app','sync','mcp','remote']),remoteMachine:Schema.optionalKey(Schema.String.check(Schema.isMinLength(1),Schema.isMaxCodePoints(255)))};
+const historyFields = {at:HistoryTimeSchema,actor:Schema.Literals(['agent','cli','app','sync','mcp','remote']),remoteMachine:Schema.optionalKey(Schema.String.check(Schema.isMinLength(1),Schema.isMaxCodePoints(255))),remoteOrigin:Schema.optionalKey(Schema.Literals(['app','cli','mcp']))};
 export const OperationHistoryEventSchema = Schema.Union([
   Schema.Struct({...historyFields,kind:Schema.Literal('unknown'),message:Schema.Literal('Unsupported historical event')}),
   Schema.Struct({...historyFields,kind:Schema.Literals(['apply-started','apply-finished','operation-checkpoint','skill-addition','held','ready','decided','policy-changed','setup-trusted','paused','resumed','revision-verified','revision-rejected','backups-pruned','outbox-dropped']),
@@ -413,7 +415,8 @@ export const UpdatesInspectionResultSchema = Schema.Struct({ generation: IdSchem
   // Why an unknown row's source could not be read, as a stable category only: "Couldn't reach <host>" or "timed out".
   reason: Schema.optionalKey(Text),
 })).check(Schema.isMaxLength(100)), nextCursor: Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(512))), unavailable: Schema.Boolean, limitReason: Schema.optionalKey(Schema.Literals(['unsafe-owner-data', 'result-bytes'])) });
-export const InspectInputSchema = Schema.Struct({ scope });
+// `cached` reads the latest inspection without inspecting again or disturbing pending previews.
+export const InspectInputSchema = Schema.Struct({ scope, cached: Schema.optionalKey(Schema.Boolean) });
 export const PreviewChangeInputSchema = Schema.Struct({ scope, change: ChangeSchema });
 export const ResolveSkillCandidateInputSchema = Schema.Struct({ scope, source: Schema.optionalKey(Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(250))), name: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)) });
 export const ApplyChangeInputSchema = Schema.Struct({ scope, planId: IdSchema, requestId: IdSchema });

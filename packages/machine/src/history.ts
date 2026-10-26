@@ -11,8 +11,11 @@ export type MutationObserver = {
 };
 
 // Who acted. `sync` marks another of the user's machines, whose event also carries its machineId;
-// `remote` marks a person's other machine running an operation here, named by `remoteMachine`.
+// `remote` marks a person's other machine running an operation here, named by `remoteMachine`, and
+// started there by `remoteOrigin` (that machine's app, CLI or MCP).
 export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp' | 'remote';
+export type RemoteOrigin = 'app' | 'cli' | 'mcp';
+export const REMOTE_ORIGINS: ReadonlyArray<RemoteOrigin> = ['app', 'cli', 'mcp'];
 export type ItemReason = { readonly itemId: string; readonly reason: string };
 export type StepRecord = { readonly key: string; readonly outcome: 'ok' | 'failed' | 'cancelled'; readonly note: string };
 
@@ -46,7 +49,7 @@ export type OperationMetadata = {
   readonly scope: { readonly kind: 'machine' };
   readonly requestId: string;
 };
-export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string; readonly remoteMachine?: string } & Partial<OperationMetadata>;
+export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string; readonly remoteMachine?: string; readonly remoteOrigin?: RemoteOrigin } & Partial<OperationMetadata>;
 export type HistoryEvent = HistoryInput & { readonly v: 1; readonly at: string };
 
 // Append-only History, shared by the agent and the CLI.
@@ -97,6 +100,7 @@ export const historyStore = (now: () => Date = () => new Date()) =>
           Effect.gen(function* () {
             // Only a remote event names a calling machine.
             if (input.remoteMachine !== undefined && input.actor !== 'remote') return yield* Effect.die(new Error('remoteMachine is only for the remote actor'));
+            if (input.remoteOrigin !== undefined && (input.actor !== 'remote' || !REMOTE_ORIGINS.includes(input.remoteOrigin))) return yield* Effect.die(new Error('remoteOrigin is only app, cli or mcp, for the remote actor'));
             const at = now().toISOString();
             const path = join(dir, `${at.slice(0, 7)}.jsonl`);
             const before = yield* fs.readText(path);

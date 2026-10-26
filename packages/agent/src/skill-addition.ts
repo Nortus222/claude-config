@@ -4,7 +4,7 @@ import { Cause, Effect, Exit } from 'effect';
 import { Backups, canonical, Fs, HistoryStore, MachinePaths, OverridesStore, runInstaller, skillLockPath, verifyAcceptedSkill,
   verifyClaudeSkill, verifyCodexSkill, SkillCandidateCleanupFailed, type Command, type Plan, type Step, type ProcessDialogue } from '@nortuscc/machine';
 import type { AcceptedSkillPlan } from './skill-operations.ts';
-import { RemoteStore } from './remote/remote-store.ts';
+import { shareCapability } from './remote/remote-store.ts';
 import { attribution, type RunLifecycle } from './runs.ts';
 import type { RunView } from './operations/index.ts';
 import type { AgentDomain } from './layer.ts';
@@ -40,12 +40,8 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   const overrides = yield* OverridesStore;
   const history = yield* HistoryStore;
   const context = yield* Effect.context<ProcessDialogue>();
-  // Sharing is installing on the user's other machines: possible once remote access is on here and
-  // another machine has been reached (ADR 0042).
-  const remote = yield* (yield* RemoteStore).get.pipe(Effect.option);
-  const share = remote._tag === 'Some' && remote.value.enabled && remote.value.known.length > 0
-    ? { available: true } as const
-    : { available: false, reason: 'Sharing needs remote access on here and another of your machines connected over Tailscale.' } as const;
+  // Sharing is installing on the user's other machines.
+  const share = yield* shareCapability;
   const tuple = acceptedSkillTuple(accepted);
   let persistenceUncertain = false;
   let saved = false;

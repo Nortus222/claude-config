@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Context, Effect, Layer, Semaphore } from 'effect';
-import { Fs, MachinePaths } from '@nortuscc/machine';
+import { Fs, MachinePaths, REMOTE_ORIGINS, type RemoteOrigin } from '@nortuscc/machine';
 import { decodeRunView, type RunView } from './operations/index.ts';
 
 export type RunActor = 'app' | 'cli' | 'mcp' | 'remote';
@@ -10,6 +10,9 @@ export const MAX_REMOTE_MACHINE = 255;
 export const validRemoteMachine = (actor: unknown, machine: unknown): boolean => actor === 'remote'
   ? typeof machine === 'string' && machine.length > 0 && [...machine].length <= MAX_REMOTE_MACHINE
   : machine === undefined;
+// What started a remote run on the calling machine; receipts from before it was recorded have none.
+export const validRemoteOrigin = (actor: unknown, origin: unknown): boolean =>
+  origin === undefined || (actor === 'remote' && (REMOTE_ORIGINS as ReadonlyArray<unknown>).includes(origin));
 export type RunReceipt = {
   // Private local flow binding, excluded from RunView and History.
   readonly signInFlow?: string;
@@ -17,6 +20,7 @@ export type RunReceipt = {
   readonly sequence: number;
   readonly actor: RunActor;
   readonly remoteMachine?: string;
+  readonly remoteOrigin?: RemoteOrigin;
   readonly view: RunView;
   // A crash here leaves the step's outcome unknown, so recovery never retries it.
   readonly inFlight: string | null;
@@ -40,10 +44,11 @@ const decode = (text: string): RunReceipt => {
     || (raw.signInFlow !== undefined && (!validSignInFlow(raw.signInFlow) || view.intent.change.kind !== 'signIn'))
     || !['app', 'cli', 'mcp', 'remote'].includes(raw.actor)
     || !validRemoteMachine(raw.actor, raw.remoteMachine)
+    || !validRemoteOrigin(raw.actor, raw.remoteOrigin)
     || !(raw.inFlight === null || typeof raw.inFlight === 'string' && [...raw.inFlight].length <= 500)) {
     throw new RunStoreError('Invalid run receipt');
   }
-  return { version: 1, sequence: raw.sequence, actor: raw.actor, ...(raw.remoteMachine === undefined ? {} : { remoteMachine: raw.remoteMachine }), view, inFlight: raw.inFlight, ...(raw.signInFlow === undefined ? {} : { signInFlow: raw.signInFlow }) };
+  return { version: 1, sequence: raw.sequence, actor: raw.actor, ...(raw.remoteMachine === undefined ? {} : { remoteMachine: raw.remoteMachine }), ...(raw.remoteOrigin === undefined ? {} : { remoteOrigin: raw.remoteOrigin }), view, inFlight: raw.inFlight, ...(raw.signInFlow === undefined ? {} : { signInFlow: raw.signInFlow }) };
 };
 const failure = (error: unknown) => new RunStoreError(error instanceof Error ? error.message : String(error));
 
@@ -73,7 +78,7 @@ export const runStore = Layer.effect(RunStore, Effect.gen(function* () {
       if (before !== undefined) {
         const previous = yield* Effect.try({ try: () => decode(before), catch: failure });
         const binding = (r: RunReceipt) => JSON.stringify([
-          r.sequence, r.actor, r.remoteMachine, r.view.runId, r.view.operation, r.view.scope.kind,
+          r.sequence, r.actor, r.remoteMachine, r.remoteOrigin, r.view.runId, r.view.operation, r.view.scope.kind,
           r.view.intent.requestId, r.view.intent.inputDigest, r.view.intent.planId,
           r.view.intent.change, r.view.intent.skillAddition, r.view.intent.parity,
         ]);

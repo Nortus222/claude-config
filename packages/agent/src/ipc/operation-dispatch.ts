@@ -1,6 +1,6 @@
 import { dirname, join } from 'node:path';
 import { Effect, Schema } from 'effect';
-import { Fs, HistoryStore, type FsFailed, type MachinePathsValue } from '@nortuscc/machine';
+import { Fs, HistoryStore, type FsFailed, type MachinePathsValue, type RemoteOrigin } from '@nortuscc/machine';
 import type { HostedFailure } from '@nortuscc/hosted-client';
 import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
 import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
@@ -9,7 +9,7 @@ import type { AgentServices } from '../layer.ts';
 import {
   operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName,
 } from '../operations/index.ts';
-import { RemoteStore, remoteAccessView } from '../remote/remote-store.ts';
+import { RemoteStore, remoteAccessView, shareCapability } from '../remote/remote-store.ts';
 import { makeFanOut } from '../remote/fan-out.ts';
 import { peerClient, type PeerClient } from '../remote/peer-client.ts';
 import { projectHistoryEvent } from '../operations/history.ts';
@@ -47,11 +47,12 @@ export const historyPage = (request: { readonly before?: HistoryResult['nextBefo
   return result;
 });
 
-// Who is asking: a local client of the socket, an MCP client bound to an app runtime, or another machine.
+// Who is asking: a local client of the socket, an MCP client bound to an app runtime, or another
+// machine, with what started the request there.
 export type OperationCaller =
   | { readonly actor: 'app' | 'cli' }
   | { readonly actor: 'mcp'; readonly runtimeId: string }
-  | { readonly actor: 'remote'; readonly machine: string };
+  | { readonly actor: 'remote'; readonly machine: string; readonly origin: RemoteOrigin };
 
 // Runs one shared operation for a caller. `input` is already decoded for `operation` by the transport.
 export type OperationDispatch = (caller: OperationCaller, operation: OperationName, input: unknown)
@@ -105,6 +106,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
       ? overridesFromLegacyState(yield* fs.readText(join(deps.paths.stateRoot, 'state.json')))
       : decodeOverrides((() => { try { return JSON.parse(overrideText); } catch { return null; } })(), 'overrides.json');
     const pending = yield* fs.exists(join(deps.paths.stateRoot, 'agent/pending-update.json'));
+    const share = yield* shareCapability;
     const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
     const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; repair the machine overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
     return projectContext({ app, agent: { version: deps.agentVersion, protocol: PROTOCOL_VERSION },
@@ -116,7 +118,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
       account: hosted?.enabled ? hosted.auth === 'signed-in' && hosted.accountId ? {state:'signed-in',accountId:hosted.accountId} : {state:hosted.auth === 'unauthenticated' ? 'unauthenticated' : 'signed-out'} : {state:'unavailable',reason:'Hosted mode is not configured.'},
       policy:state.policy, paused:state.paused === null ? null : {reason:state.paused.reason,at:state.paused.at},
       scopes:{machine:operations,user:{available:false,reason:'User mutations are not supported.'},profile:{available:false,reason:'Profile mutations are not supported.'}},
-      capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
+      capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name === 'shareWithMyMachines' ? share : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
     });
   });
   const fanOut = makeFanOut({ dispatch: (caller, operation, input) => dispatch(caller, operation, input), peers: deps.peers ?? peerClient() });
@@ -127,6 +129,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
     const args = request.input;
     if (args.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'This operation supports machine scope only; use the owning app workflow for user or profile changes.'));
     if (name === 'setRemoteAccess' && caller.actor !== 'app' && caller.actor !== 'cli') return yield* Effect.fail(new SessionError('FORBIDDEN', 'Remote access can only be changed at this machine.'));
+    if (caller.actor === 'remote' && (name === 'myMachines' || name === 'machineSkills' || name === 'applySkillOnMachines' || name === 'machineRun')) return yield* Effect.fail(new SessionError('FORBIDDEN', 'Other machines cannot fan out from this one.'));
     if (name !== 'getContext' && caller.actor === 'mcp') {
       const current = yield* identity(caller.runtimeId);
       if (!current.operations.available || caller.runtimeId !== deps.appRuntime?.runtimeId) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', current.operations.reason ?? 'The connected app runtime changed; reconnect through the installed desktop app.'));
@@ -159,11 +162,11 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
       case 'inspectIntent': result = yield* session.inspectIntent(request.input); break;
       case 'resolveSkillCandidate': result = yield* session.resolveSkillCandidate(request.input); break;
       case 'getContext': result = yield* context(caller.actor === 'mcp' ? caller.runtimeId : undefined); break;
-      case 'inspect': result = yield* session.inspect(actor); break;
+      case 'inspect': result = yield* session.inspect(actor, { cached: request.input.cached === true }); break;
       case 'previewChange': result = yield* session.previewChange(request.input.change); break;
       case 'applyChange': {
         const apply = request.input;
-        result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor, ...(caller.actor === 'remote' ? { remoteMachine: caller.machine } : {}) }).pipe(
+        result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor, ...(caller.actor === 'remote' ? { remoteMachine: caller.machine, remoteOrigin: caller.origin } : {}) }).pipe(
           Effect.map(run => ({status:'started',run})),
           Effect.catch(error => error.code === 'STALE_PLAN' && error.preview ? Effect.succeed({status:'stale',preview:error.preview}) : Effect.fail(error)),
         ); break;
@@ -192,9 +195,9 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
         result = yield* remoteAccessView; break;
       }
       case 'myMachines': result = yield* fanOut.myMachines; break;
-      case 'machineSkills': result = yield* fanOut.machineSkills(caller, request.input); break;
-      case 'applySkillOnMachines': result = yield* fanOut.applySkillOnMachines(caller, request.input); break;
-      case 'machineRun': result = yield* fanOut.machineRun(caller, request.input); break;
+      case 'machineSkills': if (caller.actor !== 'remote') result = yield* fanOut.machineSkills(caller, request.input); break;
+      case 'applySkillOnMachines': if (caller.actor !== 'remote') result = yield* fanOut.applySkillOnMachines(caller, request.input); break;
+      case 'machineRun': if (caller.actor !== 'remote') result = yield* fanOut.machineRun(caller, request.input); break;
       default: { const exhaustive: never = request; return exhaustive; }
     }
     return decodeOperationOutput(name, result);

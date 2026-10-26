@@ -8,7 +8,7 @@ Clarifies ADR 0012 and amends ADR 0032. A user manages skills across their own m
 whichever one they are on: the desktop app, the CLI and coding agents through the bundled MCP all
 call the local agent's fan-out operations (`myMachines`, `machineSkills`, `applySkillOnMachines`,
 `machineRun`), which reach each other machine's listener over Tailscale (ADR 0041) and run there as
-the `remote` actor naming the calling machine. Once a person at the target turned remote access on,
+the `remote` actor naming the calling machine and what started the change there (app, CLI or MCP). Once a person at the target turned remote access on,
 a request from that person's own Tailscale identity counts as that person acting at the target, so
 a remote install or remove previews and applies at once, with no review prompt, like clicking the
 button there; it is still a normal run with backups and a History entry on the target, removal is

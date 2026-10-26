@@ -422,6 +422,28 @@ test('a remote run needs a bounded calling machine and other actors refuse one',
   }));
 });
 
+test('a remote run records what started it on the calling machine; other actors refuse one', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session);
+    const base = inputFor(planned.planId);
+    for (const bad of [
+      { ...base, remoteOrigin: 'app' as const },
+      { ...base, actor: 'remote' as const, remoteMachine: 'Win-01', remoteOrigin: 'agent' as never },
+    ]) assert.equal((yield* Effect.flip(session.runs.submit(bad))).code, 'INVALID_INPUT');
+    const request = { ...base, actor: 'remote' as const, remoteMachine: 'Win-01', remoteOrigin: 'mcp' as const };
+    const accepted = yield* session.runs.submit(request);
+    assert.equal(accepted.remoteOrigin, 'mcp');
+    assert.equal((yield* Effect.flip(session.runs.submit({ ...request, remoteOrigin: 'cli' }))).code, 'REQUEST_CONFLICT');
+    assert.equal((yield* RunStore.use(store => store.read)).find(r => r.view.runId === accepted.runId)?.remoteOrigin, 'mcp');
+    yield* Deferred.await(f.started);
+    yield* Deferred.succeed(f.release, undefined);
+    yield* terminal(session, accepted.runId);
+  }));
+  const started = (await f.m.events()).find(e => e.kind === 'apply-started');
+  assert.equal(started?.remoteOrigin, 'mcp');
+});
+
 test('a receipt written before remote runs existed still decodes', async () => {
   const m = agentMachine(), receipt = interruptedReceipt();
   await m.run(RunStore.use(store => store.write(receipt)));

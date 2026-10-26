@@ -64,7 +64,7 @@ test('dispatch refuses an mcp caller whose runtime is not the app runtime', asyn
 
 test('dispatch runs a remote caller as the remote actor naming its machine', async () => {
   await withDispatch(async (run, dispatch) => {
-    const caller = { actor: 'remote' as const, machine: 'Win-01' };
+    const caller = { actor: 'remote' as const, machine: 'Win-01', origin: 'mcp' as const };
     const input = { scope: { kind: 'machine' } };
     const inspected = await run(dispatch(caller, 'inspect', input));
     assert.ok(inspected);
@@ -72,5 +72,6 @@ test('dispatch runs a remote caller as the remote actor naming its machine', asy
     const started = await run(dispatch(caller, 'applyChange', { ...input, planId: previewed.planId, requestId: 'remote-request' }));
     assert.equal(started.run.actor, 'remote');
     assert.equal(started.run.remoteMachine, 'Win-01');
+    assert.equal(started.run.remoteOrigin, 'mcp');
   });
 });

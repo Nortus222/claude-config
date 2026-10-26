@@ -71,6 +71,16 @@ export const remoteStore = Layer.effect(RemoteStore, Effect.gen(function* () {
   };
 }));
 
+// Whether a skill can be shared with the user's other machines: remote access is on here and
+// another machine has been reached (ADR 0042). An unreadable state counts as off.
+export const SHARE_UNAVAILABLE = 'Sharing needs remote access on here and another of your machines connected over Tailscale.';
+export const shareCapability = Effect.gen(function* () {
+  const state = yield* (yield* RemoteStore).get.pipe(Effect.option);
+  return state._tag === 'Some' && state.value.enabled && state.value.known.length > 0
+    ? { available: true } as const
+    : { available: false, reason: SHARE_UNAVAILABLE } as const;
+});
+
 export type RemoteAccessView = { enabled: boolean; tailscale: TailscaleState; self: { name: string; login: string } | null; listening: boolean };
 
 // The switch, Tailscale's state on this machine, and whether the listener is up.

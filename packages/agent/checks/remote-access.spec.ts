@@ -58,7 +58,7 @@ test('mcp and remote callers cannot change the switch', async () => {
   try {
     await call({ actor: 'cli' }, 'setRemoteAccess', { enabled: true });
     const before = m.read(file);
-    for (const caller of [{ actor: 'remote', machine: 'phone' }, { actor: 'mcp', runtimeId: 'x' }] as const) {
+    for (const caller of [{ actor: 'remote', machine: 'phone', origin: 'app' }, { actor: 'mcp', runtimeId: 'x' }] as const) {
       const error = await m.run(Effect.flip(effect(caller, 'setRemoteAccess', { enabled: false })));
       assert.ok(error instanceof SessionError);
       assert.equal(error.code, 'FORBIDDEN');

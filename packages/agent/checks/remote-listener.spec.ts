@@ -44,8 +44,8 @@ const send = (port: number, options: { host?: string; method?: string; path?: st
     req.on('error', (e: NodeJS.ErrnoException) => resolve({ error: e.code ?? e.message }));
     req.end(text);
   });
-const operation = (port: number, name: string, input: object, extra: { host?: string; headers?: Record<string, string>; protocol?: number } = {}) =>
-  send(port, { host: extra.host, headers: extra.headers, body: { protocol: extra.protocol ?? REMOTE_PROTOCOL, operation: name, input: { scope, ...input } } });
+const operation = (port: number, name: string, input: object, extra: { host?: string; headers?: Record<string, string>; protocol?: number; origin?: unknown } = {}) =>
+  send(port, { host: extra.host, headers: extra.headers, body: { protocol: extra.protocol ?? REMOTE_PROTOCOL, origin: 'origin' in extra ? extra.origin : 'app', operation: name, input: { scope, ...input } } });
 
 // Whether this host can listen on IPv6 loopback, which the address-change and two-caller tests use.
 const ipv6 = await new Promise<boolean>((resolve) => {
@@ -121,7 +121,7 @@ test('an allowed caller reads context and hello, and its identity is checked onc
     assert.ok('status' in context && context.status === 200, JSON.stringify(context));
     assert.equal(context.body.ok, true, JSON.stringify(context.body));
     assert.equal(context.body.result.agent.version, '9.9.9');
-    assert.deepEqual(calls[0]!.caller, { actor: 'remote', machine: 'desktop' });
+    assert.deepEqual(calls[0]!.caller, { actor: 'remote', machine: 'desktop', origin: 'app' });
     assert.match(fake.whois[0]!, /^127\.0\.0\.1:\d+$/);
     const hello = await send(port, { path: '/v1/hello' });
     assert.deepEqual('body' in hello && hello.body, { protocol: 1, agentVersion: '9.9.9', machine: { name: 'laptop', os: 'macOS' }, operations: [...REMOTE_OPERATIONS] });
@@ -138,6 +138,7 @@ test('a remote skillNow apply runs as the remote actor naming the calling machin
     assert.equal(applied.body.result.status, 'started');
     assert.equal(applied.body.result.run.actor, 'remote');
     assert.equal(applied.body.result.run.remoteMachine, 'desktop');
+    assert.equal(applied.body.result.run.remoteOrigin, 'app');
   });
 });
 
@@ -293,6 +294,19 @@ test('a plan previewed by one machine cannot be applied by another', { skip: !ip
     const other = await operation(l.port, 'applyChange', { planId: 'plan-1', requestId: 'r' }, { host: '::1' });
     assert.equal((other as { body: any }).body.error.code, 'UNSUPPORTED_OPERATION');
     assert.equal((await operation(l.port, 'applyChange', { planId: 'plan-1', requestId: 'r' }) as { body: any }).body.ok, true);
-    assert.deepEqual(l.calls.filter((c) => c.operation === 'applyChange').map((c) => c.caller), [{ actor: 'remote', machine: 'desktop' }]);
+    assert.deepEqual(l.calls.filter((c) => c.operation === 'applyChange').map((c) => c.caller), [{ actor: 'remote', machine: 'desktop', origin: 'app' }]);
+  });
+});
+
+test('a request must name what started it on the calling machine: its app, CLI or MCP', async () => {
+  await withListener({}, async ({ port, calls }) => {
+    for (const origin of [undefined, 'remote', 'agent', 'APP', 1]) {
+      const reply = await operation(port, 'getContext', {}, { origin });
+      assert.ok('body' in reply && reply.body.ok === false, JSON.stringify(reply));
+      assert.equal(reply.body.error.code, 'INVALID_INPUT');
+    }
+    assert.equal(calls.length, 0);
+    for (const origin of ['app', 'cli', 'mcp']) assert.equal(((await operation(port, 'getContext', {}, { origin })) as any).body.ok, true);
+    assert.deepEqual(calls.map((c) => c.caller), ['app', 'cli', 'mcp'].map((origin) => ({ actor: 'remote', machine: 'desktop', origin })));
   });
 });
