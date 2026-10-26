@@ -38,3 +38,7 @@ ours.
 - Before admission a caller costs little: one `whois` per IP at a time, reused for a minute (5 s
   when Tailscale does not know the caller), at most 64 connections, and one refusal log line per
   IP per minute.
+- Where the LocalAPI is a TCP port (the macOS App Store and Standalone clients), the agent finds it
+  again at least every 30 s. If Tailscale restarts on a new port, a local process that takes the
+  old port within that window could receive the LocalAPI token and answer `whois` falsely; sockets
+  and pipes have no such window.

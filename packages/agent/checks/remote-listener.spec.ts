@@ -47,6 +47,13 @@ const send = (port: number, options: { host?: string; method?: string; path?: st
 const operation = (port: number, name: string, input: object, extra: { host?: string; headers?: Record<string, string>; protocol?: number } = {}) =>
   send(port, { host: extra.host, headers: extra.headers, body: { protocol: extra.protocol ?? REMOTE_PROTOCOL, operation: name, input: { scope, ...input } } });
 
+// Whether this host can listen on IPv6 loopback, which the address-change and two-caller tests use.
+const ipv6 = await new Promise<boolean>((resolve) => {
+  const server = createServer();
+  server.once('error', () => resolve(false));
+  server.listen(0, '::1', () => server.close(() => resolve(true)));
+});
+
 const waitFor = async (check: () => boolean | Promise<boolean>, what: string) => {
   const deadline = Date.now() + 5000;
   while (!(await check())) {
@@ -193,7 +200,7 @@ test('remote access off by default asks Tailscale nothing and opens no listener'
   });
 });
 
-test('a changed Tailscale address rebinds the listener', async () => {
+test('a changed Tailscale address rebinds the listener', { skip: !ipv6 && 'IPv6 loopback is unavailable' }, async () => {
   await withListener({}, async ({ port, fake, store }) => {
     fake.status = ready(['::1']);
     // Turning remote access on again signals the listener as setRemoteAccess does.
@@ -275,7 +282,7 @@ test('concurrent and repeated requests from an unknown caller ask Tailscale once
   });
 });
 
-test('a plan previewed by one machine cannot be applied by another', async () => {
+test('a plan previewed by one machine cannot be applied by another', { skip: !ipv6 && 'IPv6 loopback is unavailable' }, async () => {
   const nas: WhoisResult = { ...desktop, nodeId: 'n3', name: 'nas.tail.ts.net.', machine: 'nas' };
   await withListener({ status: undefined, who: (addr) => addr.startsWith('[::1]') ? nas : desktop }, async (l) => {
     l.fake.status = ready(['127.0.0.1', '::1']);

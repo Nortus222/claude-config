@@ -165,15 +165,24 @@ export class TailscaleAccess extends Context.Service<
   }
 >()('agent/TailscaleAccess') {}
 
-// Finds the LocalAPI once and again only when it stops answering or refuses its proof, since
-// Tailscale can restart (with a new port and token) while the agent runs; finding it may spawn `lsof`.
-export const tailscaleAccess = (platform: NodeJS.Platform): Layer.Layer<TailscaleAccess, never, Fs | Processes> =>
+// A TCP LocalAPI is found again at least this often: after Tailscale restarts on a new port, any
+// local process could take the old one and answer as Tailscale, so a port is trusted only briefly.
+export const TCP_ENDPOINT_MS = 30_000;
+
+// Finds the LocalAPI and keeps it: a socket or pipe until it stops answering or refuses its proof,
+// a TCP port for at most `tcpLifetimeMs` too, since Tailscale can restart (with a new port and
+// token) while the agent runs; finding it may spawn `lsof`.
+export const tailscaleAccess = (platform: NodeJS.Platform, options: { readonly tcpLifetimeMs?: number; readonly now?: () => number } = {}): Layer.Layer<TailscaleAccess, never, Fs | Processes> =>
   Layer.effect(TailscaleAccess, Effect.gen(function* () {
     const context = yield* Effect.context<Fs | Processes>();
+    const now = options.now ?? Date.now;
+    const lifetime = options.tcpLifetimeMs ?? TCP_ENDPOINT_MS;
     let endpoint: LocalApiEndpoint | undefined;
+    let foundAt = 0;
     const stale = (reply: Reply) => reply === 'unreachable' || reply.status === 401 || reply.status === 403;
     // The LocalAPI's reply, or why it cannot be reached.
     const query = (path: string): Effect.Effect<Reply | TailscaleState> => Effect.gen(function* () {
+      if (endpoint?.kind === 'tcp' && now() - foundAt >= lifetime) endpoint = undefined;
       if (endpoint) {
         const reply = yield* get(endpoint, path);
         if (!stale(reply)) return reply;
@@ -182,6 +191,7 @@ export const tailscaleAccess = (platform: NodeJS.Platform): Layer.Layer<Tailscal
       const found = yield* findLocalApi(platform).pipe(Effect.provide(context));
       if (typeof found === 'string') return found;
       endpoint = found;
+      foundAt = now();
       return yield* get(found, path);
     });
     return {

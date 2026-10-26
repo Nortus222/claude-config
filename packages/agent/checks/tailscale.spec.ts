@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { Fs, FsFailed, LaunchFailed, Processes, type Command } from '@nortuscc/machine';
-import { TailscaleAccess, callerDecision, findLocalApi, myPeers, parseWhois, tailscaleAccess, tailscaleStatus, whois, type LocalApiEndpoint, type TsSelf } from '../src/remote/tailscale.ts';
+import { TCP_ENDPOINT_MS, TailscaleAccess, callerDecision, findLocalApi, myPeers, parseWhois, tailscaleAccess, tailscaleStatus, whois, type LocalApiEndpoint, type TsSelf } from '../src/remote/tailscale.ts';
 
 const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./support/${name}.json`, import.meta.url), 'utf8'));
 const status = fixture('tailscale-status');
@@ -194,4 +194,30 @@ test('tailscaleAccess finds the LocalAPI once and again only after it stops answ
   w.lsof = `n/x/sameuserproof-${(second.address() as { port: number }).port}-tok\n`;
   assert.equal(typeof (await Effect.runPromise(access.status())), 'object');
   assert.equal(x.commands.length, 2);
+});
+
+test('a TCP LocalAPI is found again once its lifetime passes, and a new port replaces the old', async () => {
+  const seenA: Seen[] = [];
+  const seenB: Seen[] = [];
+  const a = fakeApi(serveFixtures, seenA);
+  const b = fakeApi(serveFixtures, seenB);
+  await listen(a, 0);
+  await listen(b, 0);
+  const portOf = (server: Server) => (server.address() as { port: number }).port;
+  const w: World = { lsof: `n/x/sameuserproof-${portOf(a)}-tok\n` };
+  const x = world(w);
+  let clock = 0;
+  const access = await Effect.runPromise(TailscaleAccess.useSync((s) => s).pipe(Effect.provide(tailscaleAccess('darwin', { now: () => clock }).pipe(Layer.provide(x.layer)))));
+  await Effect.runPromise(access.status());
+  // Tailscale moved to another port, but the old one still answers.
+  w.lsof = `n/x/sameuserproof-${portOf(b)}-tok\n`;
+  clock = TCP_ENDPOINT_MS - 1;
+  await Effect.runPromise(access.whois('100.64.0.2:1234'));
+  assert.equal(x.commands.length, 1);
+  assert.equal(seenA.length, 2);
+  clock = TCP_ENDPOINT_MS;
+  assert.equal((await Effect.runPromise(access.whois('100.64.0.2:1234')))?.machine, 'desktop');
+  assert.equal(x.commands.length, 2);
+  assert.equal(seenA.length, 2);
+  assert.equal(seenB.length, 1);
 });
