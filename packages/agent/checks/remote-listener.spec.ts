@@ -79,6 +79,7 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
   const logged: string[] = [];
   const requests = { now: 0, max: 0 };
   const listenerScope = Scope.makeUnsafe();
+  let local: (caller: OperationCaller, name: string, input: object) => Promise<any> = () => Promise.reject(new Error('no real dispatch'));
   const store = await m.run(Effect.gen(function* () {
     const store = yield* RemoteStore;
     if (options.enabled ?? true) yield* store.setEnabled(true);
@@ -97,6 +98,8 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
       return real(caller, name, input);
     };
     yield* Effect.forkScoped(serveRemote({ dispatch, tailscale, store, agentVersion: '9.9.9', bind: (ips) => ips, port, log: (line) => logged.push(line), onRequests: (n) => { requests.now = n; requests.max = Math.max(requests.max, n); } }));
+    const context = yield* Effect.context<any>();
+    if (real) { const dispatchReal = real; local = (caller, name, input) => Effect.runPromise(dispatchReal(caller, name as never, { scope, ...input }).pipe(Effect.provideContext(context)) as Effect.Effect<unknown>); }
     return store;
   }).pipe(Scope.provide(listenerScope), Effect.provideService(TailscaleAccess, tailscale)), fixture.source);
   const listening = () => Effect.runPromise(store.listening);
@@ -104,7 +107,7 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
     await Effect.runPromise(Scope.close(listenerScope, Exit.void));
     rmSync(m.root, { recursive: true, force: true });
   };
-  return { m, port, fake, calls, logged, requests, store, listening, close };
+  return { m, port, fake, calls, logged, requests, store, listening, close, local };
 };
 
 const withListener = async (options: Parameters<typeof listen>[0], body: (l: Awaited<ReturnType<typeof listen>>) => Promise<void>) => {
@@ -308,5 +311,25 @@ test('a request must name what started it on the calling machine: its app, CLI o
     assert.equal(calls.length, 0);
     for (const origin of ['app', 'cli', 'mcp']) assert.equal(((await operation(port, 'getContext', {}, { origin })) as any).body.ok, true);
     assert.deepEqual(calls.map((c) => c.caller), ['app', 'cli', 'mcp'].map((origin) => ({ actor: 'remote', machine: 'desktop', origin })));
+  });
+});
+
+test('another machine sees only the runs it started here', async () => {
+  await withListener({ real: true }, async ({ port, local }) => {
+    const own = await local({ actor: 'app' }, 'previewChange', { change: { kind: 'reconcile', only: [] } });
+    const localRun = (await local({ actor: 'app' }, 'applyChange', { planId: own.planId, requestId: 'local-request' })).run;
+    await waitFor(async () => (await local({ actor: 'app' }, 'getRun', { runId: localRun.runId })).result !== null, 'the local run');
+    await waitFor(async () => { try { await local({ actor: 'app' }, 'previewChange', { change: { kind: 'reconcile', only: [] } }); return true; } catch { return false; } }, 'the agent to be idle');
+    const preview = await operation(port, 'previewChange', { change: { kind: 'skillNow', source: 'owner/repo', name: 'review', action: 'install' } });
+    const remoteRun = ((await operation(port, 'applyChange', { planId: (preview as any).body.result.planId, requestId: 'remote-request' })) as any).body.result.run;
+    const listed: any = await operation(port, 'listRuns', { limit: 10 });
+    assert.deepEqual(listed.body.result.runs.map((r: any) => r.runId), [remoteRun.runId]);
+    assert.equal(listed.body.result.nextBefore, null);
+    const hidden: any = await operation(port, 'getRun', { runId: localRun.runId });
+    const unknown: any = await operation(port, 'getRun', { runId: 'no-such-run' });
+    assert.deepEqual([hidden.body.ok, hidden.body.error.code, hidden.body.error.message], [false, unknown.body.error.code, unknown.body.error.message]);
+    assert.equal(((await operation(port, 'listRuns', { limit: 10, before: localRun.runId })) as any).body.error.code, 'UNKNOWN_RUN');
+    assert.equal(((await operation(port, 'getRun', { runId: remoteRun.runId })) as any).body.result.runId, remoteRun.runId);
+    assert.equal((await local({ actor: 'app' }, 'listRuns', { limit: 10 })).runs.length, 2);
   });
 });

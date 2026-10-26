@@ -7,13 +7,13 @@ import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import type { AgentServices } from '../layer.ts';
 import {
-  operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName,
+  operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName, type OperationOutput,
 } from '../operations/index.ts';
 import { RemoteStore, remoteAccessView, shareCapability } from '../remote/remote-store.ts';
 import { makeFanOut } from '../remote/fan-out.ts';
 import { peerClient, type PeerClient } from '../remote/peer-client.ts';
 import { projectHistoryEvent } from '../operations/history.ts';
-import { operationDigest, type RunError } from '../runs.ts';
+import { operationDigest, RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
 import { PROTOCOL_VERSION, type AppRuntime, type HistoryResult } from './protocol.ts';
 import { SessionError, type AgentSession } from './session.ts';
@@ -171,8 +171,28 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
           Effect.catch(error => error.code === 'STALE_PLAN' && error.preview ? Effect.succeed({status:'stale',preview:error.preview}) : Effect.fail(error)),
         ); break;
       }
-      case 'getRun': result = yield* session.runs.get(request.input.runId); break;
-      case 'listRuns': result = yield* session.runs.list(request.input); break;
+      case 'getRun': {
+        const run = yield* session.runs.get(request.input.runId);
+        if (caller.actor === 'remote' && run.remoteMachine !== caller.machine) return yield* Effect.fail(new RunError('UNKNOWN_RUN', 'No run has that ID'));
+        result = run; break;
+      }
+      case 'listRuns': {
+        if (caller.actor !== 'remote') { result = yield* session.runs.list(request.input); break; }
+        // Another machine sees only the runs it started here, paged over those alone.
+        const own = (run: { readonly remoteMachine?: string }) => run.remoteMachine === caller.machine;
+        let before = request.input.before;
+        if (before !== undefined && !own(yield* session.runs.get(before).pipe(Effect.mapError(() => new RunError('UNKNOWN_RUN', 'Unknown run cursor')))))
+          return yield* Effect.fail(new RunError('UNKNOWN_RUN', 'Unknown run cursor'));
+        const runs: OperationOutput<'getRun'>[] = [];
+        let more = false;
+        while (!more) {
+          const page = yield* session.runs.list({ limit: 500, ...(before === undefined ? {} : { before }) });
+          for (const run of page.runs) if (own(run)) { if (runs.length === request.input.limit) { more = true; break; } runs.push(run); }
+          if (page.nextBefore === null) break;
+          before = page.nextBefore;
+        }
+        result = { runs, nextBefore: more ? runs.at(-1)!.runId : null }; break;
+      }
       case 'cancelRun':
       case 'abandonRun': {
         const fs = yield* Fs;
