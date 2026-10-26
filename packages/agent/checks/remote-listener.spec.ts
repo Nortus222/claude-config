@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { request } from 'node:http';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { join } from 'node:path';
 import { Effect, Exit, Scope } from 'effect';
 import { configDomain, integrationsDomain } from '@nortuscc/machine';
@@ -58,7 +58,7 @@ const waitFor = async (check: () => boolean | Promise<boolean>, what: string) =>
 // One listener on 127.0.0.1 over a temp machine, with a fake Tailscale and a dispatch that records
 // its calls. With `real`, calls reach a real agent's dispatch; a remote `skillNow` preview is
 // answered with an empty reconcile plan there, so its apply is a real run.
-const listen = async (options: { real?: boolean; enabled?: boolean; status?: Status; who?: (addr: string) => WhoisResult | null } = {}) => {
+const listen = async (options: { real?: boolean; enabled?: boolean; status?: Status; who?: (addr: string) => WhoisResult | null; whoisMs?: number } = {}) => {
   const m = agentMachine('/tmp');
   const fixture = setupFixture(join(m.root, 'setup'), {});
   await m.trust();
@@ -66,10 +66,11 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
   const fake = { status: options.status ?? ready(['127.0.0.1']), who: options.who ?? (() => desktop), whois: [] as string[], statusCalls: 0 };
   const tailscale: TailscaleAccess['Service'] = {
     status: () => Effect.sync(() => { fake.statusCalls++; return fake.status; }),
-    whois: (addr) => Effect.sync(() => { fake.whois.push(addr); return fake.who(addr); }),
+    whois: (addr) => Effect.sync(() => { fake.whois.push(addr); return fake.who(addr); }).pipe(Effect.delay(options.whoisMs ?? 0)),
   };
   const calls: Array<{ caller: OperationCaller; operation: string; input: any }> = [];
   const logged: string[] = [];
+  const requests = { now: 0, max: 0 };
   const listenerScope = Scope.makeUnsafe();
   const store = await m.run(Effect.gen(function* () {
     const store = yield* RemoteStore;
@@ -88,7 +89,7 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
       if (name === 'previewChange' && input.change.kind === 'skillNow') return real(caller, name, { ...input, change: { kind: 'reconcile', only: [] } });
       return real(caller, name, input);
     };
-    yield* Effect.forkScoped(serveRemote({ dispatch, tailscale, store, agentVersion: '9.9.9', bind: (ips) => ips, port, log: (line) => logged.push(line) }));
+    yield* Effect.forkScoped(serveRemote({ dispatch, tailscale, store, agentVersion: '9.9.9', bind: (ips) => ips, port, log: (line) => logged.push(line), onRequests: (n) => { requests.now = n; requests.max = Math.max(requests.max, n); } }));
     return store;
   }).pipe(Scope.provide(listenerScope), Effect.provideService(TailscaleAccess, tailscale)), fixture.source);
   const listening = () => Effect.runPromise(store.listening);
@@ -96,7 +97,7 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
     await Effect.runPromise(Scope.close(listenerScope, Exit.void));
     rmSync(m.root, { recursive: true, force: true });
   };
-  return { m, port, fake, calls, logged, store, listening, close };
+  return { m, port, fake, calls, logged, requests, store, listening, close };
 };
 
 const withListener = async (options: Parameters<typeof listen>[0], body: (l: Awaited<ReturnType<typeof listen>>) => Promise<void>) => {
@@ -146,6 +147,7 @@ test('callers other than another untagged, unshared node of this user are refuse
       assert.equal(reply.body.ok, false);
       assert.equal((await send(port, { path: '/v1/hello' }) as { status: number }).status, 403, what);
       assert.deepEqual(calls, [], what);
+      assert.equal(logged.length, 1, what);
       assert.match(logged[0]!, new RegExp(`^refused a remote request from 127\\.0\\.0\\.1: the caller is ${what.replace(' ', '-')}$`));
     });
   }
@@ -159,7 +161,8 @@ test('requests from a browser or naming another host are refused before any call
     assert.equal((host as { status: number }).status, 403);
     assert.deepEqual(calls, []);
     assert.deepEqual(fake.whois, []);
-    assert.equal(logged.length, 2);
+    // One line per address per minute.
+    assert.equal(logged.length, 1);
   });
 });
 
@@ -210,8 +213,6 @@ test('only the remote operations, skillNow previews, own plans and protocol 1 ar
     const incompatible = await operation(port, 'getContext', {}, { protocol: 2 });
     assert.equal(code(incompatible), 'INCOMPATIBLE');
     assert.match((incompatible as { body: any }).body.error.message, /protocol 1\b/);
-    const oversized = await send(port, { raw: 'x'.repeat(MAX_RECORD_BYTES + 1) });
-    assert.ok('error' in oversized || (oversized.status === 413 && oversized.body.error.code === 'OVERSIZED'), JSON.stringify(oversized).slice(0, 200));
     assert.equal(code(await send(port, { raw: '{nope' })), 'MALFORMED');
     assert.equal(calls.length, 0);
     // A plan this machine previewed for the caller can be applied.
@@ -226,4 +227,65 @@ test('outside tests the listener binds only Tailscale addresses', () => {
   assert.deepEqual(
     tailscaleAddresses(['0.0.0.0', '::', '127.0.0.1', '::1', '192.168.1.20', '100.63.0.1', '100.128.0.1', '100.101.102.103', 'fd7a:115c:a1e0::1', 'fe80::1']),
     ['100.101.102.103', 'fd7a:115c:a1e0::1']);
+});
+
+// Writes `text` on a raw connection and returns what the listener sent before closing it, or
+// destroys the connection after `destroyMs`.
+const rawSend = (port: number, text: string | Buffer, destroyMs?: number) => new Promise<string>((resolve) => {
+  let out = '';
+  const socket = connect(port, '127.0.0.1', () => {
+    socket.write(text);
+    if (destroyMs !== undefined) setTimeout(() => socket.destroy(), destroyMs);
+  });
+  socket.on('data', (d) => { out += d.toString('utf8'); });
+  socket.on('error', () => {});
+  socket.on('close', () => resolve(out));
+});
+const head = (port: number, extra: string) => `POST /v1/operation HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\ncontent-type: application/json\r\n${extra}\r\n`;
+
+test('a body over the cap is refused with 413 by its length or as it streams, without dispatch', async () => {
+  await withListener({}, async ({ port, calls }) => {
+    const declared = await rawSend(port, head(port, `content-length: ${MAX_RECORD_BYTES + 1}\r\n`) + 'xxxx');
+    assert.match(declared, /^HTTP\/1\.1 413 /);
+    assert.match(declared, /"OVERSIZED"/);
+    const chunk = 'x'.repeat(65_536);
+    const chunks = Math.ceil((MAX_RECORD_BYTES + 1) / chunk.length);
+    const body = Array.from({ length: chunks }, () => `${chunk.length.toString(16)}\r\n${chunk}\r\n`).join('') + '0\r\n\r\n';
+    const streamed = await rawSend(port, head(port, 'transfer-encoding: chunked\r\n') + body);
+    assert.match(streamed, /^HTTP\/1\.1 413 /);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('a caller that leaves mid-body is dropped without dispatch or a lingering request', async () => {
+  await withListener({}, async ({ port, calls, requests }) => {
+    await rawSend(port, head(port, 'content-length: 100\r\n') + '{"protocol":1', 100);
+    await waitFor(() => requests.max === 1 && requests.now === 0, 'the request to settle');
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('concurrent and repeated requests from an unknown caller ask Tailscale once', async () => {
+  await withListener({ who: () => null, whoisMs: 50 }, async ({ port, fake, calls }) => {
+    const replies = await Promise.all(Array.from({ length: 8 }, () => operation(port, 'getContext', {})));
+    assert.ok(replies.every((r) => 'status' in r && r.status === 403), JSON.stringify(replies));
+    for (let i = 0; i < 3; i++) assert.equal(((await operation(port, 'getContext', {})) as { status: number }).status, 403);
+    assert.equal(fake.whois.length, 1);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('a plan previewed by one machine cannot be applied by another', async () => {
+  const nas: WhoisResult = { ...desktop, nodeId: 'n3', name: 'nas.tail.ts.net.', machine: 'nas' };
+  await withListener({ status: undefined, who: (addr) => addr.startsWith('[::1]') ? nas : desktop }, async (l) => {
+    l.fake.status = ready(['127.0.0.1', '::1']);
+    await Effect.runPromise(l.store.setEnabled(true));
+    await waitFor(async () => 'status' in (await operation(l.port, 'getContext', {}, { host: '::1' })), 'the second address');
+    const preview = await operation(l.port, 'previewChange', { change: { kind: 'skillNow', source: 'owner/repo', name: 'review', action: 'install' } });
+    assert.equal((preview as { body: any }).body.result.planId, 'plan-1');
+    const other = await operation(l.port, 'applyChange', { planId: 'plan-1', requestId: 'r' }, { host: '::1' });
+    assert.equal((other as { body: any }).body.error.code, 'UNSUPPORTED_OPERATION');
+    assert.equal((await operation(l.port, 'applyChange', { planId: 'plan-1', requestId: 'r' }) as { body: any }).body.ok, true);
+    assert.deepEqual(l.calls.filter((c) => c.operation === 'applyChange').map((c) => c.caller), [{ actor: 'remote', machine: 'desktop' }]);
+  });
 });

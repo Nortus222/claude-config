@@ -35,4 +35,6 @@ ours.
 - Tailscale stays a prerequisite for remote access only; the app and CLI work without it.
 - Any process on the owner's other machines can drive these operations once remote access is on
   there; that is the owner's accepted risk, recorded with the remote actions themselves.
-- A `whois` answer is reused per caller IP for up to a minute.
+- Before admission a caller costs little: one `whois` per IP at a time, reused for a minute (5 s
+  when Tailscale does not know the caller), at most 64 connections, and one refusal log line per
+  IP per minute.

@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { Effect, FiberSet, type Scope } from 'effect';
+import { Deferred, Effect, Exit, FiberSet, type Scope } from 'effect';
 import type { OperationDispatch } from '../ipc/operation-dispatch.ts';
 import { MAX_RECORD_BYTES, type ErrorCode } from '../ipc/protocol.ts';
 import { failureOf, truncate } from '../ipc/server.ts';
@@ -17,6 +17,10 @@ type RemoteOperation = typeof REMOTE_OPERATIONS[number];
 
 const RECHECK = '30 seconds';
 const WHOIS_MS = 60_000;
+// An unknown caller is asked about again only after this, so refused traffic cannot flood the LocalAPI.
+const UNKNOWN_MS = 5000;
+const REFUSAL_LOG_MS = 60_000;
+const MAX_CONNECTIONS = 64;
 // As long as the session retains a plan.
 const PLAN_MS = 600_000;
 const MAX_PLANS = 256;
@@ -45,19 +49,32 @@ const respond = (res: ServerResponse, status: number, body: unknown, close = fal
 const fail = (res: ServerResponse, status: number, code: ErrorCode, message: string, close = false) =>
   respond(res, status, { ok: false, error: { code, message: truncate(message, 500) } } satisfies RemoteReply, close);
 
-// The body, or undefined once it passes the record limit.
-const readBody = (req: IncomingMessage) => Effect.callback<Buffer | undefined>((resume) => {
-  if (Number(req.headers['content-length'] ?? 0) > MAX_RECORD_BYTES) return resume(Effect.succeed(undefined));
+// The body; 'oversized' once it passes the record limit; 'aborted' when the request closes unfinished.
+const readBody = (req: IncomingMessage) => Effect.callback<Buffer | 'oversized' | 'aborted'>((resume) => {
+  if (Number(req.headers['content-length'] ?? 0) > MAX_RECORD_BYTES) return resume(Effect.succeed('oversized'));
+  // The caller may have gone while it was being identified.
+  if (req.destroyed) return resume(Effect.succeed('aborted'));
   const chunks: Buffer[] = [];
   let size = 0;
-  let done = false;
-  const finish = (body: Buffer | undefined) => { if (!done) { done = true; resume(Effect.succeed(body)); } };
-  req.on('data', (chunk: Buffer) => {
+  const off = () => {
+    req.off('data', onData);
+    req.off('end', onEnd);
+    req.off('close', onClose);
+    req.off('error', onClose);
+  };
+  const finish = (body: Buffer | 'oversized' | 'aborted') => { off(); chunks.length = 0; resume(Effect.succeed(body)); };
+  const onData = (chunk: Buffer) => {
     size += chunk.length;
-    if (size > MAX_RECORD_BYTES) finish(undefined);
-    else if (!done) chunks.push(chunk);
-  });
-  req.on('end', () => finish(Buffer.concat(chunks)));
+    if (size > MAX_RECORD_BYTES) finish('oversized');
+    else chunks.push(chunk);
+  };
+  const onEnd = () => finish(Buffer.concat(chunks));
+  const onClose = () => finish('aborted');
+  req.on('data', onData);
+  req.on('end', onEnd);
+  req.on('close', onClose);
+  req.on('error', onClose);
+  return Effect.sync(off);
 });
 
 // `addresses` are those asked for; `listening` those that bound.
@@ -67,8 +84,9 @@ type Bound = { readonly addresses: ReadonlyArray<string>; listening: ReadonlyArr
 // only while remote access is on and Tailscale is running, on this node's Tailscale addresses, and
 // re-reads both every 30 s and whenever remote access is switched. Every request must come from a
 // node Tailscale's `whois` names as another untagged, unshared node of this user; it then runs as
-// `{ actor: 'remote', machine }`. Refusals go to `log`, never History. `bind` picks the addresses to
-// listen on (tests pass loopback).
+// `{ actor: 'remote', machine }`. Refusals go to `log` (once a minute per address), never History.
+// `bind` picks the addresses to listen on (tests pass loopback); `onRequests` observes how many
+// requests are in flight.
 export const serveRemote = (deps: {
   readonly dispatch: OperationDispatch;
   readonly tailscale: TailscaleAccess['Service'];
@@ -77,32 +95,53 @@ export const serveRemote = (deps: {
   readonly bind?: (ips: string[]) => string[];
   readonly port?: number;
   readonly log?: (line: string) => void;
+  readonly onRequests?: (inFlight: number) => void;
 }): Effect.Effect<never, never, Scope.Scope | AgentServices> =>
   Effect.gen(function* () {
     const run = yield* FiberSet.makeRuntime<AgentServices>();
     const bind = deps.bind ?? tailscaleAddresses;
     const port = deps.port ?? REMOTE_PORT;
     const log = deps.log ?? stderrLog;
+    const logged = new Map<string, number>();
     const refuse = (res: ServerResponse, ip: string | undefined, reason: string) => {
-      log(`refused a remote request from ${ip ?? 'an unknown address'}: ${reason}`);
+      const now = Date.now();
+      if ((logged.get(ip ?? '') ?? 0) <= now) {
+        for (const [key, until] of logged) if (until <= now) logged.delete(key);
+        logged.set(ip ?? '', now + REFUSAL_LOG_MS);
+        log(`refused a remote request from ${ip ?? 'an unknown address'}: ${reason}`);
+      }
       fail(res, 403, 'FORBIDDEN', 'This machine accepts requests only from its owner\'s other machines.', true);
     };
-    const callers = new Map<string, { readonly who: WhoisResult; readonly until: number }>();
+    const callers = new Map<string, { readonly who: WhoisResult | null; readonly until: number }>();
+    const asking = new Map<string, Deferred.Deferred<WhoisResult | null>>();
+    let inFlight = 0;
+    const track = (delta: number) => { inFlight += delta; deps.onRequests?.(inFlight); };
     const plans = new Map<string, { readonly machine: string; readonly until: number }>();
     let current: Bound | undefined;
 
     const hostsFor = (addresses: ReadonlyArray<string>, self: TsSelf) =>
       new Set([...addresses.map((a) => hostPort(a, port)), ...(self.dnsName ? [hostPort(self.dnsName.replace(/\.$/, ''), port)] : [])].map((h) => h.toLowerCase()));
 
-    // Tailscale's answer for this caller, reused per IP for up to a minute.
-    const identify = (ip: string, remotePort: number) => Effect.suspend(() => {
+    // Tailscale's answer for this caller: one question per IP at a time, reused for a minute (5 s
+    // when Tailscale does not know the caller).
+    const identify = (ip: string, remotePort: number) => Effect.suspend((): Effect.Effect<WhoisResult | null> => {
       const now = Date.now();
       const hit = callers.get(ip);
-      if (hit && hit.until > now) return Effect.succeed<WhoisResult | null>(hit.who);
-      return Effect.tap(deps.tailscale.whois(hostPort(ip, remotePort)), (who) => Effect.sync(() => {
-        for (const [key, entry] of callers) if (entry.until <= now) callers.delete(key);
-        if (who) callers.set(ip, { who, until: now + WHOIS_MS });
-      }));
+      if (hit && hit.until > now) return Effect.succeed(hit.who);
+      const waiting = asking.get(ip);
+      if (waiting) return Deferred.await(waiting);
+      const answer = Deferred.makeUnsafe<WhoisResult | null>();
+      asking.set(ip, answer);
+      return deps.tailscale.whois(hostPort(ip, remotePort)).pipe(
+        Effect.tap((who) => Effect.sync(() => {
+          for (const [key, entry] of callers) if (entry.until <= now) callers.delete(key);
+          callers.set(ip, { who, until: now + (who ? WHOIS_MS : UNKNOWN_MS) });
+        })),
+        Effect.onExit((exit) => Effect.sync(() => {
+          asking.delete(ip);
+          Deferred.doneUnsafe(answer, Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.succeed(null));
+        })),
+      );
     });
 
     const operate = (machine: string, body: Buffer) => Effect.gen(function* () {
@@ -136,6 +175,7 @@ export const serveRemote = (deps: {
       if (req.headers.origin !== undefined) return refuse(res, ip, 'it came from a browser page');
       if (!bound.hosts.has((req.headers.host ?? '').toLowerCase())) return refuse(res, ip, `it named the host ${JSON.stringify(req.headers.host ?? '')}`);
       if (ip === undefined || remotePort === undefined) return refuse(res, ip, 'its address is unknown');
+      track(1);
       void run(Effect.gen(function* () {
         const decision = callerDecision(yield* identify(ip, remotePort), bound.self);
         if (!decision.allow) return refuse(res, ip, `the caller is ${decision.reason}`);
@@ -146,7 +186,12 @@ export const serveRemote = (deps: {
         if (req.url !== '/v1/operation') return fail(res, 404, 'INVALID_REQUEST', 'Unknown path');
         if (req.method !== 'POST') return fail(res, 405, 'INVALID_REQUEST', 'Use POST /v1/operation');
         const body = yield* readBody(req);
-        if (body === undefined) return fail(res, 413, 'OVERSIZED', `Body exceeds ${MAX_RECORD_BYTES} bytes`, true);
+        if (body === 'aborted') return;
+        // Drained, so the refusal reaches the caller before the connection closes.
+        if (body === 'oversized') {
+          req.resume();
+          return fail(res, 413, 'OVERSIZED', `Body exceeds ${MAX_RECORD_BYTES} bytes`, true);
+        }
         const reply = yield* operate(decision.machine, body).pipe(Effect.matchCause({
           onSuccess: (result): RemoteReply => ({ ok: true, result }),
           onFailure: (cause): RemoteReply => ({ ok: false, error: failureOf(cause) }),
@@ -154,7 +199,10 @@ export const serveRemote = (deps: {
         if (!reply.ok) return fail(res, 200, reply.error.code, reply.error.message);
         if (Buffer.byteLength(JSON.stringify(reply)) > MAX_RECORD_BYTES) return fail(res, 200, 'OVERSIZED', `Result exceeds ${MAX_RECORD_BYTES} bytes`);
         respond(res, 200, reply);
-      }).pipe(Effect.catchCause(() => Effect.sync(() => { if (!res.headersSent) fail(res, 500, 'INTERNAL', 'The request failed'); }))));
+      }).pipe(
+        Effect.catchCause(() => Effect.sync(() => { if (!res.headersSent) fail(res, 500, 'INTERNAL', 'The request failed'); })),
+        Effect.ensuring(Effect.sync(() => track(-1))),
+      ));
     };
 
     const open = (addresses: ReadonlyArray<string>, self: TsSelf) => Effect.gen(function* () {
@@ -163,6 +211,7 @@ export const serveRemote = (deps: {
         const server = createServer(handler(bound));
         server.headersTimeout = HEADERS_MS;
         server.requestTimeout = REQUEST_MS;
+        server.maxConnections = MAX_CONNECTIONS;
         const ok = yield* Effect.callback<boolean>((resume) => {
           server.once('error', (error) => { log(`cannot listen for remote requests on ${hostPort(address, port)}: ${error.message}`); resume(Effect.succeed(false)); });
           server.listen({ host: address, port, exclusive: true }, () => resume(Effect.succeed(true)));
@@ -180,6 +229,7 @@ export const serveRemote = (deps: {
       const closing = current;
       current = undefined;
       callers.clear();
+      logged.clear();
       if (!closing) return Effect.void;
       return Effect.forEach(closing.servers, (server) => Effect.callback<void>((resume) => {
         server.close(() => resume(Effect.void));

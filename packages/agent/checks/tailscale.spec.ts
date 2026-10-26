@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { Fs, FsFailed, LaunchFailed, Processes, type Command } from '@nortuscc/machine';
-import { callerDecision, findLocalApi, myPeers, parseWhois, tailscaleStatus, whois, type LocalApiEndpoint, type TsSelf } from '../src/remote/tailscale.ts';
+import { TailscaleAccess, callerDecision, findLocalApi, myPeers, parseWhois, tailscaleAccess, tailscaleStatus, whois, type LocalApiEndpoint, type TsSelf } from '../src/remote/tailscale.ts';
 
 const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./support/${name}.json`, import.meta.url), 'utf8'));
 const status = fixture('tailscale-status');
@@ -175,4 +175,23 @@ test('findLocalApi falls back to the OSS socket on macOS, the daemon socket on L
 test('findLocalApi reports not-installed when nothing is found', async () => {
   assert.equal((await find('darwin', {})).r, 'not-installed');
   assert.equal((await find('linux', {})).r, 'not-installed');
+});
+
+test('tailscaleAccess finds the LocalAPI once and again only after it stops answering', async () => {
+  const first = fakeApi(serveFixtures);
+  await listen(first, 0);
+  const w: World = { lsof: `n/x/sameuserproof-${(first.address() as { port: number }).port}-tok\n` };
+  const x = world(w);
+  const access = await Effect.runPromise(TailscaleAccess.useSync((a) => a).pipe(Effect.provide(tailscaleAccess('darwin').pipe(Layer.provide(x.layer)))));
+  assert.equal(typeof (await Effect.runPromise(access.status())), 'object');
+  assert.equal((await Effect.runPromise(access.whois('100.64.0.2:1234')))?.machine, 'desktop');
+  assert.equal(await Effect.runPromise(access.whois('100.64.0.99:1')), null);
+  assert.equal(x.commands.length, 1);
+  // Tailscale restarts on a new port.
+  await new Promise((r) => { first.closeAllConnections(); first.close(r); });
+  const second = fakeApi(serveFixtures);
+  await listen(second, 0);
+  w.lsof = `n/x/sameuserproof-${(second.address() as { port: number }).port}-tok\n`;
+  assert.equal(typeof (await Effect.runPromise(access.status())), 'object');
+  assert.equal(x.commands.length, 2);
 });

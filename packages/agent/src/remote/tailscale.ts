@@ -82,26 +82,31 @@ const get = (endpoint: LocalApiEndpoint, path: string) => Effect.promise<Reply>(
   req.end();
 }));
 
+const statusOf = (reply: Reply): { self: TsSelf; peers: TsPeer[] } | TailscaleState => {
+  if (reply === 'unreachable') return 'not-running';
+  if (reply.status === 401 || reply.status === 403) return 'needs-admin';
+  if (reply.status !== 200) return 'not-running';
+  try {
+    const raw = JSON.parse(reply.body) as RawStatus;
+    if (raw.BackendState === 'NeedsLogin' || raw.BackendState === 'NeedsMachineAuth') return 'logged-out';
+    return raw.BackendState === 'Running' ? myPeers(raw) : 'not-running';
+  } catch {
+    return 'not-running';
+  }
+};
+const whoisOf = (reply: Reply): WhoisResult | null => {
+  if (reply === 'unreachable' || reply.status !== 200) return null;
+  try { return parseWhois(JSON.parse(reply.body)); } catch { return null; }
+};
+const STATUS_PATH = '/localapi/v0/status';
+const whoisPath = (addr: string) => `/localapi/v0/whois?addr=${encodeURIComponent(addr)}`;
+
 export const tailscaleStatus = (endpoint: LocalApiEndpoint): Effect.Effect<{ self: TsSelf; peers: TsPeer[] } | TailscaleState> =>
-  Effect.map(get(endpoint, '/localapi/v0/status'), (reply) => {
-    if (reply === 'unreachable') return 'not-running';
-    if (reply.status === 401 || reply.status === 403) return 'needs-admin';
-    if (reply.status !== 200) return 'not-running';
-    try {
-      const raw = JSON.parse(reply.body) as RawStatus;
-      if (raw.BackendState === 'NeedsLogin' || raw.BackendState === 'NeedsMachineAuth') return 'logged-out';
-      return raw.BackendState === 'Running' ? myPeers(raw) : 'not-running';
-    } catch {
-      return 'not-running';
-    }
-  });
+  Effect.map(get(endpoint, STATUS_PATH), statusOf);
 
 // Who Tailscale says owns `addr` (ip:port); null when it is unknown or the LocalAPI is unavailable.
 export const whois = (endpoint: LocalApiEndpoint, addr: string): Effect.Effect<WhoisResult | null> =>
-  Effect.map(get(endpoint, `/localapi/v0/whois?addr=${encodeURIComponent(addr)}`), (reply) => {
-    if (reply === 'unreachable' || reply.status !== 200) return null;
-    try { return parseWhois(JSON.parse(reply.body)); } catch { return null; }
-  });
+  Effect.map(get(endpoint, whoisPath(addr)), whoisOf);
 
 // A stale proof file names a port nothing listens on.
 const accepts = (port: number) => Effect.promise(() => new Promise<boolean>((resolve) => {
@@ -160,18 +165,27 @@ export class TailscaleAccess extends Context.Service<
   }
 >()('agent/TailscaleAccess') {}
 
-// Finds the LocalAPI on each call, since Tailscale can start or stop while the agent runs.
+// Finds the LocalAPI once and again only when it stops answering or refuses its proof, since
+// Tailscale can restart (with a new port and token) while the agent runs; finding it may spawn `lsof`.
 export const tailscaleAccess = (platform: NodeJS.Platform): Layer.Layer<TailscaleAccess, never, Fs | Processes> =>
   Layer.effect(TailscaleAccess, Effect.gen(function* () {
     const context = yield* Effect.context<Fs | Processes>();
+    let endpoint: LocalApiEndpoint | undefined;
+    const stale = (reply: Reply) => reply === 'unreachable' || reply.status === 401 || reply.status === 403;
+    // The LocalAPI's reply, or why it cannot be reached.
+    const query = (path: string): Effect.Effect<Reply | TailscaleState> => Effect.gen(function* () {
+      if (endpoint) {
+        const reply = yield* get(endpoint, path);
+        if (!stale(reply)) return reply;
+        endpoint = undefined;
+      }
+      const found = yield* findLocalApi(platform).pipe(Effect.provide(context));
+      if (typeof found === 'string') return found;
+      endpoint = found;
+      return yield* get(found, path);
+    });
     return {
-      status: () => Effect.gen(function* () {
-        const endpoint = yield* findLocalApi(platform);
-        return typeof endpoint === 'string' ? endpoint : yield* tailscaleStatus(endpoint);
-      }).pipe(Effect.provide(context)),
-      whois: (addr) => Effect.gen(function* () {
-        const endpoint = yield* findLocalApi(platform);
-        return typeof endpoint === 'string' ? null : yield* whois(endpoint, addr);
-      }).pipe(Effect.provide(context)),
+      status: () => Effect.map(query(STATUS_PATH), (reply) => typeof reply === 'string' && reply !== 'unreachable' ? reply : statusOf(reply)),
+      whois: (addr) => Effect.map(query(whoisPath(addr)), (reply) => typeof reply === 'string' && reply !== 'unreachable' ? null : whoisOf(reply)),
     };
   }));
