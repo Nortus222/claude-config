@@ -95,6 +95,8 @@ export const historyStore = (now: () => Date = () => new Date()) =>
       return {
         append: (input: HistoryInput) =>
           Effect.gen(function* () {
+            // Only a remote event names a calling machine.
+            if (input.remoteMachine !== undefined && input.actor !== 'remote') return yield* Effect.die(new Error('remoteMachine is only for the remote actor'));
             const at = now().toISOString();
             const path = join(dir, `${at.slice(0, 7)}.jsonl`);
             const before = yield* fs.readText(path);

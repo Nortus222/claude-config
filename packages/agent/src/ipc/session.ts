@@ -13,7 +13,7 @@ import {
 import { itemIdOf, revisionCommit, revisionSetupId, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
-import { makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
+import { attribution, makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
 import { decodeOperationInput, type ChangePreview, type ReconcileChange, type OperationChange, type OperationInput, type SkillCandidateResult } from '../operations/index.ts';
 import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
@@ -549,7 +549,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const exit = yield* Effect.exit(
           Effect.gen(function* () {
             const backups = yield* Backups;
-            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, ...(lifecycle?.remoteMachine === undefined ? {} : { remoteMachine: lifecycle.remoteMachine }), automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
+            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, ...(lifecycle ? attribution(lifecycle) : { actor }), automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
               if (parity) {
                 const folder = yield* backups.dir;
                 const backupIds = folder ? [basename(folder)] : parity.evidence().backupIds;

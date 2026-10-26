@@ -102,3 +102,9 @@ test('remote attribution names the calling machine', async () => {
   assert.equal(event?.actor, 'remote');
   assert.equal(event?.remoteMachine, 'Win-01');
 });
+
+test('History refuses a calling machine on a non-remote actor', async () => {
+  const { run } = setup();
+  await assert.rejects(run(h => h.append({ kind: 'resumed', actor: 'cli', remoteMachine: 'Win-01', reason: 'x' })));
+  assert.deepEqual(await run(h => h.read), []);
+});

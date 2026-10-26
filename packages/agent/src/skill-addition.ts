@@ -4,7 +4,7 @@ import { Cause, Effect, Exit } from 'effect';
 import { Backups, canonical, Fs, HistoryStore, MachinePaths, OverridesStore, runInstaller, skillLockPath, verifyAcceptedSkill,
   verifyClaudeSkill, verifyCodexSkill, SkillCandidateCleanupFailed, type Command, type Plan, type Step, type ProcessDialogue } from '@nortuscc/machine';
 import type { AcceptedSkillPlan } from './skill-operations.ts';
-import type { RunLifecycle } from './runs.ts';
+import { attribution, type RunLifecycle } from './runs.ts';
 import type { RunView } from './operations/index.ts';
 import type { AgentDomain } from './layer.ts';
 import type { JobInspection } from './job.ts';
@@ -50,7 +50,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   let retainedDirectory: string | undefined;
   const update = () => Effect.gen(function* () {
     const receipt = yield* Effect.exit(lifecycle.addition({ intentSaved: saved, intentState, ...(installation ? { installation } : {}) }));
-    yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, ...(lifecycle.remoteMachine === undefined ? {} : { remoteMachine: lifecycle.remoteMachine }), runId: lifecycle.runId,
+    yield* history.append({ kind: 'skill-addition', ...attribution(lifecycle), runId: lifecycle.runId,
       operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId,
       intentSaved: saved, intentState: intentState!, ...(installation ? { installationState: installation.state } : {}),
       message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Saving the machine declaration has not finished') });

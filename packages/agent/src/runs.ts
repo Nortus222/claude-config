@@ -30,6 +30,10 @@ export const operationDigest = (planId: string): string => createHash('sha256').
   operation: 'applyChange', scope: { kind: 'machine' }, planId,
 })).digest('hex');
 
+// Who a run's History events name: its actor, plus the calling machine for a remote run.
+export const attribution = (lifecycle: Pick<RunLifecycle, 'actor' | 'remoteMachine'>) =>
+  lifecycle.remoteMachine === undefined ? { actor: lifecycle.actor } : { actor: lifecycle.actor, remoteMachine: lifecycle.remoteMachine };
+
 export type RunLifecycle = {
   readonly actor: RunActor;
   readonly remoteMachine?: string;

@@ -10,6 +10,7 @@ import { checkoutGroups, decodeSyncState } from '@nortuscc/sync';
 import { AgentClock } from '../clock.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
 import { recordedRun } from '../apply.ts';
+import { attribution } from '../runs.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { JobInspection } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
@@ -181,7 +182,7 @@ export const prepareUpdateChange = (change: UpdateChange, inspection: JobInspect
       } }));
     }) };
     const project = (event: Progress): Progress => event.type === 'started' ? { ...event, step: publicPlan.steps[event.index]! } : event.type === 'finished' ? { ...event, note: event.outcome === 'ok' ? 'Update effect observed' : 'Update effect did not complete' } : event;
-    const ran = yield* recordedRun(planned,report,[domain],{ runId: lifecycle.runId, actor: lifecycle.actor, automatic: false, signal, operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId }, projectProgress: project,
+    const ran = yield* recordedRun(planned,report,[domain],{ runId: lifecycle.runId, ...attribution(lifecycle), automatic: false, signal, operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId }, projectProgress: project,
       checkpoint: event => Effect.gen(function* () { evidence = { ...evidence, state: 'needsInspection' }; if (event.type === 'finished' && event.outcome === 'ok') yield* commit(event.key); else yield* checkpoint(); yield* lifecycle.progress(project(event)); }) });
     if (ran.steps.some(s => s.outcome !== 'ok')) return yield* Effect.fail(failed());
   }).pipe(Effect.provide(backupsForRun(now).pipe(Layer.provideMerge(machinePaths(inspection.paths)))),Effect.provideContext(context),Effect.mapError(failed))) };
