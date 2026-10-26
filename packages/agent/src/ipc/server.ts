@@ -53,7 +53,7 @@ type Connection = {
 type Handled = { readonly result: unknown; readonly after?: () => void; readonly flushed?: () => void };
 
 // Cuts `text` to at most `max` UTF-16 units without splitting a surrogate pair.
-const truncate = (text: string, max: number): string => {
+export const truncate = (text: string, max: number): string => {
   if (text.length <= max) return text;
   const last = text.charCodeAt(max - 1);
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
@@ -63,6 +63,16 @@ const describe = (error: unknown): string => {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && '_tag' in error && typeof error._tag === 'string') return error._tag;
   return String(error);
+};
+
+// The wire error for a failed handler, shared by every transport that answers operations.
+export const failureOf = (cause: Cause.Cause<unknown>): { readonly code: ErrorCode; readonly message: string } => {
+  if (Cause.hasInterruptsOnly(cause)) return { code: 'SHUTDOWN', message: 'The agent is shutting down' };
+  const error = Cause.squash(cause);
+  if (error instanceof HostedFailure) return { code: error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', message: error.message };
+  if (error instanceof RunError) return { code: error.code as ErrorCode, message: error.message };
+  if (error instanceof SessionError) return { code: error.code, message: error.message };
+  return { code: 'INTERNAL', message: describe(error) };
 };
 
 const attempt = (what: string, run: () => Promise<unknown>) =>
@@ -373,12 +383,8 @@ export const serveIpc = (input: {
             handled.after?.();
           },
           onFailure: (cause) => {
-            if (Cause.hasInterruptsOnly(cause)) return reject(conn, request.id, 'SHUTDOWN', 'The agent is shutting down');
-            const error = Cause.squash(cause);
-            if (error instanceof HostedFailure) reject(conn, request.id, error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', error.message);
-            else if (error instanceof RunError) reject(conn, request.id, error.code as ErrorCode, error.message);
-            else if (error instanceof SessionError) reject(conn, request.id, error.code, error.message);
-            else reject(conn, request.id, 'INTERNAL', describe(error));
+            const { code, message } = failureOf(cause);
+            reject(conn, request.id, code, message);
           },
         }),
       ));

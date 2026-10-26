@@ -153,7 +153,11 @@ export const findLocalApi = (platform: NodeJS.Platform): Effect.Effect<LocalApiE
 // This machine's Tailscale view, injectable so tests and the listener share one source.
 export class TailscaleAccess extends Context.Service<
   TailscaleAccess,
-  { readonly status: () => Effect.Effect<{ self: TsSelf; peers: TsPeer[] } | TailscaleState> }
+  {
+    readonly status: () => Effect.Effect<{ self: TsSelf; peers: TsPeer[] } | TailscaleState>;
+    // Who owns `addr` (ip:port); null when unknown or Tailscale is unreachable.
+    readonly whois: (addr: string) => Effect.Effect<WhoisResult | null>;
+  }
 >()('agent/TailscaleAccess') {}
 
 // Finds the LocalAPI on each call, since Tailscale can start or stop while the agent runs.
@@ -164,6 +168,10 @@ export const tailscaleAccess = (platform: NodeJS.Platform): Layer.Layer<Tailscal
       status: () => Effect.gen(function* () {
         const endpoint = yield* findLocalApi(platform);
         return typeof endpoint === 'string' ? endpoint : yield* tailscaleStatus(endpoint);
+      }).pipe(Effect.provide(context)),
+      whois: (addr) => Effect.gen(function* () {
+        const endpoint = yield* findLocalApi(platform);
+        return typeof endpoint === 'string' ? null : yield* whois(endpoint, addr);
       }).pipe(Effect.provide(context)),
     };
   }));

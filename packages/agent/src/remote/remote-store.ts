@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Context, Effect, Layer, Ref, Semaphore } from 'effect';
+import { Context, Deferred, Effect, Layer, Ref, Semaphore } from 'effect';
 import { Backups, backupsForRun, Fs, MachinePaths, type FsFailed } from '@nortuscc/machine';
 import { TailscaleAccess, type TailscaleState } from './tailscale.ts';
 
@@ -16,6 +16,8 @@ export class RemoteStore extends Context.Service<
   {
     readonly get: Effect.Effect<RemoteState, FsFailed>;
     readonly setEnabled: (enabled: boolean) => Effect.Effect<RemoteState, FsFailed>;
+    // A wait that completes on the next `setEnabled` after this is read.
+    readonly changed: Effect.Effect<Effect.Effect<void>>;
     // Adds or refreshes machines by nodeId; keeps the 64 most recently reached.
     readonly remember: (machines: ReadonlyArray<KnownMachine>) => Effect.Effect<RemoteState, FsFailed>;
     // Whether the listener is accepting callers; in memory only, set by the listener.
@@ -32,6 +34,8 @@ export const remoteStore = Layer.effect(RemoteStore, Effect.gen(function* () {
   const path = join(paths.stateRoot, 'agent', 'remote.json');
   const lock = yield* Semaphore.make(1);
   const listening = yield* Ref.make(false);
+  const change = yield* Ref.make(yield* Deferred.make<void>());
+  const signal = Effect.flatMap(Deferred.make<void>(), (next) => Effect.flatMap(Ref.getAndSet(change, next), (current) => Deferred.succeed(current, undefined)));
   const backups = backupsForRun().pipe(Layer.provide(Layer.mergeAll(Layer.succeed(MachinePaths, paths), Layer.succeed(Fs, fs))));
   const load = Effect.gen(function* () {
     const text = yield* fs.readText(path);
@@ -54,7 +58,8 @@ export const remoteStore = Layer.effect(RemoteStore, Effect.gen(function* () {
   }).pipe(lock.withPermit);
   return {
     get: Effect.map(load, (r) => r.state),
-    setEnabled: (enabled) => update((s) => ({ ...s, enabled })),
+    setEnabled: (enabled) => update((s) => ({ ...s, enabled })).pipe(Effect.tap(() => signal)),
+    changed: Effect.map(Ref.get(change), (current) => Deferred.await(current)),
     remember: (machines) => update((s) => {
       const byId = new Map(s.known.map((k) => [k.nodeId, k]));
       for (const m of machines) byId.set(m.nodeId, m);

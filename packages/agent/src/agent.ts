@@ -8,7 +8,11 @@ import { AgentClock } from './clock.ts';
 import { failedStatus, runJob, type AgentStatus, type JobInspection, type JobResult } from './job.ts';
 import { agentLayer, type AgentDomains } from './layer.ts';
 import type { AppRuntime } from './ipc/protocol.ts';
+import { makeOperationDispatch } from './ipc/operation-dispatch.ts';
 import { serveIpc } from './ipc/server.ts';
+import { serveRemote } from './remote/listener.ts';
+import { RemoteStore } from './remote/remote-store.ts';
+import { TailscaleAccess } from './remote/tailscale.ts';
 import { SessionError, makeSession } from './ipc/session.ts';
 import { captureAgentOutput, startAgentLogRotation, type AgentLogOutput } from './log.ts';
 import { makeNotifier } from './notifier.ts';
@@ -329,6 +333,9 @@ export const runAgent = (input: {
       yield* Effect.addFinalizer(() => ipcReady ? observe('ipc_closed', 'completed') : Effect.void);
       yield* phase('ipc', serveIpc({ paths: input.paths, platform: input.platform ?? process.platform, handle, session, agentVersion: input.agentVersion, appRuntime: input.appRuntime, notifier, onShutdown: () => shutdown.abort() }));
       ipcReady = true;
+      // Opens no socket until remote access is turned on at this machine (ADR 0041).
+      const dispatch = makeOperationDispatch({ session, paths: input.paths, handle, appRuntime: input.appRuntime, agentVersion: input.agentVersion, platform: input.platform ?? process.platform });
+      yield* Effect.forkScoped(serveRemote({ dispatch, tailscale: yield* TailscaleAccess, store: yield* RemoteStore, agentVersion: input.agentVersion }));
     }
     yield* Effect.forkScoped(observe('first_job', 'started').pipe(Effect.andThen(handle.request('start')),
       Effect.onExit(exit => observe('first_job', Exit.isSuccess(exit) && exit.value.error !== undefined ? 'failed' : outcome(exit)))));

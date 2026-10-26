@@ -10,7 +10,7 @@ import { agentMachine } from './support/agent-machine.ts';
 import { configDomain } from '@nortuscc/machine';
 
 const self = { nodeId: 'n1', userId: 1, login: 'me@example.com', hostName: 'laptop', dnsName: 'laptop.ts.net.', os: 'macOS', ips: [] };
-const fakeTailscale = (status: unknown) => Layer.succeed(TailscaleAccess, { status: () => Effect.succeed(status as never) });
+const fakeTailscale = (status: unknown) => Layer.succeed(TailscaleAccess, { status: () => Effect.succeed(status as never), whois: () => Effect.succeed(null) });
 
 const setup = async (status: unknown = { self, peers: [] }) => {
   const m = agentMachine('/tmp');
