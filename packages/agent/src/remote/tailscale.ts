@@ -15,7 +15,7 @@ type RawNode = {
 export type RawStatus = { BackendState: string; Self: RawNode; Peer?: Record<string, RawNode>; User?: Record<string, { LoginName: string }> };
 
 // A node as `whois` reports it; `nodeId` is the stable ID, the same identifier `status` uses.
-export type WhoisResult = { nodeId: string; name: string; computedName?: string; tagged: boolean; userId: number; shared: boolean };
+export type WhoisResult = { nodeId: string; name: string; machine: string; tagged: boolean; userId: number; shared: boolean };
 
 const HOST = 'local-tailscaled.sock';
 const WINDOWS_PIPE = '\\\\.\\pipe\\ProtectedPrefix\\Administrators\\Tailscale\\tailscaled';
@@ -34,14 +34,20 @@ export const myPeers = (status: RawStatus): { self: TsSelf; peers: TsPeer[] } =>
   return { self, peers };
 };
 
+// Null unless the node carries a stable ID (the id space `status` uses) and a machine name.
 export const parseWhois = (json: unknown): WhoisResult | null => {
   const node = (json as { Node?: Record<string, unknown> } | null)?.Node;
   if (!node || typeof node !== 'object' || typeof node.User !== 'number') return null;
+  if (typeof node.StableID !== 'string' || node.StableID === '') return null;
+  const name = typeof node.Name === 'string' ? node.Name : '';
+  const computedName = typeof node.ComputedName === 'string' && node.ComputedName ? node.ComputedName : undefined;
+  const machine = computedName ?? name.split('.')[0] ?? '';
+  if (machine === '') return null;
   const tags = node.Tags;
   return {
-    nodeId: String(node.StableID ?? node.ID),
-    name: String(node.Name ?? ''),
-    ...(typeof node.ComputedName === 'string' && node.ComputedName ? { computedName: node.ComputedName } : {}),
+    nodeId: node.StableID,
+    name,
+    machine,
     tagged: Array.isArray(tags) && tags.length > 0,
     userId: node.User,
     shared: typeof node.Sharer === 'number' && node.Sharer !== 0,
@@ -57,7 +63,7 @@ export const callerDecision = (who: WhoisResult | null, self: TsSelf):
   if (who.shared) return { allow: false, reason: 'shared' };
   if (who.userId !== self.userId) return { allow: false, reason: 'other-user' };
   if (who.nodeId === self.nodeId) return { allow: false, reason: 'self' };
-  return { allow: true, machine: who.computedName ?? who.name.split('.')[0] ?? who.name };
+  return { allow: true, machine: who.machine };
 };
 
 type Reply = { status: number; body: string } | 'unreachable';
@@ -100,6 +106,7 @@ export const whois = (endpoint: LocalApiEndpoint, addr: string): Effect.Effect<W
 // A stale proof file names a port nothing listens on.
 const accepts = (port: number) => Effect.promise(() => new Promise<boolean>((resolve) => {
   const socket = connect({ host: '127.0.0.1', port }, () => { socket.destroy(); resolve(true); });
+  socket.setTimeout(5000, () => { socket.destroy(); resolve(false); });
   socket.on('error', () => resolve(false));
 }));
 

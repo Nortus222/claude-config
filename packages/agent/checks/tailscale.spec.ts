@@ -26,7 +26,10 @@ test('callerDecision admits only another untagged, unshared node of the same use
   for (const reason of ['self', 'tagged', 'shared', 'other-user'] as const) {
     assert.deepEqual(callerDecision(who(reason), self), { allow: false, reason });
   }
-  assert.deepEqual(callerDecision(parseWhois({ Node: { ID: 1, Name: 'x.tail1.ts.net.', User: 7 } }), self), { allow: true, machine: 'x' });
+  assert.deepEqual(callerDecision(parseWhois({ Node: { ID: 1, StableID: 'nX', Name: 'x.tail1.ts.net.', User: 7 } }), self), { allow: true, machine: 'x' });
+  // Without a stable ID the node cannot be compared with self, and a nameless node cannot be shown: both are unknown.
+  assert.deepEqual(callerDecision(parseWhois({ Node: { ID: 11, Name: 'laptop.tail1.ts.net.', User: 7 } }), self), { allow: false, reason: 'unknown' });
+  assert.deepEqual(callerDecision(parseWhois({ Node: { ID: 1, StableID: 'nX', Name: '', User: 7 } }), self), { allow: false, reason: 'unknown' });
 });
 
 type Seen = { url: string; headers: IncomingMessage['headers'] };
@@ -88,6 +91,18 @@ test('401 means needs-admin; a refused connection means not-running', async () =
   assert.equal(await Effect.runPromise(tailscaleStatus({ kind: 'path', path })), 'needs-admin');
   assert.equal(await Effect.runPromise(tailscaleStatus({ kind: 'path', path: join(dir(), 'missing.sock') })), 'not-running');
   assert.equal(await Effect.runPromise(tailscaleStatus({ kind: 'tcp', port: await closedPort(), token: 't' })), 'not-running');
+});
+
+test('403 means needs-admin; other statuses and malformed JSON mean not-running', async () => {
+  const path = join(dir(), 'odd.sock');
+  let reply: { status: number; body?: unknown } = { status: 403 };
+  await listen(createHttp((_req, res) => { res.writeHead(reply.status); res.end(reply.body === 'garbage' ? 'not json' : ''); }), path);
+  const endpoint: LocalApiEndpoint = { kind: 'path', path };
+  assert.equal(await Effect.runPromise(tailscaleStatus(endpoint)), 'needs-admin');
+  reply = { status: 500 };
+  assert.equal(await Effect.runPromise(tailscaleStatus(endpoint)), 'not-running');
+  reply = { status: 200, body: 'garbage' };
+  assert.equal(await Effect.runPromise(tailscaleStatus(endpoint)), 'not-running');
 });
 
 test('a backend that is not running maps to logged-out or not-running', async () => {
