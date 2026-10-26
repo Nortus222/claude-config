@@ -26,6 +26,7 @@ export const toolNames = {
   getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change',
   applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs',
   cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history',
+  remoteAccess: 'nortuscc_remote_access', setRemoteAccess: 'nortuscc_set_remote_access',
 } as const satisfies Record<OperationName, string>;
 const descriptions: Record<OperationName, string> = {
   inspectProfiles: 'Read the followed profile and available named profiles.',
@@ -63,6 +64,8 @@ const descriptions: Record<OperationName, string> = {
   listRuns: 'List durable operation runs with bounded pagination.',
   cancelRun: 'Request cancellation of a machine operation run and read its settled receipt.',
   abandonRun: 'Mark an interrupted run abandoned while retaining its steps, committed and remaining keys, backups and result. Interrupted runs never block new applies or app updates.',
+  remoteAccess: 'Read whether remote access is on for this machine, Tailscale readiness and whether it is listening.',
+  setRemoteAccess: 'Turn remote access for this machine on or off. Only works from the app or CLI at this machine; MCP callers are refused with FORBIDDEN.',
   history: 'Read bounded safe History details for decisions, setups, revisions, policy, pause and backup retention, with shared actor and durable operation attribution. Unknown historical events use a constant fallback.',
 };
 

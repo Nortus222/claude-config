@@ -1,6 +1,6 @@
 import { request } from 'node:http';
 import { connect } from 'node:net';
-import { Effect } from 'effect';
+import { Context, Effect, Layer } from 'effect';
 import { Fs, Processes } from '@nortuscc/machine';
 
 export type LocalApiEndpoint = { kind: 'tcp'; port: number; token: string } | { kind: 'path'; path: string };
@@ -149,3 +149,21 @@ export const findLocalApi = (platform: NodeJS.Platform): Effect.Effect<LocalApiE
     if (std && std !== 'needs-admin') return std;
     return (yield* socketAt('/var/run/tailscaled.socket')) ?? std ?? 'not-installed';
   });
+
+// This machine's Tailscale view, injectable so tests and the listener share one source.
+export class TailscaleAccess extends Context.Service<
+  TailscaleAccess,
+  { readonly status: () => Effect.Effect<{ self: TsSelf; peers: TsPeer[] } | TailscaleState> }
+>()('agent/TailscaleAccess') {}
+
+// Finds the LocalAPI on each call, since Tailscale can start or stop while the agent runs.
+export const tailscaleAccess = (platform: NodeJS.Platform): Layer.Layer<TailscaleAccess, never, Fs | Processes> =>
+  Layer.effect(TailscaleAccess, Effect.gen(function* () {
+    const context = yield* Effect.context<Fs | Processes>();
+    return {
+      status: () => Effect.gen(function* () {
+        const endpoint = yield* findLocalApi(platform);
+        return typeof endpoint === 'string' ? endpoint : yield* tailscaleStatus(endpoint);
+      }).pipe(Effect.provide(context)),
+    };
+  }));

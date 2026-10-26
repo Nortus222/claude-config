@@ -132,7 +132,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'skillNow', 'shareWithMyMachines', 'promoteToProfile'] as const;
+export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'skillNow', 'shareWithMyMachines', 'promoteToProfile', 'remoteAccess', 'setRemoteAccess'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -526,3 +526,13 @@ export const UpstreamSkillResultSchema = Schema.Union([
   Schema.Struct({ unavailable: Schema.String }),
 ]);
 export const DraftsResultSchema = Schema.Struct({ drafts: Schema.Array(Schema.Union([DraftSchema, Schema.Struct({ id: DraftIdSchema, error: Schema.String })])) });
+
+const machineScope = OperationScopeSchema.pipe(Schema.withDecodingDefaultKey(Effect.succeed({ kind: 'machine' } as const)));
+export const RemoteAccessInputSchema = Schema.Struct({ scope: machineScope });
+export const SetRemoteAccessInputSchema = Schema.Struct({ scope: machineScope, enabled: Schema.Boolean });
+export const RemoteAccessResultSchema = Schema.Struct({
+  enabled: Schema.Boolean,
+  tailscale: Schema.Literals(['not-installed', 'not-running', 'logged-out', 'needs-admin', 'ready']),
+  self: Schema.NullOr(Schema.Struct({ name: Text, login: Text })),
+  listening: Schema.Boolean,
+});

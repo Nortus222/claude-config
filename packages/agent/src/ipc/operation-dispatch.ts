@@ -9,6 +9,7 @@ import type { AgentServices } from '../layer.ts';
 import {
   operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName,
 } from '../operations/index.ts';
+import { RemoteStore, remoteAccessView } from '../remote/remote-store.ts';
 import { projectHistoryEvent } from '../operations/history.ts';
 import { operationDigest, type RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
@@ -120,6 +121,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
     const name = request.operation;
     const args = request.input;
     if (args.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'This operation supports machine scope only; use the owning app workflow for user or profile changes.'));
+    if (name === 'setRemoteAccess' && caller.actor !== 'app' && caller.actor !== 'cli') return yield* Effect.fail(new SessionError('FORBIDDEN', 'Remote access can only be changed at this machine.'));
     if (name !== 'getContext' && caller.actor === 'mcp') {
       const current = yield* identity(caller.runtimeId);
       if (!current.operations.available || caller.runtimeId !== deps.appRuntime?.runtimeId) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', current.operations.reason ?? 'The connected app runtime changed; reconnect through the installed desktop app.'));
@@ -178,6 +180,11 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
           const projected = projectHistoryEvent(event);
           return projected ? [projected] : [];
         }) }; break;
+      }
+      case 'remoteAccess': result = yield* remoteAccessView; break;
+      case 'setRemoteAccess': {
+        yield* (yield* RemoteStore).setEnabled(request.input.enabled);
+        result = yield* remoteAccessView; break;
       }
       default: { const exhaustive: never = request; return exhaustive; }
     }
