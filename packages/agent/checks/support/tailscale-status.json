@@ -1,0 +1,13 @@
+{
+  "BackendState": "Running",
+  "Self": { "ID": "nSELF", "HostName": "laptop", "DNSName": "laptop.tail1.ts.net.", "OS": "macOS", "UserID": 7, "TailscaleIPs": ["100.64.0.1", "fd7a::1"], "Online": true },
+  "Peer": {
+    "nodekey:own": { "ID": "nOWN", "HostName": "desktop", "DNSName": "desktop.tail1.ts.net.", "OS": "windows", "UserID": 7, "TailscaleIPs": ["100.64.0.2"], "Online": true },
+    "nodekey:offline": { "ID": "nOFF", "HostName": "nas", "DNSName": "nas.tail1.ts.net.", "OS": "linux", "UserID": 7, "TailscaleIPs": ["100.64.0.3"], "Online": false },
+    "nodekey:tagged": { "ID": "nTAG", "HostName": "ci", "DNSName": "ci.tail1.ts.net.", "OS": "linux", "UserID": 7, "TailscaleIPs": ["100.64.0.4"], "Tags": ["tag:ci"], "Online": true },
+    "nodekey:shared": { "ID": "nSHR", "HostName": "friend", "DNSName": "friend.tail2.ts.net.", "OS": "linux", "UserID": 7, "TailscaleIPs": ["100.64.0.5"], "ShareeNode": true, "Online": true },
+    "nodekey:other": { "ID": "nOTH", "HostName": "colleague", "DNSName": "colleague.tail1.ts.net.", "OS": "macOS", "UserID": 8, "TailscaleIPs": ["100.64.0.6"], "Online": true },
+    "nodekey:expired": { "ID": "nEXP", "HostName": "old", "DNSName": "old.tail1.ts.net.", "OS": "linux", "UserID": 7, "TailscaleIPs": ["100.64.0.7"], "Expired": true, "Online": false }
+  },
+  "User": { "7": { "LoginName": "ihor@example.com" }, "8": { "LoginName": "other@example.com" } }
+}
