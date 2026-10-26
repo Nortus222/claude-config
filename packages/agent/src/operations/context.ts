@@ -31,6 +31,7 @@ export const capabilityInventory = {
   addSkill: { available: true },
   skillNow: { available: true },
   remoteAccess: { available: true }, setRemoteAccess: { available: true },
+  myMachines: { available: true }, machineSkills: { available: true }, applySkillOnMachines: { available: true }, machineRun: { available: true },
   shareWithMyMachines: { available: false, reason: 'Personal sharing requires an available distribution destination.' },
   promoteToProfile: { available: false, reason: 'Profile promotion requires owned-profile identity, an explicit destination and a verified publication workflow.' },
 } as const;

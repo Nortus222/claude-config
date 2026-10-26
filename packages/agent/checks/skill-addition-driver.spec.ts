@@ -107,7 +107,7 @@ test('addition saves backed-up intent and verifies only selected native target w
     assert.equal(done.state, 'succeeded'); assert.equal(done.intentSaved, true); assert.equal(done.installation?.state, 'verified');
     assert.equal(done.intent.skillAddition?.acceptedRevision, c.revision); assert.equal(done.installation?.sharedStore.codexScans, true);
     assert.deepEqual(done.installation?.nextActions, [
-      { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing requires the personal sharing workflow and a user destination.' }, requiredDestination: 'user' },
+      { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing needs remote access on here and another of your machines connected over Tailscale.' }, requiredDestination: 'user' },
       { kind: 'promote_to_profile', capability: { available: false, reason: 'Promotion requires the profile publication workflow and an owned profile destination.' }, requiredDestination: 'profile' },
     ]);
     // Reading or ignoring a suggestion cannot publish or promote any part of the override.

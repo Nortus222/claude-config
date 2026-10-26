@@ -12,6 +12,8 @@ import {
   GetRunInputSchema, RunViewSchema, ListRunsInputSchema, RunListResultSchema, CancelRunInputSchema,
   HistoryInputSchema, OperationHistoryResultSchema, ResolveSkillCandidateInputSchema, SkillCandidateResultSchema,
   RemoteAccessInputSchema, SetRemoteAccessInputSchema, RemoteAccessResultSchema,
+  MyMachinesInputSchema, MyMachinesResultSchema, MachineSkillsInputSchema, MachineSkillsResultSchema,
+  ApplySkillOnMachinesInputSchema, ApplySkillOnMachinesResultSchema, MachineRunInputSchema,
 } from './schemas.ts';
 
 export * from './model.ts';
@@ -61,6 +63,10 @@ export const operationDefinitions = {
   history: define('history', HistoryInputSchema, OperationHistoryResultSchema),
   remoteAccess: define('remoteAccess', RemoteAccessInputSchema, RemoteAccessResultSchema),
   setRemoteAccess: define('setRemoteAccess', SetRemoteAccessInputSchema, RemoteAccessResultSchema, true),
+  myMachines: define('myMachines', MyMachinesInputSchema, MyMachinesResultSchema),
+  machineSkills: define('machineSkills', MachineSkillsInputSchema, MachineSkillsResultSchema),
+  applySkillOnMachines: define('applySkillOnMachines', ApplySkillOnMachinesInputSchema, ApplySkillOnMachinesResultSchema, true),
+  machineRun: define('machineRun', MachineRunInputSchema, RunViewSchema),
 } as const;
 export type OperationName = keyof typeof operationDefinitions;
 export type OperationInput<N extends OperationName> = typeof operationDefinitions[N]['input']['Type'];

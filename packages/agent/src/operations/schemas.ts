@@ -132,7 +132,7 @@ const availability = <S extends Schema.Constraint>(item: S) => Schema.Union([
   Schema.Struct({ state: Schema.Literal('available'), items: list(item) }),
   Schema.Struct({ state: Schema.Literals(['unknown', 'unavailable']), reason: Text }),
 ]);
-export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'skillNow', 'shareWithMyMachines', 'promoteToProfile', 'remoteAccess', 'setRemoteAccess'] as const;
+export const CAPABILITY_NAMES = ['inspectProfiles','inspectShareLink','followProfile','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','editDraft','removeDraftIntent','deleteDraft','ghLogin','publishDraft','announcePublication','listBackups','pruneBackups','agentStatus','accountState','setPolicy','resume','signIn','signOut','syncAccount','patchMachineMetadata','sourceDecision','watchSources','inspectSourceDiff','pinImpact','draftChangelog', 'getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'setupReview', 'setupApply', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'syncDecision', 'machineIntent', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'history', 'resolveSkillCandidate', 'addSkill', 'skillNow', 'shareWithMyMachines', 'promoteToProfile', 'remoteAccess', 'setRemoteAccess', 'myMachines', 'machineSkills', 'applySkillOnMachines', 'machineRun'] as const;
 const capabilityFields = Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, CapabilityStateSchema])) as { readonly [K in typeof CAPABILITY_NAMES[number]]: typeof CapabilityStateSchema };
 export const ContextResultSchema = Schema.Struct({
   app: Schema.Struct({ ownership: Schema.NullOr(Schema.Literals(['app', 'cli'])), version: Schema.NullOr(Version), runtimeId: Schema.NullOr(IdSchema) }),
@@ -536,3 +536,32 @@ export const RemoteAccessResultSchema = Schema.Struct({
   self: Schema.NullOr(Schema.Struct({ name: Text, login: Text })),
   listening: Schema.Boolean,
 });
+
+// The user's machines over Tailscale (ADR 0042). A machine reference is `this` or a Tailscale node ID.
+const MachineRefSchema = Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(100));
+const MachineName = Schema.String.check(Schema.isMaxCodePoints(255));
+export const MyMachinesInputSchema = Schema.Struct({ scope: machineScope });
+export const MyMachinesResultSchema = Schema.Struct({
+  tailscale: RemoteAccessResultSchema.fields.tailscale,
+  self: Schema.NullOr(Schema.Struct({ nodeId: MachineRefSchema, name: MachineName, os: MachineName })),
+  machines: Schema.Array(Schema.Struct({ nodeId: MachineRefSchema, name: MachineName, os: MachineName,
+    reach: Schema.Literals(['ok', 'offline', 'app-closed', 'remote-off', 'incompatible']), lastReachedAt: Schema.NullOr(Text) })).check(Schema.isMaxLength(1000)),
+});
+export const MachineSkillsInputSchema = Schema.Struct({ scope: machineScope, machine: MachineRefSchema, fresh: Schema.optionalKey(Schema.Boolean) });
+export const MachineSkillsResultSchema = Schema.Struct({
+  inspectedAt: Text,
+  // `source` is null for a hand-installed skill whose installer lock names no GitHub source; it cannot be copied.
+  skills: Schema.Array(Schema.Struct({ source: Schema.NullOr(SkillSourceSchema), name: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)),
+    state: Schema.Literals(['installed', 'absent', 'undeclared', 'profile-off']), choice: Schema.NullOr(Schema.Boolean), from: Schema.NullOr(IntentOrigin) })).check(Schema.isMaxLength(10_000)),
+});
+export const ApplySkillOnMachinesInputSchema = Schema.Struct({ scope: machineScope, requestId: IdSchema, source: SkillSourceSchema, name: SkillNameSchema,
+  action: Schema.Literals(['install', 'remove']), revision: Schema.optionalKey(SkillRevisionSchema),
+  machines: Schema.Union([Schema.Literal('all'), Schema.Array(MachineRefSchema).check(Schema.isMinLength(1), Schema.isMaxLength(64))]) });
+export const ApplySkillOnMachinesResultSchema = Schema.Struct({
+  results: Schema.Array(Schema.Struct({ machine: MachineRefSchema, name: MachineName, outcome: Schema.Union([
+    Schema.Struct({ status: Schema.Literal('started'), runId: IdSchema }),
+    Schema.Struct({ status: Schema.Literal('refused'), reason: Text }),
+    Schema.Struct({ status: Schema.Literal('offline') }),
+  ]) })).check(Schema.isMaxLength(1000)),
+});
+export const MachineRunInputSchema = Schema.Struct({ scope: machineScope, machine: MachineRefSchema, runId: IdSchema });

@@ -10,6 +10,8 @@ import {
   operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName,
 } from '../operations/index.ts';
 import { RemoteStore, remoteAccessView } from '../remote/remote-store.ts';
+import { makeFanOut } from '../remote/fan-out.ts';
+import { peerClient, type PeerClient } from '../remote/peer-client.ts';
 import { projectHistoryEvent } from '../operations/history.ts';
 import { operationDigest, type RunError } from '../runs.ts';
 import { AgentStateStore } from '../state.ts';
@@ -62,6 +64,8 @@ export type OperationDeps = {
   readonly appRuntime?: AppRuntime;
   readonly agentVersion: string;
   readonly platform: NodeJS.Platform;
+  // How this agent reaches the user's other machines; tests point it at loopback.
+  readonly peers?: PeerClient;
 };
 
 // Whether the installed desktop app can serve this agent's operations, and who owns the agent.
@@ -115,7 +119,8 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
       capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
     });
   });
-  return (caller, operation, rawInput) => Effect.gen(function* () {
+  const fanOut = makeFanOut({ dispatch: (caller, operation, input) => dispatch(caller, operation, input), peers: deps.peers ?? peerClient() });
+  const dispatch: OperationDispatch = (caller, operation, rawInput) => Effect.gen(function* () {
     const actor = caller.actor;
     const request = { operation, input: rawInput } as { [N in OperationName]: { readonly operation: N; readonly input: OperationInput<N> } }[OperationName];
     const name = request.operation;
@@ -186,8 +191,13 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
         yield* (yield* RemoteStore).setEnabled(request.input.enabled);
         result = yield* remoteAccessView; break;
       }
+      case 'myMachines': result = yield* fanOut.myMachines; break;
+      case 'machineSkills': result = yield* fanOut.machineSkills(caller, request.input); break;
+      case 'applySkillOnMachines': result = yield* fanOut.applySkillOnMachines(caller, request.input); break;
+      case 'machineRun': result = yield* fanOut.machineRun(caller, request.input); break;
       default: { const exhaustive: never = request; return exhaustive; }
     }
     return decodeOperationOutput(name, result);
   });
+  return dispatch;
 };
