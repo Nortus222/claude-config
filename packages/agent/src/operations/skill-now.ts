@@ -89,9 +89,9 @@ export const makeSkillNow = (deps: {
       const reconcileKeys = reconcile.map(step => step.key);
       const steps = [...intent.preview.plan.steps, ...reconcile.map(step => ({ key: step.key, domain: step.domain, action: step.action, summary: step.summary,
         touches: [...step.touches], interruptible: step.interruptible, ...(step.targets ? { targets: [...step.targets] } : {}) }))];
-      const p = yield* preview(route, intent.preview.generation, steps, route === 'enable'
-        ? [`Saves ${name} as on for this machine`, `Installs ${name} from ${source} now, including any bundled scripts, without asking`]
-        : [`Saves ${name} as off for this machine`, 'Removes the copy the app installed; a backup is kept']);
+      const p = yield* preview(route, intent.preview.generation, steps, [`Saves ${name} as ${route === 'enable' ? 'on' : 'off'} for this machine`,
+        reconcileKeys.length === 0 ? 'Nothing is installed or removed now'
+          : route === 'enable' ? `Installs ${name} from ${source} now, including any bundled scripts, without asking` : 'Removes the copy the app installed; a backup is kept']);
       const planned = p.plan.steps.map(step => step.key);
       const acceptance: ParityAcceptance = { kind: 'skillNow', generation: p.generation, baselineDigest: intent.acceptance.baselineDigest, planDigest: digest(p.plan), plannedKeys: planned };
       const changed = () => refused('UNKNOWN_PLAN', `${name} changed after its choice was saved; check for new changes and try again`);
@@ -123,7 +123,9 @@ export const makeSkillNow = (deps: {
 
     if (action === 'install') {
       if (targets.length === 0) return yield* Effect.fail(refused('TARGET_UNAVAILABLE', 'This machine has no agent targets set up; set them up in the app first'));
-      if (skill?.install && item?.state === 'ok' && item.disposition === 'in-sync') return yield* settled('noop', [`${name} is already installed on this machine`]);
+      // Already installed counts only when every requested target is one the skill is already set up for.
+      const covered = targets.every(t => (skill?.targets ?? TARGETS).includes(t));
+      if (skill?.install && covered && item?.state === 'ok' && item.disposition === 'in-sync') return yield* settled('noop', [`${name} is already installed on this machine`]);
       if (skill && skill.targets === undefined) return yield* choose('enable', targets);
       const found = yield* deps.skills.resolveSkillCandidate({ scope: { kind: 'machine' }, source, name }).pipe(Effect.mapError(skillError));
       if (found.status === 'unavailable' || found.status === 'limited')
