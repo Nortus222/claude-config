@@ -10,8 +10,9 @@ export type MutationObserver = {
   readonly committed: (key: string) => Effect.Effect<void, unknown>;
 };
 
-// Who acted. `sync` marks another of the user's machines, whose event also carries its machineId.
-export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp';
+// Who acted. `sync` marks another of the user's machines, whose event also carries its machineId;
+// `remote` marks a person's other machine running an operation here, named by `remoteMachine`.
+export type Actor = 'agent' | 'cli' | 'app' | 'sync' | 'mcp' | 'remote';
 export type ItemReason = { readonly itemId: string; readonly reason: string };
 export type StepRecord = { readonly key: string; readonly outcome: 'ok' | 'failed' | 'cancelled'; readonly note: string };
 
@@ -45,7 +46,7 @@ export type OperationMetadata = {
   readonly scope: { readonly kind: 'machine' };
   readonly requestId: string;
 };
-export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string } & Partial<OperationMetadata>;
+export type HistoryInput = HistoryEventBody & { readonly actor: Actor; readonly machineId?: string; readonly remoteMachine?: string } & Partial<OperationMetadata>;
 export type HistoryEvent = HistoryInput & { readonly v: 1; readonly at: string };
 
 // Append-only History, shared by the agent and the CLI.

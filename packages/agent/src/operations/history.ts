@@ -44,6 +44,7 @@ export function projectHistoryEvent(raw: unknown): typeof OperationHistoryEventS
       event.scope = { kind: 'machine' };
       event.requestId = e.requestId;
     }
+    if (e.remoteMachine !== undefined) event.remoteMachine = e.remoteMachine;
     if (e.runId !== undefined) event.runId = e.runId;
     switch (e.kind) {
       case 'decided':

@@ -330,7 +330,8 @@ const runFields = {
   ghCode: Schema.optionalKey(Schema.NullOr(Schema.Struct({ code: Schema.String.check(Schema.isPattern(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/)), url: Schema.Literal('https://github.com/login/device') }))),
   publicationRecovery: Schema.optionalKey(Schema.Struct({ published: Schema.Union([Schema.Boolean, Schema.Literal('unknown')]), action: Schema.NullOr(Schema.Literals(['announce', 're-check', 're-preview'])) })),
   publication: Schema.optionalKey(PublicationSchema),
-  actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp'])),
+  actor: Schema.optionalKey(Schema.Literals(['app', 'cli', 'mcp', 'remote'])),
+  remoteMachine: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxCodePoints(255))),
   runId: IdSchema, state: Schema.Literals(['accepted', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted', 'abandoned']),
   abandonedAt: Schema.optionalKey(OperationTimeSchema),
   operation: Schema.Literal('applyChange'), scope: OperationScopeSchema,
@@ -384,7 +385,7 @@ const HistoryStepSchema = Schema.Union([
   Schema.Struct({key:KeySchema,outcome:Schema.Literal('failed'),note:Schema.Literal('Step failed')}),
   Schema.Struct({key:KeySchema,outcome:Schema.Literal('cancelled'),note:Schema.Literal('Step cancelled')}),
 ]);
-const historyFields = {at:HistoryTimeSchema,actor:Schema.Literals(['agent','cli','app','sync','mcp'])};
+const historyFields = {at:HistoryTimeSchema,actor:Schema.Literals(['agent','cli','app','sync','mcp','remote']),remoteMachine:Schema.optionalKey(Schema.String.check(Schema.isMinLength(1),Schema.isMaxCodePoints(255)))};
 export const OperationHistoryEventSchema = Schema.Union([
   Schema.Struct({...historyFields,kind:Schema.Literal('unknown'),message:Schema.Literal('Unsupported historical event')}),
   Schema.Struct({...historyFields,kind:Schema.Literals(['apply-started','apply-finished','operation-checkpoint','skill-addition','held','ready','decided','policy-changed','setup-trusted','paused','resumed','revision-verified','revision-rejected','backups-pruned','outbox-dropped']),

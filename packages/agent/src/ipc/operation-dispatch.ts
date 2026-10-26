@@ -115,7 +115,6 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
     });
   });
   return (caller, operation, rawInput) => Effect.gen(function* () {
-    if (caller.actor === 'remote') return yield* Effect.fail(new SessionError('UNAUTHORIZED', 'Remote operations are not available yet.'));
     const actor = caller.actor;
     const request = { operation, input: rawInput } as { [N in OperationName]: { readonly operation: N; readonly input: OperationInput<N> } }[OperationName];
     const name = request.operation;
@@ -157,7 +156,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
       case 'previewChange': result = yield* session.previewChange(request.input.change); break;
       case 'applyChange': {
         const apply = request.input;
-        result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor }).pipe(
+        result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor, ...(caller.actor === 'remote' ? { remoteMachine: caller.machine } : {}) }).pipe(
           Effect.map(run => ({status:'started',run})),
           Effect.catch(error => error.code === 'STALE_PLAN' && error.preview ? Effect.succeed({status:'stale',preview:error.preview}) : Effect.fail(error)),
         ); break;

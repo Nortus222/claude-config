@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Effect, Semaphore } from 'effect';
 import type { OperationProgress as Progress, ParityAcceptance, ParityRunEvidence } from './operations/index.ts';
 import { decodeOperationInput, decodeRunView, type RunView, type ChangePreview, type OperationChange } from './operations/index.ts';
-import { MAX_RUN_BYTES, RunStore, validSignInFlow, type RunActor, type RunReceipt } from './run-store.ts';
+import { MAX_RUN_BYTES, RunStore, validRemoteMachine, validSignInFlow, type RunActor, type RunReceipt } from './run-store.ts';
 import { describe, failedStepsMessage, redact, safeMessage } from './operations/safety.ts';
 
 const RUN_RECEIPT_HEADROOM_BYTES = 4096;
@@ -14,7 +14,7 @@ export class RunError extends Error {
     super(message); this.code = code; this.preview = preview;
   }
 }
-export type SubmitRun = { readonly requestId: string; readonly inputDigest: string; readonly planId: string; readonly actor: RunActor };
+export type SubmitRun = { readonly requestId: string; readonly inputDigest: string; readonly planId: string; readonly actor: RunActor; readonly remoteMachine?: string };
 export type AgentRuns = {
   readonly submit: (input: SubmitRun) => Effect.Effect<RunView, RunError>;
   readonly get: (runId: string) => Effect.Effect<RunView, RunError>;
@@ -32,6 +32,7 @@ export const operationDigest = (planId: string): string => createHash('sha256').
 
 export type RunLifecycle = {
   readonly actor: RunActor;
+  readonly remoteMachine?: string;
   readonly runId: string;
   readonly requestId: string;
   readonly accepted: (change: OperationChange, keys: readonly string[], skillAddition?: RunView['intent']['skillAddition'], parity?: ParityAcceptance) => Effect.Effect<void, RunError>;
@@ -53,7 +54,7 @@ const logEnded = (receipt: RunReceipt, state: string, cause: string) => {
   try { process.stderr.write(`apply run ${receipt.view.runId} (${receipt.view.intent.change.kind}) ${state}: ${safeMessage(cause, 4000)}\n`); } catch {}
 };
 // Attribution comes from the immutable receipt owner, including older receipts without a view actor.
-const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor, ...(receipt.view.ghCode && receipt.view.result ? { ghCode: null } : {}) });
+const publicView = (receipt: RunReceipt): RunView => copy({ ...receipt.view, actor: receipt.actor, ...(receipt.remoteMachine === undefined ? {} : { remoteMachine: receipt.remoteMachine }), ...(receipt.view.ghCode && receipt.view.result ? { ghCode: null } : {}) });
 // Push notifications contain no device challenge. Read the current display through get/list.
 const notificationView = (receipt: RunReceipt): RunView => {
   const view = { ...publicView(receipt), ...(receipt.view.ghCode ? { ghCode: null } : {}) };
@@ -171,12 +172,12 @@ export const makeAgentRuns = (driver: {
     return Effect.gen(function* () {
       yield* Effect.try({ try: () => {
         decodeOperationInput('applyChange', { planId: input.planId, requestId: input.requestId });
-        if (input.inputDigest !== operationDigest(input.planId) || !['app', 'cli', 'mcp'].includes(input.actor)) throw new Error('Invalid operation digest or actor');
+        if (input.inputDigest !== operationDigest(input.planId) || !['app', 'cli', 'mcp', 'remote'].includes(input.actor) || !validRemoteMachine(input.actor, input.remoteMachine)) throw new Error('Invalid operation digest or actor');
       }, catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
       const previousId = requests.get(input.requestId);
       if (previousId) {
         const previous = receipts.get(previousId)!;
-        if (previous.view.intent.inputDigest !== input.inputDigest || previous.view.intent.planId !== input.planId || previous.actor !== input.actor) {
+        if (previous.view.intent.inputDigest !== input.inputDigest || previous.view.intent.planId !== input.planId || previous.actor !== input.actor || previous.remoteMachine !== input.remoteMachine) {
           return yield* Effect.fail(new RunError('REQUEST_CONFLICT', 'This request ID already belongs to different input'));
         }
         return yield* get(previousId);
@@ -187,7 +188,7 @@ export const makeAgentRuns = (driver: {
       let durabilityCause: string | undefined;
       const durability = (cause: unknown) => Effect.sync(() => { durabilityFailed = true; durabilityCause ??= describe(cause); });
       const lifecycle: RunLifecycle = {
-        runId, requestId: input.requestId, actor: input.actor,
+        runId, requestId: input.requestId, actor: input.actor, ...(input.remoteMachine === undefined ? {} : { remoteMachine: input.remoteMachine }),
         accepted: (change, keys, skillAddition, parity) => Effect.gen(function* () {
           const view = yield* Effect.try({ try: () => decodeRunView({ runId, state: 'accepted', operation: 'applyChange', scope: { kind: 'machine' },
             intent: { requestId: input.requestId, inputDigest: input.inputDigest, planId: input.planId, change: copy(change), ...(skillAddition ? { skillAddition: copy(skillAddition) } : {}), ...(parity ? { parity: copy(parity) } : {}) },
@@ -198,7 +199,7 @@ export const makeAgentRuns = (driver: {
           yield* Effect.try({ try: () => decodeRunView(largest), catch: e => new RunError('INVALID_INPUT', bounded(String(e))) });
           if (Buffer.byteLength(JSON.stringify(largest)) > MAX_RUN_BYTES - RUN_RECEIPT_HEADROOM_BYTES) return yield* Effect.fail(new RunError('INVALID_INPUT', 'The plan is too large for a run receipt'));
           noteLimit = Math.min(500, Math.floor(64 * 1024 / Math.max(1, keys.length) / 4));
-          yield* save({ version: 1, sequence: ++sequence, actor: input.actor, view, inFlight: null });
+          yield* save({ version: 1, sequence: ++sequence, actor: input.actor, ...(input.remoteMachine === undefined ? {} : { remoteMachine: input.remoteMachine }), view, inFlight: null });
         }),
         bindSignInFlow: flow => Effect.gen(function* () {
           const receipt = yield* find(runId);

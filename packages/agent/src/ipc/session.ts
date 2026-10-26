@@ -44,7 +44,7 @@ export class SessionError extends Error {
   }
 }
 
-type Client = 'app' | 'cli' | 'mcp';
+type Client = RunActor;
 
 // One person's preview and machine run, plus an independent GitHub sign-in.
 export type AgentSession = {
@@ -549,7 +549,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const exit = yield* Effect.exit(
           Effect.gen(function* () {
             const backups = yield* Backups;
-            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
+            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, ...(lifecycle?.remoteMachine === undefined ? {} : { remoteMachine: lifecycle.remoteMachine }), automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
               if (parity) {
                 const folder = yield* backups.dir;
                 const backupIds = folder ? [basename(folder)] : parity.evidence().backupIds;

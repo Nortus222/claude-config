@@ -50,7 +50,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   let retainedDirectory: string | undefined;
   const update = () => Effect.gen(function* () {
     const receipt = yield* Effect.exit(lifecycle.addition({ intentSaved: saved, intentState, ...(installation ? { installation } : {}) }));
-    yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, runId: lifecycle.runId,
+    yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, ...(lifecycle.remoteMachine === undefined ? {} : { remoteMachine: lifecycle.remoteMachine }), runId: lifecycle.runId,
       operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId,
       intentSaved: saved, intentState: intentState!, ...(installation ? { installationState: installation.state } : {}),
       message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Saving the machine declaration has not finished') });

@@ -40,7 +40,7 @@ export const recordedRun = <E = never>(
   report: MachineReport,
   domains: ReadonlyArray<AgentDomain>,
   options: {
-    readonly runId: string; readonly actor: Actor; readonly automatic: boolean; readonly signal?: AbortSignal;
+    readonly runId: string; readonly actor: Actor; readonly remoteMachine?: string; readonly automatic: boolean; readonly signal?: AbortSignal;
     readonly onProgress?: (progress: Progress) => Effect.Effect<void>;
     readonly checkpoint?: (progress: Extract<Progress, { type: 'started' | 'finished' }>) => Effect.Effect<void, E>;
     readonly operation?: OperationMetadata;
@@ -50,7 +50,8 @@ export const recordedRun = <E = never>(
   Effect.gen(function* () {
     const history = yield* HistoryStore;
     const { runId, actor } = options;
-    yield* history.append({ kind: 'apply-started', actor, runId, automatic: options.automatic, ...options.operation, keys: planned.steps.map((s) => s.key) });
+    const who = options.remoteMachine === undefined ? { actor } : { actor, remoteMachine: options.remoteMachine };
+    yield* history.append({ kind: 'apply-started', ...who, runId, automatic: options.automatic, ...options.operation, keys: planned.steps.map((s) => s.key) });
     const steps: StepRecord[] = [];
     let result: RunRecord['result'] = 'done';
     let backup: string | null = null;
@@ -64,7 +65,7 @@ export const recordedRun = <E = never>(
       }), options.onProgress?.(event) ?? Effect.void);
     });
     const ran: RunRecord = { steps, result, backup };
-    yield* history.append({ kind: 'apply-finished', actor, runId, ...options.operation, ...ran });
+    yield* history.append({ kind: 'apply-finished', ...who, runId, ...options.operation, ...ran });
     return ran;
   });
 

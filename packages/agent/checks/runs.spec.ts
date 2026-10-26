@@ -384,3 +384,47 @@ test('persisted parity acceptance cannot replace its baseline or planned keys', 
     }
   }));
 });
+
+test('a remote run records the calling machine in its view, receipt and History', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session);
+    const request = { ...inputFor(planned.planId), actor: 'remote' as const, remoteMachine: 'Win-01' };
+    const accepted = yield* session.runs.submit(request);
+    assert.equal(accepted.actor, 'remote'); assert.equal(accepted.remoteMachine, 'Win-01');
+    assert.equal((yield* session.runs.submit(request)).runId, accepted.runId);
+    const other = yield* Effect.flip(session.runs.submit({ ...request, remoteMachine: 'Mac-02' }));
+    assert.equal(other.code, 'REQUEST_CONFLICT');
+    const local = yield* Effect.flip(session.runs.submit(inputFor(planned.planId)));
+    assert.equal(local.code, 'REQUEST_CONFLICT');
+    const stored = (yield* RunStore.use(store => store.read)).find(r => r.view.runId === accepted.runId);
+    assert.equal(stored?.remoteMachine, 'Win-01');
+    yield* Deferred.await(f.started);
+    yield* Deferred.succeed(f.release, undefined);
+    yield* terminal(session, accepted.runId);
+    assert.equal((yield* session.runs.get(accepted.runId)).remoteMachine, 'Win-01');
+  }));
+  const started = (await f.m.events()).find(e => e.kind === 'apply-started');
+  assert.equal(started?.actor, 'remote'); assert.equal(started?.remoteMachine, 'Win-01');
+});
+
+test('a remote run needs a bounded calling machine and other actors refuse one', async () => {
+  const f = await fixture();
+  await f.within(session => Effect.gen(function* () {
+    const planned = yield* preview(session);
+    const base = inputFor(planned.planId);
+    for (const bad of [
+      { ...base, actor: 'remote' as const },
+      { ...base, actor: 'remote' as const, remoteMachine: '' },
+      { ...base, actor: 'remote' as const, remoteMachine: 'x'.repeat(256) },
+      { ...base, remoteMachine: 'Win-01' },
+    ]) assert.equal((yield* Effect.flip(session.runs.submit(bad))).code, 'INVALID_INPUT');
+  }));
+});
+
+test('a receipt written before remote runs existed still decodes', async () => {
+  const m = agentMachine(), receipt = interruptedReceipt();
+  await m.run(RunStore.use(store => store.write(receipt)));
+  const read = await m.run(RunStore.use(store => store.read));
+  assert.equal(read[0]?.remoteMachine, undefined);
+});
