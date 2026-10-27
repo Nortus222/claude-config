@@ -17,13 +17,13 @@ function heldReply<T>() {
 }
 const machine = () => new MachineController(null);
 const navLabels = (markup: string) => [...markup.matchAll(/<button[^>]*>([^<]+)/g)].map(match => match[1]);
-test('navigation lists seven screens in THIS MAC and MY PROFILES groups plus Settings, under the Nortuscc brand', () => {
+test('navigation lists eight screens in THIS MAC, MY MACHINES and MY PROFILES groups plus Settings, under the Nortuscc brand', () => {
   const c = machine();
   const markup = renderToStaticMarkup(createElement(ShellView, { screen: 'home', navigate: () => {}, machine: c.state, children: createElement('p', null, 'Home body') }));
-  assert.deepEqual(navLabels(markup), ['Home', 'Changes', 'Skills', 'Profiles', 'Upstreams', 'Publish', 'Settings']);
+  assert.deepEqual(navLabels(markup), ['Home', 'Changes', 'Skills', 'Skills on my machines', 'Profiles', 'Upstreams', 'Publish', 'Settings']);
   const groups = [...markup.matchAll(/role="group" aria-labelledby="([^"]+)"><p class="[^"]*" id="\1">([^<]+)<\/p>(.*?)<\/div>/g)]
     .map(([, , label, body]) => [label, navLabels(body)]);
-  assert.deepEqual(groups, [['THIS MAC', ['Home', 'Changes', 'Skills']], ['MY PROFILES', ['Profiles', 'Upstreams', 'Publish']]]);
+  assert.deepEqual(groups, [['THIS MAC', ['Home', 'Changes', 'Skills']], ['MY MACHINES', ['Skills on my machines']], ['MY PROFILES', ['Profiles', 'Upstreams', 'Publish']]]);
   assert.match(markup, /<h2>Nortuscc<\/h2>/);
   assert.match(markup, /<button aria-current="page">Home<\/button>/);
   for (const gone of ['Review &amp; apply', 'Resolved', 'Overview', 'Setup', 'Claude Config', 'Inspect, review, then apply']) assert.doesNotMatch(markup, new RegExp(gone));

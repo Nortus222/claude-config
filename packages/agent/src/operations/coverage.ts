@@ -25,6 +25,8 @@ export const engineCapabilityCoverage = {
   durableRunRead: available('agent/run-store.ts and agent/runs.ts', ['getRun', 'listRuns'], 'Accepted/running/terminal receipts survive client disconnect and agent restart recovery.'),
   interruptedRunAbandon: available('agent/runs.ts', ['abandonRun'], 'Mark an interrupted run abandoned while retaining its steps, committed and remaining keys, backups and result. Interrupted runs never block applies or app updates.'),
   cancellation: available('agent/ipc/session.ts', ['cancelRun'], 'Cancel a retained authorized machine run at existing safe boundaries.'),
+  remoteAccess: available('agent/remote/remote-store.ts', ['remoteAccess', 'setRemoteAccess'], 'Per-machine remote access switch and Tailscale readiness; only the app or CLI at this machine can change the switch.'),
+  myMachines: available('agent/remote/fan-out.ts', ['myMachines', 'machineSkills', 'applySkillOnMachines', 'machineRun'], 'List the user\'s machines over Tailscale, read their skills, and install or remove a skill on several at once; each target runs it as a normal run naming this machine. Nothing is queued for an unreachable machine.'),
   history: available('machine/history.ts', ['history'], 'Bounded pagination and MCP actor, operation, scope, request and run attribution.'),
   targetCategoryForceSelection: available('operations/actions.ts and machine/model.ts Selection', ['previewChange', 'applyChange'], 'Typed selected reconciliation retains target/category/force rules and owner guards.', ['reconcile']),
   configCapture: available('operations/author.ts', ['previewChange','applyChange','getRun'], 'Author choices are saved as draft intents and replayed in the private clone.', ['editDraft', 'removeDraftIntent', 'deleteDraft']),
@@ -52,6 +54,7 @@ export const engineCapabilityCoverage = {
   agentPolicyResume: available('agent/agent.ts and operations/account.ts', ['agentStatus','previewChange','applyChange'], 'Manual, notify and auto-apply retain policy semantics; resume clears failure pause without changing policy. No user pause or trust grant.', ['setPolicy', 'resume']),
   skillCandidateDiscovery: available('agent/skill-operations.ts', ['resolveSkillCandidate', 'previewChange'], 'Bounded source-specific metadata discovery and exact side-effect-free tentative machine declaration preview.', ['addSkill']),
   skillAddition: available('agent/skill-addition.ts', ['applyChange', 'getRun', 'listRuns', 'cancelRun'], 'Durable machine declaration, accepted content verification and selected native catalog evidence.', ['addSkill']),
+  skillNow: available('operations/skill-now.ts', ['previewChange', 'applyChange', 'getRun'], 'Save one skill choice on this machine and install or remove it in one run; removal is the owned disable only.', ['skillNow']),
   arbitrarySkillRemoval: remaining('machine/skills/installer.ts', 'Physical general skill removal', 'Enablement and declaration removal change intent; general physical deletion has no supported owner.'),
   integrationRemoval: remaining('machine/integrations/domain.ts', 'Integration removal semantics', 'No existing domain removal steps exist; cannot publish a callable placeholder.'),
   personalSharing: remaining('hosted-protocol/revisions.ts', profiles, 'Requires an available personal distribution destination and declaration workflow.', 'prerequisite'),
@@ -87,7 +90,7 @@ const capabilityCoverage: Record<string, { readonly state: 'available' | 'remain
   setupReview: { state: 'available' }, setupApply: { state: 'available' },
   inspectSetups: { state: 'available' }, incomingChanges: { state: 'available' }, prepareTrustRequest: { state: 'available' }, syncDecision: { state: 'available' }, inspectUpdates: { state: 'available' }, inspectIntent: { state: 'available' }, machineIntent: { state: 'available' }, getContext: { state: 'available' }, inspect: { state: 'available' }, previewChange: { state: 'available' },
   applyChange: { state: 'available' }, getRun: { state: 'available' }, listRuns: { state: 'available' }, cancelRun: { state: 'available' }, history: { state: 'available' }, resolveSkillCandidate: { state: 'available' },
-  addSkill: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: profiles }, promoteToProfile: { state: 'remaining', reason: profiles },
+  addSkill: { state: 'available' }, skillNow: { state: 'available' }, remoteAccess: { state: 'available' }, setRemoteAccess: { state: 'available' }, myMachines: { state: 'available' }, machineSkills: { state: 'available' }, applySkillOnMachines: { state: 'available' }, machineRun: { state: 'available' }, shareWithMyMachines: { state: 'remaining', reason: 'Conditional: getContext reports it available once remote access is on here and another machine is known.' }, promoteToProfile: { state: 'remaining', reason: profiles },
 };
 
 // Refuse an operation/capability added without reviewing its coverage and readiness.

@@ -1,6 +1,6 @@
 ---
 status: accepted
-note: amended by 0040 for Windows
+note: amended by 0040 for Windows and by 0041 for remote access over Tailscale
 ---
 
 # The agent serves IPC on a Unix socket only, for now

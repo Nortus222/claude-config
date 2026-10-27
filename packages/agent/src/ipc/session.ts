@@ -13,7 +13,7 @@ import {
 import { itemIdOf, revisionCommit, revisionSetupId, type SetupSource } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
 import { recordedRun } from '../apply.ts';
-import { makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
+import { attribution, makeAgentRuns, type AgentRuns, type RunLifecycle } from '../runs.ts';
 import { decodeOperationInput, type ChangePreview, type ReconcileChange, type OperationChange, type OperationInput, type SkillCandidateResult } from '../operations/index.ts';
 import type { RunActor } from '../run-store.ts';
 import { AgentSkillInstaller } from '../skill-installer.ts';
@@ -24,6 +24,7 @@ import { readSyncOperation, prepareSyncOperation } from '../operations/sync.ts';
 import { inspectUpdateOperations, prepareUpdateChange } from '../operations/updates.ts';
 import { prepareActionChange } from '../operations/actions.ts';
 import { makeIntentOperations } from '../operations/intent.ts';
+import { makeSkillNow } from '../operations/skill-now.ts';
 import { parityObserver, type PreparedParityChange } from '../operations/parity.ts';
 import { causeMessage, describe, safeMessage } from '../operations/safety.ts';
 import type { ParityAcceptance } from '../operations/index.ts';
@@ -44,7 +45,7 @@ export class SessionError extends Error {
   }
 }
 
-type Client = 'app' | 'cli' | 'mcp';
+type Client = RunActor;
 
 // One person's preview and machine run, plus an independent GitHub sign-in.
 export type AgentSession = {
@@ -80,7 +81,9 @@ export type AgentSession = {
   readonly resolveSkillCandidate: (input: OperationInput<'resolveSkillCandidate'>) => Effect.Effect<SkillCandidateResult, SessionError>;
   readonly onProgress: (listener: (runId: string, progress: RunProgress) => void) => () => void;
   // Runs a job now and answers what it inspected, with its status. Clears the reconcile preview.
-  readonly inspect: (actor: Client) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
+  // `cached` answers from the latest job's inspection, without a new job, the BUSY check or dropping
+  // retained previews; it inspects anew only when there is none.
+  readonly inspect: (actor: Client, options?: { readonly cached?: boolean }) => Effect.Effect<InspectResult & { readonly status: WireStatus }, SessionError>;
   readonly preview: (exclude: ReadonlyArray<string>) => Effect.Effect<PreviewResult, SessionError>;
   readonly previewChange: (change: OperationChange) => Effect.Effect<ChangePreview, SessionError>;
   // Answers `started` and runs in the background, or `stale` with a new preview. The run's events
@@ -207,13 +210,18 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
 
     const retainParityChange: AgentSession['retainParityChange'] = prepared => retainPrepared(prepared);
 
-    const inspect: AgentSession['inspect'] = () =>
+    const inspect: AgentSession['inspect'] = (_actor, request = {}) =>
       Effect.gen(function* () {
+        const last = request.cached ? yield* Effect.all([handle.status, handle.inspection]) : undefined;
+        if (last?.[0] && last[1]) return report(last[0], last[1]);
         if (active) return yield* Effect.fail(busy);
         const status = yield* handle.request('inspect');
         const inspection = yield* handle.inspection;
         previewed = undefined; parityPlans.clear();
         if (inspection === undefined) return yield* Effect.fail(noInspection(status, options.platform));
+        return report(status, inspection);
+      });
+    const report = (status: AgentStatus, inspection: JobInspection) => {
         const result: InspectResult & { status: WireStatus } = {
           profile: {
             repo,
@@ -226,7 +234,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
           status: { ...toWireStatus(status), applying: active !== undefined || liveLockHolder(join(stateRoot, 'apply.lock')) !== undefined },
         };
         return result;
-      });
+    };
 
     const legacySetupIdentity = (inspection: JobInspection) => Effect.gen(function* () {
       const setupId = inspection.revision === null ? 'local' : revisionSetupId(inspection.revision);
@@ -294,6 +302,10 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       };
     });
 
+    const skillNow = yield* makeSkillNow({ inspection: handle.inspection, generation: handle.generation ?? Effect.succeed(0), domains: options.domains,
+      freshInspection: (handle.freshInspection ?? runJob(options.domains, { inspectOnly: true })).pipe(Effect.map(job => job.inspection), Effect.provideContext(context)),
+      skills: skillOperations, prepareIntent: intentOperations.prepare, prepareReconcile: prepareAction });
+
     const previewChange: AgentSession['previewChange'] = change => Effect.gen(function* () {
       const input = yield* Effect.try({
         try: () => decodeOperationInput('previewChange', { change }),
@@ -343,6 +355,11 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
       if (input.change.kind === 'machineIntent') {
         if (active) return yield* Effect.fail(busy);
         return yield* retainParityChange(yield* intentOperations.prepare(input.change));
+      }
+      if (input.change.kind === 'skillNow') {
+        if (active) return yield* Effect.fail(busy);
+        const prepared = yield* skillNow.prepare(input.change);
+        return prepared.kind === 'retained' ? prepared.preview : yield* retainParityChange(prepared.prepared);
       }
       if (input.change.kind === 'addSkill') {
         if (active) return yield* Effect.fail(busy);
@@ -549,7 +566,7 @@ export const makeSession = (handle: AgentHandle, options: { readonly signal: Abo
         const exit = yield* Effect.exit(
           Effect.gen(function* () {
             const backups = yield* Backups;
-            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, actor, automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
+            return yield* recordedRun(planned, inspection.report, driver ? [driver.domain] : inspection.domains, { runId, ...(lifecycle ? attribution(lifecycle) : { actor }), automatic: false, signal, onProgress, checkpoint: lifecycle ? progress => Effect.gen(function* () {
               if (parity) {
                 const folder = yield* backups.dir;
                 const backupIds = folder ? [basename(folder)] : parity.evidence().backupIds;

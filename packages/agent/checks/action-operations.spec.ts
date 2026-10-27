@@ -32,9 +32,9 @@ const fixture = () => {
   })), setup.source);
   return { m, setup, within };
 };
-const apply = (session: AgentSession, change: unknown, requestId = 'action') => Effect.gen(function* () {
+const apply = (session: AgentSession, change: unknown, requestId = 'action', who: { actor: 'mcp' } | { actor: 'remote'; remoteMachine: string } = { actor: 'mcp' }) => Effect.gen(function* () {
   const p = yield* session.previewChange(change as OperationChange); decodeOperationOutput('previewChange', p);
-  const req = { planId: p.planId, requestId, inputDigest: operationDigest(p.planId), actor: 'mcp' as const };
+  const req = { planId: p.planId, requestId, inputDigest: operationDigest(p.planId), ...who };
   const accepted = yield* session.runs.submit(req);
   yield* Effect.callback<void>(resume => { const off = session.runs.subscribe(accepted.runId, run => { if (run.result) resume(Effect.void); }); return Effect.sync(off); });
   while (yield* session.running) yield* Effect.yieldNow;
@@ -217,4 +217,18 @@ test('reconcile reports the audited additions repair prerequisite without invoki
     assert.equal(done.state, 'succeeded'); assert.deepEqual(done.parity?.committedKeys, []);
     assert.equal(f.m.read(join(f.m.paths.agentsSkills, 'personal', 'SKILL.md')), undefined);
   }), { domains: () => [skillsDomain] });
+});
+
+test('a remote config removal names the calling machine on every History event of its run', async () => {
+  const f = fixture();
+  await f.within(session => Effect.gen(function* () {
+    const who = { actor: 'remote' as const, remoteMachine: 'Win-01' };
+    assert.equal((yield* apply(session, { kind: 'reconcile', only: [THEME] }, 'install')).state, 'succeeded');
+    yield* session.inspect('mcp');
+    const done = yield* apply(session, { kind: 'uninstallConfig', only: [THEME] }, 'remove-remote', who);
+    assert.equal(done.state, 'succeeded');
+    const events = (yield* Effect.promise(() => f.m.events())).filter(e => 'runId' in e && e.runId === done.runId);
+    assert.deepEqual(events.map(e => e.kind).filter((k, i, all) => all.indexOf(k) === i).sort(), ['apply-finished', 'apply-started', 'operation-checkpoint']);
+    for (const event of events) { assert.equal(event.actor, 'remote'); assert.equal(event.remoteMachine, 'Win-01'); }
+  }));
 });

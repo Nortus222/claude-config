@@ -21,6 +21,7 @@ import { recordedRun } from '../apply.ts';
 import { observedHostedItems } from '../hosted-status.ts';
 import { decodeOperationOutput, SETUP_TEXT_MAX_BYTES, type OperationPlan, type OperationInput, type SetupApplyChange, type SetupReview } from './index.ts';
 import { parityObserver, type PreparedParityChange } from './parity.ts';
+import { attribution } from '../runs.ts';
 import { describe, failedStepsMessage, redact, safeMessage } from './safety.ts';
 
 const SETUP_INSPECT_TIMEOUT = '20 seconds';
@@ -249,7 +250,7 @@ export const prepareSetupApply = (handle: AgentHandle, change: SetupApplyChange,
               yield* backups.preserve(join(paths.stateRoot, 'decisions.json'), 'decisions.json', undefined, { private: true });
               yield* handle.mutationBodies.decideAll(writes.map(p => p.decision), lifecycle.actor);
             }), observer).pipe(Effect.onExit(() => checkpoint()));
-          const ran = yield* recordedRun(first.planned, first.report, first.domains, { runId: lifecycle.runId, actor: lifecycle.actor, automatic: false, signal,
+          const ran = yield* recordedRun(first.planned, first.report, first.domains, { runId: lifecycle.runId, ...attribution(lifecycle), automatic: false, signal,
             operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId },
             checkpoint: event => Effect.gen(function* () {
               if (event.type === 'started') yield* observed.observer.pending(event.step.key);

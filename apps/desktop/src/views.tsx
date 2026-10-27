@@ -11,7 +11,7 @@ import { draftCount, type HomeState } from './home-controller.ts';
 import { errorText, repoName } from './copy.ts';
 import { THIS_MACHINE, ThisMachine, thisMachine } from './device.ts';
 
-export type Screen = 'home' | 'changes' | 'skills' | 'profiles' | 'upstreams' | 'publish' | 'settings';
+export type Screen = 'home' | 'changes' | 'skills' | 'machines' | 'profiles' | 'upstreams' | 'publish' | 'settings';
 // Counts shown beside a screen's name: undecided incoming changes, unpublished drafts, an app update.
 export type NavBadges = { readonly changes?: number; readonly publish?: number; readonly settings?: boolean };
 // Badges from the Changes review (incoming rows not on hold), Home's local drafts and the updater.
@@ -25,6 +25,7 @@ export function navBadges(changes: Pick<SetupSyncState, 'review'>, home: Pick<Ho
 }
 const groups = [
   [THIS_MACHINE, [['home', 'Home'], ['changes', 'Changes'], ['skills', 'Skills']]],
+  ['MY MACHINES', [['machines', 'Skills on my machines']]],
   ['MY PROFILES', [['profiles', 'Profiles'], ['upstreams', 'Upstreams'], ['publish', 'Publish']]],
 ] as const;
 // A notification click names no notification. Item notifications count incoming changes, decided on Changes;

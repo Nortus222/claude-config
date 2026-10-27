@@ -1,3 +1,7 @@
+---
+note: amended by 0042 for installing on the user's other machines
+---
+
 # The app bundles MCP and its local agent executes every operation
 
 Coding agents need to manage the same configuration as the desktop app, including machine-local skill additions and explicit promotion to personal or shared-profile scope. Bundle a local stdio MCP server with the app and connect it only to the app-owned, compatible local agent through authenticated IPC; the MCP never executes the engine independently. Shared typed engine operations define validation, previews, results and capability coverage for the UI, CLI and MCP, while the agent owns accepted runs independently of client connections and records MCP activity in history. Additions default to this machine, and sharing or profile publication requires a separate explicit request without granting remote installation permission. This reuses one execution path, keeps changes visible in the app and lets chat reconnect while the window is closed, at the cost of requiring an installed app and extending the current IPC and run lifecycle. The standalone CLI keeps its existing in-process mode, and Windows MCP support waits for supported local-agent IPC.

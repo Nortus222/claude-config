@@ -1,6 +1,6 @@
 import { Cause, Effect, Exit } from 'effect';
 import { HistoryStore, type MutationObserver } from '@nortuscc/machine';
-import { RunError, type RunLifecycle } from '../runs.ts';
+import { RunError, attribution, type RunLifecycle } from '../runs.ts';
 import type { SessionError } from '../ipc/session.ts';
 import type { Trigger } from '../scheduler.ts';
 import type { ChangePreview, ParityAcceptance, ParityRunEvidence } from './model.ts';
@@ -28,7 +28,7 @@ export const parityObserver = (lifecycle: RunLifecycle, acceptance: ParityAccept
       evidence = previous;
       return yield* Effect.failCause(receipt.cause);
     }
-    const record = yield* Effect.exit(history.append({ kind: 'operation-checkpoint', actor: lifecycle.actor, runId: lifecycle.runId,
+    const record = yield* Effect.exit(history.append({ kind: 'operation-checkpoint', ...attribution(lifecycle), runId: lifecycle.runId,
       operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId,
       keys: acceptance.plannedKeys, committedKeys: evidence.committedKeys, remainingKeys: evidence.remainingKeys, backupIds: evidence.backupIds,
       state: evidence.state, message: 'Operation progress recorded' }));

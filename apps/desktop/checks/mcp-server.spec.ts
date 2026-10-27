@@ -43,7 +43,7 @@ before(async () => {
   }
 });
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-const names: Record<OperationName, string> = {inspectProfiles:'nortuscc_inspect_profiles',inspectShareLink:'nortuscc_inspect_share_link',authorProfiles:'nortuscc_author_profiles',machineFile:'nortuscc_machine_file',authorFile:'nortuscc_author_file',upstreams:'nortuscc_upstreams',discoverUpstream:'nortuscc_discover_upstream',upstreamSkill:'nortuscc_upstream_skill',drafts:'nortuscc_drafts',draftPreview:'nortuscc_draft_preview',ghState:'nortuscc_gh_state',setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history' };
+const names: Record<OperationName, string> = {inspectProfiles:'nortuscc_inspect_profiles',inspectShareLink:'nortuscc_inspect_share_link',authorProfiles:'nortuscc_author_profiles',machineFile:'nortuscc_machine_file',authorFile:'nortuscc_author_file',upstreams:'nortuscc_upstreams',discoverUpstream:'nortuscc_discover_upstream',upstreamSkill:'nortuscc_upstream_skill',drafts:'nortuscc_drafts',draftPreview:'nortuscc_draft_preview',ghState:'nortuscc_gh_state',setupReview:'nortuscc_setup_review',listBackups:'nortuscc_list_backups',agentStatus:'nortuscc_agent_status',accountState:'nortuscc_account_state',watchSources: 'nortuscc_watch_sources', inspectSourceDiff: 'nortuscc_inspect_source_diff', pinImpact: 'nortuscc_pin_impact', draftChangelog: 'nortuscc_draft_changelog',  inspectSetups:'nortuscc_inspect_setups', incomingChanges:'nortuscc_incoming_changes', prepareTrustRequest:'nortuscc_prepare_trust_request', inspectUpdates: 'nortuscc_inspect_updates', inspectIntent: 'nortuscc_inspect_intent', resolveSkillCandidate: 'nortuscc_resolve_skill_candidate', getContext: 'nortuscc_get_context', inspect: 'nortuscc_inspect', previewChange: 'nortuscc_preview_change', applyChange: 'nortuscc_apply_change', getRun: 'nortuscc_get_run', listRuns: 'nortuscc_list_runs', cancelRun: 'nortuscc_cancel_run', abandonRun: 'nortuscc_abandon_run', history: 'nortuscc_history', remoteAccess: 'nortuscc_remote_access', setRemoteAccess: 'nortuscc_set_remote_access', myMachines: 'nortuscc_my_machines', machineSkills: 'nortuscc_machine_skills', applySkillOnMachines: 'nortuscc_apply_skill_on_machines', machineRun: 'nortuscc_machine_run' };
 
 // Real newline-delimited MCP over the packaged entry, with every stdout record captured.
 function open(runtime: string, stateRoot: string, modern = false) {
@@ -573,7 +573,7 @@ for (const runtime of runtimes) test(`${runtime}: MCP addition from arbitrary cw
   assert.deepEqual(done.installation.nextActions.map((action: any) => [action.kind, action.capability.available, action.requiredDestination]), [
     ['share_with_my_machines', false, 'user'], ['promote_to_profile', false, 'profile'],
   ]);
-  assert.match(done.installation.nextActions[0].capability.reason, /personal sharing workflow/);
+  assert.match(done.installation.nextActions[0].capability.reason, /remote access on here/);
   assert.match(done.installation.nextActions[1].capability.reason, /profile publication workflow/);
   const before = s.m.read(join(s.m.paths.stateRoot, 'overrides.json'));
   assert.deepEqual(output('getRun', await next.call('getRun', { runId })), done);
@@ -698,6 +698,15 @@ test('MCP descriptions explain semantic effects and recovery', async t => {
   const listed = await client.ask('tools/list');
   const description = listed.result.tools.find((tool: { name: string }) => tool.name === names.getRun).description;
   assert.match(description, /committed.*remaining/i); assert.match(description, /author destination/i); assert.match(description, /uncertain/i);
+});
+
+test('MCP machine descriptions explain machines not set up and busy reads', async t => {
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const listed = await client.ask('tools/list');
+  const description = (name: OperationName) => listed.result.tools.find((tool: { name: string }) => tool.name === names[name]).description;
+  assert.match(description('myMachines'), /notSetUp/); assert.match(description('myMachines'), /turn on remote access/);
+  assert.match(description('machineSkills'), /busy true/); assert.doesNotMatch(description('machineSkills'), /waits out/);
 });
 
 test('MCP partial retention preserves observed removals and reconnect never retries effects', async t => {

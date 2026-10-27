@@ -29,7 +29,11 @@ export const capabilityInventory = {
   cancelRun: { available: true }, history: { available: true },
   resolveSkillCandidate: { available: true },
   addSkill: { available: true },
-  shareWithMyMachines: { available: false, reason: 'Personal sharing requires an available distribution destination.' },
+  skillNow: { available: true },
+  remoteAccess: { available: true }, setRemoteAccess: { available: true },
+  myMachines: { available: true }, machineSkills: { available: true }, applySkillOnMachines: { available: true }, machineRun: { available: true },
+  // Off until remote access is on and another machine is known; getContext reports it live.
+  shareWithMyMachines: { available: false, reason: 'Sharing needs remote access on here and another of your machines connected over Tailscale.' },
   promoteToProfile: { available: false, reason: 'Profile promotion requires owned-profile identity, an explicit destination and a verified publication workflow.' },
 } as const;
 

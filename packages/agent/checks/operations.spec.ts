@@ -50,11 +50,11 @@ test('future capabilities are unavailable inventory entries without executable d
     assert.ok('reason' in state && state.reason.length > 0);
     assert.equal(name in operationDefinitions, false);
   }
-  assert.deepEqual(Object.keys(operationDefinitions), ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history']);
+  assert.deepEqual(Object.keys(operationDefinitions), ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','listBackups','agentStatus','accountState','watchSources','inspectSourceDiff','pinImpact','draftChangelog','setupReview','inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'resolveSkillCandidate', 'getContext', 'inspectUpdates', 'inspectIntent', 'inspect', 'previewChange', 'applyChange', 'getRun', 'listRuns', 'cancelRun', 'abandonRun', 'history', 'remoteAccess', 'setRemoteAccess', 'myMachines', 'machineSkills', 'applySkillOnMachines', 'machineRun']);
   for (const [name, definition] of Object.entries(operationDefinitions)) {
     assert.equal(definition.name, name);
     assert.deepEqual(definition.scopes, ['machine']);
-    assert.equal(definition.mutation, name === 'applyChange' || name === 'cancelRun' || name === 'abandonRun');
+    assert.equal(definition.mutation, name === 'applyChange' || name === 'cancelRun' || name === 'abandonRun' || name === 'setRemoteAccess' || name === 'applySkillOnMachines');
   }
 });
 

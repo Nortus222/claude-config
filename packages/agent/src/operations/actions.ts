@@ -9,7 +9,7 @@ import { itemIdOf } from '@nortuscc/sync';
 import { recordedRun } from '../apply.ts';
 import { AgentClock } from '../clock.ts';
 import { SessionError } from '../ipc/session.ts';
-import type { RunLifecycle } from '../runs.ts';
+import { attribution, type RunLifecycle } from '../runs.ts';
 import type { JobInspection } from '../job.ts';
 import type { AgentDomains, AgentServices } from '../layer.ts';
 import { decodeOperationOutput, type ActionChange, type ParityRunEvidence } from './index.ts';
@@ -94,7 +94,7 @@ export const prepareActionChange = (change: ActionChange, inspection: JobInspect
       yield* checkpoint();
     });
     const observedDomains = built.map(domain => domain.name === 'config' && change.kind === 'uninstallConfig' ? configDomainWithObserver({ pending: () => checkpoint(), committed: commit }) : domain);
-    const ran = yield* recordedRun(planned, inspection.report, observedDomains, { runId: lifecycle.runId, actor: lifecycle.actor, automatic: false, signal,
+    const ran = yield* recordedRun(planned, inspection.report, observedDomains, { runId: lifecycle.runId, ...attribution(lifecycle), automatic: false, signal,
       operation: { operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId }, projectProgress: event => safeProgress(event, publicPlan),
       checkpoint: event => Effect.gen(function* () {
         evidence = { ...evidence, state: 'needsInspection' };

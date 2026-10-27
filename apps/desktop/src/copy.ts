@@ -83,6 +83,7 @@ const CHANGE_TITLES = {
   machineIntent: 'Save skill choice',
   update: 'Update skills',
   addSkill: 'Add a skill',
+  skillNow: 'Install or remove a skill',
   uninstallConfig: 'Restore configuration',
   capture: `Save ${thisMachine}’s changes to a draft`,
   syncDecision: 'Decide on an incoming change',
@@ -229,3 +230,53 @@ export function runReport(report: RunReport): string {
   lines.push(`Agent log: ${AGENT_LOG}`);
   return lines.join('\n');
 }
+
+// Skills on my machines: why a machine can't be changed now, what Tailscale still needs here, and what a cell shows.
+export const machineUnreachable = (reach: 'offline' | 'app-closed' | 'remote-off' | 'incompatible', name: string, lastReachedAt: string | null): string => {
+  if (reach === 'app-closed') return `The app is closed on ${name}.`;
+  if (reach === 'remote-off') return `Remote access is off on ${name}. Turn it on in the app on that machine.`;
+  if (reach === 'incompatible') return `Update the app on ${name}.`;
+  const when = lastReachedAt ? relativeTime(lastReachedAt) : '';
+  return `${name} is offline. ${when ? `Last reached ${when}.` : 'Never reached from here.'}`;
+};
+export const TAILSCALE_PROBLEMS = {
+  'not-installed': `Tailscale isn’t installed on ${thisMachine}. Install it from tailscale.com, then refresh.`,
+  'not-running': `Tailscale is installed but not running on ${thisMachine}. Open Tailscale, then refresh.`,
+  'logged-out': `Tailscale isn’t signed in on ${thisMachine}, or is waiting for your tailnet admin to approve it.`,
+  'needs-admin': 'Tailscale needs an administrator account on this Mac to confirm who is calling.',
+} as const;
+export const CELL_WORDS = { installed: 'Installed', absent: 'Not installed', undeclared: 'Installed outside the app', profile: 'Off by profile', working: 'Working…', offline: 'Not reachable' } as const;
+export const unownedCopy = (name: string) => `Installed outside the app; remove it on ${name}.`;
+export const UNKNOWN_SOURCE = 'The app doesn’t know where this skill came from.';
+export const offlineNotice = (name: string) => `${name} is offline. Nothing changed there.`;
+export const keptNotice = (skill: string, from: string, to: string) => `Kept ${skill} on ${from} because it didn’t install on ${to}.`;
+const CELL_ENDED: Readonly<Record<string, string>> = { failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted', abandoned: 'was abandoned' };
+// A finished run on one machine that did not succeed, from the action the grid asked for.
+export const cellFailed = (action: 'install' | 'remove', state: string, cause: string) =>
+  `${action === 'install' ? 'Install' : 'Removal'} ${CELL_ENDED[state] ?? 'stopped'}.${cause ? ` ${cause}` : ''}`;
+// The rest of the words on Skills on my machines.
+export const MACHINES_WORDS = {
+  title: 'Skills on my machines',
+  intro: 'See the skills on each of your machines and change them from here. A change applies on that machine right away.',
+  browser: 'Open the desktop app to see the skills on your machines.',
+  browserDetail: 'Browser preview has no agent connection.',
+  refreshAll: 'Refresh all', refresh: 'Refresh', reading: 'Reading your machines…', checking: 'Checking…', checked: (when: string) => `checked ${when}`,
+  busy: (when: string) => `Busy with a change; showing the check from ${when}.`,
+  notSetUp: (machine: string) => `Not set up yet: turn on remote access in the app on ${machine}.`,
+  notListening: 'Remote access is on but this machine isn’t listening yet — check that Tailscale is running and nothing else uses port 47821.',
+  skill: 'Skill', install: 'Install', remove: 'Remove', moveTo: 'Move to…', copy: 'Copy to other machines', outside: 'installed outside the app',
+  installLabel: (skill: string, machine: string) => `Install ${skill} on ${machine}`,
+  removeLabel: (skill: string, machine: string) => `Remove ${skill} from ${machine}`,
+  moveLabel: (skill: string, machine: string) => `Move ${skill} from ${machine}`,
+  refreshLabel: (machine: string) => `Refresh ${machine}`,
+  connect: 'Connect my machines',
+  connectIntro: 'Your machines reach each other through Tailscale, on your own account. Turn remote access on in the app on each machine.',
+  checks: { 'not-installed': 'Tailscale installed', 'not-running': 'Tailscale running', 'logged-out': 'Signed in', 'needs-admin': 'Administrator access' },
+  checkDone: 'Done.', checkWaiting: 'Not checked yet.', signedInAs: (login: string) => `Signed in as ${login}.`,
+  remoteAccess: 'Remote access',
+  remoteOn: `On. Your other machines can reach ${thisMachine}.`, remoteOff: `Remote access is off on ${thisMachine}.`, remoteIsOn: 'Remote access is on.',
+  turnOn: 'Turn on remote access', turnOff: 'Turn off remote access', tailscaleFirst: 'Finish setting up Tailscale first.',
+  installTitle: 'Install a skill', source: 'Source', skillName: 'Skill name', revision: 'Revision (optional)', machines: 'Machines', allOnline: 'All online machines', cancel: 'Cancel',
+  agentFirst: 'Connect the local agent first.', unreachable: 'That machine can’t be reached.', changing: 'This skill is already being changed there.',
+  revisionInvalid: 'A revision is a full commit ID: 40 characters, 0–9 and a–f. Leave it empty for the latest version.',
+} as const;

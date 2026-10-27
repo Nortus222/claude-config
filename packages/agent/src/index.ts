@@ -32,3 +32,6 @@ export * from './runs.ts';
 export * from './run-store.ts';
 
 export { AgentSkillInstaller, agentSkillInstaller, SkillInstallUnavailable } from './skill-installer.ts';
+
+export * from './remote/remote-store.ts';
+export { TailscaleAccess, tailscaleAccess, type TailscaleState } from './remote/tailscale.ts';

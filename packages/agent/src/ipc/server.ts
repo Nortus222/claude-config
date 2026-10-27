@@ -1,26 +1,23 @@
-import { projectHistoryEvent } from '../operations/history.ts';
 import { HostedFailure } from '@nortuscc/hosted-client';
 import { disabledHostedState } from '../hosted.ts';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
-import { dirname, join } from 'node:path';
-import { Cause, Data, Effect, FiberSet, Schema } from 'effect';
-import { Fs, HistoryStore, liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
+import { join } from 'node:path';
+import { Cause, Data, Effect, FiberSet } from 'effect';
+import { liveLockHolder, type Decision, type MachinePathsValue } from '@nortuscc/machine';
 import type { AgentHandle } from '../agent.ts';
 import { AgentClock } from '../clock.ts';
 import type { Notifier, Notification } from '../notifier.ts';
 import type { AgentStatus } from '../job.ts';
 import type { AgentServices } from '../layer.ts';
-import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
-import { AGENT_PIPE_FILE, SetupsStore, newPipeName, revisionCommit, revisionSetupId } from '@nortuscc/sync';
-import { operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema } from '../operations/index.ts';
-import { operationDigest, RunError } from '../runs.ts';
-import { AgentStateStore } from '../state.ts';
+import { AGENT_PIPE_FILE, newPipeName } from '@nortuscc/sync';
+import { RunError } from '../runs.ts';
 import {
   toWireHostedState, decodeSignInResult, decodeMessage, decodeRequest, MAX_RECORD_BYTES, PROTOCOL_VERSION, toWireStatus,
-  type AppRuntime, type ErrorCode, type HelloResult, type HistoryResult, type Request, type RunProgress,
+  type AppRuntime, type ErrorCode, type HelloResult, type Request, type RunProgress,
 } from './protocol.ts';
+import { historyPage, makeIdentity, makeOperationDispatch } from './operation-dispatch.ts';
 import { SessionError, type AgentSession } from './session.ts';
 
 // The socket could not be set up: its directory, token or listener.
@@ -56,7 +53,7 @@ type Connection = {
 type Handled = { readonly result: unknown; readonly after?: () => void; readonly flushed?: () => void };
 
 // Cuts `text` to at most `max` UTF-16 units without splitting a surrogate pair.
-const truncate = (text: string, max: number): string => {
+export const truncate = (text: string, max: number): string => {
   if (text.length <= max) return text;
   const last = text.charCodeAt(max - 1);
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
@@ -66,6 +63,16 @@ const describe = (error: unknown): string => {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && '_tag' in error && typeof error._tag === 'string') return error._tag;
   return String(error);
+};
+
+// The wire error for a failed handler, shared by every transport that answers operations.
+export const failureOf = (cause: Cause.Cause<unknown>): { readonly code: ErrorCode; readonly message: string } => {
+  if (Cause.hasInterruptsOnly(cause)) return { code: 'SHUTDOWN', message: 'The agent is shutting down' };
+  const error = Cause.squash(cause);
+  if (error instanceof HostedFailure) return { code: error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', message: error.message };
+  if (error instanceof RunError) return { code: error.code as ErrorCode, message: error.message };
+  if (error instanceof SessionError) return { code: error.code, message: error.message };
+  return { code: 'INTERNAL', message: describe(error) };
 };
 
 const attempt = (what: string, run: () => Promise<unknown>) =>
@@ -249,27 +256,8 @@ export const serveIpc = (input: {
     input.notifier?.setConnected(deliverNotification);
     yield* Effect.addFinalizer(() => Effect.sync(() => input.notifier?.setConnected(undefined)));
 
-    const identity = (expectedRuntimeId?: string) => Effect.gen(function* () {
-      const state = yield* (yield* AgentStateStore).read;
-      const runtime = input.appRuntime;
-      let reason: string | undefined;
-      // The Windows app never takes over a CLI-installed agent (ADR 0040), so it names the hand-over instead.
-      if (input.platform === 'win32' && state.installedBy === 'cli') reason = 'The command-line tool manages this agent; run `nortuscc agent uninstall`, then restart the agent from the desktop app or reopen the app.';
-      else if (!runtime || state.installedBy !== 'app') reason = 'Open the installed desktop app to configure its background agent.';
-      else if (!(runtime.platform === 'darwin' && runtime.target === 'darwin-arm64') && !(runtime.platform === 'win32' && runtime.target === 'win32-x64')) reason = 'MCP requires the supported macOS arm64 or Windows x64 desktop runtime.';
-      else if (state.agentVersion !== input.agentVersion || runtime.runtimeId !== input.agentVersion || state.appPath === undefined || dirname(state.appPath) !== runtime.appDirectory) reason = 'The app runtime changed; reopen the installed desktop app to reconnect.';
-      else if (expectedRuntimeId !== undefined && expectedRuntimeId !== runtime.runtimeId) reason = 'The client runtime does not match the app; reconnect through the installed desktop app.';
-      else {
-        const fs = yield* Fs;
-        const text = yield* fs.readText(runtime.metadataPath);
-        try {
-          const metadata = JSON.parse(text ?? 'null');
-          if (!metadata || metadata.agentVersion !== runtime.runtimeId || metadata.appVersion !== runtime.version || metadata.target !== runtime.target) reason = 'The installed app changed; reopen it before using MCP.';
-        } catch { reason = 'Installed app metadata is unavailable; reopen or repair the desktop app.'; }
-      }
-      return { state, app: { ownership: state.installedBy ?? null, version: runtime?.version ?? null, runtimeId: runtime?.runtimeId ?? null },
-        operations: reason ? { available: false, reason } : { available: true } };
-    });
+    const identity = makeIdentity(input);
+    const operate = makeOperationDispatch({ session, paths: input.paths, handle, appRuntime: input.appRuntime, agentVersion: input.agentVersion, platform: input.platform });
     const hello = (client: Client, expectedRuntimeId?: string) => Effect.gen(function* () {
       const { state, app, operations } = yield* identity(expectedRuntimeId);
       const result: HelloResult = {
@@ -279,64 +267,11 @@ export const serveIpc = (input: {
       };
       return result;
     });
-    const context = (expectedRuntimeId?: string) => Effect.gen(function* () {
-      const { state, app, operations } = yield* identity(expectedRuntimeId);
-      const inspection = yield* handle.inspection;
-      const hosted = handle.hosted ? yield* handle.hosted.state : undefined;
-      const trustedSetups = yield* (yield* SetupsStore).read;
-      const fs = yield* Fs;
-      const overrideText = yield* fs.readText(join(input.paths.stateRoot, 'overrides.json'));
-      const choices = overrideText === undefined
-        ? overridesFromLegacyState(yield* fs.readText(join(input.paths.stateRoot, 'state.json')))
-        : decodeOverrides((() => { try { return JSON.parse(overrideText); } catch { return null; } })(), 'overrides.json');
-      const pending = yield* fs.exists(join(input.paths.stateRoot, 'agent/pending-update.json'));
-      const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
-      const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; repair the machine overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
-      return projectContext({ app, agent: { version: input.agentVersion, protocol: PROTOCOL_VERSION },
-        targets: choices.issues.length ? [] : (choices.value.manageConfig === false ? [] : choices.value.configTargets ?? (inspection ? TARGETS : [])),
-        setups: hosted?.enabled ? { state: 'available', items: hosted.setups.map(s => ({setupId:s.setupId, trusted: trustedSetups?.some(t => t.setupId === s.setupId && t.accountId === hosted.accountId) ?? false, revision:s.latestRevision})) }
-          : inspection ? {state:'available',items:[{setupId: inspection.revision ? revisionSetupId(inspection.revision) : 'local', trusted:inspection.trusted, revision: inspection.revision ? revisionCommit(inspection.revision) : null}]}
-          : {state:'unknown',reason:'The agent has no setup inspection yet.'},
-        profiles: {state:'unavailable',reason:'Profile discovery is not available in the machine reconciliation workflow.'},
-        account: hosted?.enabled ? hosted.auth === 'signed-in' && hosted.accountId ? {state:'signed-in',accountId:hosted.accountId} : {state:hosted.auth === 'unauthenticated' ? 'unauthenticated' : 'signed-out'} : {state:'unavailable',reason:'Hosted mode is not configured.'},
-        policy:state.policy, paused:state.paused === null ? null : {reason:state.paused.reason,at:state.paused.at},
-        scopes:{machine:operations,user:{available:false,reason:'User mutations are not supported.'},profile:{available:false,reason:'Profile mutations are not supported.'}},
-        capabilities:Object.fromEntries(Object.entries(capabilityInventory).map(([name,capability]) => [name,name === 'getContext' ? {available:true} : name in operationDefinitions && operationDefinitions[name as keyof typeof operationDefinitions].mutation ? mutation : name in operationDefinitions ? operations : capability])), diagnostics,
-      });
-    });
     // Until the start job finishes there is no status; answering at once beats making a client wait for a job.
     const latest = Effect.flatMap(handle.status, (status) =>
       (status === undefined ? Effect.fail(new SessionError('NO_REPORT', 'the agent is still starting')) : Effect.succeed(status)));
     const wire = <R>(effect: Effect.Effect<AgentStatus, unknown, R>): Effect.Effect<Handled, unknown, R> =>
       Effect.flatMap(effect, (status) => Effect.map(liveStatus(status), (result) => ({ result })));
-
-    const decodeHistoryTime = Schema.decodeUnknownSync(HistoryTimeSchema);
-    const historyPage = (request: { readonly before?: HistoryResult['nextBefore']; readonly limit: number }) => Effect.gen(function* () {
-      const events = yield* (yield* HistoryStore).read;
-      // Per-instant append order stays stable when a clock rollback adds an older month.
-      const sequences = new Map<number, number>();
-      const ordered = events.flatMap((event) => {
-        let at: number;
-        try { at = Date.parse(decodeHistoryTime(event.at)); }
-        catch { return []; }
-        if (!Number.isFinite(at)) return [];
-        const seq = sequences.get(at) ?? 0;
-        sequences.set(at, seq + 1);
-        return [{ event, at, seq }];
-      }).sort((a, b) => b.at - a.at || b.seq - a.seq);
-      const before = request.before ?? undefined;
-      const beforeAt = before === undefined ? Infinity : Date.parse(before.at);
-      const matching = ordered.filter((e) =>
-        e.at < beforeAt || (e.at === beforeAt && before !== undefined && e.seq < before.seq));
-      const kept = matching.slice(0, request.limit);
-      const last = kept.at(-1);
-      const result: HistoryResult = {
-        events: kept.map((e) => e.event),
-        nextBefore: matching.length > kept.length && last !== undefined
-          ? { at: new Date(last.at).toISOString(), seq: last.seq } : null,
-      };
-      return result;
-    });
 
     const dispatch = (conn: Connection, request: Request, client: Client): Effect.Effect<Handled, unknown, AgentServices> => {
       if (client === 'mcp' && !['hello', 'operation'].includes(request.command)) return Effect.fail(new SessionError('UNAUTHORIZED', 'MCP connections use shared operations only; open the app for consent and service management.'));
@@ -345,73 +280,9 @@ export const serveIpc = (input: {
         Effect.map(hosted?.state ?? Effect.succeed(disabledHostedState), (s) => ({ result: toWireHostedState(s) })));
       const unavailable = Effect.fail(new SessionError('NOT_SIGNED_IN', 'Hosted mode is not configured'));
       switch (request.command) {
-        case 'operation': return Effect.gen(function* () {
-          const name = request.operation;
-          const args = request.input;
-          if (args.scope.kind !== 'machine') return yield* Effect.fail(new SessionError('UNSUPPORTED_SCOPE', 'This operation supports machine scope only; use the owning app workflow for user or profile changes.'));
-          if (name !== 'getContext' && client === 'mcp') {
-            const current = yield* identity(conn.runtimeId);
-            if (!current.operations.available || conn.runtimeId !== input.appRuntime?.runtimeId) return yield* Effect.fail(new SessionError('APP_UNAVAILABLE', current.operations.reason ?? 'The connected app runtime changed; reconnect through the installed desktop app.'));
-          }
-          let result: unknown;
-          switch (request.operation) {
-            case 'authorProfiles': result = yield* session.authorProfiles(request.input); break;
-            case 'machineFile': result = yield* session.machineFile(request.input); break;
-            case 'authorFile': result = yield* session.authorFile(request.input); break;
-            case 'upstreams': result = yield* session.upstreams(request.input); break;
-            case 'discoverUpstream': result = yield* session.discoverUpstream(request.input); break;
-            case 'upstreamSkill': result = yield* session.upstreamSkill(request.input); break;
-            case 'drafts': result = yield* session.drafts(request.input); break;
-            case 'draftPreview': result = yield* session.draftPreview(request.input); break;
-            case 'ghState': result = yield* session.ghState(request.input); break;
-            case 'listBackups': result = yield* session.listBackups(request.input); break;
-            case 'agentStatus': result = yield* session.agentStatus(request.input); break;
-            case 'accountState': result = yield* session.accountState(request.input); break;
-            case 'watchSources': result = yield* session.watchSources(request.input); break;
-            case 'inspectSourceDiff': result = yield* session.inspectSourceDiff(request.input); break;
-            case 'pinImpact': result = yield* session.pinImpact(request.input); break;
-            case 'draftChangelog': result = yield* session.draftChangelog(request.input); break;
-            case 'inspectProfiles': result = yield* session.inspectProfiles(request.input); break;
-            case 'inspectShareLink': result = yield* session.inspectShareLink(request.input); break;
-            case 'inspectSetups': result = yield* session.inspectSetups(request.input); break;
-            case 'setupReview': result = yield* session.setupReview(request.input); break;
-            case 'incomingChanges': result = yield* session.incomingChanges(request.input); break;
-            case 'prepareTrustRequest': result = yield* session.prepareTrustRequest(request.input); break;
-            case 'inspectUpdates': result = yield* session.inspectUpdates(request.input); break;
-            case 'inspectIntent': result = yield* session.inspectIntent(request.input); break;
-            case 'resolveSkillCandidate': result = yield* session.resolveSkillCandidate(request.input); break;
-            case 'getContext': result = yield* context(conn.runtimeId); break;
-            case 'inspect': result = yield* session.inspect(client); break;
-            case 'previewChange': result = yield* session.previewChange(request.input.change); break;
-            case 'applyChange': {
-              const apply = request.input;
-              result = yield* session.runs.submit({ planId: apply.planId, requestId: apply.requestId, inputDigest: operationDigest(apply.planId), actor: client }).pipe(
-                Effect.map(run => ({status:'started',run})),
-                Effect.catch(error => error.code === 'STALE_PLAN' && error.preview ? Effect.succeed({status:'stale',preview:error.preview}) : Effect.fail(error)),
-              ); break;
-            }
-            case 'getRun': result = yield* session.runs.get(request.input.runId); break;
-            case 'listRuns': result = yield* session.runs.list(request.input); break;
-            case 'cancelRun':
-            case 'abandonRun': {
-              const fs = yield* Fs;
-              const path = join(input.paths.stateRoot, 'agent/pending-update.json');
-              const pending = yield* fs.readText(path).pipe(Effect.mapError(() => new SessionError('LOCKED', 'Desktop maintenance state is unavailable; open or repair the app.')));
-              if (pending !== undefined || (yield* fs.exists(path))) return yield* Effect.fail(new SessionError('LOCKED', 'Desktop update recovery is pending; open the app before changing the machine.'));
-              result = yield* (request.operation === 'cancelRun' ? session.runs.cancel(request.input.runId) : session.runs.abandon(request.input.runId)); break;
-            }
-            case 'history': {
-              const history = request.input;
-              const legacy = yield* historyPage(history);
-              result = { ...legacy, events: legacy.events.flatMap(event => {
-                const projected = projectHistoryEvent(event);
-                return projected ? [projected] : [];
-              }) }; break;
-            }
-            default: { const exhaustive: never = request; return exhaustive; }
-          }
-          return { result: decodeOperationOutput(name, result) };
-        });
+        case 'operation': return Effect.map(
+          operate(client === 'mcp' ? { actor: 'mcp', runtimeId: conn.runtimeId ?? '' } : { actor: client }, request.operation, request.input),
+          (result) => ({ result }));
         case 'hostedState': return hostedResult(Effect.void);
         case 'signIn': return hosted ? Effect.map(hosted.signIn(request.name, request.reportStatus), (s) => ({ result: decodeSignInResult(s) })) : unavailable;
         case 'signOut': return hosted ? hostedResult(hosted.signOut()) : unavailable;
@@ -512,12 +383,8 @@ export const serveIpc = (input: {
             handled.after?.();
           },
           onFailure: (cause) => {
-            if (Cause.hasInterruptsOnly(cause)) return reject(conn, request.id, 'SHUTDOWN', 'The agent is shutting down');
-            const error = Cause.squash(cause);
-            if (error instanceof HostedFailure) reject(conn, request.id, error.code === 'unauthenticated' ? 'NOT_SIGNED_IN' : 'INTERNAL', error.message);
-            else if (error instanceof RunError) reject(conn, request.id, error.code as ErrorCode, error.message);
-            else if (error instanceof SessionError) reject(conn, request.id, error.code, error.message);
-            else reject(conn, request.id, 'INTERNAL', describe(error));
+            const { code, message } = failureOf(cause);
+            reject(conn, request.id, code, message);
           },
         }),
       ));

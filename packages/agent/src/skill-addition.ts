@@ -4,7 +4,8 @@ import { Cause, Effect, Exit } from 'effect';
 import { Backups, canonical, Fs, HistoryStore, MachinePaths, OverridesStore, runInstaller, skillLockPath, verifyAcceptedSkill,
   verifyClaudeSkill, verifyCodexSkill, SkillCandidateCleanupFailed, type Command, type Plan, type Step, type ProcessDialogue } from '@nortuscc/machine';
 import type { AcceptedSkillPlan } from './skill-operations.ts';
-import type { RunLifecycle } from './runs.ts';
+import { shareCapability } from './remote/remote-store.ts';
+import { attribution, type RunLifecycle } from './runs.ts';
 import type { RunView } from './operations/index.ts';
 import type { AgentDomain } from './layer.ts';
 import type { JobInspection } from './job.ts';
@@ -39,6 +40,8 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   const overrides = yield* OverridesStore;
   const history = yield* HistoryStore;
   const context = yield* Effect.context<ProcessDialogue>();
+  // Sharing is installing on the user's other machines.
+  const share = yield* shareCapability;
   const tuple = acceptedSkillTuple(accepted);
   let persistenceUncertain = false;
   let saved = false;
@@ -50,7 +53,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   let retainedDirectory: string | undefined;
   const update = () => Effect.gen(function* () {
     const receipt = yield* Effect.exit(lifecycle.addition({ intentSaved: saved, intentState, ...(installation ? { installation } : {}) }));
-    yield* history.append({ kind: 'skill-addition', actor: lifecycle.actor, runId: lifecycle.runId,
+    yield* history.append({ kind: 'skill-addition', ...attribution(lifecycle), runId: lifecycle.runId,
       operation: 'applyChange', scope: { kind: 'machine' }, requestId: lifecycle.requestId,
       intentSaved: saved, intentState: intentState!, ...(installation ? { installationState: installation.state } : {}),
       message: installation?.message ?? (saved ? 'Machine declaration saved' : 'Saving the machine declaration has not finished') });
@@ -59,7 +62,7 @@ export const makeAdditionDriver = (accepted: AcceptedSkillPlan, lifecycle: RunLi
   const result = (state: Installation['state'], message: string, evidence: Pick<Installation, 'claude' | 'codex'> = {}): Installation => ({
     state, message: [...message].slice(0, 500).join(''), ...(retainedDirectory ? { retainedDirectory: [...retainedDirectory].slice(0, 4096).join('') } : {}), sharedStore: { codexScans: true, visibility: 'shared' }, ...evidence,
     nextActions: state === 'verified' ? [
-      { kind: 'share_with_my_machines', capability: { available: false, reason: 'Sharing requires the personal sharing workflow and a user destination.' }, requiredDestination: 'user' },
+      { kind: 'share_with_my_machines', capability: share, requiredDestination: 'user' },
       { kind: 'promote_to_profile', capability: { available: false, reason: 'Promotion requires the profile publication workflow and an owned profile destination.' }, requiredDestination: 'profile' },
     ] : [],
   });

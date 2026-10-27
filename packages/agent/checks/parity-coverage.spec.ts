@@ -5,7 +5,7 @@ import { engineCapabilityCoverage, assertCapabilityCoverage } from '../src/opera
 import { operationDefinitions, operationJsonSchemas, capabilityInventory, decodeOperationOutput } from '../src/operations/index.ts';
 
 const reads = ['inspectProfiles','inspectShareLink','authorProfiles','machineFile','authorFile','upstreams','discoverUpstream','upstreamSkill','drafts','draftPreview','ghState','getContext', 'inspect', 'inspectIntent', 'inspectUpdates', 'resolveSkillCandidate', 'inspectSetups', 'incomingChanges', 'prepareTrustRequest', 'watchSources', 'inspectSourceDiff', 'pinImpact', 'draftChangelog', 'agentStatus', 'accountState', 'listBackups', 'getRun', 'listRuns', 'history'];
-const changes = ['followProfile','reconcile', 'machineIntent', 'editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill'];
+const changes = ['followProfile','reconcile', 'machineIntent', 'editDraft', 'removeDraftIntent', 'deleteDraft', 'ghLogin', 'publishDraft', 'announcePublication', 'uninstallConfig', 'update', 'setupApply', 'syncDecision', 'setPolicy', 'resume', 'signIn', 'signOut', 'syncAccount', 'patchMachineMetadata', 'pruneBackups', 'addSkill', 'skillNow'];
 
 test('original owner inventory maps dedicated reads and every supported change to actual handlers', () => {
   const rows = Object.values(engineCapabilityCoverage);
@@ -15,7 +15,7 @@ test('original owner inventory maps dedicated reads and every supported change t
   assert.deepEqual([...new Set(available.flatMap(row => 'changes' in row ? row.changes as string[] : []))].sort(), changes.sort());
   const changeSchema = operationJsonSchemas.previewChange.input as { properties: { change: { anyOf: { properties: {kind: {enum: string[]}} }[] } } };
   assert.deepEqual([...new Set(changeSchema.properties.change.anyOf.flatMap(change => change.properties.kind.enum))].sort(), [...changes, 'capture', 'sourceDecision'].sort());
-  const server = readFileSync(new URL('../src/ipc/server.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('../src/ipc/operation-dispatch.ts', import.meta.url), 'utf8');
   for (const name of Object.keys(operationDefinitions)) assert.ok(server.includes(`case '${name}':`), name);
   assert.ok(rows.some(row => row.state !== 'available' && /user.*pause/i.test(row.reason)));
   assert.ok(rows.some(row => row.state !== 'available' && /standalone.*pull/i.test(row.reason)));
