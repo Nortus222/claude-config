@@ -549,10 +549,14 @@ export const MyMachinesResultSchema = Schema.Struct({
   self: Schema.NullOr(Schema.Struct({ nodeId: MachineRefSchema, name: MachineName, os: MachineName })),
   machines: Schema.Array(Schema.Struct({ nodeId: MachineRefSchema, name: MachineName, os: MachineName,
     reach: Schema.Literals(['ok', 'offline', 'app-closed', 'remote-off', 'incompatible']), lastReachedAt: Schema.NullOr(Text) })).check(Schema.isMaxLength(1000)),
+  // The user's desktop machines on Tailscale that have never answered: remote access is not on there yet.
+  notSetUp: Schema.Array(Schema.Struct({ nodeId: MachineRefSchema, name: MachineName, os: MachineName })).check(Schema.isMaxLength(1000)),
 });
 export const MachineSkillsInputSchema = Schema.Struct({ scope: machineScope, machine: MachineRefSchema, fresh: Schema.optionalKey(Schema.Boolean) });
 export const MachineSkillsResultSchema = Schema.Struct({
   inspectedAt: Text,
+  // Set when a fresh read found the machine busy with a run, so this is its last check.
+  busy: Schema.optionalKey(Schema.Literal(true)),
   // `source` is null for a hand-installed skill whose installer lock names no GitHub source; it cannot be copied.
   skills: Schema.Array(Schema.Struct({ source: Schema.NullOr(SkillSourceSchema), name: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(255)),
     state: Schema.Literals(['installed', 'absent', 'undeclared', 'profile-off']), choice: Schema.NullOr(Schema.Boolean), from: Schema.NullOr(IntentOrigin) })).check(Schema.isMaxLength(10_000)),

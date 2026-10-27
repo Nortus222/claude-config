@@ -180,14 +180,16 @@ const newer = async () => {
   return port;
 };
 
-test('myMachines lists reachable, powered-off, app-closed, remote-off and incompatible machines, and remembers the reachable', async () => {
+test('myMachines lists remembered machines and those that answer now, and remembers the reachable; the rest are not set up', async () => {
   const windows = await silent();
   const incompatible = await newer();
   const closed = await freePort();
   const { A } = await pair({}, {
-    peers: [peer('node-c', 'machine-c', { online: false }), peer('node-w', 'machine-w', { os: 'windows' }), peer('node-i', 'machine-i'), peer('node-r', 'machine-r')],
-    ports: [['node-w', windows], ['node-i', incompatible], ['node-r', closed]],
-    known: [{ nodeId: 'node-c', name: 'machine-c', os: 'linux', lastReachedAt: '2026-10-01T00:00:00.000Z' }, { nodeId: 'node-gone', name: 'old-laptop', os: 'macOS', lastReachedAt: '2026-09-01T00:00:00.000Z' }],
+    peers: [peer('node-c', 'machine-c', { online: false }), peer('node-w', 'machine-w', { os: 'windows' }), peer('node-i', 'machine-i'), peer('node-r', 'machine-r'),
+      peer('node-k', 'machine-k'), peer('node-m', 'machine-m', { os: 'macOS', online: false }), peer('node-p', 'phone', { os: 'iOS', online: false }), peer('node-t', 'tablet', { os: 'android' })],
+    ports: [['node-w', windows], ['node-i', incompatible], ['node-r', closed], ['node-k', closed], ['node-t', closed]],
+    known: [{ nodeId: 'node-c', name: 'machine-c', os: 'linux', lastReachedAt: '2026-10-01T00:00:00.000Z' }, { nodeId: 'node-gone', name: 'old-laptop', os: 'macOS', lastReachedAt: '2026-09-01T00:00:00.000Z' },
+      { nodeId: 'node-k', name: 'machine-k', os: 'linux', lastReachedAt: '2026-10-02T00:00:00.000Z' }],
   });
   const result = await A.call('myMachines', {});
   assert.equal(result.tailscale, 'ready');
@@ -195,15 +197,38 @@ test('myMachines lists reachable, powered-off, app-closed, remote-off and incomp
   const reach = Object.fromEntries(result.machines.map((m: any) => [m.nodeId, [m.name, m.reach]]));
   assert.deepEqual(reach, {
     'node-b': ['machine-b', 'ok'], 'node-c': ['machine-c', 'offline'], 'node-gone': ['old-laptop', 'offline'],
-    'node-w': ['machine-w', 'app-closed'], 'node-i': ['machine-i', 'incompatible'], 'node-r': ['machine-r', 'remote-off'],
+    'node-i': ['machine-i', 'incompatible'], 'node-k': ['machine-k', 'remote-off'],
   });
+  // Peers that never answered, on desktop systems only.
+  assert.deepEqual(result.notSetUp, [
+    { nodeId: 'node-m', name: 'machine-m', os: 'macOS' }, { nodeId: 'node-r', name: 'machine-r', os: 'linux' }, { nodeId: 'node-w', name: 'machine-w', os: 'windows' },
+  ]);
   const byId = (id: string) => result.machines.find((m: any) => m.nodeId === id);
   assert.equal(byId('node-c').lastReachedAt, '2026-10-01T00:00:00.000Z');
-  assert.equal(byId('node-w').lastReachedAt, null);
+  assert.equal(byId('node-i').lastReachedAt, null);
   assert.ok(Date.parse(byId('node-b').lastReachedAt) > Date.parse('2026-10-26T00:00:00.000Z'));
   const known = await A.known();
-  assert.deepEqual(known.map((k) => k.nodeId).sort(), ['node-b', 'node-c', 'node-gone']);
+  assert.deepEqual(known.map((k) => k.nodeId).sort(), ['node-b', 'node-c', 'node-gone', 'node-k']);
   assert.equal(known.find((k) => k.nodeId === 'node-b')?.name, 'machine-b');
+});
+
+test('a Windows machine whose app is closed stays a column once it has been reached', async () => {
+  const windows = await silent();
+  const { A } = await pair({}, { peers: [peer('node-w', 'machine-w', { os: 'windows' })], ports: [['node-w', windows]],
+    known: [{ nodeId: 'node-w', name: 'machine-w', os: 'windows', lastReachedAt: '2026-10-01T00:00:00.000Z' }] });
+  const result = await A.call('myMachines', {});
+  assert.deepEqual(result.machines.find((m: any) => m.nodeId === 'node-w')?.reach, 'app-closed');
+  assert.deepEqual(result.notSetUp, []);
+});
+
+test('this machine\'s own node ID names this machine', async () => {
+  const { A, B } = await pair();
+  const skills = await A.call('machineSkills', { machine: 'node-a' });
+  assert.ok(skills.skills.some((s: any) => s.name === 'review'));
+  const result = await A.call('applySkillOnMachines', install(['node-a']));
+  assert.deepEqual(result.results.map((r: any) => [r.machine, r.name, r.outcome.status]), [['node-a', 'machine-a', 'started']]);
+  assert.equal((await runOn(A, 'node-a', result.results[0].outcome.runId)).state, 'succeeded');
+  assert.equal(B.installs(), 0);
 });
 
 for (const [who, caller] of [['app', { actor: 'app' }], ['mcp', mcp]] as const) test(`installing from ${who} on another machine and this one starts a run on each; the target records the calling machine and ${who}`, async () => {
@@ -296,7 +321,12 @@ test('a grid read during a run on the target answers from its last inspection; o
   assert.ok(during.skills.some((s: any) => s.name === 'review'));
   assert.equal(during.inspectedAt, first.inspectedAt);
   assert.equal(B.inspections(), before);
-  assert.equal((await A.fails('machineSkills', { machine: 'node-b', fresh: true })).code, 'BUSY');
+  // A machine busy with a run answers a fresh read from its last check, and says so.
+  const busy = await A.call('machineSkills', { machine: 'node-b', fresh: true });
+  assert.equal(busy.busy, true);
+  assert.equal(busy.inspectedAt, first.inspectedAt);
+  assert.ok(busy.skills.some((s: any) => s.name === 'review'));
+  assert.equal(B.inspections(), before);
   release();
   await runOn(A, 'node-b', started.results[0].outcome.runId);
   await until(async () => B.inspections(), (n) => n > before, 'the inspection after the run');
@@ -304,6 +334,7 @@ test('a grid read during a run on the target answers from its last inspection; o
   const fresh = await A.call('machineSkills', { machine: 'node-b', fresh: true });
   assert.equal(B.inspections(), settled + 1);
   assert.ok(Date.parse(fresh.inspectedAt) > Date.parse(first.inspectedAt));
+  assert.equal(fresh.busy, undefined);
 });
 
 test('"all" installs on every reachable machine and this one', async () => {

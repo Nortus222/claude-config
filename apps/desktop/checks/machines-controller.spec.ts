@@ -13,7 +13,7 @@ const access = (fields = {}): OperationOutput<'remoteAccess'> => ({ enabled: tru
 const mine = (fields = {}): OperationOutput<'myMachines'> => ({ tailscale: 'ready', self: { nodeId: 'n-mac', name: 'mac', os: 'macOS' }, machines: [
   { nodeId: 'n-pc', name: 'pc', os: 'windows', reach: 'ok', lastReachedAt: '2026-10-26T10:00:00.000Z' },
   { nodeId: 'n-old', name: 'old', os: 'linux', reach: 'offline', lastReachedAt: '2026-10-20T10:00:00.000Z' },
-], ...fields });
+], notSetUp: [], ...fields });
 const started = (machine: string, runId: string) => ({ machine, name: machine, outcome: { status: 'started', runId } });
 
 async function connected(handlers: Partial<Record<OperationName, Handler>> = {}, clock = { now: 0 }) {
@@ -191,4 +191,64 @@ test('installing on all online machines routes each result to its column, this m
   await f.machines.install('owner/skills', 'lint', 'all');
   assert.deepEqual(named(f, 'machineRun').map(i => [i.machine, i.runId]).sort(), [['n-pc', 'run-pc'], ['this', 'run-this']]);
   assert.equal(cell(f, 'lint', 'this'), 'installed'); assert.equal(cell(f, 'lint', 'n-pc'), 'installed'); assert.equal(cell(f, 'lint', 'n-old'), 'offline');
+});
+
+test('a failed skills read keeps what the machine showed before and says why', async () => {
+  let fail = false;
+  const f = await entered({ machineSkills: input => { if (fail && input.machine === 'n-pc') throw new Error('OFFLINE: pc can’t be reached right now'); return undefined; } });
+  const before = f.machines.state.columns.find(c => c.ref === 'n-pc')!;
+  fail = true; await f.machines.refresh('n-pc');
+  const after = f.machines.state.columns.find(c => c.ref === 'n-pc')!;
+  assert.deepEqual([after.skills, after.inspectedAt], [before.skills, before.inspectedAt]);
+  assert.equal(after.error, 'pc can’t be reached right now');
+  assert.equal(cell(f, 'tdd', 'n-pc'), 'absent');
+  fail = false; await f.machines.refresh('n-pc');
+  assert.equal(f.machines.state.columns.find(c => c.ref === 'n-pc')!.error, null);
+});
+test('a machine busy with a change answers a refresh from its last check, flagged busy', async () => {
+  const f = await entered({ machineSkills: input => input.fresh ? { inspectedAt: '2026-10-26T10:00:00.000Z', busy: true, skills: [skill('tdd', { state: 'absent' })] } : undefined });
+  await f.machines.refresh('n-pc');
+  const column = f.machines.state.columns.find(c => c.ref === 'n-pc')!;
+  assert.deepEqual([column.busy, column.error, column.loading], [true, null, false]);
+  assert.equal(f.machines.state.columns.find(c => c.ref === 'this')!.busy, false);
+});
+test('after a run, the machine is read again until its check is newer than before the change', async () => {
+  let reads = 0;
+  const f = await entered();
+  const baseline = named(f, 'machineSkills').length;
+  const g = await entered({ machineSkills: input => {
+    if (input.machine !== 'n-pc' || ++reads <= 1) return undefined;
+    // The first two reads after the run still answer from the check before it.
+    return reads <= 3 ? { inspectedAt: '2026-10-26T10:00:00.000Z', skills: [skill('tdd', { state: 'absent' })] }
+      : { inspectedAt: '2026-10-26T10:05:00.000Z', skills: [skill('tdd')] };
+  } });
+  await g.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  assert.equal(named(g, 'machineSkills').filter(i => i.machine === 'n-pc').length, 4);
+  assert.equal(cell(g, 'tdd', 'n-pc'), 'installed');
+  assert.equal(g.machines.state.columns.find(c => c.ref === 'n-pc')!.inspectedAt, '2026-10-26T10:05:00.000Z');
+  // A machine that never reports a newer check is read a bounded number of times.
+  await f.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  assert.equal(named(f, 'machineSkills').length - baseline, 6);
+  assert.equal(cell(f, 'tdd', 'n-pc'), 'absent');
+});
+test('a second change on a machine waits until the first one’s run there has finished', async () => {
+  const run = deferred<unknown>();
+  const f = await entered({ machineRun: input => input.runId === 'run-1' ? run.promise : receipt('succeeded'),
+    applySkillOnMachines: input => ({ results: [started('n-pc', named(f, 'applySkillOnMachines').length === 1 ? 'run-1' : 'run-2')] }) });
+  f.box.skills['n-pc'] = [skill('tdd', { state: 'absent' }), skill('lint', { state: 'absent' })];
+  await f.machines.refresh('n-pc');
+  const first = f.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const second = f.machines.setCell({ source: 'owner/skills', name: 'lint' }, 'n-pc', true);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(named(f, 'applySkillOnMachines').length, 1, 'the second change is held');
+  assert.equal(cell(f, 'lint', 'n-pc'), 'working');
+  run.resolve(receipt('succeeded')); await first; await second;
+  assert.deepEqual(named(f, 'applySkillOnMachines').map(i => i.name), ['tdd', 'lint']);
+  assert.equal(f.machines.state.error, null);
+});
+test('the machines that never answered are listed as not set up', async () => {
+  const f = await entered({ myMachines: () => mine({ notSetUp: [{ nodeId: 'n-new', name: 'studio', os: 'macOS' }] }) });
+  assert.deepEqual(f.machines.state.notSetUp.map(m => m.name), ['studio']);
+  assert.ok(!f.machines.state.columns.some(c => c.ref === 'n-new'));
 });

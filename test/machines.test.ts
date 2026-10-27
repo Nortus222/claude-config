@@ -12,6 +12,7 @@ const MACHINES = {
     { nodeId: 'n-lap', name: 'Laptop', os: 'Windows', reach: 'ok', lastReachedAt: null },
     { nodeId: 'n-nas', name: 'Nas', os: 'Linux', reach: 'offline', lastReachedAt: null },
   ],
+  notSetUp: [{ nodeId: 'n-new', name: 'Studio', os: 'macOS' }],
 };
 const run = (state: string) => ({
   runId: 'run1', state, operation: 'applyChange', scope: { kind: 'machine' }, intentSaved: true, steps: [], result: null,
@@ -66,6 +67,8 @@ test('machines lists names, systems and reach', async (t) => {
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /Laptop\tWindows\treachable/);
   assert.match(r.stdout, /Nas\tLinux\toffline/);
+  assert.match(r.stdout, /\nNot set up \(turn on remote access in the app there\):\nStudio\tmacOS\n/);
+  assert.doesNotMatch(r.stdout.split('Not set up')[0]!, /Studio/);
 });
 
 test('machines skills resolves a name ignoring case, and this', async (t) => {

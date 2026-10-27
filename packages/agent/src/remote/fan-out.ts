@@ -29,6 +29,8 @@ const MAX_INTENT_PAGES = 50;
 const MAX_RUN_PAGES = 5;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const bounded = (text: string) => [...text].slice(0, 500).join('');
+// Systems the app runs on, as Tailscale names them; phones and tablets are never asked to set up.
+const DESKTOP = /^(macos|windows|linux)$/i;
 
 // Where a machine reference points now: this machine, a peer Tailscale reports online, or one that
 // cannot be reached (offline or not one of the user's machines).
@@ -52,7 +54,7 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
 
   const resolve = (ref: string) => Effect.gen(function* () {
     const { status, known } = yield* tailnet;
-    if (ref === 'this') return { kind: 'this', name: typeof status === 'string' ? 'this machine' : status.self.hostName } satisfies Target;
+    if (ref === 'this' || (typeof status !== 'string' && ref === status.self.nodeId)) return { kind: 'this', name: typeof status === 'string' ? 'this machine' : status.self.hostName } satisfies Target;
     const peer = typeof status === 'string' ? undefined : status.peers.find((p) => p.nodeId === ref);
     if (peer?.online) return { kind: 'peer', peer, name: peer.hostName } satisfies Target;
     const name = peer?.hostName ?? known.find((k) => k.nodeId === ref)?.name;
@@ -82,33 +84,45 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
         : error.code === 'FORBIDDEN' ? 'remote-off' : 'incompatible')),
   );
 
+  // My machines are those remembered (reached before) and those whose agent answers now (spec:
+  // discovery). The user's other desktop machines that never answered are listed as not set up.
   const myMachines = Effect.gen(function* () {
     const { status, known } = yield* tailnet;
     const now = (yield* (yield* AgentClock).now).toISOString();
     const state: TailscaleState = typeof status === 'string' ? status : 'ready';
     const peers = typeof status === 'string' ? [] : status.peers;
     const ids = [...new Set([...peers.map((p) => p.nodeId), ...known.map((k) => k.nodeId)])];
-    const machines = yield* Effect.forEach(ids, (nodeId) => Effect.gen(function* () {
+    const seen = yield* Effect.forEach(ids, (nodeId) => Effect.gen(function* () {
       const peer = peers.find((p) => p.nodeId === nodeId);
       const remembered = known.find((k) => k.nodeId === nodeId);
       const reach: Reach = peer?.online ? yield* reachOf(peer) : 'offline';
-      return { nodeId, name: peer?.hostName ?? remembered!.name, os: peer?.os ?? remembered!.os, reach,
-        lastReachedAt: reach === 'ok' ? now : remembered?.lastReachedAt ?? null };
+      return { remembered: remembered !== undefined, machine: { nodeId, name: peer?.hostName ?? remembered!.name, os: peer?.os ?? remembered!.os, reach,
+        lastReachedAt: reach === 'ok' ? now : remembered?.lastReachedAt ?? null } };
     }), { concurrency: 'unbounded' });
+    const byName = (a: { name: string; nodeId: string }, b: { name: string; nodeId: string }) => a.name.localeCompare(b.name) || a.nodeId.localeCompare(b.nodeId);
+    const answered = (reach: Reach) => reach === 'ok' || reach === 'incompatible';
+    const machines = seen.filter((s) => s.remembered || answered(s.machine.reach)).map((s) => s.machine).sort(byName);
+    const notSetUp = seen.filter((s) => !s.remembered && !answered(s.machine.reach) && DESKTOP.test(s.machine.os))
+      .map(({ machine: { nodeId, name, os } }) => ({ nodeId, name, os })).sort(byName);
     const reached = machines.filter((m) => m.reach === 'ok').map(({ nodeId, name, os }) => ({ nodeId, name, os, lastReachedAt: now }));
     if (reached.length) yield* (yield* RemoteStore).remember(reached).pipe(Effect.ignore);
-    machines.sort((a, b) => a.name.localeCompare(b.name) || a.nodeId.localeCompare(b.nodeId));
-    return { tailscale: state, self: typeof status === 'string' ? null : { nodeId: status.self.nodeId, name: status.self.hostName, os: status.self.os }, machines };
+    return { tailscale: state, self: typeof status === 'string' ? null : { nodeId: status.self.nodeId, name: status.self.hostName, os: status.self.os }, machines, notSetUp };
   });
 
   // The target's declared skills from its effective intent, with installed state from its latest
   // inspection, plus what it has installed outside its configuration. Only `fresh` makes the target
-  // inspect again, which waits out a run there and drops its pending previews.
+  // inspect again, which drops its pending previews; a target running a change answers from its
+  // last inspection instead, with `busy`.
   const machineSkills = (caller: LocalCaller, input: OperationInput<'machineSkills'>) => Effect.gen(function* () {
     const target = yield* resolve(input.machine);
     const name = target.kind === 'unknown' ? '' : target.name;
     const read = <N extends RemoteOperation>(op: N, args: object) => on(caller, target, op, args).pipe(asOffline(name));
-    const inspected = yield* read('inspect', input.fresh ? {} : { cached: true });
+    const cached = read('inspect', { cached: true });
+    // A machine busy with a run answers a fresh read from its last check, flagged busy.
+    const inspected = input.fresh
+      ? yield* read('inspect', {}).pipe(Effect.map((r) => ({ ...r, busy: false })),
+        Effect.catch((e) => 'code' in e && e.code === 'BUSY' ? Effect.map(cached, (r) => ({ ...r, busy: true })) : Effect.fail(e)))
+      : { ...(yield* cached), busy: false };
     const declared: OperationOutput<'inspectIntent'>['items'][number][] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_INTENT_PAGES; page++) {
@@ -138,7 +152,7 @@ export const makeFanOut = (deps: { readonly dispatch: OperationDispatch; readonl
       if (names.has(skill)) continue;
       skills.push({ source: (observed.group && normalizeSkillSource(observed.group)) || null, name: skill, state: 'undeclared', choice: null, from: null });
     }
-    return { inspectedAt: inspected.status?.at ?? (yield* (yield* AgentClock).now).toISOString(), skills };
+    return { inspectedAt: inspected.status?.at ?? (yield* (yield* AgentClock).now).toISOString(), ...(inspected.busy ? { busy: true as const } : {}), skills };
   });
 
   // The run a request ID already started on a machine, among its most recent runs.

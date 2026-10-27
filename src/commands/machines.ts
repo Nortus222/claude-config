@@ -7,7 +7,7 @@ import { NOT_RUNNING } from './agent.ts';
 import type { OperationInput, OperationName, OperationOutput } from '@nortuscc/agent/operations';
 
 const USAGE = `Usage: nortuscc machines [skills <name|this> | install|remove <owner/repo> <skill> --on <name,...|all> | remote on|off]
-  machines                   list my machines and whether each can be reached
+  machines                   list my machines and whether each can be reached, then those not set up yet
   machines skills <name>     the skills on a machine, with their state ("this" is this machine)
   machines install|remove <owner/repo> <skill> --on <name,...|all>
                              run the change on those machines and wait for each to finish
@@ -49,10 +49,14 @@ function resolve(machines: Machines, name: string): { ref: string; label: string
 }
 
 async function list(op: Op): Promise<number> {
-  const { self, machines, tailscale } = await myMachines(op);
+  const { self, machines, notSetUp, tailscale } = await myMachines(op);
   if (machines.length === 0 && !self) console.log(`no machines found (Tailscale: ${tailscale})`);
   for (const m of machines) console.log(`${m.name}\t${m.os}\t${REACH[m.reach] ?? m.reach}`);
   if (self) console.log(`${self.name}\t${self.os}\tthis machine`);
+  if (notSetUp.length) {
+    console.log('\nNot set up (turn on remote access in the app there):');
+    for (const m of notSetUp) console.log(`${m.name}\t${m.os}`);
+  }
   return 0;
 }
 

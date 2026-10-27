@@ -12,9 +12,11 @@ export type MachineSkill = OperationOutput<'machineSkills'>['skills'][number];
 export type Reach = OperationOutput<'myMachines'>['machines'][number]['reach'];
 export type Column = {
   readonly ref: MachineRef; readonly name: string; readonly os: string; readonly self: boolean; readonly reach: Reach; readonly lastReachedAt: string | null;
-  // What the machine last reported, and when it inspected; null until read or when the read failed.
-  readonly inspectedAt: string | null; readonly skills: readonly MachineSkill[] | null; readonly loading: boolean; readonly error: string | null;
+  // What the machine last reported, and when it inspected; null until first read. A failed read keeps them and sets `error`;
+  // `busy` says the machine was running a change, so a refresh showed its last check.
+  readonly inspectedAt: string | null; readonly skills: readonly MachineSkill[] | null; readonly loading: boolean; readonly error: string | null; readonly busy: boolean;
 };
+export type NotSetUp = OperationOutput<'myMachines'>['notSetUp'][number];
 export type CellChange = 'working' | { readonly failed: string };
 export type Cell = 'installed' | 'absent' | 'undeclared' | 'profile' | 'working' | { readonly failed: string } | 'offline';
 export type SkillId = { readonly source: string | null; readonly name: string };
@@ -23,6 +25,8 @@ export type MachinesViewState = {
   readonly native: boolean;
   readonly access: RemoteAccess | null;
   readonly columns: readonly Column[];
+  // The user's machines on Tailscale whose app has never answered.
+  readonly notSetUp: readonly NotSetUp[];
   // Cells being changed or whose change did not land, by machine and `rowKey`.
   readonly changes: Readonly<Record<MachineRef, Readonly<Record<string, CellChange>>>>;
   // What the last action reported beyond its cells.
@@ -41,6 +45,9 @@ const CELL: Readonly<Record<MachineSkill['state'], Cell>> = { installed: 'instal
 export const rowKey = (skill: SkillId) => JSON.stringify([skill.source, skill.name]);
 // A page entered again re-reads once its last read is older than this.
 const STALE_MS = 60_000;
+// Reads after a run until the machine reports a check newer than the one before the change.
+const SETTLE_READS = 5;
+const newer = (at: string | null, than: string | null) => at !== null && (than === null || Date.parse(at) > Date.parse(than));
 const REVISION = /^[0-9a-f]{40}$/;
 // Why an install revision can't be used, or null; empty means the latest version.
 export const revisionError = (revision: string) => { const text = revision.trim(); return !text || REVISION.test(text) ? null : MACHINES_WORDS.revisionInvalid; };
@@ -80,6 +87,8 @@ export class MachinesController {
   private reads = 0;
   private reading: Promise<void> | null = null;
   private flights = new Set<Promise<unknown>>();
+  // The latest change sent to each machine; the next one there waits for it, since a machine runs one change at a time.
+  private queues = new Map<MachineRef, Promise<unknown>>();
   private waits = new Set<{ timer: ReturnType<typeof setTimeout>; resolve: () => void }>();
   private session: number;
   private unlistenMachine: () => void;
@@ -91,13 +100,13 @@ export class MachinesController {
   constructor(bridge: Bridge | null, machine: MachineController, options: MachinesOptions = {}) {
     this.bridge = bridge; this.machine = machine; this.pollMs = options.pollMs ?? 1000; this.now = options.now ?? Date.now;
     this.session = machine.state.session;
-    this.state = { native: bridge !== null, access: null, columns: [], changes: {}, notices: [], loading: false, switching: false, error: null };
+    this.state = { native: bridge !== null, access: null, columns: [], notSetUp: [], changes: {}, notices: [], loading: false, switching: false, error: null };
     this.unlistenMachine = machine.subscribe(() => {
       if (machine.state.session === this.session && machine.state.connection === 'connected') return;
       this.session = machine.state.session;
       if (!this.touched) return;
-      this.epoch++; this.touched = false; this.loadedAt = null; this.reading = null; this.stopWaits();
-      this.update({ access: null, columns: [], changes: {}, notices: [], loading: false, switching: false, error: null });
+      this.epoch++; this.touched = false; this.loadedAt = null; this.reading = null; this.queues.clear(); this.stopWaits();
+      this.update({ access: null, columns: [], notSetUp: [], changes: {}, notices: [], loading: false, switching: false, error: null });
     });
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -149,12 +158,12 @@ export class MachinesController {
     const reading: Promise<void> = this.track((async () => {
       const [access, mine] = await Promise.all([operation(this.bridge!, 'remoteAccess', { scope: SCOPE }), operation(this.bridge!, 'myMachines', { scope: SCOPE })]);
       if (!current(access) || !current(mine)) return;
-      const previous = (ref: MachineRef) => this.column(ref) ?? { inspectedAt: null, skills: null };
+      const previous = (ref: MachineRef) => this.column(ref) ?? { inspectedAt: null, skills: null, busy: false };
       const self = mine.data.self;
       const columns: Column[] = [{ ref: 'this', name: self?.name ?? ThisMachine, os: self?.os ?? '', self: true, reach: 'ok' as Reach, lastReachedAt: null as string | null },
         ...mine.data.machines.map(peer => ({ ref: peer.nodeId, name: peer.name, os: peer.os, self: false, reach: peer.reach, lastReachedAt: peer.lastReachedAt }))]
-        .map(column => ({ ...column, inspectedAt: previous(column.ref).inspectedAt, skills: previous(column.ref).skills, loading: column.reach === 'ok', error: null }));
-      this.update({ access: access.data, columns });
+        .map(column => ({ ...column, inspectedAt: previous(column.ref).inspectedAt, skills: previous(column.ref).skills, busy: previous(column.ref).busy, loading: column.reach === 'ok', error: null }));
+      this.update({ access: access.data, columns, notSetUp: mine.data.notSetUp });
       await Promise.all(columns.filter(column => column.reach === 'ok').map(column => this.readSkills(column.ref, fresh, current)));
       if (current()) this.loadedAt = this.now();
     })().catch(error => { if (current()) this.update({ error: errorText(error) }); }).finally(() => {
@@ -164,13 +173,17 @@ export class MachinesController {
     this.reading = reading;
     return reading;
   }
-  private async readSkills(ref: MachineRef, fresh: boolean, current: Current) {
+  // Reads one machine's skills; resolves with when it inspected, or null when the read failed and the column kept what it had.
+  private async readSkills(ref: MachineRef, fresh: boolean, current: Current): Promise<string | null> {
     this.patchColumn(ref, { loading: true, error: null });
     try {
       const reply = await operation(this.bridge!, 'machineSkills', { scope: SCOPE, machine: ref, ...(fresh ? { fresh: true } : {}) });
-      if (current(reply)) this.patchColumn(ref, { loading: false, skills: reply.data.skills, inspectedAt: reply.data.inspectedAt });
+      if (!current(reply)) return null;
+      this.patchColumn(ref, { loading: false, skills: reply.data.skills, inspectedAt: reply.data.inspectedAt, busy: reply.data.busy === true });
+      return reply.data.inspectedAt;
     } catch (error) {
-      if (current()) this.patchColumn(ref, { loading: false, skills: null, error: errorText(error) });
+      if (current()) this.patchColumn(ref, { loading: false, error: errorText(error) });
+      return null;
     }
   }
   // Asks one machine, or all of them, to inspect again now.
@@ -191,10 +204,19 @@ export class MachinesController {
     if (skill && this.state.changes[machine]?.[rowKey(skill)] === 'working') return MACHINES_WORDS.changing;
     return null;
   }
-  // Sends one change to `machines` and follows each run it starts. Resolves with the run each machine finished,
-  // or null for one that didn't start or couldn't be followed.
-  private async send(skill: { source: string; name: string }, action: Action, machines: readonly MachineRef[] | 'all', requestId: string, current: Current, revision?: string) {
+  // Sends one change to `machines` once the changes already sent there have finished, and follows each run it starts.
+  // Resolves with the run each machine finished, or null for one that didn't start or couldn't be followed.
+  private send(skill: { source: string; name: string }, action: Action, machines: readonly MachineRef[] | 'all', requestId: string, current: Current, revision?: string) {
     if (machines !== 'all') for (const ref of machines) this.setChange(ref, skill, 'working');
+    const targets = machines === 'all' ? this.state.columns.map(column => column.ref) : machines;
+    const earlier = targets.flatMap(ref => this.queues.get(ref) ?? []);
+    const sent = Promise.allSettled(earlier).then(() => current() ? this.sendNow(skill, action, machines, requestId, current, revision) : new Map<MachineRef, RunView | null>());
+    for (const ref of targets) this.queues.set(ref, sent);
+    void sent.finally(() => { for (const ref of targets) if (this.queues.get(ref) === sent) this.queues.delete(ref); }).catch(() => {});
+    return sent;
+  }
+  private async sendNow(skill: { source: string; name: string }, action: Action, machines: readonly MachineRef[] | 'all', requestId: string, current: Current, revision?: string) {
+    const before = new Map(this.state.columns.map(column => [column.ref, column.inspectedAt]));
     let results: OperationOutput<'applySkillOnMachines'>['results'];
     try {
       const reply = await operation(this.bridge!, 'applySkillOnMachines', { scope: SCOPE, requestId, source: skill.source, name: skill.name, action, machines, ...(revision ? { revision } : {}) });
@@ -215,12 +237,13 @@ export class MachinesController {
       }
       if (outcome.status === 'refused') { this.setChange(machine, skill, { failed: outcome.reason }); return [machine, null]; }
       this.setChange(machine, skill, 'working');
-      return [machine, await this.follow(machine, outcome.runId, skill, action, current)];
+      return [machine, await this.follow(machine, outcome.runId, skill, action, current, before.get(machine) ?? null)];
     }));
     return new Map(finished);
   }
-  // Polls a target's run until it finishes, then reads that machine again.
-  private async follow(ref: MachineRef, runId: string, skill: SkillId, action: Action, current: Current) {
+  // Polls a target's run until it finishes, then reads that machine again until it reports a check newer than
+  // `before`, the one shown when the change was sent; the machine inspects only after the run has finished.
+  private async follow(ref: MachineRef, runId: string, skill: SkillId, action: Action, current: Current, before: string | null) {
     for (;;) {
       await this.wait();
       if (!current()) return null;
@@ -234,7 +257,12 @@ export class MachinesController {
         return null;
       }
       if (live(run)) continue;
-      await this.readSkills(ref, false, current);
+      for (let read = 0; read <= SETTLE_READS; read++) {
+        if (read > 0) await this.wait();
+        if (!current()) return null;
+        const at = await this.readSkills(ref, false, current);
+        if (at === null || newer(at, before)) break;
+      }
       if (!current()) return null;
       this.setChange(ref, skill, run.state === 'succeeded' ? null : { failed: cellFailed(action, run.state, runCauses(run)[0] ?? '') });
       return run;

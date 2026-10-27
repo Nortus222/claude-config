@@ -81,14 +81,15 @@ function CellView({ row, column, cell, columns, disabled, controller }: { row: G
 }
 
 function ColumnHeader({ column, disabled, controller }: { column: Column; disabled: boolean; controller: MachinesController }) {
-  const unreachable = column.reach !== 'ok' ? machineUnreachable(column.reach, column.name, column.lastReachedAt) : column.error;
+  const problem = column.reach !== 'ok' ? machineUnreachable(column.reach, column.name, column.lastReachedAt) : column.error;
   const checked = column.inspectedAt ? relativeTime(column.inspectedAt) : '';
   return <th scope="col">
     <strong>{column.name}</strong>{column.self ? <small>{thisMachine}</small> : null}
     {column.os ? <small>{column.os}</small> : null}
-    {unreachable ? <small role="note">{unreachable}</small>
+    {problem ? <small role="note">{problem}</small> : null}
+    {column.reach !== 'ok' ? null
       : column.loading ? <small><span className="spinner" aria-hidden="true" /> {W.checking}</small>
-      : checked ? <small>{W.checked(checked)}</small> : null}
+      : checked ? <small>{column.busy ? W.busy(checked) : W.checked(checked)}</small> : null}
     {column.reach === 'ok' ? <button disabled={disabled || column.loading} aria-label={W.refreshLabel(column.name)} onClick={() => void controller.refresh(column.ref)}>{W.refresh}</button> : null}
   </th>;
 }
@@ -112,6 +113,8 @@ export function MachinesView({ state, machine, controller, installing = false }:
       {state.notices.length ? <div role="status">{state.notices.map(notice => <p className="feedback" key={notice}>{notice}</p>)}</div> : null}
       {access && !connected ? <ConnectSection access={access} switching={state.switching} disabled={disabled} controller={controller} /> : null}
       {access && connected ? <p className="muted">{W.remoteIsOn} <button disabled={disabled || state.switching} onClick={() => void controller.setRemoteAccess(false)}>{W.turnOff}</button></p> : null}
+      {access && connected && !access.listening ? <p className="alert" role="note">{W.notListening}</p> : null}
+      {state.notSetUp.length ? <ul className="muted">{state.notSetUp.map(machine => <li key={machine.nodeId}>{W.notSetUp(machine.name)}</li>)}</ul> : null}
       {dialog ? <InstallDialog columns={state.columns} disabled={disabled} controller={controller} onClose={() => setDialog(false)} /> : null}
       {state.columns.length ? <div className="table-wrap"><table className="machines-grid">
         <thead><tr><th scope="col">{W.skill}</th>{state.columns.map(column => <ColumnHeader key={column.ref} column={column} disabled={disabled} controller={controller} />)}</tr></thead>

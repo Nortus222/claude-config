@@ -700,6 +700,15 @@ test('MCP descriptions explain semantic effects and recovery', async t => {
   assert.match(description, /committed.*remaining/i); assert.match(description, /author destination/i); assert.match(description, /uncertain/i);
 });
 
+test('MCP machine descriptions explain machines not set up and busy reads', async t => {
+  const s = await agent(); t.after(s.close);
+  const client = open(process.execPath, s.m.paths.stateRoot); t.after(client.close); await client.initialize();
+  const listed = await client.ask('tools/list');
+  const description = (name: OperationName) => listed.result.tools.find((tool: { name: string }) => tool.name === names[name]).description;
+  assert.match(description('myMachines'), /notSetUp/); assert.match(description('myMachines'), /turn on remote access/);
+  assert.match(description('machineSkills'), /busy true/); assert.doesNotMatch(description('machineSkills'), /waits out/);
+});
+
 test('MCP partial retention preserves observed removals and reconnect never retries effects', async t => {
  const s=await agent('app',{failPruneAt:2});t.after(s.close);
  const ids=Array.from({length:23},(_,i)=>`nortuscc-${new Date(Date.UTC(2020,0,1)-i*86400000).toISOString().replace(/[:.]/g,'-')}`);

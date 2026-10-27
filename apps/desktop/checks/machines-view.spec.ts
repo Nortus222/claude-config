@@ -13,7 +13,7 @@ type Skill = OperationOutput<'machineSkills'>['skills'][number];
 const skill = (name: string, fields: Partial<Skill> = {}): Skill => ({ source: 'owner/skills', name, state: 'installed', choice: null, from: null, ...fields });
 const recently = new Date(Date.now() - 3 * 60_000).toISOString();
 const column = (ref: string, name: string, fields: Partial<Column> = {}): Column => ({ ref, name, os: 'macOS', self: false, reach: 'ok', lastReachedAt: recently,
-  inspectedAt: recently, skills: [], loading: false, error: null, ...fields });
+  inspectedAt: recently, skills: [], loading: false, error: null, busy: false, ...fields });
 const key = (source: string | null, name: string) => JSON.stringify([source, name]);
 const render = (fields: Partial<MachinesViewState> = {}) => {
   const machine = new MachineController(null), controller = new MachinesController(null, machine);
@@ -80,4 +80,21 @@ test('the install dialog takes an optional revision and explains a malformed one
   assert.match(empty, /Revision \(optional\)/); assert.doesNotMatch(empty, /role="alert"/);
   const bad = renderToStaticMarkup(createElement(InstallDialog, { columns, disabled: false, controller, onClose: () => {}, initial: { revision: 'main' } }));
   assert.match(bad, /aria-invalid="true"/); assert.match(bad, /role="alert">A revision is a full commit ID/);
+});
+
+test('a column whose read failed keeps its cells and says why; a busy one says it shows its last check', () => {
+  const failed = render({ columns: [column('n-pc', 'pc', { skills: [skill('tdd')], error: 'pc can’t be reached right now' })] });
+  assert.match(failed, /pc can’t be reached right now/); assert.match(failed, /aria-label="Remove tdd from pc"/); assert.match(failed, /checked 3 minutes ago/);
+  const busy = render({ columns: [column('n-pc', 'pc', { skills: [skill('tdd')], busy: true })] });
+  assert.match(busy, /Busy with a change; showing the check from 3 minutes ago\./); assert.doesNotMatch(busy, /is offline/);
+});
+test('machines that never answered are listed as not set up, not as columns', () => {
+  const html = render({ columns: [column('this', 'mac', { self: true })], notSetUp: [{ nodeId: 'n-new', name: 'studio', os: 'macOS' }] });
+  assert.match(html, /Not set up yet: turn on remote access in the app on studio\./);
+  assert.doesNotMatch(html, /<th scope="col"><strong>studio/);
+});
+test('remote access that is on but not listening says what to check', () => {
+  const html = render({ access: { enabled: true, tailscale: 'ready', self: { name: 'mac', login: 'me@example.com' }, listening: false } });
+  assert.match(html, /Remote access is on but this machine isn’t listening yet — check that Tailscale is running and nothing else uses port 47821\./);
+  assert.doesNotMatch(render(), /isn’t listening/);
 });
