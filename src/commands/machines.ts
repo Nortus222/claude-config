@@ -3,6 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { Effect } from 'effect';
 import { AgentError, AgentUnavailable, connectAgent, type AgentConnection } from '../agent-client.ts';
 import { resolvePaths, runCommand } from '../machine.ts';
+import { NOT_RUNNING } from './agent.ts';
+import type { OperationInput, OperationName, OperationOutput } from '@nortuscc/agent/operations';
 
 const USAGE = `Usage: nortuscc machines [skills <name|this> | install|remove <owner/repo> <skill> --on <name,...|all> | remote on|off]
   machines                   list my machines and whether each can be reached
@@ -11,14 +13,14 @@ const USAGE = `Usage: nortuscc machines [skills <name|this> | install|remove <ow
                              run the change on those machines and wait for each to finish
   machines remote on|off     let my other machines act on this one (needs Tailscale)`;
 
-const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run). Remote actions need the agent.';
+const NEEDS_AGENT = `${NOT_RUNNING}. Remote actions need the agent.`;
 const NO_ANSWER = 'nortuscc: the agent did not answer in time';
 const POLL_MS = 1000;
 const WAIT_MS = 120_000;
 const scope = { kind: 'machine' } as const;
 
-type Machines = Awaited<ReturnType<typeof myMachines>>;
-type Op = (operation: string, input: Record<string, unknown>) => Promise<any>;
+type Machines = OperationOutput<'myMachines'>;
+type Op = <N extends OperationName>(operation: N, input: OperationInput<N>) => Promise<OperationOutput<N>>;
 
 const usage = (problem?: string): number => {
   if (problem) console.error(`nortuscc: ${problem}\n`);
@@ -26,7 +28,7 @@ const usage = (problem?: string): number => {
   return 2;
 };
 
-const myMachines = (op: Op): Promise<any> => op('myMachines', { scope });
+const myMachines = (op: Op) => op('myMachines', { scope });
 
 const REACH: Record<string, string> = {
   ok: 'reachable', offline: 'offline', 'app-closed': 'app closed', 'remote-off': 'remote access off', incompatible: 'needs update',
@@ -36,13 +38,14 @@ const REACH: Record<string, string> = {
 // Unknown and ambiguous names fail with the known names.
 function resolve(machines: Machines, name: string): { ref: string; label: string } | string {
   const wanted = name.toLowerCase();
-  const known = [...(machines.self ? [machines.self.name] : []), ...machines.machines.map((m: any) => m.name)];
+  const known = [...(machines.self ? [machines.self.name] : []), ...machines.machines.map((m) => m.name)];
   const list = `known machines: this${known.length ? `, ${known.join(', ')}` : ''}`;
-  if (wanted === 'this' || machines.self?.name.toLowerCase() === wanted) return { ref: 'this', label: machines.self?.name ?? 'this' };
-  const hits = machines.machines.filter((m: any) => m.name.toLowerCase() === wanted);
+  const hits = machines.machines.filter((m) => m.name.toLowerCase() === wanted);
+  const isSelf = wanted === 'this' || machines.self?.name.toLowerCase() === wanted;
+  if (hits.length + (isSelf ? 1 : 0) > 1) return `'${name}' names more than one machine; ${list}`;
+  if (isSelf) return { ref: 'this', label: machines.self?.name ?? 'this' };
   if (hits.length === 0) return `no machine named '${name}'; ${list}`;
-  if (hits.length > 1) return `'${name}' names more than one machine; ${list}`;
-  return { ref: hits[0].nodeId, label: hits[0].name };
+  return { ref: hits[0]!.nodeId, label: hits[0]!.name };
 }
 
 async function list(op: Op): Promise<number> {
@@ -82,22 +85,25 @@ async function change(op: Op, action: 'install' | 'remove', source: string, skil
   const { results } = await op('applySkillOnMachines', { scope, requestId: randomUUID(), source, name: skill, action, machines });
   const verb = action === 'install' ? 'installed' : 'removed';
   const deadline = Date.now() + WAIT_MS;
-  let failed = false;
-  const lines = await Promise.all(results.map(async (r: any) => {
+  const follow = async (r: (typeof results)[number]): Promise<{ line: string; ok: boolean }> => {
     const who = r.name || labels.get(r.machine) || r.machine;
-    if (r.outcome.status === 'offline') return failed = true, `${who}: offline, nothing was started`;
-    if (r.outcome.status === 'refused') return failed = true, `${who}: refused: ${r.outcome.reason}`;
-    for (;;) {
-      const run = await op('machineRun', { scope, machine: r.machine, runId: r.outcome.runId });
-      if (FINISHED.includes(run.state)) {
-        if (run.state === 'succeeded') return `${who}: ${verb}`;
-        failed = true;
-        return `${who}: ${run.state}`;
+    if (r.outcome.status === 'offline') return { line: `${who}: offline, nothing was started`, ok: false };
+    if (r.outcome.status === 'refused') return { line: `${who}: refused: ${r.outcome.reason}`, ok: false };
+    try {
+      for (;;) {
+        const run = await op('machineRun', { scope, machine: r.machine, runId: r.outcome.runId });
+        if (run.state === 'succeeded') return { line: `${who}: ${verb}`, ok: true };
+        if (FINISHED.includes(run.state)) return { line: `${who}: ${run.state}`, ok: false };
+        if (Date.now() >= deadline) return { line: `${who}: still running after ${WAIT_MS / 1000} s`, ok: false };
+        await sleep(POLL_MS);
       }
-      if (Date.now() >= deadline) return failed = true, `${who}: still running after ${WAIT_MS / 1000} s`;
-      await sleep(POLL_MS);
+    } catch (error) {
+      return { line: `${who}: could not follow the run (${error instanceof Error ? error.message : String(error)})`, ok: false };
     }
-  }));
+  };
+  const outcomes = await Promise.all(results.map(follow));
+  const failed = outcomes.some((o) => !o.ok);
+  const lines = outcomes.map((o) => o.line);
   for (const line of lines) console.log(line);
   return failed ? 1 : 0;
 }
@@ -129,7 +135,7 @@ export async function run(args: string[]): Promise<number> {
           conn = await connectAgent(paths);
         } catch (error) {
           if (!(error instanceof AgentUnavailable)) throw error;
-          console.error(NOT_RUNNING);
+          console.error(NEEDS_AGENT);
           return 1;
         }
         try {

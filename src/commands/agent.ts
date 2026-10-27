@@ -150,7 +150,7 @@ async function runForeground(): Promise<number> {
   }
 }
 
-const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
+export const NOT_RUNNING = 'nortuscc: the agent is not running (start it with: nortuscc agent install, or nortuscc agent run)';
 const NO_ANSWER = 'nortuscc: the agent did not answer in time';
 const LOST = 'nortuscc: lost the agent during the run; check nortuscc agent status';
 const STARTING = 'nortuscc: the agent is still starting; try again in a moment';

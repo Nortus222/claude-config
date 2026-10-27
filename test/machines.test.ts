@@ -20,7 +20,7 @@ const run = (state: string) => ({
 });
 
 // A stub agent answering the machine operations; `seen` records each operation request.
-async function stub(t: import('node:test').TestContext) {
+async function stub(t: import('node:test').TestContext, runs: Record<string, string> = {}) {
   const m = { ...machine({ repo: 'checkout' }), state: shortTempDir('nmc-') };
   t.after(() => rmSync(m.state, { recursive: true, force: true }));
   mkdirSync(join(m.state, 'agent')); writeFileSync(join(m.state, 'agent', 'agent.token'), 'tok');
@@ -32,11 +32,15 @@ async function stub(t: import('node:test').TestContext) {
     if (operation === 'myMachines') return MACHINES;
     if (operation === 'setRemoteAccess') return { enabled: input.enabled, tailscale: 'ready', self: null, listening: input.enabled };
     if (operation === 'machineSkills') return { inspectedAt: 'now', skills: [{ source: 'a/b', name: 'tidy', state: 'installed', choice: null, from: null }] };
-    if (operation === 'applySkillOnMachines') return { results: [
+    if (operation === 'applySkillOnMachines') return { results: input.machines === 'all' ? [
       { machine: 'n-lap', name: 'Laptop', outcome: { status: 'started', runId: 'run1' } },
       { machine: 'n-nas', name: 'Nas', outcome: { status: 'offline' } },
-    ] };
-    if (operation === 'machineRun') return run('succeeded');
+    ] : input.machines.map((machine: string) => ({ machine, name: machine === 'this' ? 'Desk' : machine === 'n-lap' ? 'Laptop' : 'Nas', outcome: { status: 'started', runId: `run-${machine}` } })) };
+    if (operation === 'machineRun') {
+      const state = runs[input.machine] ?? 'succeeded';
+      if (state === 'error') return { error: { code: 'OFFLINE', message: 'went away' } };
+      return run(state);
+    }
     throw new Error(operation);
   };
   const server = createServer((socket) => {
@@ -46,7 +50,8 @@ async function stub(t: import('node:test').TestContext) {
       let newline;
       while ((newline = text.indexOf('\n')) >= 0) {
         const request = JSON.parse(text.slice(0, newline)); text = text.slice(newline + 1);
-        socket.write(JSON.stringify({ version: 3, id: request.id, ok: true, result: answer(request) }) + '\n');
+        const result: any = answer(request);
+        socket.write(JSON.stringify({ version: 3, id: request.id, ...(result?.error ? { ok: false, error: result.error } : { ok: true, result }) }) + '\n');
       }
     });
   });
@@ -88,8 +93,28 @@ test('machines install --on all prints a line per machine and exits 1 when one i
 test('machines remove --on names sends their node ids and exits 0 when all succeed', async (t) => {
   const { m, seen } = await stub(t);
   const r = await runCli(m, ['machines', 'remove', 'a/b', 'tidy', '--on', 'LAPTOP']);
-  assert.match(r.stdout, /Laptop: installed|Laptop: removed/);
-  assert.deepEqual(seen.find((s) => s.operation === 'applySkillOnMachines').input.machines, ['n-lap']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'Laptop: removed');
+  const input = seen.find((s) => s.operation === 'applySkillOnMachines').input;
+  assert.deepEqual(input.machines, ['n-lap']);
+  assert.equal(input.action, 'remove');
+});
+
+test('--on A,B starts both and reports a failed run without hiding the other', async (t) => {
+  const { m, seen } = await stub(t, { 'n-nas': 'failed' });
+  const r = await runCli(m, ['machines', 'install', 'a/b', 'tidy', '--on', 'laptop,NAS']);
+  assert.equal(r.code, 1);
+  assert.deepEqual(seen.find((s) => s.operation === 'applySkillOnMachines').input.machines, ['n-lap', 'n-nas']);
+  assert.match(r.stdout, /Laptop: installed/);
+  assert.match(r.stdout, /Nas: failed/);
+});
+
+test('a run that cannot be followed is reported and the other machines still print', async (t) => {
+  const { m } = await stub(t, { 'n-nas': 'error' });
+  const r = await runCli(m, ['machines', 'install', 'a/b', 'tidy', '--on', 'Laptop,Nas']);
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /Laptop: installed/);
+  assert.match(r.stdout, /Nas: could not follow the run \(.*went away/);
 });
 
 test('an unknown machine name exits 2 and lists the known ones', async (t) => {
