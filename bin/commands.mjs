@@ -1,4 +1,4 @@
-export const VERBS = ['setup', 'status', 'apply', 'capture', 'sync', 'pull', 'push', 'update', 'uninstall', 'agent'];
+export const VERBS = ['setup', 'status', 'apply', 'capture', 'sync', 'pull', 'push', 'update', 'uninstall', 'agent', 'machines'];
 
 export const USAGE = `nortuscc — keep this machine in agreement with claude-config
 
@@ -59,6 +59,11 @@ Installation (setup and apply --install):
   agent resume                      resume a paused agent
   agent policy <auto-apply|notify|manual>
                                     set how the agent treats accepted items
+  machines                          list my machines and whether each can be reached
+  machines skills <name|this>       the skills on a machine, with their state
+  machines install|remove <owner/repo> <skill> --on <name,...|all>
+                                    change skills on my other machines, then wait
+  machines remote on|off            allow my other machines to act on this one
 
 Examples:
   nortuscc status --target codex    report only what Codex owns
