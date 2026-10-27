@@ -230,3 +230,27 @@ export function runReport(report: RunReport): string {
   lines.push(`Agent log: ${AGENT_LOG}`);
   return lines.join('\n');
 }
+
+// Skills on my machines: why a machine can't be changed now, what Tailscale still needs here, and what a cell shows.
+export const machineUnreachable = (reach: 'offline' | 'app-closed' | 'remote-off' | 'incompatible', name: string, lastReachedAt: string | null): string => {
+  if (reach === 'app-closed') return `The app is closed on ${name}.`;
+  if (reach === 'remote-off') return `Remote access is off on ${name}. Turn it on in the app on that machine.`;
+  if (reach === 'incompatible') return `Update the app on ${name}.`;
+  const when = lastReachedAt ? relativeTime(lastReachedAt) : '';
+  return `${name} is offline. ${when ? `Last reached ${when}.` : 'Never reached from here.'}`;
+};
+export const TAILSCALE_PROBLEMS = {
+  'not-installed': `Tailscale isn’t installed on ${thisMachine}. Install it from tailscale.com, then refresh.`,
+  'not-running': `Tailscale is installed but not running on ${thisMachine}. Open Tailscale, then refresh.`,
+  'logged-out': `Tailscale isn’t signed in on ${thisMachine}, or is waiting for your tailnet admin to approve it.`,
+  'needs-admin': 'Tailscale needs an administrator account on this Mac to confirm who is calling.',
+} as const;
+export const CELL_WORDS = { installed: 'Installed', absent: 'Not installed', undeclared: 'Installed outside the app', profile: 'Off by profile', working: 'Working…', offline: 'Not reachable' } as const;
+export const unownedCopy = (name: string) => `Installed outside the app; remove it on ${name}.`;
+export const UNKNOWN_SOURCE = 'The app doesn’t know where this skill came from.';
+export const offlineNotice = (name: string) => `${name} is offline. Nothing changed there.`;
+export const keptNotice = (skill: string, from: string, to: string) => `Kept ${skill} on ${from} because it didn’t install on ${to}.`;
+const CELL_ENDED: Readonly<Record<string, string>> = { failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted', abandoned: 'was abandoned' };
+// A finished run on one machine that did not succeed, from the action the grid asked for.
+export const cellFailed = (action: 'install' | 'remove', state: string, cause: string) =>
+  `${action === 'install' ? 'Install' : 'Removal'} ${CELL_ENDED[state] ?? 'stopped'}.${cause ? ` ${cause}` : ''}`;

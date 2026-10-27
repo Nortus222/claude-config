@@ -6,6 +6,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SkillsController } from './skills-controller.ts';
 import { SkillsView } from './skills-view.tsx';
+import { MachinesController } from './machines-controller.ts';
+import { MachinesView } from './machines-view.tsx';
 import { MachineController } from './controller.ts';
 import { AccountController } from './account-controller.ts';
 import { SetupSyncController } from './setup-sync-controller.ts';
@@ -38,12 +40,13 @@ function App() {
     const setupSync = new SetupSyncController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
     const skills = new SkillsController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) });
     const author = new AuthorController(bridge, machine, { maintenance: () => appMaintenance(updates.state.update?.phase) !== null });
-    return { machine, skills, author, home: new HomeController(bridge, machine), connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
+    return { machine, skills, machines: new MachinesController(bridge, machine), author, home: new HomeController(bridge, machine), connections: new ConnectionsController(bridge, machine), account: new AccountController(bridge, machine), setup: new SetupController(bridge, machine), updates, setupSync };
   });
-  const { machine, account, setup, updates, connections, setupSync, skills, author, home } = controllers;
+  const { machine, account, setup, updates, connections, setupSync, skills, machines, author, home } = controllers;
   const state = useSyncExternalStore(machine.subscribe, machine.snapshot);
   const authorState = useSyncExternalStore(author.subscribe, author.snapshot);
   const skillsState = useSyncExternalStore(skills.subscribe, skills.snapshot);
+  const machinesState = useSyncExternalStore(machines.subscribe, machines.snapshot);
   const connectionsState = useSyncExternalStore(connections.subscribe, connections.snapshot);
   const accountState = useSyncExternalStore(account.subscribe, account.snapshot);
   const setupSyncState = useSyncExternalStore(setupSync.subscribe, setupSync.snapshot);
@@ -70,10 +73,14 @@ function App() {
     return () => { if (screen === 'skills') skills.leave(); };
   }, [skills, screen, state.session, state.connection]);
   useEffect(() => {
+    if (screen === 'machines') machines.enter();
+    return () => { if (screen === 'machines') machines.leave(); };
+  }, [machines, screen, state.session, state.connection]);
+  useEffect(() => {
     void updates.start();
     void setup.check();
-    return () => { author.dispose(); skills.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); home.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
-  }, [machine, account, setup, updates, connections, setupSync, skills, author, home]);
+    return () => { author.dispose(); skills.dispose(); machines.dispose(); account.dispose(); setup.dispose(); setupSync.dispose(); home.dispose(); machine.dispose(); updates.dispose(); connections.dispose(); };
+  }, [machine, account, setup, updates, connections, setupSync, skills, machines, author, home]);
   useEffect(() => {
     if (state.connection === 'connected') { void account.refresh(); void connections.refresh(); }
   }, [account, connections, state.connection, state.session]);
@@ -91,6 +98,7 @@ function App() {
       {screen === 'home' ? <HomeView machine={state} changes={setupSyncState} home={homeState} update={updateState} navigate={setScreen} controller={home} /> : null}
       {screen === 'changes' ? <SetupSyncView state={setupSyncState} controller={setupSync} onOpenProfiles={() => setScreen('profiles')} repoUrl={setupState.setup?.defaultRepoUrl ?? DEFAULT_REPO_URL} /> : null}
       {screen === 'skills' ? <SkillsView state={skillsState} machine={state} controller={skills} maintenance={appMaintenance(updateState.update?.phase)} onOpenChanges={() => setScreen('changes')} /> : null}
+      {screen === 'machines' ? <MachinesView state={machinesState} machine={state} controller={machines} /> : null}
       {screen === 'profiles' ? <ProfilesView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}
       {screen === 'upstreams' ? <UpstreamsView state={authorState} controller={author} onOpenPublish={() => setScreen('publish')} /> : null}
       {screen === 'publish' ? <PublishView state={authorState} controller={author} /> : null}
