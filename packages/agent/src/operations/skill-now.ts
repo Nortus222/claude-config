@@ -3,6 +3,7 @@ import { Effect, Layer } from 'effect';
 import { backupsForRun, canonical, inspect, machinePaths, OverridesStore, peekMachineState, plan, selectAll, StateStore, type Observed } from '@nortuscc/machine';
 import { normalizeSkillSource, TARGETS, type DesiredConfig, type Target } from '@nortuscc/profile-engine';
 import { AgentClock } from '../clock.ts';
+import { configuredTargets } from '../configured-targets.ts';
 import { SessionError } from '../ipc/session.ts';
 import type { RunLifecycle } from '../runs.ts';
 import type { JobInspection } from '../job.ts';
@@ -51,8 +52,7 @@ export const makeSkillNow = (deps: {
     const skill = declared[0];
     const item = inspection.report.items.find(i => i.key === key);
     const current = yield* overrides.read;
-    const configured: readonly Target[] = current.value.manageConfig === false ? [] : current.value.configTargets ?? TARGETS;
-    const targets = change.targets ?? configured;
+    const targets = change.targets ?? configuredTargets(current, true);
     const observed = (i: JobInspection) => ({ skills: i.desired.skills.filter(s => s.name === name), item: i.report.items.find(row => row.key === key) ?? null });
 
     const preview = (route: Route, generation: string, steps: readonly unknown[], effects: readonly string[]) => Effect.try({

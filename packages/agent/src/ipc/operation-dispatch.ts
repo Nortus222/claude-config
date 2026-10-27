@@ -2,9 +2,10 @@ import { dirname, join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { Fs, HistoryStore, type FsFailed, type MachinePathsValue, type RemoteOrigin } from '@nortuscc/machine';
 import type { HostedFailure } from '@nortuscc/hosted-client';
-import { TARGETS, decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
+import { decodeOverrides, overridesFromLegacyState } from '@nortuscc/profile-engine';
 import { SetupsStore, revisionCommit, revisionSetupId } from '@nortuscc/sync';
 import type { AgentHandle } from '../agent.ts';
+import { configuredTargets } from '../configured-targets.ts';
 import type { AgentServices } from '../layer.ts';
 import {
   operationDefinitions, decodeOperationOutput, capabilityInventory, projectContext, HistoryTimeSchema, type OperationInput, type OperationName, type OperationOutput,
@@ -110,7 +111,7 @@ export const makeOperationDispatch = (deps: OperationDeps): OperationDispatch =>
     const mutation = pending ? {available:false,reason:'Desktop update recovery is pending; open the app before changing the machine.'} : operations;
     const diagnostics = [...(pending ? [mutation.reason!] : []), ...(operations.available ? [] : [operations.reason!]), ...(choices.issues.length ? ['Machine target choices are invalid; repair the machine overrides.'] : []), ...(!inspection ? ['Inspect the machine to load setup and target context.'] : [])];
     return projectContext({ app, agent: { version: deps.agentVersion, protocol: PROTOCOL_VERSION },
-      targets: choices.issues.length ? [] : (choices.value.manageConfig === false ? [] : choices.value.configTargets ?? (inspection ? TARGETS : [])),
+      targets: configuredTargets(choices, Boolean(inspection)),
       setups: hosted?.enabled ? { state: 'available', items: hosted.setups.map(s => ({setupId:s.setupId, trusted: trustedSetups?.some(t => t.setupId === s.setupId && t.accountId === hosted.accountId) ?? false, revision:s.latestRevision})) }
         : inspection ? {state:'available',items:[{setupId: inspection.revision ? revisionSetupId(inspection.revision) : 'local', trusted:inspection.trusted, revision: inspection.revision ? revisionCommit(inspection.revision) : null}]}
         : {state:'unknown',reason:'The agent has no setup inspection yet.'},
