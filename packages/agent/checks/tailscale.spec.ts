@@ -221,3 +221,21 @@ test('a TCP LocalAPI is found again once its lifetime passes, and a new port rep
   assert.equal(seenA.length, 2);
   assert.equal(seenB.length, 1);
 });
+
+test('by default a TCP LocalAPI lifetime follows the monotonic clock, not the wall clock', async () => {
+  const api = fakeApi(serveFixtures);
+  await listen(api, 0);
+  const x = world({ lsof: `n/x/sameuserproof-${(api.address() as { port: number }).port}-tok\n` });
+  const wall = Date.now;
+  Date.now = () => 0;
+  try {
+    const access = await Effect.runPromise(TailscaleAccess.useSync((s) => s).pipe(Effect.provide(tailscaleAccess('darwin', { tcpLifetimeMs: 20 }).pipe(Layer.provide(x.layer)))));
+    await Effect.runPromise(access.status());
+    await new Promise((r) => setTimeout(r, 40));
+    await Effect.runPromise(access.status());
+    assert.equal(x.commands.length, 2);
+  } finally {
+    Date.now = wall;
+    await new Promise((r) => { api.closeAllConnections(); api.close(r); });
+  }
+});

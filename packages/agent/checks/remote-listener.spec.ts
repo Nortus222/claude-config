@@ -65,7 +65,7 @@ const waitFor = async (check: () => boolean | Promise<boolean>, what: string) =>
 // One listener on 127.0.0.1 over a temp machine, with a fake Tailscale and a dispatch that records
 // its calls. With `real`, calls reach a real agent's dispatch; a remote `skillNow` preview is
 // answered with an empty reconcile plan there, so its apply is a real run.
-const listen = async (options: { real?: boolean; enabled?: boolean; status?: Status; who?: (addr: string) => WhoisResult | null; whoisMs?: number } = {}) => {
+const listen = async (options: { real?: boolean; enabled?: boolean; status?: Status; who?: (addr: string) => WhoisResult | null; whoisMs?: number; now?: () => number } = {}) => {
   const m = agentMachine('/tmp');
   const fixture = setupFixture(join(m.root, 'setup'), {});
   await m.trust();
@@ -97,7 +97,7 @@ const listen = async (options: { real?: boolean; enabled?: boolean; status?: Sta
       if (name === 'previewChange' && input.change.kind === 'skillNow') return real(caller, name, { ...input, change: { kind: 'reconcile', only: [] } });
       return real(caller, name, input);
     };
-    yield* Effect.forkScoped(serveRemote({ dispatch, tailscale, store, agentVersion: '9.9.9', bind: (ips) => ips, port, log: (line) => logged.push(line), onRequests: (n) => { requests.now = n; requests.max = Math.max(requests.max, n); } }));
+    yield* Effect.forkScoped(serveRemote({ dispatch, tailscale, store, agentVersion: '9.9.9', bind: (ips) => ips, port, log: (line) => logged.push(line), ...(options.now ? { now: options.now } : {}), onRequests: (n) => { requests.now = n; requests.max = Math.max(requests.max, n); } }));
     const context = yield* Effect.context<any>();
     if (real) { const dispatchReal = real; local = (caller, name, input) => Effect.runPromise(dispatchReal(caller, name as never, { scope, ...input }).pipe(Effect.provideContext(context)) as Effect.Effect<unknown>); }
     return store;
@@ -332,4 +332,24 @@ test('another machine sees only the runs it started here', async () => {
     assert.equal(((await operation(port, 'getRun', { runId: remoteRun.runId })) as any).body.result.runId, remoteRun.runId);
     assert.equal((await local({ actor: 'app' }, 'listRuns', { limit: 10 })).runs.length, 2);
   });
+});
+
+test('caller checks and previewed plans expire by the listener clock, not the wall clock', async () => {
+  const clock = { now: 0 };
+  const wall = Date.now;
+  // A wall clock stuck in the past must not keep an identity or a plan alive.
+  Date.now = () => 0;
+  try {
+    await withListener({ now: () => clock.now }, async ({ port, fake }) => {
+      const preview = await operation(port, 'previewChange', { change: { kind: 'skillNow', source: 'owner/repo', name: 'review', action: 'install' } });
+      assert.equal((preview as { body: any }).body.ok, true);
+      assert.equal(fake.whois.length, 1);
+      clock.now = 60_000;
+      await operation(port, 'getContext', {});
+      assert.equal(fake.whois.length, 2, 'the caller is checked again after a minute');
+      clock.now = 600_000;
+      const applied = await operation(port, 'applyChange', { planId: 'plan-1', requestId: 'r' });
+      assert.equal((applied as { body: any }).body.error?.code, 'UNSUPPORTED_OPERATION', 'the plan expired');
+    });
+  } finally { Date.now = wall; }
 });

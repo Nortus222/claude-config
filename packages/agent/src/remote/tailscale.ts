@@ -1,4 +1,5 @@
 import { request } from 'node:http';
+import { performance } from 'node:perf_hooks';
 import { connect } from 'node:net';
 import { Context, Effect, Layer } from 'effect';
 import { Fs, Processes } from '@nortuscc/machine';
@@ -175,7 +176,8 @@ export const TCP_ENDPOINT_MS = 30_000;
 export const tailscaleAccess = (platform: NodeJS.Platform, options: { readonly tcpLifetimeMs?: number; readonly now?: () => number } = {}): Layer.Layer<TailscaleAccess, never, Fs | Processes> =>
   Layer.effect(TailscaleAccess, Effect.gen(function* () {
     const context = yield* Effect.context<Fs | Processes>();
-    const now = options.now ?? Date.now;
+    // Monotonic, so a wall-clock change cannot extend how long a port is trusted.
+    const now = options.now ?? (() => performance.now());
     const lifetime = options.tcpLifetimeMs ?? TCP_ENDPOINT_MS;
     let endpoint: LocalApiEndpoint | undefined;
     let foundAt = 0;

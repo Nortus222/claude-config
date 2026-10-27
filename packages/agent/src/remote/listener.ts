@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { performance } from 'node:perf_hooks';
 import { Deferred, Effect, Exit, FiberSet, type Scope } from 'effect';
 import { REMOTE_ORIGINS, type RemoteOrigin } from '@nortuscc/machine';
 import type { OperationDispatch } from '../ipc/operation-dispatch.ts';
@@ -87,7 +88,7 @@ type Bound = { readonly addresses: ReadonlyArray<string>; listening: ReadonlyArr
 // node Tailscale's `whois` names as another untagged, unshared node of this user; it then runs as
 // `{ actor: 'remote', machine, origin }`, `origin` naming the caller's app, CLI or MCP. Refusals go
 // to `log` (once a minute per address), never History. `bind` picks the addresses to listen on (tests pass loopback); `onRequests` observes how many
-// requests are in flight.
+// requests are in flight. `now` times caller checks and previewed plans: monotonic by default, so a wall-clock change cannot extend them.
 export const serveRemote = (deps: {
   readonly dispatch: OperationDispatch;
   readonly tailscale: TailscaleAccess['Service'];
@@ -97,15 +98,17 @@ export const serveRemote = (deps: {
   readonly port?: number;
   readonly log?: (line: string) => void;
   readonly onRequests?: (inFlight: number) => void;
+  readonly now?: () => number;
 }): Effect.Effect<never, never, Scope.Scope | AgentServices> =>
   Effect.gen(function* () {
     const run = yield* FiberSet.makeRuntime<AgentServices>();
     const bind = deps.bind ?? tailscaleAddresses;
     const port = deps.port ?? REMOTE_PORT;
     const log = deps.log ?? stderrLog;
+    const clock = deps.now ?? (() => performance.now());
     const logged = new Map<string, number>();
     const refuse = (res: ServerResponse, ip: string | undefined, reason: string) => {
-      const now = Date.now();
+      const now = clock();
       if ((logged.get(ip ?? '') ?? 0) <= now) {
         for (const [key, until] of logged) if (until <= now) logged.delete(key);
         logged.set(ip ?? '', now + REFUSAL_LOG_MS);
@@ -126,7 +129,7 @@ export const serveRemote = (deps: {
     // Tailscale's answer for this caller: one question per IP at a time, reused for a minute (5 s
     // when Tailscale does not know the caller).
     const identify = (ip: string, remotePort: number) => Effect.suspend((): Effect.Effect<WhoisResult | null> => {
-      const now = Date.now();
+      const now = clock();
       const hit = callers.get(ip);
       if (hit && hit.until > now) return Effect.succeed(hit.who);
       const waiting = asking.get(ip);
@@ -160,7 +163,7 @@ export const serveRemote = (deps: {
       if (operation === 'previewChange' && change !== 'skillNow') return yield* Effect.fail(new SessionError('UNSUPPORTED_OPERATION', 'Other machines may preview only skillNow changes.'));
       let input: unknown;
       try { input = decodeOperationInput(operation, raw.input); } catch { return yield* Effect.fail(new SessionError('INVALID_REQUEST', `Invalid input for ${operation}`)); }
-      const now = Date.now();
+      const now = clock();
       for (const [id, plan] of plans) if (plan.until <= now) plans.delete(id);
       if (operation === 'applyChange' && plans.get((input as { planId: string }).planId)?.machine !== machine)
         return yield* Effect.fail(new SessionError('UNSUPPORTED_OPERATION', 'Other machines may apply only plans they previewed here.'));
