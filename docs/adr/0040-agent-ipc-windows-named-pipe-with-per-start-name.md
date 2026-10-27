@@ -1,5 +1,6 @@
 ---
 status: accepted
+note: amended by 0041 for remote access over Tailscale
 ---
 
 # On Windows the agent serves IPC on a named pipe whose name is per-start

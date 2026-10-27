@@ -1,5 +1,6 @@
 ---
 status: accepted (classifier and auto-apply built in #77)
+note: amended by 0042 for the owner's remote requests, which count as a person on the machine
 ---
 
 # Auto-apply changes only items proven inert; only a person on the machine changes trust

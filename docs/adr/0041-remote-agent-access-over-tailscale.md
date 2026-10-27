@@ -8,7 +8,9 @@ Amends ADRs 0019 and 0040: local IPC is unchanged, and remote access is a second
 Managing skills across machines needs one machine's agent to reach another's, and the agent so far
 listened only on a user-private socket or pipe. A person at the machine turns remote access on
 (`setRemoteAccess`, app or CLI only); until then, and whenever Tailscale is not running, the agent
-opens no network socket and asks Tailscale nothing. While on, it listens over HTTP on port 47821 of
+opens no listener and serves nothing remotely. The switch governs only what this machine serves:
+while it is off the agent still reads the local Tailscale status, and calls the other machines'
+listeners, when the user opens the machines screen or asks through the CLI or MCP. While on, it listens over HTTP on port 47821 of
 each of this node's Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48), never a wildcard,
 loopback or LAN address, and re-reads the switch and Tailscale's status every 30 s and whenever
 the switch changes. Every request is checked before its body is read. A request carrying `Origin`

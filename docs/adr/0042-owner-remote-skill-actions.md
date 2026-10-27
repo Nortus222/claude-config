@@ -30,5 +30,7 @@ cannot be reached.
 - Accepted risk (owner): whatever drives a coding agent, or any process, on one of the user's
   machines can install or remove skills, including bundled scripts, on every machine of theirs that
   has remote access on, without review there.
-- Only a person at a machine turns remote access on or off; MCP and remote callers are refused.
+- Remote access is turned on or off by the app or CLI at the machine; MCP and remote callers are
+  refused. Accepted risk (owner): any local process holding the agent's IPC token, including the
+  CLI run by a coding agent, can turn it on; such a process can already change this machine.
 - Retrying a fan-out with the same caller request ID reaches the same runs on each machine.
