@@ -2,7 +2,7 @@ import type { OperationOutput, RunView } from '@nortuscc/agent/operations';
 import type { Bridge, Envelope } from './bridge.ts';
 import type { MachineController } from './controller.ts';
 import { operation } from './operations.ts';
-import { cellFailed, errorText, keptNotice, offlineNotice, runCauses } from './copy.ts';
+import { MACHINES_WORDS, cellFailed, errorText, keptNotice, offlineNotice, runCauses } from './copy.ts';
 import { ThisMachine } from './device.ts';
 
 // `this` or a Tailscale node ID, as the agent's fan-out operations take it.
@@ -31,7 +31,7 @@ export type MachinesViewState = {
   readonly switching: boolean;
   readonly error: string | null;
 };
-export type MachinesOptions = { readonly pollMs?: number };
+export type MachinesOptions = { readonly pollMs?: number; readonly now?: () => number };
 type Current = (reply?: Envelope) => boolean;
 type Action = 'install' | 'remove';
 
@@ -39,6 +39,14 @@ const SCOPE = { kind: 'machine' } as const;
 const live = (run: RunView) => run.state === 'accepted' || run.state === 'running';
 const CELL: Readonly<Record<MachineSkill['state'], Cell>> = { installed: 'installed', absent: 'absent', undeclared: 'undeclared', 'profile-off': 'profile' };
 export const rowKey = (skill: SkillId) => JSON.stringify([skill.source, skill.name]);
+// A page entered again re-reads once its last read is older than this.
+const STALE_MS = 60_000;
+const REVISION = /^[0-9a-f]{40}$/;
+// Why an install revision can't be used, or null; empty means the latest version.
+export const revisionError = (revision: string) => { const text = revision.trim(); return !text || REVISION.test(text) ? null : MACHINES_WORDS.revisionInvalid; };
+// Changes without the failures shown, keeping cells still being changed.
+const withoutFailures = (changes: MachinesViewState['changes']) =>
+  Object.fromEntries(Object.entries(changes).map(([ref, cells]) => [ref, Object.fromEntries(Object.entries(cells).filter(([, change]) => change === 'working'))]));
 
 // The grid input for each machine: what it reported (null when it can't be read) and the cells being changed.
 export const perMachine = (state: Pick<MachinesViewState, 'columns' | 'changes'>) => Object.fromEntries(state.columns.map(column =>
@@ -65,7 +73,12 @@ export class MachinesController {
   private listeners = new Set<() => void>();
   private disposed = false;
   private epoch = 0;
-  private loaded = false;
+  // Set by the first read, so a session change knows there is something to clear.
+  private touched = false;
+  private loadedAt: number | null = null;
+  // Each machine-list read; a newer one supersedes an older one still in flight.
+  private reads = 0;
+  private reading: Promise<void> | null = null;
   private flights = new Set<Promise<unknown>>();
   private waits = new Set<{ timer: ReturnType<typeof setTimeout>; resolve: () => void }>();
   private session: number;
@@ -73,16 +86,17 @@ export class MachinesController {
   private bridge: Bridge | null;
   private machine: MachineController;
   private pollMs: number;
+  private now: () => number;
 
   constructor(bridge: Bridge | null, machine: MachineController, options: MachinesOptions = {}) {
-    this.bridge = bridge; this.machine = machine; this.pollMs = options.pollMs ?? 1000;
+    this.bridge = bridge; this.machine = machine; this.pollMs = options.pollMs ?? 1000; this.now = options.now ?? Date.now;
     this.session = machine.state.session;
     this.state = { native: bridge !== null, access: null, columns: [], changes: {}, notices: [], loading: false, switching: false, error: null };
     this.unlistenMachine = machine.subscribe(() => {
       if (machine.state.session === this.session && machine.state.connection === 'connected') return;
       this.session = machine.state.session;
-      if (!this.loaded) return;
-      this.epoch++; this.loaded = false; this.stopWaits();
+      if (!this.touched) return;
+      this.epoch++; this.touched = false; this.loadedAt = null; this.reading = null; this.stopWaits();
       this.update({ access: null, columns: [], changes: {}, notices: [], loading: false, switching: false, error: null });
     });
   }
@@ -120,16 +134,19 @@ export class MachinesController {
     this.update({ changes: { ...this.state.changes, [ref]: change ? { ...rest, [rowKey(skill)]: change } : rest } });
   }
 
-  enter() { if (this.ready() && !this.loaded) void this.load(false); }
+  enter() {
+    if (this.ready() && !this.reading && (this.loadedAt === null || this.now() - this.loadedAt > STALE_MS)) void this.load(false);
+  }
   leave() {}
 
   // Reads remote access and the machine list, then each reachable machine's skills in parallel. `fresh` asks
   // every machine to inspect again and clears the failures shown.
   private load(fresh: boolean) {
-    this.loaded = true;
-    const current = this.current();
-    this.update({ loading: true, error: null, notices: [], ...(fresh ? { changes: {} } : {}) });
-    return this.track((async () => {
+    this.touched = true;
+    const read = ++this.reads, session = this.current();
+    const current: Current = reply => session(reply) && read === this.reads;
+    this.update({ loading: true, error: null, notices: [], ...(fresh ? { changes: withoutFailures(this.state.changes) } : {}) });
+    const reading: Promise<void> = this.track((async () => {
       const [access, mine] = await Promise.all([operation(this.bridge!, 'remoteAccess', { scope: SCOPE }), operation(this.bridge!, 'myMachines', { scope: SCOPE })]);
       if (!current(access) || !current(mine)) return;
       const previous = (ref: MachineRef) => this.column(ref) ?? { inspectedAt: null, skills: null };
@@ -139,7 +156,13 @@ export class MachinesController {
         .map(column => ({ ...column, inspectedAt: previous(column.ref).inspectedAt, skills: previous(column.ref).skills, loading: column.reach === 'ok', error: null }));
       this.update({ access: access.data, columns });
       await Promise.all(columns.filter(column => column.reach === 'ok').map(column => this.readSkills(column.ref, fresh, current)));
-    })().catch(error => { if (current()) this.update({ error: errorText(error) }); }).finally(() => { if (current()) this.update({ loading: false }); }));
+      if (current()) this.loadedAt = this.now();
+    })().catch(error => { if (current()) this.update({ error: errorText(error) }); }).finally(() => {
+      if (current()) this.update({ loading: false });
+      if (this.reading === reading) this.reading = null;
+    }));
+    this.reading = reading;
+    return reading;
   }
   private async readSkills(ref: MachineRef, fresh: boolean, current: Current) {
     this.patchColumn(ref, { loading: true, error: null });
@@ -156,24 +179,25 @@ export class MachinesController {
     if (machine === undefined) return this.load(true);
     const column = this.column(machine);
     if (column?.reach !== 'ok') return Promise.resolve();
-    this.update({ changes: { ...this.state.changes, [machine]: {} } });
+    this.update({ changes: { ...this.state.changes, ...withoutFailures({ [machine]: this.state.changes[machine] ?? {} }) } });
     return this.track(this.readSkills(machine, true, this.current()));
   }
 
   // Why `skill` can't be changed on `machine` now, or null.
-  blocked(machine: MachineRef): string | null {
-    if (!this.ready()) return 'Connect the local agent first.';
+  blocked(machine: MachineRef, skill?: SkillId): string | null {
+    if (!this.ready()) return MACHINES_WORDS.agentFirst;
     const column = this.column(machine);
-    if (!column || column.reach !== 'ok' || !column.skills) return 'That machine can’t be reached.';
+    if (!column || column.reach !== 'ok' || !column.skills) return MACHINES_WORDS.unreachable;
+    if (skill && this.state.changes[machine]?.[rowKey(skill)] === 'working') return MACHINES_WORDS.changing;
     return null;
   }
   // Sends one change to `machines` and follows each run it starts. Resolves with the run each machine finished,
   // or null for one that didn't start or couldn't be followed.
-  private async send(skill: { source: string; name: string }, action: Action, machines: readonly MachineRef[] | 'all', requestId: string, current: Current) {
+  private async send(skill: { source: string; name: string }, action: Action, machines: readonly MachineRef[] | 'all', requestId: string, current: Current, revision?: string) {
     if (machines !== 'all') for (const ref of machines) this.setChange(ref, skill, 'working');
     let results: OperationOutput<'applySkillOnMachines'>['results'];
     try {
-      const reply = await operation(this.bridge!, 'applySkillOnMachines', { scope: SCOPE, requestId, source: skill.source, name: skill.name, action, machines });
+      const reply = await operation(this.bridge!, 'applySkillOnMachines', { scope: SCOPE, requestId, source: skill.source, name: skill.name, action, machines, ...(revision ? { revision } : {}) });
       if (!current(reply)) return new Map<MachineRef, RunView | null>();
       results = reply.data.results;
     } catch (error) {
@@ -225,25 +249,26 @@ export class MachinesController {
   // Turns `skill` on or off on one machine, applied there now.
   setCell(skill: SkillId, machine: MachineRef, on: boolean) {
     const source = skill.source;
-    if (source === null || this.blocked(machine)) return Promise.resolve();
+    if (source === null || this.blocked(machine, skill)) return Promise.resolve();
     return this.act((requestId, current) => this.send({ source, name: skill.name }, on ? 'install' : 'remove', [machine], requestId, current));
   }
   // Installs a skill on the ticked machines, or every machine online now.
-  install(source: string, name: string, machines: readonly MachineRef[] | 'all') {
-    const skill = { source: source.trim(), name: name.trim() };
-    if (!skill.source || !skill.name || (machines !== 'all' && (!machines.length || machines.some(ref => this.blocked(ref))))) return Promise.resolve();
-    return this.act((requestId, current) => this.send(skill, 'install', machines, requestId, current));
+  // `revision` pins a full commit ID; empty installs the latest version.
+  install(source: string, name: string, machines: readonly MachineRef[] | 'all', revision = '') {
+    const skill = { source: source.trim(), name: name.trim() }, pin = revision.trim();
+    if (!skill.source || !skill.name || revisionError(pin) || (machines !== 'all' && (!machines.length || machines.some(ref => this.blocked(ref, skill))))) return Promise.resolve();
+    return this.act((requestId, current) => this.send(skill, 'install', machines, requestId, current, pin || undefined));
   }
   // Installs a skill one machine has on others that don't.
   copy(skill: SkillId, to: readonly MachineRef[]) {
     const source = skill.source;
-    if (source === null || !to.length || to.some(ref => this.blocked(ref))) return Promise.resolve();
+    if (source === null || !to.length || to.some(ref => this.blocked(ref, skill))) return Promise.resolve();
     return this.act((requestId, current) => this.send({ source, name: skill.name }, 'install', to, requestId, current));
   }
   // Installs on `to`, then removes from `from` once that install succeeded, as one user action.
   move(skill: SkillId, from: MachineRef, to: MachineRef) {
     const source = skill.source;
-    if (source === null || from === to || this.blocked(from) || this.blocked(to)) return Promise.resolve();
+    if (source === null || from === to || this.blocked(from, skill) || this.blocked(to, skill)) return Promise.resolve();
     const id = { source, name: skill.name };
     return this.act(async (requestId, current) => {
       const installed = (await this.send(id, 'install', [to], requestId, current)).get(to);

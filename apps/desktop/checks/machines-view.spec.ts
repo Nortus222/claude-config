@@ -4,8 +4,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { OperationOutput } from '@nortuscc/agent/operations';
 import { MachineController } from '../src/controller.ts';
-import { MachinesController, type Column, type MachinesViewState } from '../src/machines-controller.ts';
-import { MachinesView } from '../src/machines-view.tsx';
+import { MachinesController, revisionError, type Column, type MachinesViewState } from '../src/machines-controller.ts';
+import { InstallDialog, MachinesView } from '../src/machines-view.tsx';
 import { ShellView } from '../src/views.tsx';
 import { status } from './support/skills-data.ts';
 
@@ -70,4 +70,14 @@ test('the install dialog offers each online machine and all of them', () => {
   const html = renderToStaticMarkup(createElement(MachinesView, { state, machine: { ...machine.state, connection: 'connected', initialReadPending: false, status: status() }, controller, installing: true }));
   assert.match(html, /Source/); assert.match(html, /Skill name/); assert.match(html, /All online machines/);
   assert.match(html, /type="checkbox"[^>]*\/?>(?:<span>)?mac/); assert.match(html, /type="checkbox"[^>]*\/?>(?:<span>)?pc/); assert.doesNotMatch(html, /type="checkbox"[^>]*\/?>(?:<span>)?old/);
+});
+
+test('the install dialog takes an optional revision and explains a malformed one in words', () => {
+  assert.equal(revisionError(''), null); assert.equal(revisionError('0123456789abcdef0123456789abcdef01234567'), null);
+  assert.match(revisionError('main')!, /full commit ID: 40 characters/);
+  const machine = new MachineController(null), controller = new MachinesController(null, machine), columns = [column('this', 'mac', { self: true })];
+  const empty = renderToStaticMarkup(createElement(InstallDialog, { columns, disabled: false, controller, onClose: () => {} }));
+  assert.match(empty, /Revision \(optional\)/); assert.doesNotMatch(empty, /role="alert"/);
+  const bad = renderToStaticMarkup(createElement(InstallDialog, { columns, disabled: false, controller, onClose: () => {}, initial: { revision: 'main' } }));
+  assert.match(bad, /aria-invalid="true"/); assert.match(bad, /role="alert">A revision is a full commit ID/);
 });

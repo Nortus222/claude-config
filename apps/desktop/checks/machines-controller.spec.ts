@@ -16,7 +16,7 @@ const mine = (fields = {}): OperationOutput<'myMachines'> => ({ tailscale: 'read
 ], ...fields });
 const started = (machine: string, runId: string) => ({ machine, name: machine, outcome: { status: 'started', runId } });
 
-async function connected(handlers: Partial<Record<OperationName, Handler>> = {}) {
+async function connected(handlers: Partial<Record<OperationName, Handler>> = {}, clock = { now: 0 }) {
   const calls: Array<{ name: OperationName; input: Readonly<Record<string, unknown>> }> = [];
   const box = { skills: { this: [skill('tdd')], 'n-pc': [skill('tdd', { state: 'absent' })] } as Record<string, Skill[]>, run: receipt('succeeded') as RunView };
   const bridge: Bridge = {
@@ -35,11 +35,11 @@ async function connected(handlers: Partial<Record<OperationName, Handler>> = {})
     },
   };
   const machine = new MachineController(bridge); await machine.connect();
-  const machines = new MachinesController(bridge, machine, { pollMs: 0 });
+  const machines = new MachinesController(bridge, machine, { pollMs: 0, now: () => clock.now });
   return { machines, machine, calls, box };
 }
-async function entered(handlers: Partial<Record<OperationName, Handler>> = {}) {
-  const f = await connected(handlers); f.machines.enter(); await f.machines.idle(); return f;
+async function entered(handlers: Partial<Record<OperationName, Handler>> = {}, clock = { now: 0 }) {
+  const f = await connected(handlers, clock); f.machines.enter(); await f.machines.idle(); return f;
 }
 const named = (f: Awaited<ReturnType<typeof connected>>, name: OperationName) => f.calls.filter(c => c.name === name).map(c => c.input);
 const cell = (f: Awaited<ReturnType<typeof connected>>, name: string, machine: string) =>
@@ -139,4 +139,56 @@ test('gridRows merges machines by source and name and marks unread machines offl
     ['owner/skills', 'lint', { this: 'absent', pc: 'undeclared', old: 'offline' }],
     ['owner/skills', 'tdd', { this: 'installed', pc: 'working', old: 'offline' }],
   ]);
+});
+
+test('install passes a full commit revision and omits an empty one; a malformed one never writes', async () => {
+  const f = await entered(), sha = 'a'.repeat(40);
+  await f.machines.install('owner/skills', 'tdd', ['n-pc'], ` ${sha} `);
+  assert.equal(named(f, 'applySkillOnMachines').at(-1)!.revision, sha);
+  await f.machines.install('owner/skills', 'lint', ['n-pc'], '');
+  assert.ok(!('revision' in named(f, 'applySkillOnMachines').at(-1)!));
+  for (const bad of ['abc123', 'A'.repeat(40), `${sha}0`]) await f.machines.install('owner/skills', 'tdd', ['n-pc'], bad);
+  assert.equal(named(f, 'applySkillOnMachines').length, 2);
+});
+test('a failed first read is retried on the next visit, and a visit after a minute reads again', async () => {
+  let fail = true; const clock = { now: 0 };
+  const f = await entered({ myMachines: () => { if (fail) throw new Error('UNAVAILABLE: Tailscale did not answer'); return mine(); } }, clock);
+  assert.match(f.machines.state.error!, /Tailscale did not answer/);
+  fail = false; f.machines.leave(); f.machines.enter(); await f.machines.idle();
+  assert.equal(named(f, 'myMachines').length, 2); assert.equal(f.machines.state.columns.length, 3);
+  clock.now = 59_000; f.machines.enter(); await f.machines.idle(); assert.equal(named(f, 'myMachines').length, 2);
+  clock.now = 61_000; f.machines.enter(); await f.machines.idle(); assert.equal(named(f, 'myMachines').length, 3);
+  assert.ok(named(f, 'machineSkills').every(i => !('fresh' in i)));
+});
+test('turning remote access on supersedes a machine read still in flight', async () => {
+  const first = deferred<unknown>(); let reads = 0;
+  const f = await connected({ myMachines: () => (++reads === 1 ? first.promise : mine({ machines: [] })) });
+  f.machines.enter(); await new Promise(resolve => setTimeout(resolve, 5));
+  const switching = f.machines.setRemoteAccess(true); await switching;
+  first.resolve(mine()); await f.machines.idle();
+  assert.deepEqual(f.machines.state.columns.map(c => c.ref), ['this']);
+  assert.equal(f.machines.state.loading, false);
+});
+test('a cell already being changed takes no second change', async () => {
+  const run = deferred<unknown>();
+  const f = await entered({ machineRun: () => run.promise });
+  const first = f.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await f.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  await f.machines.copy({ source: 'owner/skills', name: 'tdd' }, ['n-pc']);
+  await f.machines.move({ source: 'owner/skills', name: 'tdd' }, 'this', 'n-pc');
+  assert.equal(named(f, 'applySkillOnMachines').length, 1);
+  run.resolve(receipt('succeeded')); await first;
+});
+test('a run that cannot be followed leaves a failed cell that says why', async () => {
+  const f = await entered({ machineRun: () => { throw new Error('OFFLINE: pc can’t be reached right now'); } });
+  await f.machines.setCell({ source: 'owner/skills', name: 'tdd' }, 'n-pc', true);
+  assert.deepEqual(cell(f, 'tdd', 'n-pc'), { failed: 'pc can’t be reached right now' });
+});
+test('installing on all online machines routes each result to its column, this machine included', async () => {
+  const f = await entered({ applySkillOnMachines: () => ({ results: [started('n-pc', 'run-pc'), started('this', 'run-this')] }) });
+  f.box.skills['n-pc'] = [skill('tdd'), skill('lint')]; f.box.skills.this = [skill('tdd'), skill('lint')];
+  await f.machines.install('owner/skills', 'lint', 'all');
+  assert.deepEqual(named(f, 'machineRun').map(i => [i.machine, i.runId]).sort(), [['n-pc', 'run-pc'], ['this', 'run-this']]);
+  assert.equal(cell(f, 'lint', 'this'), 'installed'); assert.equal(cell(f, 'lint', 'n-pc'), 'installed'); assert.equal(cell(f, 'lint', 'n-old'), 'offline');
 });

@@ -254,3 +254,26 @@ const CELL_ENDED: Readonly<Record<string, string>> = { failed: 'failed', cancell
 // A finished run on one machine that did not succeed, from the action the grid asked for.
 export const cellFailed = (action: 'install' | 'remove', state: string, cause: string) =>
   `${action === 'install' ? 'Install' : 'Removal'} ${CELL_ENDED[state] ?? 'stopped'}.${cause ? ` ${cause}` : ''}`;
+// The rest of the words on Skills on my machines.
+export const MACHINES_WORDS = {
+  title: 'Skills on my machines',
+  intro: 'See the skills on each of your machines and change them from here. A change applies on that machine right away.',
+  browser: 'Open the desktop app to see the skills on your machines.',
+  browserDetail: 'Browser preview has no agent connection.',
+  refreshAll: 'Refresh all', refresh: 'Refresh', reading: 'Reading your machines…', checking: 'Checking…', checked: (when: string) => `checked ${when}`,
+  skill: 'Skill', install: 'Install', remove: 'Remove', moveTo: 'Move to…', copy: 'Copy to other machines', outside: 'installed outside the app',
+  installLabel: (skill: string, machine: string) => `Install ${skill} on ${machine}`,
+  removeLabel: (skill: string, machine: string) => `Remove ${skill} from ${machine}`,
+  moveLabel: (skill: string, machine: string) => `Move ${skill} from ${machine}`,
+  refreshLabel: (machine: string) => `Refresh ${machine}`,
+  connect: 'Connect my machines',
+  connectIntro: 'Your machines reach each other through Tailscale, on your own account. Turn remote access on in the app on each machine.',
+  checks: { 'not-installed': 'Tailscale installed', 'not-running': 'Tailscale running', 'logged-out': 'Signed in', 'needs-admin': 'Administrator access' },
+  checkDone: 'Done.', checkWaiting: 'Not checked yet.', signedInAs: (login: string) => `Signed in as ${login}.`,
+  remoteAccess: 'Remote access',
+  remoteOn: `On. Your other machines can reach ${thisMachine}.`, remoteOff: `Remote access is off on ${thisMachine}.`, remoteIsOn: 'Remote access is on.',
+  turnOn: 'Turn on remote access', turnOff: 'Turn off remote access', tailscaleFirst: 'Finish setting up Tailscale first.',
+  installTitle: 'Install a skill', source: 'Source', skillName: 'Skill name', revision: 'Revision (optional)', machines: 'Machines', allOnline: 'All online machines', cancel: 'Cancel',
+  agentFirst: 'Connect the local agent first.', unreachable: 'That machine can’t be reached.', changing: 'This skill is already being changed there.',
+  revisionInvalid: 'A revision is a full commit ID: 40 characters, 0–9 and a–f. Leave it empty for the latest version.',
+} as const;

@@ -1,10 +1,9 @@
 import React, { useState } from 'react';
 import type { ViewState } from './controller.ts';
-import { gridRows, perMachine, type Cell, type Column, type GridRow, type MachinesController, type MachinesViewState, type RemoteAccess } from './machines-controller.ts';
-import { CELL_WORDS, TAILSCALE_PROBLEMS, UNKNOWN_SOURCE, machineUnreachable, relativeTime, unownedCopy } from './copy.ts';
+import { gridRows, perMachine, revisionError, type Cell, type Column, type GridRow, type MachinesController, type MachinesViewState, type RemoteAccess } from './machines-controller.ts';
+import { CELL_WORDS, MACHINES_WORDS as W, TAILSCALE_PROBLEMS, UNKNOWN_SOURCE, machineUnreachable, relativeTime, unownedCopy } from './copy.ts';
 import { thisMachine } from './device.ts';
 
-const BROWSER = 'Open the desktop app to see the skills on your machines.';
 const online = (column: Column) => column.reach === 'ok' && column.skills !== null;
 const lacks = (cell: Cell | undefined) => cell === 'absent' || cell === 'profile';
 const has = (cell: Cell | undefined) => cell === 'installed' || cell === 'undeclared';
@@ -12,47 +11,50 @@ const cellText = (cell: Cell) => typeof cell === 'string' ? CELL_WORDS[cell] : c
 
 // The checks that stand between this machine and remote access, in the order they're met.
 const CHECKS = ['not-installed', 'not-running', 'logged-out', 'needs-admin'] as const;
-const CHECK_LABELS = { 'not-installed': 'Tailscale installed', 'not-running': 'Tailscale running', 'logged-out': 'Signed in', 'needs-admin': 'Administrator access' } as const;
 function ConnectSection({ access, switching, disabled, controller }: { access: RemoteAccess; switching: boolean; disabled: boolean; controller: MachinesController }) {
   const failing = CHECKS.indexOf(access.tailscale as typeof CHECKS[number]);
   const rows = CHECKS.filter(check => check !== 'needs-admin' || access.tailscale === 'needs-admin').map(check => {
     const at = CHECKS.indexOf(check), ok = failing === -1 || at < failing;
-    const text = at === failing ? TAILSCALE_PROBLEMS[check] : !ok ? 'Not checked yet.'
-      : check === 'logged-out' && access.self ? `Signed in as ${access.self.login}.` : 'Done.';
-    return <li key={check} className={ok ? 'check-ok' : 'check-problem'}><strong>{CHECK_LABELS[check]}</strong> <span>{text}</span></li>;
+    const text = at === failing ? TAILSCALE_PROBLEMS[check] : !ok ? W.checkWaiting
+      : check === 'logged-out' && access.self ? W.signedInAs(access.self.login) : W.checkDone;
+    return <li key={check} className={ok ? 'check-ok' : 'check-problem'}><strong>{W.checks[check]}</strong> <span>{text}</span></li>;
   });
   const canTurnOn = access.tailscale === 'ready';
   return <section className="card machines-connect">
-    <h2>Connect my machines</h2>
-    <p className="muted">Your machines reach each other through Tailscale, on your own account. Turn remote access on in the app on each machine.</p>
+    <h2>{W.connect}</h2>
+    <p className="muted">{W.connectIntro}</p>
     <ul>{rows}
-      <li className={access.enabled ? 'check-ok' : 'check-problem'}><strong>Remote access</strong> <span>{access.enabled ? `On. Your other machines can reach ${thisMachine}.` : `Remote access is off on ${thisMachine}.`}</span>{' '}
-        <button disabled={disabled || switching || (!access.enabled && !canTurnOn)} title={!access.enabled && !canTurnOn ? 'Finish setting up Tailscale first.' : undefined}
-          onClick={() => void controller.setRemoteAccess(!access.enabled)}>{access.enabled ? 'Turn off remote access' : 'Turn on remote access'}</button></li>
+      <li className={access.enabled ? 'check-ok' : 'check-problem'}><strong>{W.remoteAccess}</strong> <span>{access.enabled ? W.remoteOn : W.remoteOff}</span>{' '}
+        <button disabled={disabled || switching || (!access.enabled && !canTurnOn)} title={!access.enabled && !canTurnOn ? W.tailscaleFirst : undefined}
+          onClick={() => void controller.setRemoteAccess(!access.enabled)}>{access.enabled ? W.turnOff : W.turnOn}</button></li>
     </ul>
   </section>;
 }
 
-function InstallDialog({ columns, disabled, controller, onClose }: { columns: readonly Column[]; disabled: boolean; controller: MachinesController; onClose: () => void }) {
-  const [source, setSource] = useState(''), [name, setName] = useState('');
+export function InstallDialog({ columns, disabled, controller, onClose, initial = {} }: {
+  columns: readonly Column[]; disabled: boolean; controller: MachinesController; onClose: () => void; initial?: { readonly revision?: string };
+}) {
+  const [source, setSource] = useState(''), [name, setName] = useState(''), [revision, setRevision] = useState(initial.revision ?? '');
   const [all, setAll] = useState(false), [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
-  const choices = columns.filter(online);
-  const ready = source.trim() && name.trim() && (all || picked.size > 0);
-  return <section className="card form-section" aria-label="Install a skill">
-    <h2>Install a skill</h2>
-    <label>Source <input value={source} placeholder="owner/repo" onChange={event => setSource(event.target.value)} /></label>
-    <label>Skill name <input value={name} onChange={event => setName(event.target.value)} /></label>
+  const choices = columns.filter(online), invalid = revisionError(revision);
+  const ready = source.trim() && name.trim() && !invalid && (all || picked.size > 0);
+  return <section className="card form-section" aria-label={W.installTitle}>
+    <h2>{W.installTitle}</h2>
+    <label>{W.source} <input value={source} placeholder="owner/repo" onChange={event => setSource(event.target.value)} /></label>
+    <label>{W.skillName} <input value={name} onChange={event => setName(event.target.value)} /></label>
+    <label>{W.revision} <input value={revision} aria-invalid={invalid ? true : undefined} onChange={event => setRevision(event.target.value)} /></label>
+    {invalid ? <p className="feedback" role="alert">{invalid}</p> : null}
     <fieldset disabled={disabled}>
-      <legend>Machines</legend>
-      <label className="choice"><input type="checkbox" checked={all} onChange={() => setAll(!all)} /><span>All online machines</span></label>
+      <legend>{W.machines}</legend>
+      <label className="choice"><input type="checkbox" checked={all} onChange={() => setAll(!all)} /><span>{W.allOnline}</span></label>
       {choices.map(column => <label className="choice" key={column.ref}>
         <input type="checkbox" disabled={all} checked={all || picked.has(column.ref)}
           onChange={() => { const next = new Set(picked); if (!next.delete(column.ref)) next.add(column.ref); setPicked(next); }} /><span>{column.name}</span>
       </label>)}
     </fieldset>
     <div className="form-actions">
-      <button className="primary" disabled={disabled || !ready} onClick={() => { void controller.install(source, name, all ? 'all' : [...picked]); onClose(); }}>Install</button>
-      <button onClick={onClose}>Cancel</button>
+      <button className="primary" disabled={disabled || !ready} onClick={() => { void controller.install(source, name, all ? 'all' : [...picked], revision); onClose(); }}>{W.install}</button>
+      <button onClick={onClose}>{W.cancel}</button>
     </div>
   </section>;
 }
@@ -65,13 +67,13 @@ function CellView({ row, column, cell, columns, disabled, controller }: { row: G
   if (cell === 'undeclared') actions = <small>{unownedCopy(column.name)}</small>;
   else if (row.source === null) actions = null;
   else if (cell === 'installed') actions = <>
-    <button disabled={busy} aria-label={`Remove ${row.name} from ${column.name}`} onClick={() => void controller.setCell(row, column.ref, false)}>Remove</button>
-    {targets.length ? <select disabled={busy} aria-label={`Move ${row.name} from ${column.name}`} value="" onChange={event => void controller.move(row, column.ref, event.target.value)}>
-      <option value="">Move to…</option>
+    <button disabled={busy} aria-label={W.removeLabel(row.name, column.name)} onClick={() => void controller.setCell(row, column.ref, false)}>{W.remove}</button>
+    {targets.length ? <select disabled={busy} aria-label={W.moveLabel(row.name, column.name)} value="" onChange={event => void controller.move(row, column.ref, event.target.value)}>
+      <option value="">{W.moveTo}</option>
       {targets.map(target => <option key={target.ref} value={target.ref}>{target.name}</option>)}
     </select> : null}
   </>;
-  else if (cell !== 'working') actions = <button disabled={busy} aria-label={`Install ${row.name} on ${column.name}`} onClick={() => void controller.setCell(row, column.ref, true)}>Install</button>;
+  else if (cell !== 'working') actions = <button disabled={busy} aria-label={W.installLabel(row.name, column.name)} onClick={() => void controller.setCell(row, column.ref, true)}>{W.install}</button>;
   return <td aria-busy={cell === 'working' ? true : undefined}>
     {cell === 'working' ? <span role="status"><span className="spinner" aria-hidden="true" /> {text}</span> : <span className={typeof cell === 'string' ? undefined : 'feedback'}>{text}</span>}
     {actions ? <div className="row-actions">{actions}</div> : null}
@@ -85,9 +87,9 @@ function ColumnHeader({ column, disabled, controller }: { column: Column; disabl
     <strong>{column.name}</strong>{column.self ? <small>{thisMachine}</small> : null}
     {column.os ? <small>{column.os}</small> : null}
     {unreachable ? <small role="note">{unreachable}</small>
-      : column.loading ? <small><span className="spinner" aria-hidden="true" /> Checking…</small>
-      : checked ? <small>checked {checked}</small> : null}
-    {column.reach === 'ok' ? <button disabled={disabled || column.loading} aria-label={`Refresh ${column.name}`} onClick={() => void controller.refresh(column.ref)}>Refresh</button> : null}
+      : column.loading ? <small><span className="spinner" aria-hidden="true" /> {W.checking}</small>
+      : checked ? <small>{W.checked(checked)}</small> : null}
+    {column.reach === 'ok' ? <button disabled={disabled || column.loading} aria-label={W.refreshLabel(column.name)} onClick={() => void controller.refresh(column.ref)}>{W.refresh}</button> : null}
   </th>;
 }
 
@@ -99,33 +101,32 @@ export function MachinesView({ state, machine, controller, installing = false }:
   const rows = gridRows(perMachine(state)), access = state.access;
   const connected = access?.enabled === true && access.tailscale === 'ready';
   return <div className="machines-view">
-    <header className="page-header"><div><h1>Skills on my machines</h1>
-      <p className="intro">See the skills on each of your machines and change them from here. A change applies on that machine right away.</p></div>
+    <header className="page-header"><div><h1>{W.title}</h1><p className="intro">{W.intro}</p></div>
       {state.native ? <div className="header-actions">
-        <button disabled={disabled || state.loading} onClick={() => void controller.refresh()}>Refresh all</button>
-        <button className="primary" disabled={disabled} onClick={() => setDialog(true)}>Install a skill</button>
+        <button disabled={disabled || state.loading} onClick={() => void controller.refresh()}>{W.refreshAll}</button>
+        <button className="primary" disabled={disabled} onClick={() => setDialog(true)}>{W.installTitle}</button>
       </div> : null}
     </header>
-    {!state.native ? <section className="card"><h2>{BROWSER}</h2><p className="muted">Browser preview has no agent connection.</p></section> : <>
+    {!state.native ? <section className="card"><h2>{W.browser}</h2><p className="muted">{W.browserDetail}</p></section> : <>
       {state.error ? <p className="alert" role="alert">{state.error}</p> : null}
       {state.notices.length ? <div role="status">{state.notices.map(notice => <p className="feedback" key={notice}>{notice}</p>)}</div> : null}
       {access && !connected ? <ConnectSection access={access} switching={state.switching} disabled={disabled} controller={controller} /> : null}
-      {access && connected ? <p className="muted">Remote access is on. <button disabled={disabled || state.switching} onClick={() => void controller.setRemoteAccess(false)}>Turn off remote access</button></p> : null}
+      {access && connected ? <p className="muted">{W.remoteIsOn} <button disabled={disabled || state.switching} onClick={() => void controller.setRemoteAccess(false)}>{W.turnOff}</button></p> : null}
       {dialog ? <InstallDialog columns={state.columns} disabled={disabled} controller={controller} onClose={() => setDialog(false)} /> : null}
       {state.columns.length ? <div className="table-wrap"><table className="machines-grid">
-        <thead><tr><th scope="col">Skill</th>{state.columns.map(column => <ColumnHeader key={column.ref} column={column} disabled={disabled} controller={controller} />)}</tr></thead>
+        <thead><tr><th scope="col">{W.skill}</th>{state.columns.map(column => <ColumnHeader key={column.ref} column={column} disabled={disabled} controller={controller} />)}</tr></thead>
         <tbody>{rows.map(row => {
           const lacking = state.columns.filter(column => online(column) && lacks(row.cells[column.ref]));
           const copyable = row.source !== null && lacking.length > 0 && state.columns.some(column => has(row.cells[column.ref]));
           return <tr key={JSON.stringify([row.source, row.name])}>
-            <th scope="row"><strong>{row.name}</strong><small>{row.source ?? 'installed outside the app'}</small>
-              {row.source === null ? <><button disabled title={UNKNOWN_SOURCE}>Copy to other machines</button><small>{UNKNOWN_SOURCE}</small></>
-                : copyable ? <button disabled={disabled} onClick={() => void controller.copy(row, lacking.map(column => column.ref))}>Copy to other machines</button> : null}
+            <th scope="row"><strong>{row.name}</strong><small>{row.source ?? W.outside}</small>
+              {row.source === null ? <><button disabled title={UNKNOWN_SOURCE}>{W.copy}</button><small>{UNKNOWN_SOURCE}</small></>
+                : copyable ? <button disabled={disabled} onClick={() => void controller.copy(row, lacking.map(column => column.ref))}>{W.copy}</button> : null}
             </th>
             {state.columns.map(column => <CellView key={column.ref} row={row} column={column} cell={row.cells[column.ref]!} columns={state.columns} disabled={disabled} controller={controller} />)}
           </tr>;
         })}</tbody>
-      </table></div> : state.loading ? <p role="status"><span className="spinner" aria-hidden="true" /> Reading your machines…</p> : null}
+      </table></div> : state.loading ? <p role="status"><span className="spinner" aria-hidden="true" /> {W.reading}</p> : null}
     </>}
   </div>;
 }
