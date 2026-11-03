@@ -50,7 +50,10 @@ user's SID.
 - On Windows the desktop app owns the agent: it spawns the bundled agent as a child in a
   kill-on-close job, so the agent dies with the app. There is no Task Scheduler login service for
   an app-owned agent. The agent, and with it scheduled checks, auto-apply and App MCP, therefore
-  runs only while the app is open.
+  runs only while the app process is running. Closing the main window hides it to a system tray
+  icon with Open Nortuscc and Quit Nortuscc actions, preserving the child and IPC connection.
+  Explicit Quit retains graceful shutdown and kill-on-close cleanup. This keeps background work
+  available after window closure without introducing a service; crashes and sign-out still stop it.
 - Another user can hold read-only instances open until the 10 s handshake timer closes them:
   a nuisance, not a leak.
 - The protocol, token, framing and error codes are unchanged; only how a client finds and opens
