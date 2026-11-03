@@ -13,6 +13,8 @@ mod notifications;
 mod pipe;
 #[cfg(windows)]
 mod agent_child;
+#[cfg(windows)]
+mod tray;
 use host::{Agent, Request, Setup};
 use startup_diagnostics::{Operation, Phase};
 use serde_json::{json, Value};
@@ -607,8 +609,12 @@ fn main() {
     #[cfg(windows)]
     let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry, ()>::new("nortuscc-platform")
         .js_init_script("Object.defineProperty(window, '__NORTUSCC_PLATFORM__', { value: 'windows' });").build());
+    #[cfg(windows)]
+    let builder = builder.on_window_event(tray::on_window_event);
     let exit_code=builder
         .setup(move |app| {
+            #[cfg(windows)]
+            tray::install(app)?;
             if let Ok(directory) = app.path().app_log_dir() { startup_diagnostics::initialize(&directory); }
             let trace = startup_diagnostics::trace(Operation::AppStartup);
             trace.measure(Phase::AppSetup, || {

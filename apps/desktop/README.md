@@ -1,12 +1,14 @@
 # Claude Config desktop
 
-The React renderer inspects, previews, applies and cancels through the local agent. The Tauri 2 Rust host connects to `<stateRoot>/agent/agent.sock`, reads `agent.token` fresh, authenticates with protocol v3 as `app`, and subscribes to status and progress events. Closing the window closes its connection and leaves the agent running.
+The React renderer inspects, previews, applies and cancels through the local agent. The Tauri 2 Rust host connects to `<stateRoot>/agent/agent.sock` on Unix or the per-start named pipe on Windows, reads `agent.token` fresh, authenticates with protocol v3 as `app`, and subscribes to status and progress events.
+
+On Windows, closing the main window hides it to the system tray. The app, its agent and App MCP remain available while the tray process runs. Click the tray icon or choose **Open Nortuscc** to restore the window. Choose **Quit Nortuscc** to exit and stop the app-owned agent. Quitting, an app crash, signing out or shutting down ends background availability; this does not install a login task or start the app automatically. On macOS, closing the window disconnects the app while its independently managed agent service continues running.
 
 The app ships a standalone Bun runtime and an agent bundle. A short-lived helper registers the per-user login service on first run, records `installedBy: 'app'`, and replaces its registration when the app moves or ships different agent code. Upgrades wait for idle status and a free shared apply lock, send `shutdown`, and restart through the service manager. Policy, pauses, trust, History and decisions persist. The renderer sends only opaque report keys and plan ids through Rust's fixed request allow-list.
 
 ## MCP connections
 
-Install and configure the macOS arm64 app, then use Settings > MCP connections to connect
+Install and configure the macOS arm64 or Windows x64 app, then use Settings > MCP connections to connect
 Claude Code or Codex. The app registers its own installed executable with the fixed `--mcp`
 argument and maintains the owned registration and machine instruction block. Existing foreign
 registrations or edited owned blocks require resolving the displayed conflict. Disconnect removes
@@ -27,7 +29,8 @@ whether a coding host has loaded it. Reload the host or start a new session afte
 relocating or upgrading the app, then inspect context in that session. App relocation repairs only
 owned registrations through the app lifecycle. The installed app is required for upgrades and
 maintenance; MCP is not a standalone engine or remote installation service. Other desktop
-packaging targets are unvalidated, and Windows has no supported agent IPC.
+packaging targets are unvalidated. Windows App MCP requires the app process to remain running,
+including when its window is hidden to the tray.
 
 The app exposes twenty-one machine operations:
 
