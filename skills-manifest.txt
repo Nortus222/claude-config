@@ -9,6 +9,7 @@ deploy-mobile-apps
 emws-api
 explain
 share-artifacts
+telemetry-review
 
 [cursor/plugins] exact
 unslop
@@ -47,3 +48,6 @@ writing-for-agents
 
 [vercel-labs/skills]
 find-skills
+
+[xingkongliang/skills-manager] exact
+manage-skills

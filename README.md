@@ -27,8 +27,9 @@ The command opens an interactive setup. No extra arguments are needed:
    and Codex CLI each get a separate installation prompt. Installed tools are
    not reinstalled. GitHub CLI, Claude Code and Codex each get an optional
    account setup prompt. Authentication stays with the tool that owns it.
-3. Review the integrations and skills, then confirm installation. The three
-   Nortus skills, `deploy-mobile-apps`, `explain`, and `share-artifacts`, are
+3. Review the integrations and skills, then confirm installation. The five
+   Nortus skills, `deploy-mobile-apps`, `emws-api`, `explain`, `share-artifacts`,
+   and `telemetry-review`, are
    unchecked by default. Select them explicitly to install them.
 
 Setup saves the configuration choice before copying any agent files. Later
@@ -342,8 +343,10 @@ optional declarations even when the skills are absent locally.
 ```text
 [Nortus222/agent-skills] optional
 deploy-mobile-apps
+emws-api
 explain
 share-artifacts
+telemetry-review
 ```
 
 A source may combine `exact optional` to limit discovery and require opt-in.
@@ -531,3 +534,19 @@ resolved through `%APPDATA%`, and backup filenames worked without colons.
 ## Experimental desktop fixture app
 
 [`apps/desktop`](apps/desktop/README.md) contains an isolated Tauri 2 feasibility app with a React dashboard, an Effect backend, and a bundled Bun runtime. It inspects sample settings and runs cancellable operations in temporary directories. It does not manage real agent configuration. It is an npm workspace: install with `npm ci` at the repository root.
+
+## Skills Manager library and presets
+
+This repository declares desired skills in `skills-manifest.txt`. The private
+[Nortus222/skills-manager-backup](https://github.com/Nortus222/skills-manager-backup)
+repository holds Skills Manager's managed copies, source metadata, and presets.
+Do not use `claude-config` as the Skills Manager Git Backup remote.
+
+Presets are additive: Core, Development, Design and planning, Knowledge and
+communication, and Work apps. Membership organizes skills; deploying a preset
+exposes it to the explicitly selected agent. Keep machine deployment state and
+credentials out of both repositories.
+
+Use the `manage-skills` skill and the app-published `skills-manager-cli` for
+library changes. Run `skills check --all` before updates and preview deployments
+with `--dry-run`. The manifest remains the portable desired list for nortuscc.
