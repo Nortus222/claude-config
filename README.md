@@ -550,3 +550,6 @@ credentials out of both repositories.
 Use the `manage-skills` skill and the app-published `skills-manager-cli` for
 library changes. Run `skills check --all` before updates and preview deployments
 with `--dry-run`. The manifest remains the portable desired list for nortuscc.
+
+Share the general-purpose [Nortus development preset](presets/README.md) with others.
+It recreates the group from public upstream sources without access to the private backup.
