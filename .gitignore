@@ -10,3 +10,8 @@ apps/desktop/src-tauri/gen/
 # Working documents: specs, plans and research stay local. Decisions go in docs/adr/.
 docs/superpowers/
 docs/research/
+Thumbs.db
+*.tmp
+.skills-manager.lock
+__pycache__/
+*.pyc
